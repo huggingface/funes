@@ -1,0 +1,29 @@
+[package]
+name = "funes"
+version = "0.0.1"
+edition = "2021"
+description = "Recall over your past AI agent sessions — the man who forgets nothing, with discrimination."
+
+[dependencies]
+lancedb = "0.30"                 # store + vector + FTS (Rust-native; pulls lance + arrow 58)
+fastembed = "5"                  # local CPU embeddings + rerank (ONNX/ort)
+arrow-array = "58"               # MUST match lancedb's arrow version for RecordBatch types
+arrow-schema = "58"              # Schema/Field/DataType for building batches
+lance-index = "=7.0.0"           # FullTextSearchQuery for hybrid (must match lance 7.0)
+chrono = "0.4"                   # recency weighting
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std"] }
+futures = "0.3"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }               # MCP request structs
+serde_json = { version = "1", features = ["preserve_order"] }  # parse JSONL; preserve tool_use key order
+sha1 = "0.10"                    # chunk id = sha1(...)[:16]
+hex = "0.4"
+walkdir = "2"                    # recursive *.jsonl walk
+rmcp = { version = "1", features = ["server", "macros", "transport-io", "schemars"] }  # MCP stdio server
+
+[dev-dependencies]
+tempfile = "3"                   # real temp files/dirs for parse + index tests (no mocking)
+
+[profile.release]
+opt-level = 3

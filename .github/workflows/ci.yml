@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint-test:
+    name: Lint & Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pin nightly so rustfmt rules don't drift between CI and contributor machines.
+      # Bump together with the nightly used for `cargo +nightly fmt` locally.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-04-22
+          components: rustfmt
+
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # lance-encoding (via lancedb) compiles protobuf in its build script.
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Format check
+        run: cargo +nightly-2026-04-22 fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      # Unit tests only here — hermetic, no network. The integration test that runs the
+      # real embedder lives in its own job below.
+      - name: Unit tests
+        run: cargo test --lib
+
+  integration-test:
+    name: Integration Test (real embedder)
+    runs-on: ubuntu-latest
+    needs: lint-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.95.0
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      # Cache the embedder/reranker weights so we don't re-download ~hundreds of MB from
+      # the Hugging Face Hub every run. fastembed downloads into ./.fastembed_cache.
+      - name: Cache fastembed models
+        uses: actions/cache@v4
+        with:
+          path: .fastembed_cache
+          key: fastembed-models-v1
+
+      - name: Integration test
+        run: cargo test --test index_recall -- --nocapture
