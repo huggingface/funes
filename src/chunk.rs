@@ -127,3 +127,93 @@ pub fn chunks_from_turns(turns: &[Turn], include_thinking: bool) -> Vec<Chunk> {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parse::{Block, Turn};
+
+    fn block(block_type: &str, text: &str, tool_name: Option<&str>) -> Block {
+        Block {
+            block_type: block_type.into(),
+            text: text.into(),
+            tool_name: tool_name.map(str::to_string),
+            tool_use_id: None,
+        }
+    }
+
+    fn turn(blocks: Vec<Block>) -> Turn {
+        Turn {
+            session_id: "sess".into(),
+            project: "proj".into(),
+            turn_uuid: "uuid".into(),
+            parent_uuid: None,
+            seq: 7,
+            ts: "2026-01-01T00:00:00Z".into(),
+            role: "assistant".into(),
+            blocks,
+            source_path: "/x.jsonl".into(),
+        }
+    }
+
+    #[test]
+    fn render_labels_tool_blocks() {
+        assert_eq!(
+            render("tool_use", r#"{"a":1}"#, &Some("Bash".into())),
+            r#"[tool_use Bash] {"a":1}"#
+        );
+        assert_eq!(render("tool_use", "{}", &None), "[tool_use None] {}");
+        assert_eq!(
+            render("tool_result", "out", &Some("Read".into())),
+            "[tool_result Read] out"
+        );
+        assert_eq!(render("tool_result", "out", &None), "[tool_result] out");
+        assert_eq!(render("text", "hello", &None), "hello");
+    }
+
+    #[test]
+    fn split_keeps_short_text_whole() {
+        assert_eq!(split("just a line"), vec!["just a line".to_string()]);
+        assert!(split("   ").is_empty());
+    }
+
+    #[test]
+    fn split_overlaps_long_text_within_max() {
+        let text: String = (0..600).map(|i| format!("word{i} ")).collect();
+        let pieces = split(&text);
+        assert!(pieces.len() > 1, "long text should split");
+        for p in &pieces {
+            assert!(p.chars().count() <= MAX_CHARS, "piece exceeds MAX_CHARS");
+        }
+        // Consecutive pieces share the overlap region: the start of piece[1] (which
+        // begins OVERLAP chars before piece[0] ended) appears inside piece[0].
+        let head: String = pieces[1].chars().take(20).collect();
+        assert!(pieces[0].contains(&head), "consecutive pieces should overlap");
+    }
+
+    #[test]
+    fn cid_is_stable_and_distinct() {
+        assert_eq!(cid("s", "u", 0, 0), cid("s", "u", 0, 0));
+        assert_ne!(cid("s", "u", 0, 0), cid("s", "u", 0, 1));
+        assert_eq!(cid("s", "u", 0, 0).len(), 16);
+    }
+
+    #[test]
+    fn block_idx_counts_dropped_thinking_blocks() {
+        // text(0), thinking(1), text(2). With thinking excluded, the surviving text
+        // blocks must keep block_idx 0 and 2 — dropping a block does not renumber.
+        let t = turn(vec![
+            block("text", "first", None),
+            block("thinking", "secret", None),
+            block("text", "third", None),
+        ]);
+        let with = chunks_from_turns(std::slice::from_ref(&t), true);
+        assert_eq!(with.len(), 3);
+        assert_eq!(with.iter().map(|c| c.block_idx).collect::<Vec<_>>(), vec![0, 1, 2]);
+
+        let without = chunks_from_turns(std::slice::from_ref(&t), false);
+        assert_eq!(without.len(), 2);
+        assert_eq!(without.iter().map(|c| c.block_idx).collect::<Vec<_>>(), vec![0, 2]);
+        assert!(without.iter().all(|c| c.block_type != "thinking"));
+    }
+}

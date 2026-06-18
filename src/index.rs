@@ -212,3 +212,53 @@ pub async fn run_index(source: &Path, no_thinking: bool) -> Result<()> {
     println!("indexed files={n_files} skipped={n_skipped} chunks={n_chunks}");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn file_sig_is_len_colon_mtime() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(b"hello").unwrap();
+        f.flush().unwrap();
+        let sig = file_sig(f.path()).expect("stat-able file has a signature");
+        let (len, mtime) = sig.split_once(':').expect("sig is len:mtime");
+        assert_eq!(len, "5");
+        assert!(mtime.parse::<u64>().is_ok());
+    }
+
+    #[test]
+    fn file_sig_is_none_for_missing_file() {
+        assert!(file_sig(Path::new("/no/such/file")).is_none());
+    }
+
+    #[test]
+    fn schema_column_order_is_load_bearing() {
+        // Column order must match build_batch's array order exactly, or Lance writes the
+        // wrong column. Pin it so a reorder can't slip through.
+        let s = schema();
+        let names: Vec<&str> = s.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "id",
+                "text",
+                "session_id",
+                "project",
+                "turn_uuid",
+                "parent_uuid",
+                "seq",
+                "ts",
+                "role",
+                "block_type",
+                "tool_name",
+                "source_path",
+                "block_idx",
+                "split_idx",
+                "vector",
+            ]
+        );
+    }
+}

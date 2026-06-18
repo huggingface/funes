@@ -499,7 +499,42 @@ pub async fn status() -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::stitch;
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn esc_doubles_single_quotes() {
+        assert_eq!(esc("o'brien"), "o''brien");
+        assert_eq!(esc("plain"), "plain");
+    }
+
+    #[test]
+    fn build_where_combines_set_filters() {
+        assert_eq!(build_where(None, None), None);
+        assert_eq!(build_where(Some("text"), None).as_deref(), Some("block_type = 'text'"));
+        assert_eq!(build_where(None, Some("proj")).as_deref(), Some("project = 'proj'"));
+        assert_eq!(
+            build_where(Some("tool_use"), Some("proj")).as_deref(),
+            Some("block_type = 'tool_use' AND project = 'proj'")
+        );
+        // values are escaped against filter-string injection.
+        assert_eq!(build_where(None, Some("a'b")).as_deref(), Some("project = 'a''b'"));
+    }
+
+    #[test]
+    fn recency_weight_halves_each_half_life() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 31, 0, 0, 0).unwrap();
+        // disabled
+        assert_eq!(recency_weight("2026-01-01T00:00:00Z", now, 0.0), 1.0);
+        // fresh
+        assert!((recency_weight("2026-01-31T00:00:00Z", now, 30.0) - 1.0).abs() < 1e-9);
+        // exactly one half-life (30 days) old -> 0.5
+        assert!((recency_weight("2026-01-01T00:00:00Z", now, 30.0) - 0.5).abs() < 1e-9);
+        // future timestamps clamp to fresh, not >1.
+        assert!((recency_weight("2026-02-10T00:00:00Z", now, 30.0) - 1.0).abs() < 1e-9);
+        // unparseable -> neutral 1.0
+        assert_eq!(recency_weight("not-a-date", now, 30.0), 1.0);
+    }
 
     #[test]
     fn stitch_drops_overlap_once() {

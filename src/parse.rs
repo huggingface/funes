@@ -230,3 +230,104 @@ pub fn turns_from_jsonl_file(p: &Path, session_id: &str, project: &str) -> std::
     }
     Ok(turns)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn project_of_uses_segment_after_projects() {
+        let p = Path::new("/home/u/.claude/projects/-home-u-dev-funes/abc.jsonl");
+        assert_eq!(project_of(p), "-home-u-dev-funes");
+    }
+
+    #[test]
+    fn project_of_falls_back_to_parent_dir() {
+        let p = Path::new("/tmp/some-dir/abc.jsonl");
+        assert_eq!(project_of(p), "some-dir");
+    }
+
+    #[test]
+    fn session_id_is_file_stem() {
+        assert_eq!(session_id_of(Path::new("/x/y/71626b12.jsonl")), "71626b12");
+    }
+
+    fn write_jsonl(lines: &[&str]) -> tempfile::NamedTempFile {
+        let mut f = tempfile::Builder::new().suffix(".jsonl").tempfile().unwrap();
+        for l in lines {
+            writeln!(f, "{l}").unwrap();
+        }
+        f.flush().unwrap();
+        f
+    }
+
+    #[test]
+    fn parses_text_thinking_and_correlates_tool_names() {
+        // assistant turn: thinking + tool_use; user turn: tool_result whose name is
+        // back-filled from the matching tool_use id. A non-user/assistant record and a
+        // blank line are skipped; seq counts only retained turns.
+        let f = write_jsonl(&[
+            r#"{"type":"summary","summary":"ignore me"}"#,
+            r#"{"type":"assistant","uuid":"u1","timestamp":"2026-01-01T00:00:00Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hmm"},{"type":"tool_use","id":"call_1","name":"Bash","input":{"command":"ls"}}]}}"#,
+            "",
+            r#"{"type":"user","uuid":"u2","parentUuid":"u1","timestamp":"2026-01-01T00:00:01Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":[{"type":"text","text":"file.txt"}]}]}}"#,
+        ]);
+        let turns = turns_from_jsonl_file(f.path(), "sess", "proj").unwrap();
+
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].seq, 0);
+        assert_eq!(turns[1].seq, 1);
+        assert_eq!(turns[0].session_id, "sess");
+        assert_eq!(turns[0].project, "proj");
+        assert_eq!(turns[1].parent_uuid.as_deref(), Some("u1"));
+
+        let blocks0 = &turns[0].blocks;
+        assert_eq!(blocks0.len(), 2);
+        assert_eq!(blocks0[0].block_type, "thinking");
+        assert_eq!(blocks0[1].block_type, "tool_use");
+        assert_eq!(blocks0[1].tool_name.as_deref(), Some("Bash"));
+        // tool_use input is compact JSON with source key order preserved.
+        assert_eq!(blocks0[1].text, r#"{"command":"ls"}"#);
+
+        let result = &turns[1].blocks[0];
+        assert_eq!(result.block_type, "tool_result");
+        assert_eq!(result.text, "file.txt");
+        // name correlated from the tool_use with the same id.
+        assert_eq!(result.tool_name.as_deref(), Some("Bash"));
+    }
+
+    #[test]
+    fn string_content_becomes_single_text_block() {
+        let f = write_jsonl(&[r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"hello there"}}"#]);
+        let turns = turns_from_jsonl_file(f.path(), "s", "p").unwrap();
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].blocks.len(), 1);
+        assert_eq!(turns[0].blocks[0].block_type, "text");
+        assert_eq!(turns[0].blocks[0].text, "hello there");
+    }
+
+    #[test]
+    fn turn_with_only_blank_text_is_dropped() {
+        let f = write_jsonl(&[
+            r#"{"type":"assistant","uuid":"u1","message":{"role":"assistant","content":[{"type":"text","text":"   "}]}}"#,
+        ]);
+        assert!(turns_from_jsonl_file(f.path(), "s", "p").unwrap().is_empty());
+    }
+
+    #[test]
+    fn missing_file_is_an_error_not_empty() {
+        // A read failure must surface as Err so the indexer skips it without recording
+        // state, rather than silently treating it as an empty (fully indexed) file.
+        let err = turns_from_jsonl_file(Path::new("/no/such/file.jsonl"), "s", "p");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn flatten_tool_result_handles_string_and_array() {
+        assert_eq!(flatten_tool_result(&Value::String("plain".into())), "plain");
+        let arr = serde_json::json!([{"type":"text","text":"a"},{"type":"image"},{"type":"text","text":"b"}]);
+        assert_eq!(flatten_tool_result(&arr), "a\nb");
+        assert_eq!(flatten_tool_result(&Value::Null), "");
+    }
+}
