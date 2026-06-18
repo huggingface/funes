@@ -33,14 +33,14 @@ pub struct GetRequest {
 }
 
 #[derive(Clone)]
-pub struct Funes {
+pub(crate) struct Funes {
     #[allow(dead_code)]
     tool_router: ToolRouter<Funes>,
 }
 
 #[tool_router]
 impl Funes {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self {
             tool_router: Self::tool_router(),
         }

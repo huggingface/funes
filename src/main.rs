@@ -3,12 +3,7 @@
 //! `recall` reads the index (hybrid → rerank → recency); `index` builds/updates it
 //! from `~/.claude/projects/**/*.jsonl`. Index location is `$FUNES_DB` or `~/.funes`.
 
-mod chunk;
-mod db;
-mod index;
-mod mcp;
-mod parse;
-mod recall;
+use funes::{index, mcp, recall};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
