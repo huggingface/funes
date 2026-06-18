@@ -1,0 +1,79 @@
+# funes
+
+> *"To think is to forget differences, generalize, make abstractions."*
+> — Jorge Luis Borges, *Funes the Memorious* (trans. James E. Irby)
+
+Ireneo Funes, after his fall, could forget nothing — every leaf of every tree, every
+instant of every day, kept in perfect and infinite detail. It was a **curse**: buried in
+particulars, he could no longer generalize, abstract, or think.
+
+An LLM agent has the *opposite* affliction — the **goldfish problem**: the moment a session
+ends or the context window fills, everything is gone, and it meets your project as a
+stranger, again and again.
+
+**`funes` lives between the two.** It gives any model durable, mid-term memory of your past
+sessions — so it stops forgetting — but serves it through **selective, reranked recall**:
+you (or the agent) ask, and get back the few relevant passages with exact provenance, not
+Funes's drowning flood of detail. Memory that remembers *for* you, and forgets *on your
+behalf*.
+
+## What it is (and isn't)
+
+- **Append-only event log, not a mutable knowledge base.** Every chunk is an immutable,
+  timestamped record of *what was said when*. Nothing is overwritten; obsolescence is
+  resolved at read time by recency + the reader, not by a reconciliation engine.
+- **No LLM in the ingest path.** Deterministic parse → chunk → embed. It returns
+  *passages*, not LLM-distilled "facts". Interpretation is deferred to read time (you, or an
+  orchestrator). This is the property that keeps it stable, debuggable, and private.
+- **Local + model-agnostic.** Local embeddings + reranker; the only state is a derived,
+  rebuildable index. The transcripts (local + your HF bucket) are the source of truth. Any
+  model can query it — switch models per task; nothing is trained into weights.
+
+## Pipeline
+
+```
+~/.claude/projects/*.jsonl
+   │  parse        deterministic — turns (text / thinking / tool_use / tool_result)
+   │  chunk        one chunk per content block, tight provenance
+   │  embed        pinned local model (BAAI/bge-small-en-v1.5)
+   ▼  store        embedded vector store (vector + BM25)
+recall(query) ──>  vector + BM25  →  RRF  →  cross-encoder rerank  →  recency  →  neighbors
+```
+
+## Sources
+
+> **For now, the only supported source is Claude Code** — session transcripts under
+> `~/.claude/projects/**/*.jsonl` (subagent sidechains included). Support for other agent
+> frameworks is planned.
+
+The Claude coupling is confined to the **parse** step: it reads Claude's transcript format
+into a generic turn/block shape. Everything downstream — chunk → embed → store → recall — is
+source-agnostic and operates on that shape. Adding another framework means writing one new
+parser to the same shape, not touching the index or query path.
+
+## Use
+
+> `funes` is a single Rust binary (`lancedb` + `fastembed-rs`, CPU).
+
+```bash
+funes index                                       # index ~/.claude/projects (incremental)
+funes recall "how do we parse transcripts"        # hybrid → rerank → recency → neighbors
+funes recall "the lancedb schema" --type tool_use --project <project>
+funes list --project <project>                    # browse indexed sessions
+funes get <session_id> <turn_uuid>                # expand a hit into its full surrounding turns
+funes status
+funes mcp                                         # run as an MCP server over stdio
+```
+
+`index` writes; `recall` / `list` / `get` / `status` read. `recall` narrows with `--type`
+(`text|thinking|tool_use|tool_result`) and `--project`, and each hit prints a
+`→ get <session_id> <turn_uuid>` line for drilling down into the full surrounding turns. An
+agent consumes funes either by shelling out to the CLI or via the `recall` / `get` MCP tools
+(`funes mcp`).
+
+## Notes
+
+- **Embedding model is pinned** and stamped into the index; querying with a different model
+  is refused. To change models, rebuild from the transcripts (the index is a disposable
+  derived artifact — the raw text is retained in every row).
+- **Subagent transcripts** (`.../subagents/agent-*.jsonl`) are indexed too.
