@@ -1,0 +1,12 @@
+.venv/
+venv/
+dist/
+build/
+.ruff_cache/
+.DS_Store
+
+# Rust build artifacts
+/target/
+
+# fastembed model cache (downloaded ONNX weights)
+.fastembed_cache/
