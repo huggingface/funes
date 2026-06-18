@@ -142,7 +142,14 @@ pub async fn run_index(source: &Path, no_thinking: bool) -> Result<()> {
 
         let sid = parse::session_id_of(p);
         let project = parse::project_of(p);
-        let turns = parse::turns_from_jsonl_file(p, &sid, &project);
+        let turns = match parse::turns_from_jsonl_file(p, &sid, &project) {
+            Ok(t) => t,
+            Err(e) => {
+                // Don't record state, so a transient read failure is retried next run.
+                eprintln!("[{}/{}] {sid} — read failed, skipping: {e}", idx + 1, total);
+                continue;
+            }
+        };
         let chunks = chunk::chunks_from_turns(&turns, include_thinking);
 
         if !chunks.is_empty() {

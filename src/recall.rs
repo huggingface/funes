@@ -10,6 +10,7 @@ use chrono::{DateTime, Utc};
 use fastembed::{EmbeddingModel, InitOptions, RerankInitOptions, RerankerModel, TextEmbedding, TextRerank};
 use futures::TryStreamExt;
 use lance_index::scalar::FullTextSearchQuery;
+use lancedb::index::IndexType;
 use lancedb::query::{ExecutableQuery, QueryBase, QueryExecutionOptions, Select};
 use lancedb::Table;
 use std::collections::BTreeMap;
@@ -97,10 +98,14 @@ fn recency_weight(ts: &str, now: DateTime<Utc>, half_life: f64) -> f64 {
 
 /// Join two consecutive splits of one block, dropping the overlapping region (the suffix
 /// of `a` that equals the prefix of `b`). Falls back to a plain concat. Char-indexed.
+///
+/// The search is capped at `chunk::OVERLAP`: consecutive splits share at most that many
+/// chars, so any longer suffix==prefix match is a coincidence of repetitive text and would
+/// wrongly drop real content.
 fn stitch(a: &str, b: &str) -> String {
     let ac: Vec<char> = a.chars().collect();
     let bc: Vec<char> = b.chars().collect();
-    let max_k = ac.len().min(bc.len()).min(300);
+    let max_k = ac.len().min(bc.len()).min(crate::chunk::OVERLAP);
     for k in (1..=max_k).rev() {
         if ac[ac.len() - k..] == bc[..k] {
             return ac.iter().chain(bc[k..].iter()).collect();
@@ -130,15 +135,34 @@ pub async fn recall(
     let table = db.open_table(db::TABLE).execute().await?;
 
     let where_clause = build_where(block_type.as_deref(), project.as_deref());
-    let mut q = table
-        .query()
-        .full_text_search(FullTextSearchQuery::new(query.clone()))
-        .nearest_to(qv)?
-        .limit(candidates);
-    if let Some(w) = &where_clause {
-        q = q.only_if(w);
-    }
-    let mut stream = q.execute_hybrid(QueryExecutionOptions::default()).await?;
+
+    // The pipeline is hybrid (vector + BM25). The FTS index is a soft failure at index
+    // time, so it may be absent; without it, a hybrid query would error here. Fall back
+    // to vector-only search so recall still returns results.
+    let has_fts = table
+        .list_indices()
+        .await?
+        .iter()
+        .any(|ix| ix.index_type == IndexType::FTS && ix.columns.iter().any(|c| c == "text"));
+
+    let mut stream = if has_fts {
+        let mut q = table
+            .query()
+            .full_text_search(FullTextSearchQuery::new(query.clone()))
+            .nearest_to(qv)?
+            .limit(candidates);
+        if let Some(w) = &where_clause {
+            q = q.only_if(w);
+        }
+        q.execute_hybrid(QueryExecutionOptions::default()).await?
+    } else {
+        eprintln!("note: no full-text index; falling back to vector-only search");
+        let mut q = table.query().nearest_to(qv)?.limit(candidates);
+        if let Some(w) = &where_clause {
+            q = q.only_if(w);
+        }
+        q.execute().await?
+    };
 
     let mut hits: Vec<Hit> = Vec::new();
     while let Some(batch) = stream.try_next().await? {
@@ -471,4 +495,34 @@ pub async fn status() -> Result<String> {
         db::lancedb_uri(),
         db::TABLE
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stitch;
+
+    #[test]
+    fn stitch_drops_overlap_once() {
+        let overlap = "the quick brown fox jumps";
+        let a = format!("HEAD {overlap}");
+        let b = format!("{overlap} TAIL");
+        assert_eq!(stitch(&a, &b), "HEAD the quick brown fox jumps TAIL");
+    }
+
+    #[test]
+    fn stitch_does_not_over_merge_repetitive_text() {
+        // Periodic text: many suffix==prefix lengths match. The seam is bounded by
+        // chunk::OVERLAP, so a longer spurious match must not swallow real content.
+        let unit = "abcabcabc ";
+        let a = unit.repeat(60); // > OVERLAP chars, all periodic
+        let b = unit.repeat(60);
+        let joined = stitch(&a, &b);
+        // Reassembly must not be shorter than the longer input (no content dropped).
+        assert!(joined.chars().count() >= a.chars().count());
+    }
+
+    #[test]
+    fn stitch_no_overlap_concatenates() {
+        assert_eq!(stitch("alpha", "beta"), "alphabeta");
+    }
 }

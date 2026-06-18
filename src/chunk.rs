@@ -5,7 +5,9 @@ use crate::parse::Turn;
 use sha1::{Digest, Sha1};
 
 const MAX_CHARS: usize = 1200;
-const OVERLAP: usize = 150;
+/// Consecutive splits of one block share this many leading/trailing chars, so reassembly
+/// (`recall::stitch`) never needs to match a longer overlap than this.
+pub const OVERLAP: usize = 150;
 
 pub struct Chunk {
     pub id: String,

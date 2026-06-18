@@ -156,8 +156,8 @@ fn normalize_blocks(content: &Value) -> Vec<Block> {
     out
 }
 
-pub fn turns_from_jsonl_file(p: &Path, session_id: &str, project: &str) -> Vec<Turn> {
-    let raw = std::fs::read(p).unwrap_or_default();
+pub fn turns_from_jsonl_file(p: &Path, session_id: &str, project: &str) -> std::io::Result<Vec<Turn>> {
+    let raw = std::fs::read(p)?;
     let content = String::from_utf8_lossy(&raw);
     let mut records: Vec<Value> = Vec::new();
     for line in content.lines() {
@@ -228,5 +228,5 @@ pub fn turns_from_jsonl_file(p: &Path, session_id: &str, project: &str) -> Vec<T
             }
         }
     }
-    turns
+    Ok(turns)
 }
