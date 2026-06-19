@@ -1,0 +1,205 @@
+name: Release
+
+# Build prebuilt binaries and attach them to a GitHub Release. protoc (needed by lance's
+# build scripts) is installed on the runner, so end users download a ready-made binary and
+# never compile lance themselves. Mirrors the release flow of huggingface/hf-mount.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump type (leave 'auto' to detect from commit messages)"
+        required: true
+        type: choice
+        default: auto
+        options:
+          - auto
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Manual dispatch path: bump Cargo.toml, commit, tag, push. Downstream jobs run in this
+  # same run (keyed off needs.bump) because a tag pushed with GITHUB_TOKEN doesn't cascade
+  # into a fresh workflow run, so the `push: tags` trigger wouldn't fire.
+  bump:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    outputs:
+      new_tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Detect bump type from commits
+        id: detect
+        run: |
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          RANGE="HEAD"
+          [ -n "$LAST_TAG" ] && RANGE="${LAST_TAG}..HEAD"
+          COMMITS=$(git log --pretty=format:"%s" "$RANGE")
+          BUMP="patch"
+          if echo "$COMMITS" | grep -qiE "^feat(\(.*\))?!:|BREAKING CHANGE"; then
+            BUMP="major"
+          elif echo "$COMMITS" | grep -qiE "^feat(\(.*\))?:"; then
+            BUMP="minor"
+          elif echo "$COMMITS" | grep -qiE "^(fix|perf)(\(.*\))?:"; then
+            BUMP="patch"
+          fi
+          echo "detected=$BUMP" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve bump type
+        id: bump
+        run: |
+          BUMP="${{ inputs.bump }}"
+          [ "$BUMP" = "auto" ] && BUMP="${{ steps.detect.outputs.detected }}"
+          echo "type=$BUMP" >> "$GITHUB_OUTPUT"
+
+      - name: Compute new version
+        id: version
+        run: |
+          CURRENT=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+          case "${{ steps.bump.outputs.type }}" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+          esac
+          NEW="${MAJOR}.${MINOR}.${PATCH}"
+          echo "new=$NEW" >> "$GITHUB_OUTPUT"
+          echo "tag=v${NEW}" >> "$GITHUB_OUTPUT"
+
+      - name: Bump Cargo.toml, commit, tag, push
+        run: |
+          sed -i "0,/^version = \".*\"/s//version = \"${{ steps.version.outputs.new }}\"/" Cargo.toml
+          cargo generate-lockfile
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore: release ${{ steps.version.outputs.tag }}"
+          git tag "${{ steps.version.outputs.tag }}"
+          git push origin HEAD:main --tags
+
+  build-linux:
+    name: Build Linux (${{ matrix.arch }})
+    needs: [bump]
+    if: |
+      always() &&
+      (startsWith(github.ref, 'refs/tags/') || needs.bump.result == 'success')
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            arch: x86_64
+          - target: aarch64-unknown-linux-gnu
+            arch: aarch64
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ needs.bump.outputs.new_tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: release-${{ matrix.target }}
+
+      # protoc runs on the host (build-time tool), so the host package serves both targets.
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Install cross-compilation tools
+        if: matrix.arch == 'aarch64'
+        run: |
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo '[target.aarch64-unknown-linux-gnu]' >> ~/.cargo/config.toml
+          echo 'linker = "aarch64-linux-gnu-gcc"' >> ~/.cargo/config.toml
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/funes" "dist/funes-${{ matrix.arch }}-linux"
+          chmod +x dist/*
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist/
+
+  build-macos:
+    name: Build macOS (arm64)
+    needs: [bump]
+    if: |
+      always() &&
+      (startsWith(github.ref, 'refs/tags/') || needs.bump.result == 'success')
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ needs.bump.outputs.new_tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: release-aarch64-apple-darwin
+
+      - name: Install protoc
+        run: brew install protobuf
+
+      - name: Build
+        run: cargo build --release --target aarch64-apple-darwin
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/aarch64-apple-darwin/release/funes dist/funes-arm64-apple-darwin
+          chmod +x dist/*
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-arm64
+          path: dist/
+
+  release:
+    name: Create Release
+    needs: [bump, build-linux, build-macos]
+    if: |
+      always() &&
+      needs.build-linux.result == 'success' &&
+      needs.build-macos.result == 'success' &&
+      (startsWith(github.ref, 'refs/tags/') || needs.bump.result == 'success')
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: artifacts
+          pattern: "{linux-*,macos-*}"
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ needs.bump.outputs.new_tag || github.ref_name }}"
+          gh release create "$TAG" artifacts/* \
+            --repo "${{ github.repository }}" \
+            --title "$TAG" \
+            --generate-notes

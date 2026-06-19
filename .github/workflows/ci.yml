@@ -21,7 +21,7 @@ jobs:
     name: Lint & Unit Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       # Pin nightly so rustfmt rules don't drift between CI and contributor machines.
       # Bump together with the nightly used for `cargo +nightly fmt` locally.
@@ -30,11 +30,11 @@ jobs:
           toolchain: nightly-2026-04-22
           components: rustfmt
 
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
           components: clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       # lance-encoding (via lancedb) compiles protobuf in its build script.
       - name: Install protoc
@@ -56,11 +56,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: lint-test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
@@ -68,7 +68,7 @@ jobs:
       # Cache the embedder/reranker weights so we don't re-download ~hundreds of MB from
       # the Hugging Face Hub every run. fastembed downloads into ./.fastembed_cache.
       - name: Cache fastembed models
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .fastembed_cache
           key: fastembed-models-v1

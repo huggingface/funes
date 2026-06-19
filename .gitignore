@@ -10,3 +10,6 @@ build/
 
 # fastembed model cache (downloaded ONNX weights)
 .fastembed_cache/
+
+# protoc downloaded by scripts/bootstrap-protoc.sh
+/.tools/
