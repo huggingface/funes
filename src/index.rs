@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::{Instant, UNIX_EPOCH};
 
 const MODEL: &str = "BAAI/bge-small-en-v1.5";
-const DIM: i32 = 384;
+pub const DIM: i32 = 384;
 const EMBED_BATCH: usize = 256;
 
 /// The table schema (column order is load-bearing for Lance).

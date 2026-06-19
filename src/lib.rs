@@ -7,6 +7,7 @@
 
 pub mod chunk;
 pub mod db;
+pub mod hub;
 pub mod index;
 pub mod mcp;
 pub mod parse;
