@@ -21,7 +21,7 @@ on:
 permissions:
   contents: write
 
-# On pull requests the build jobs run (to validate the release build) but bump/publish
+# On pull requests the build jobs run (to validate the release build) but compute/publish
 # don't; cancel superseded PR runs. Tag/dispatch runs key on run_id, so they never cancel.
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -31,19 +31,20 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Manual dispatch path: bump Cargo.toml, commit, tag, push. Downstream jobs run in this
-  # same run (keyed off needs.bump) because a tag pushed with GITHUB_TOKEN doesn't cascade
-  # into a fresh workflow run, so the `push: tags` trigger wouldn't fire.
-  bump:
+  # Dispatch-only: work out the next version. Nothing is written or pushed here — the
+  # version is stamped into each build's working tree, and only committed + tagged by
+  # `publish` after the builds succeed, so a failed build never bumps the version or
+  # leaves a dangling tag.
+  compute:
     if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     outputs:
-      new_tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.new }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0 # history + tags for `git describe`
 
       - name: Detect bump type from commits
         id: detect
@@ -83,23 +84,12 @@ jobs:
           echo "new=$NEW" >> "$GITHUB_OUTPUT"
           echo "tag=v${NEW}" >> "$GITHUB_OUTPUT"
 
-      - name: Bump Cargo.toml, commit, tag, push
-        run: |
-          sed -i "0,/^version = \".*\"/s//version = \"${{ steps.version.outputs.new }}\"/" Cargo.toml
-          cargo generate-lockfile
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml Cargo.lock
-          git commit -m "chore: release ${{ steps.version.outputs.tag }}"
-          git tag "${{ steps.version.outputs.tag }}"
-          git push origin HEAD:main --tags
-
   build-linux:
     name: Build Linux (${{ matrix.arch }})
-    needs: [bump]
+    needs: [compute]
     if: |
       always() &&
-      (startsWith(github.ref, 'refs/tags/') || needs.bump.result == 'success'
+      (startsWith(github.ref, 'refs/tags/') || needs.compute.result == 'success'
         || github.event_name == 'pull_request')
     # 24.04 (glibc 2.39): the prebuilt onnxruntime pulled by ort_sys/fastembed needs the
     # glibc 2.38+ __isoc23_* symbols, so linking fails on 22.04.
@@ -112,8 +102,6 @@ jobs:
             arch: x86_64
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          ref: ${{ needs.bump.outputs.new_tag || github.ref }}
 
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
@@ -125,6 +113,12 @@ jobs:
 
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      # Stamp the computed version into the working tree (no commit) so the binary embeds
+      # it via CARGO_PKG_VERSION. Skipped on tag/PR builds, which use Cargo.toml as-is.
+      - name: Set release version
+        if: needs.compute.outputs.version != ''
+        run: perl -i -pe 'if (!$d && s/^version = ".*"/version = "${{ needs.compute.outputs.version }}"/) { $d = 1 }' Cargo.toml
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
@@ -142,16 +136,14 @@ jobs:
 
   build-macos:
     name: Build macOS (arm64)
-    needs: [bump]
+    needs: [compute]
     if: |
       always() &&
-      (startsWith(github.ref, 'refs/tags/') || needs.bump.result == 'success'
+      (startsWith(github.ref, 'refs/tags/') || needs.compute.result == 'success'
         || github.event_name == 'pull_request')
     runs-on: macos-14
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          ref: ${{ needs.bump.outputs.new_tag || github.ref }}
 
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
@@ -163,6 +155,10 @@ jobs:
 
       - name: Install protoc
         run: brew install protobuf
+
+      - name: Set release version
+        if: needs.compute.outputs.version != ''
+        run: perl -i -pe 'if (!$d && s/^version = ".*"/version = "${{ needs.compute.outputs.version }}"/) { $d = 1 }' Cargo.toml
 
       - name: Build
         run: cargo build --release --target aarch64-apple-darwin
@@ -178,16 +174,38 @@ jobs:
           name: macos-arm64
           path: dist/
 
-  release:
-    name: Create Release
-    needs: [bump, build-linux, build-macos]
+  # Runs only after both builds succeed. On dispatch it now commits the version bump,
+  # tags, and pushes — so the version/tag only ever advance for a release that actually
+  # built. On a tag push there's nothing to commit; it just publishes at that tag.
+  publish:
+    name: Publish Release
+    needs: [compute, build-linux, build-macos]
     if: |
       always() &&
       needs.build-linux.result == 'success' &&
       needs.build-macos.result == 'success' &&
-      (startsWith(github.ref, 'refs/tags/') || needs.bump.result == 'success')
-    runs-on: ubuntu-22.04
+      (startsWith(github.ref, 'refs/tags/') || needs.compute.result == 'success')
+    runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Dispatch only: bump now that the builds passed, matching the version stamped into
+      # the artifacts, then tag and push.
+      - name: Commit and tag release
+        if: needs.compute.outputs.version != ''
+        run: |
+          perl -i -pe 'if (!$d && s/^version = ".*"/version = "${{ needs.compute.outputs.version }}"/) { $d = 1 }' Cargo.toml
+          perl -i -pe 'if ($h) { s/^version = .*/version = "${{ needs.compute.outputs.version }}"/; $h = 0 } $h = 1 if /^name = "funes"$/' Cargo.lock
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore: release ${{ needs.compute.outputs.tag }}"
+          git tag "${{ needs.compute.outputs.tag }}"
+          git push origin HEAD:main --tags
+
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: artifacts
@@ -198,7 +216,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${{ needs.bump.outputs.new_tag || github.ref_name }}"
+          TAG="${{ needs.compute.outputs.tag || github.ref_name }}"
           gh release create "$TAG" artifacts/* \
             --repo "${{ github.repository }}" \
             --title "$TAG" \
