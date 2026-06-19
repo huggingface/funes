@@ -1,6 +1,6 @@
 [package]
 name = "funes"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Recall over your past AI agent sessions — the man who forgets nothing, with discrimination."
 
