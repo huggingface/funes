@@ -75,3 +75,9 @@ jobs:
 
       - name: Integration test
         run: cargo test --test index_recall -- --nocapture
+
+      # Gated: runs only when the secret is present (skips on forks / missing secret).
+      - name: Remote recall test
+        env:
+          HF_FUNES_TEST_TOKEN: ${{ secrets.HF_FUNES_TEST_TOKEN }}
+        run: cargo test --test remote_recall -- --nocapture
