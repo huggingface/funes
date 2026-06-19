@@ -53,8 +53,7 @@ parser to the same shape, not touching the index or query path.
 
 ## Install
 
-Prebuilt binaries are on [GitHub Releases](https://github.com/huggingface/funes/releases) —
-no build step, no `protoc`:
+Prebuilt binaries are on [GitHub Releases](https://github.com/huggingface/funes/releases):
 
 | Platform | Binary |
 | --- | --- |

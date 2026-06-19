@@ -1,8 +1,5 @@
 name: Release
 
-# Build prebuilt binaries and attach them to a GitHub Release. protoc (needed by lance's
-# build scripts) is installed on the runner, so end users download a ready-made binary and
-# never compile lance themselves. Mirrors the release flow of huggingface/hf-mount.
 on:
   push:
     tags: ["v*"]
