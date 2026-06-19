@@ -51,6 +51,23 @@ into a generic turn/block shape. Everything downstream — chunk → embed → s
 source-agnostic and operates on that shape. Adding another framework means writing one new
 parser to the same shape, not touching the index or query path.
 
+## Install
+
+Prebuilt binaries are on [GitHub Releases](https://github.com/huggingface/funes/releases):
+
+| Platform | Binary |
+| --- | --- |
+| Linux x86_64 | `funes-x86_64-linux` |
+| Linux aarch64 | `funes-aarch64-linux` |
+| macOS Apple Silicon | `funes-arm64-apple-darwin` |
+
+```bash
+curl -fsSL https://github.com/huggingface/funes/releases/latest/download/funes-x86_64-linux -o funes
+chmod +x funes && ./funes status
+```
+
+To build it yourself instead, see [Building from source](#building-from-source).
+
 ## Use
 
 > `funes` is a single Rust binary (`lancedb` + `fastembed-rs`, CPU).
@@ -70,6 +87,24 @@ funes mcp                                         # run as an MCP server over st
 `→ get <session_id> <turn_uuid>` line for drilling down into the full surrounding turns. An
 agent consumes funes either by shelling out to the CLI or via the `recall` / `get` MCP tools
 (`funes mcp`).
+
+## Building from source
+
+Needs a Rust toolchain and **`protoc`** — `lance`'s build scripts compile protobuf at
+build time (the finished binary does not need it). Install it one of two ways:
+
+```bash
+# System-wide:
+sudo apt-get install -y protobuf-compiler   # Debian/Ubuntu
+brew install protobuf                        # macOS
+
+# …or repo-local, no sudo (downloads a pinned protoc into .tools/):
+./scripts/bootstrap-protoc.sh
+export PROTOC="$PWD/.tools/protoc/bin/protoc"
+```
+
+Then `cargo build --release` (binary at `target/release/funes`); `cargo test` runs the
+suite. The integration test downloads the embedder/reranker weights on first run.
 
 ## Notes
 
