@@ -5,6 +5,12 @@ on:
     tags: ["v*"]
   pull_request:
     branches: [main]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/release.yml"
   workflow_dispatch:
     inputs:
       bump:
@@ -29,6 +35,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
 
 jobs:
   # Dispatch-only: work out the next version. Nothing is written or pushed here — the
@@ -38,6 +45,7 @@ jobs:
   compute:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     outputs:
       version: ${{ steps.version.outputs.new }}
       tag: ${{ steps.version.outputs.tag }}
@@ -88,12 +96,13 @@ jobs:
     name: Build Linux (${{ matrix.arch }})
     needs: [compute]
     if: |
-      always() &&
+      !cancelled() &&
       (startsWith(github.ref, 'refs/tags/') || needs.compute.result == 'success'
         || github.event_name == 'pull_request')
     # 24.04 (glibc 2.39): the prebuilt onnxruntime pulled by ort_sys/fastembed needs the
     # glibc 2.38+ __isoc23_* symbols, so linking fails on 22.04.
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -110,6 +119,9 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: release-${{ matrix.target }}
+
+      # Faster, lower-memory linker — keeps the heavy lance/onnxruntime link in budget.
+      - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
 
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
@@ -138,10 +150,11 @@ jobs:
     name: Build macOS (arm64)
     needs: [compute]
     if: |
-      always() &&
+      !cancelled() &&
       (startsWith(github.ref, 'refs/tags/') || needs.compute.result == 'success'
         || github.event_name == 'pull_request')
     runs-on: macos-14
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
@@ -181,11 +194,12 @@ jobs:
     name: Publish Release
     needs: [compute, build-linux, build-macos]
     if: |
-      always() &&
+      !cancelled() &&
       needs.build-linux.result == 'success' &&
       needs.build-macos.result == 'success' &&
       (startsWith(github.ref, 'refs/tags/') || needs.compute.result == 'success')
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
