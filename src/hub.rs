@@ -14,24 +14,36 @@ use lancedb::Table;
 use crate::db;
 use crate::index::DIM;
 
-/// Where to recall from.
+/// A store to recall from: a local Lance directory or a remote dataset on the HF Hub.
 #[derive(Debug, Clone)]
 pub enum Source {
-    /// The local index under `funes_dir()`.
-    Local,
+    /// A local Lance store directory (e.g. `~/.funes/lancedb`).
+    Local { path: PathBuf },
     /// A remote Lance dataset on the HF Hub, e.g. `hf://datasets/<org>/<repo>`.
     Remote { uri: String, revision: Option<String> },
 }
 
 impl Source {
-    /// `"local"` → [`Source::Local`]; anything else is treated as a remote dataset URI.
+    /// The default local store (`$FUNES_DB` / `~/.funes` → `…/lancedb`).
+    pub fn local() -> Self {
+        Source::Local {
+            path: PathBuf::from(db::lancedb_uri()),
+        }
+    }
+
+    /// Parse a source spec: `"local"` → the default local store; an `hf://…` URI → a remote
+    /// dataset; anything else → a local store at that path.
     pub fn parse(spec: &str, revision: Option<String>) -> Self {
         if spec == "local" {
-            Source::Local
-        } else {
+            Source::local()
+        } else if spec.starts_with("hf://") {
             Source::Remote {
                 uri: spec.to_string(),
                 revision,
+            }
+        } else {
+            Source::Local {
+                path: PathBuf::from(spec),
             }
         }
     }
@@ -39,18 +51,19 @@ impl Source {
     /// Short label for output/provenance.
     pub fn label(&self) -> String {
         match self {
-            Source::Local => "local".to_string(),
+            Source::Local { path } => path.display().to_string(),
             Source::Remote { uri, .. } => uri.clone(),
         }
     }
 
-    /// Open the `chunks` table for this source. Remote sources read lazily over `hf://`
-    /// (cached by Xet) and are dimension-checked against the local embedding model.
+    /// Open the `chunks` table for this source; remote sources stream lazily over `hf://`.
+    /// Rejects a store whose `vector` dimension isn't funes's `DIM` — a coarse guard, since a
+    /// matching dimension doesn't prove a matching embedding model.
     pub async fn open(&self) -> Result<Table> {
-        match self {
-            Source::Local => {
-                let db = db::open_db().await?;
-                Ok(db.open_table(db::TABLE).execute().await?)
+        let tbl = match self {
+            Source::Local { path } => {
+                let db = lancedb::connect(&path.to_string_lossy()).execute().await?;
+                db.open_table(db::TABLE).execute().await?
             }
             Source::Remote { uri, revision } => {
                 let mut conn = lancedb::connect(uri);
@@ -60,12 +73,11 @@ impl Source {
                 if let Some(token) = hf_token() {
                     conn = conn.storage_option("hf_token", token);
                 }
-                let db = conn.execute().await?;
-                let tbl = db.open_table(db::TABLE).execute().await?;
-                check_dim(&tbl).await?;
-                Ok(tbl)
+                conn.execute().await?.open_table(db::TABLE).execute().await?
             }
-        }
+        };
+        check_dim(&tbl).await?;
+        Ok(tbl)
     }
 }
 
@@ -124,8 +136,12 @@ mod tests {
     use arrow_schema::{DataType, Field, Schema};
 
     #[test]
-    fn source_parse_local_vs_remote() {
-        assert!(matches!(Source::parse("local", None), Source::Local));
+    fn source_parse_local_path_remote() {
+        assert!(matches!(Source::parse("local", None), Source::Local { .. }));
+        match Source::parse("/tmp/store", None) {
+            Source::Local { path } => assert_eq!(path, std::path::PathBuf::from("/tmp/store")),
+            _ => panic!("expected a local path"),
+        }
         match Source::parse("hf://datasets/org/kb", Some("abc".into())) {
             Source::Remote { uri, revision } => {
                 assert_eq!(uri, "hf://datasets/org/kb");
@@ -137,7 +153,7 @@ mod tests {
 
     #[test]
     fn source_label() {
-        assert_eq!(Source::Local.label(), "local");
+        assert_eq!(Source::Local { path: "/tmp/x".into() }.label(), "/tmp/x");
         assert_eq!(
             Source::parse("hf://datasets/org/kb", None).label(),
             "hf://datasets/org/kb"

@@ -3,7 +3,7 @@
 //! `recall` reads the index (hybrid → rerank → recency); `index` builds/updates it
 //! from `~/.claude/projects/**/*.jsonl`. Index location is `$FUNES_DB` or `~/.funes`.
 
-use funes::{index, mcp, recall};
+use funes::{hub, index, mcp, recall};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -90,6 +90,7 @@ async fn main() -> Result<()> {
             print!(
                 "{}",
                 recall::recall(
+                    hub::Source::local(),
                     query.join(" "),
                     k,
                     candidates,

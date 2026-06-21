@@ -4,6 +4,7 @@
 //! prints it and the MCP server returns it verbatim.
 
 use crate::db;
+use crate::hub::Source;
 use anyhow::{Context, Result};
 use arrow_array::{Int64Array, RecordBatch, StringArray};
 use chrono::{DateTime, Utc};
@@ -114,8 +115,10 @@ fn stitch(a: &str, b: &str) -> String {
     format!("{a}{b}")
 }
 
-/// Run the recall pipeline and return the formatted results as text.
+/// Run the recall pipeline over one store and return the formatted results as text.
+#[allow(clippy::too_many_arguments)]
 pub async fn recall(
+    source: Source,
     query: String,
     k: usize,
     candidates: usize,
@@ -131,8 +134,7 @@ pub async fn recall(
         .next()
         .context("empty embedding")?;
 
-    let db = db::open_db().await?;
-    let table = db.open_table(db::TABLE).execute().await?;
+    let table = source.open().await?;
 
     let where_clause = build_where(block_type.as_deref(), project.as_deref());
 

@@ -58,7 +58,18 @@ impl Funes {
             project,
         }): Parameters<RecallRequest>,
     ) -> String {
-        match recall::recall(query, k.unwrap_or(8), 30, 30.0, 1, block_type, project).await {
+        match recall::recall(
+            crate::hub::Source::local(),
+            query,
+            k.unwrap_or(8),
+            30,
+            30.0,
+            1,
+            block_type,
+            project,
+        )
+        .await
+        {
             Ok(s) if !s.is_empty() => s,
             Ok(_) => "no results".to_string(),
             Err(e) => format!("recall error: {e}"),

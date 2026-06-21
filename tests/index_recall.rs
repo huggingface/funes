@@ -44,9 +44,18 @@ async fn index_then_read_surface() {
     assert!(list.contains(&project), "list should name the project: {list}");
 
     // recall: the parsing turn surfaces, and the `→ get` line carries the full session id.
-    let out = funes::recall::recall("parse transcripts into turns".into(), 5, 30, 30.0, 1, None, None)
-        .await
-        .unwrap();
+    let out = funes::recall::recall(
+        funes::hub::Source::local(),
+        "parse transcripts into turns".into(),
+        5,
+        30,
+        30.0,
+        1,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     assert_ne!(out, "no results", "recall returned nothing");
     assert!(
         out.contains(&session),
@@ -54,9 +63,18 @@ async fn index_then_read_surface() {
     );
 
     // type filter: restrict to tool_use → the Bash call.
-    let tu = funes::recall::recall("cargo test".into(), 5, 30, 0.0, 0, Some("tool_use".into()), None)
-        .await
-        .unwrap();
+    let tu = funes::recall::recall(
+        funes::hub::Source::local(),
+        "cargo test".into(),
+        5,
+        30,
+        0.0,
+        0,
+        Some("tool_use".into()),
+        None,
+    )
+    .await
+    .unwrap();
     assert!(tu.contains("tool_use"), "type filter should keep tool_use rows: {tu}");
 
     // get: reassemble the assistant turn by its uuid.
