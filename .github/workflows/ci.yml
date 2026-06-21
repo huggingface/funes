@@ -43,6 +43,10 @@ jobs:
           components: clippy
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # One cache shared by both CI jobs (same deps under the ci profile) — fewer,
+          # smaller caches that survive GitHub's 10 GB/repo limit instead of evicting.
+          shared-key: ci
 
       # Faster, lower-memory linker — keeps the heavy lance/onnxruntime link in budget.
       - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
@@ -73,16 +77,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: ci
 
       - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
 
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
-      # Cache the embedder/reranker weights so we don't re-download ~hundreds of MB from
-      # the Hugging Face Hub every run. fastembed downloads into ./.fastembed_cache.
-      - name: Cache fastembed models
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      # Embedder/reranker weights (~hundreds of MB). Cache on main only — PRs restore
+      # main's copy, so there's no duplicate per-PR copy eating the 10 GB cache budget.
+      - name: Restore fastembed models
+        id: fastembed
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: .fastembed_cache
           key: fastembed-models-v1
@@ -95,3 +102,10 @@ jobs:
         env:
           HF_FUNES_TEST_TOKEN: ${{ secrets.HF_FUNES_TEST_TOKEN }}
         run: cargo test --profile ci --test remote_recall -- --nocapture
+
+      - name: Save fastembed models
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' && steps.fastembed.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: .fastembed_cache
+          key: fastembed-models-v1
