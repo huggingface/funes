@@ -9,6 +9,7 @@ use arrow_array::{FixedSizeListArray, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use lancedb::index::scalar::FtsIndexBuilder;
+use lancedb::index::vector::IvfPqIndexBuilder;
 use lancedb::index::Index;
 use std::collections::HashMap;
 use std::io::Write as _;
@@ -17,7 +18,7 @@ use std::sync::Arc;
 use std::time::{Instant, UNIX_EPOCH};
 
 const MODEL: &str = "BAAI/bge-small-en-v1.5";
-const DIM: i32 = 384;
+pub const DIM: i32 = 384;
 const EMBED_BATCH: usize = 256;
 
 /// The table schema (column order is load-bearing for Lance).
@@ -198,14 +199,27 @@ pub async fn run_index(source: &Path, no_thinking: bool) -> Result<()> {
     }
 
     if table_exists {
-        eprintln!("building BM25 full-text index…");
         let t = conn.open_table(db::TABLE).execute().await?;
+        eprintln!("building BM25 full-text index…");
         if let Err(e) = t
             .create_index(&["text"], Index::FTS(FtsIndexBuilder::default()))
             .execute()
             .await
         {
             eprintln!("  (fts index skipped: {e})");
+        }
+
+        // Vector ANN index: bounds how much a query reads, which is what makes recall over a
+        // remote (hf://) tier lazy instead of a full-column scan. lance enforces its own
+        // training minimum (256 rows for default IVF_PQ) and errors cleanly below it, so just
+        // attempt the build and fall back to brute-force vector search on any failure.
+        eprintln!("building IVF_PQ vector index…");
+        if let Err(e) = t
+            .create_index(&["vector"], Index::IvfPq(IvfPqIndexBuilder::default()))
+            .execute()
+            .await
+        {
+            eprintln!("  (vector index skipped: {e})");
         }
     }
 
