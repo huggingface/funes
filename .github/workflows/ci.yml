@@ -44,12 +44,12 @@ jobs:
         run: cargo +nightly-2026-04-22 fmt --check
 
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --profile ci -- -D warnings
 
       # Unit tests only here — hermetic, no network. The integration test that runs the
       # real embedder lives in its own job below.
       - name: Unit tests
-        run: cargo test --lib
+        run: cargo test --lib --profile ci
 
   integration-test:
     name: Integration Test (real embedder)
@@ -74,10 +74,10 @@ jobs:
           key: fastembed-models-v1
 
       - name: Integration test
-        run: cargo test --test index_recall -- --nocapture
+        run: cargo test --profile ci --test index_recall -- --nocapture
 
       # Gated: runs only when the secret is present (skips on forks / missing secret).
       - name: Remote recall test
         env:
           HF_FUNES_TEST_TOKEN: ${{ secrets.HF_FUNES_TEST_TOKEN }}
-        run: cargo test --test remote_recall -- --nocapture
+        run: cargo test --profile ci --test remote_recall -- --nocapture

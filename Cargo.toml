@@ -29,3 +29,16 @@ tempfile = "3"                   # real temp files/dirs for parse + index tests 
 
 [profile.release]
 opt-level = 3
+
+# CI build profile. Keeps line numbers for our own code so test backtraces stay useful, but strips debuginfo
+# from dependencies so linking doesn't exhaust the runner's disk.
+# Workspace keeps debug-assertions (inherited from dev); only deps drop them.
+[profile.ci]
+inherits = "dev"
+debug = "line-tables-only"
+incremental = false
+
+[profile.ci.package."*"]
+debug = false
+debug-assertions = false
+strip = "debuginfo"
