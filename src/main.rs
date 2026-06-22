@@ -42,7 +42,7 @@ enum Cmd {
         #[arg(long)]
         project: Option<String>,
         #[command(flatten)]
-        src: SourceOpts,
+        store: StoreOpts,
     },
     /// List indexed sessions, newest activity first.
     List {
@@ -53,7 +53,7 @@ enum Cmd {
         #[arg(long, default_value_t = 50)]
         limit: usize,
         #[command(flatten)]
-        src: SourceOpts,
+        store: StoreOpts,
     },
     /// Drill down on a recall hit: a turn plus the turns around it, reassembled.
     Get {
@@ -65,7 +65,7 @@ enum Cmd {
         #[arg(long, default_value_t = 3)]
         window: i64,
         #[command(flatten)]
-        src: SourceOpts,
+        store: StoreOpts,
     },
     /// Build or update the index from session transcripts.
     Index {
@@ -78,7 +78,7 @@ enum Cmd {
     /// Show index statistics.
     Status {
         #[command(flatten)]
-        src: SourceOpts,
+        store: StoreOpts,
     },
     /// Run as an MCP server over stdio (for Claude Code, Cursor, …).
     Mcp,
@@ -86,19 +86,19 @@ enum Cmd {
 
 /// Which store the read commands act on. Shared by `recall`/`list`/`get`/`status`.
 #[derive(Args)]
-struct SourceOpts {
+struct StoreOpts {
     /// Store to read: `local` (default), an `hf://datasets/<org>/<repo>` URI, or a local path.
-    /// Falls back to $FUNES_SOURCE, then the local index.
+    /// Falls back to $FUNES_STORE, then the local index.
     #[arg(long)]
-    source: Option<String>,
-    /// Revision (branch/tag/sha) for a remote `hf://` source. Falls back to $FUNES_REVISION.
+    store: Option<String>,
+    /// Revision (branch/tag/sha) for a remote `hf://` store. Falls back to $FUNES_REVISION.
     #[arg(long)]
     revision: Option<String>,
 }
 
-impl SourceOpts {
-    fn resolve(self) -> hub::Source {
-        hub::Source::resolve(self.source, self.revision)
+impl StoreOpts {
+    fn resolve(self) -> hub::Store {
+        hub::Store::resolve(self.store, self.revision)
     }
 }
 
@@ -113,12 +113,12 @@ async fn main() -> Result<()> {
             neighbors,
             block_type,
             project,
-            src,
+            store,
         } => {
             print!(
                 "{}",
                 recall::recall(
-                    src.resolve(),
+                    store.resolve(),
                     query.join(" "),
                     k,
                     candidates,
@@ -131,28 +131,28 @@ async fn main() -> Result<()> {
             );
             Ok(())
         }
-        Cmd::List { project, limit, src } => {
-            print!("{}", recall::list(src.resolve(), project, limit).await?);
+        Cmd::List { project, limit, store } => {
+            print!("{}", recall::list(store.resolve(), project, limit).await?);
             Ok(())
         }
         Cmd::Get {
             session_id,
             turn_uuid,
             window,
-            src,
+            store,
         } => {
-            print!("{}", recall::get(src.resolve(), session_id, turn_uuid, window).await?);
+            print!("{}", recall::get(store.resolve(), session_id, turn_uuid, window).await?);
             Ok(())
         }
         Cmd::Index { source, no_thinking } => {
-            let src = source.unwrap_or_else(|| {
+            let dir = source.unwrap_or_else(|| {
                 let home = std::env::var("HOME").unwrap_or_default();
                 PathBuf::from(home).join(".claude").join("projects")
             });
-            index::run_index(&src, no_thinking).await
+            index::run_index(&dir, no_thinking).await
         }
-        Cmd::Status { src } => {
-            print!("{}", recall::status(src.resolve()).await?);
+        Cmd::Status { store } => {
+            print!("{}", recall::status(store.resolve()).await?);
             Ok(())
         }
         Cmd::Mcp => mcp::run().await,

@@ -8,7 +8,7 @@
 //! ephemeral dataset per run is deferred to Step 5, once funes can push/delete itself.
 
 use arrow_array::{Array, StringArray};
-use funes::hub::Source;
+use funes::hub::Store;
 use futures::TryStreamExt;
 use lance_index::scalar::FullTextSearchQuery;
 use lancedb::query::{ExecutableQuery, QueryBase};
@@ -26,10 +26,10 @@ async fn recall_from_remote_fixture() {
         eprintln!("skip: HF_FUNES_TEST_TOKEN not set");
         return;
     }
-    // funes' Source::open authenticates via HF_TOKEN.
+    // funes' Store::open authenticates via HF_TOKEN.
     std::env::set_var("HF_TOKEN", token);
 
-    let tbl = Source::parse(FIXTURE_URI, None)
+    let tbl = Store::parse(FIXTURE_URI, None)
         .open()
         .await
         .expect("open remote fixture over hf://");
@@ -81,7 +81,7 @@ async fn recall_from_remote_fixture() {
     // End-to-end: the full recall pipeline (hybrid → rerank → recency → format) over the remote
     // store surfaces the marker chunk. recency off, no neighbors, to keep the assertion tight.
     let out = funes::recall::recall(
-        Source::parse(FIXTURE_URI, None),
+        Store::parse(FIXTURE_URI, None),
         MARKER.to_string(),
         5,
         30,

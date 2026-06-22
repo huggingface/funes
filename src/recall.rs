@@ -4,7 +4,7 @@
 //! prints it and the MCP server returns it verbatim.
 
 use crate::db;
-use crate::hub::Source;
+use crate::hub::Store;
 use anyhow::{Context, Result};
 use arrow_array::{Int64Array, RecordBatch, StringArray};
 use chrono::{DateTime, Utc};
@@ -118,7 +118,7 @@ fn stitch(a: &str, b: &str) -> String {
 /// Run the recall pipeline over one store and return the formatted results as text.
 #[allow(clippy::too_many_arguments)]
 pub async fn recall(
-    source: Source,
+    store: Store,
     query: String,
     k: usize,
     candidates: usize,
@@ -134,7 +134,7 @@ pub async fn recall(
         .next()
         .context("empty embedding")?;
 
-    let table = source.open().await?;
+    let table = store.open().await?;
 
     let where_clause = build_where(block_type.as_deref(), project.as_deref());
 
@@ -328,8 +328,8 @@ async fn attach_neighbors(table: &Table, hits: &mut [&mut Hit], window: i64) -> 
 }
 
 /// Browse indexed sessions: one line per session, newest activity first.
-pub async fn list(source: Source, project: Option<String>, limit: usize) -> Result<String> {
-    let table = source.open().await?;
+pub async fn list(store: Store, project: Option<String>, limit: usize) -> Result<String> {
+    let table = store.open().await?;
 
     let cols = ["session_id", "project", "ts", "role", "text"];
     let mut q = table.query().select(Select::columns(&cols)).limit(SCAN_LIMIT);
@@ -404,8 +404,8 @@ pub async fn list(source: Source, project: Option<String>, limit: usize) -> Resu
 
 /// Drill down on a recall hit: the named turn plus the turns within `window` of it, each
 /// reassembled (blocks in order, splits de-overlapped) into one readable passage.
-pub async fn get(source: Source, session_id: String, turn_uuid: String, window: i64) -> Result<String> {
-    let table = source.open().await?;
+pub async fn get(store: Store, session_id: String, turn_uuid: String, window: i64) -> Result<String> {
+    let table = store.open().await?;
 
     let cols = ["turn_uuid", "seq", "ts", "role", "text", "block_idx", "split_idx"];
     let mut stream = table
@@ -486,12 +486,12 @@ pub async fn get(source: Source, session_id: String, turn_uuid: String, window: 
     Ok(out)
 }
 
-pub async fn status(source: Source) -> Result<String> {
-    let table = source.open().await?;
+pub async fn status(store: Store) -> Result<String> {
+    let table = store.open().await?;
     let rows = table.count_rows(None).await?;
     Ok(format!(
-        "source: {}\ntable:  {}\nchunks: {rows}\n",
-        source.label(),
+        "store: {}\ntable:  {}\nchunks: {rows}\n",
+        store.label(),
         db::TABLE
     ))
 }
