@@ -3,7 +3,7 @@
 //! `recall` reads the index (hybrid → rerank → recency); `index` builds/updates it
 //! from `~/.claude/projects/**/*.jsonl`. Index location is `$FUNES_DB` or `~/.funes`.
 
-use funes::{hub, index, mcp, recall};
+use funes::{hub, index, mcp, recall, sync};
 
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
@@ -80,6 +80,11 @@ enum Cmd {
         #[command(flatten)]
         store: StoreOpts,
     },
+    /// Publish the local store's new chunks to a remote store on the HF Hub.
+    Sync {
+        #[command(flatten)]
+        store: StoreOpts,
+    },
     /// Run as an MCP server over stdio (for Claude Code, Cursor, …).
     Mcp,
 }
@@ -153,6 +158,10 @@ async fn main() -> Result<()> {
         }
         Cmd::Status { store } => {
             print!("{}", recall::status(store.resolve()).await?);
+            Ok(())
+        }
+        Cmd::Sync { store } => {
+            print!("{}", sync::run_sync(store.resolve()).await?);
             Ok(())
         }
         Cmd::Mcp => mcp::run().await,

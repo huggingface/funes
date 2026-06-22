@@ -13,3 +13,4 @@ pub mod mcp;
 pub mod parse;
 pub mod recall;
 pub mod scan;
+pub mod sync;

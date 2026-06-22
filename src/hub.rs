@@ -100,7 +100,7 @@ fn resolve_from(spec: Option<String>, revision: Option<String>, env: impl Fn(&st
 }
 
 /// HF token from the standard env var, else the `huggingface_hub` cached token file.
-fn hf_token() -> Option<String> {
+pub(crate) fn hf_token() -> Option<String> {
     let token_file = std::env::var("HOME")
         .ok()
         .map(|h| PathBuf::from(h).join(".cache/huggingface/token"));
