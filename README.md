@@ -29,6 +29,8 @@ behalf*.
   rebuildable index. The transcripts (local + your HF bucket) are the source of truth. Any
   model can query it — switch models per task; nothing is trained into weights.
 
+For the *why* behind these choices — and how funes differs from, and complements, the crowd of memory providers — see [docs/RATIONALE.md](docs/RATIONALE.md).
+
 ## Pipeline
 
 ```
