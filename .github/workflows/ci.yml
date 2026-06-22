@@ -85,6 +85,13 @@ jobs:
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
+      # sync's pre-publish secret gate shells out to trufflehog (fail-closed), so the
+      # round-trip test below needs the binary on PATH. Pinned to the version used locally.
+      - name: Install trufflehog
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin v3.95.5
+          trufflehog --version
+
       # Embedder/reranker weights (~hundreds of MB). Cache on main only — PRs restore
       # main's copy, so there's no duplicate per-PR copy eating the 10 GB cache budget.
       - name: Restore fastembed models
@@ -102,6 +109,13 @@ jobs:
         env:
           HF_FUNES_TEST_TOKEN: ${{ secrets.HF_FUNES_TEST_TOKEN }}
         run: cargo test --profile ci --test remote_recall -- --nocapture
+
+      # Gated: create→append→recall→clear against a unique scratch path. Skips without the
+      # secret; cleans up the scratch path itself.
+      - name: Sync round-trip test
+        env:
+          HF_FUNES_TEST_TOKEN: ${{ secrets.HF_FUNES_TEST_TOKEN }}
+        run: cargo test --profile ci --test sync_round_trip -- --nocapture
 
       - name: Save fastembed models
         if: ${{ !cancelled() && github.ref == 'refs/heads/main' && steps.fastembed.outputs.cache-hit != 'true' }}
