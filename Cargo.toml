@@ -23,9 +23,7 @@ sha1 = "0.10"                    # chunk id = sha1(...)[:16]
 hex = "0.4"
 walkdir = "2"                    # recursive *.jsonl walk
 rmcp = { version = "1", features = ["server", "macros", "transport-io", "schemars"] }  # MCP stdio server
-
-[dev-dependencies]
-tempfile = "3"                   # real temp files/dirs for parse + index tests (no mocking)
+tempfile = "3"                   # temp dir for the pre-publish secret scan; temp files/dirs in tests
 
 [profile.release]
 opt-level = 3

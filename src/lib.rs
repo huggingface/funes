@@ -12,3 +12,4 @@ pub mod index;
 pub mod mcp;
 pub mod parse;
 pub mod recall;
+pub mod scan;
