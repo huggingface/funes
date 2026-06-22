@@ -20,7 +20,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Instant, UNIX_EPOCH};
 
-const MODEL: &str = "BAAI/bge-small-en-v1.5";
+pub const MODEL: &str = "BAAI/bge-small-en-v1.5";
 pub const DIM: i32 = 384;
 const EMBED_BATCH: usize = 256;
 
@@ -28,27 +28,30 @@ const EMBED_BATCH: usize = 256;
 fn schema() -> Arc<Schema> {
     let utf8 = |name: &str| Field::new(name, DataType::Utf8, true);
     let i64f = |name: &str| Field::new(name, DataType::Int64, true);
-    Arc::new(Schema::new(vec![
-        utf8("id"),
-        utf8("text"),
-        utf8("session_id"),
-        utf8("project"),
-        utf8("turn_uuid"),
-        utf8("parent_uuid"),
-        i64f("seq"),
-        utf8("ts"),
-        utf8("role"),
-        utf8("block_type"),
-        utf8("tool_name"),
-        utf8("source_path"),
-        i64f("block_idx"),
-        i64f("split_idx"),
-        Field::new(
-            "vector",
-            DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), DIM),
-            true,
-        ),
-    ]))
+    Arc::new(Schema::new_with_metadata(
+        vec![
+            utf8("id"),
+            utf8("text"),
+            utf8("session_id"),
+            utf8("project"),
+            utf8("turn_uuid"),
+            utf8("parent_uuid"),
+            i64f("seq"),
+            utf8("ts"),
+            utf8("role"),
+            utf8("block_type"),
+            utf8("tool_name"),
+            utf8("source_path"),
+            i64f("block_idx"),
+            i64f("split_idx"),
+            Field::new(
+                "vector",
+                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), DIM),
+                true,
+            ),
+        ],
+        HashMap::from([("embedding_model".to_string(), MODEL.to_string())]),
+    ))
 }
 
 fn build_batch(chunks: &[chunk::Chunk], vectors: &[Vec<f32>]) -> Result<RecordBatch> {
@@ -118,23 +121,20 @@ pub async fn run_index(source: &Path, no_thinking: bool) -> Result<()> {
     let dir = db::funes_dir();
     std::fs::create_dir_all(&dir)?;
 
-    // Model-pin guard: refuse to mix embedding models in one index.
-    let meta_path = dir.join("meta.json");
-    let meta: Option<serde_json::Value> = std::fs::read_to_string(&meta_path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok());
-    if let Some(em) = meta
-        .as_ref()
-        .and_then(|m| m.get("embedding_model"))
-        .and_then(|x| x.as_str())
-    {
-        if em != MODEL {
-            return Err(anyhow!("index built with model {em:?}, refusing to mix with {MODEL:?}"));
-        }
-    }
-
     let conn = db::open_db().await?;
     let mut table_exists = conn.table_names().execute().await?.iter().any(|t| t == db::TABLE);
+
+    // Model-pin: refuse to add to a store built with a different embedding model. The id rides
+    // in the table's schema metadata; a pre-metadata store (no id) is tolerated and guarded only
+    // by the dimension check until it is reindexed.
+    if table_exists {
+        let stored = conn.open_table(db::TABLE).execute().await?.schema().await?;
+        if let Some(em) = stored.metadata().get("embedding_model") {
+            if em != MODEL {
+                return Err(anyhow!("index built with model {em:?}, refusing to mix with {MODEL:?}"));
+            }
+        }
+    }
 
     // Incremental state: path -> "size:mtime".
     let state_path = dir.join("state.json");
@@ -246,11 +246,6 @@ pub async fn run_index(source: &Path, no_thinking: bool) -> Result<()> {
                                 // Persist after each file so progress survives interruption (a kill is resumable).
         std::fs::write(&state_path, serde_json::to_string_pretty(&state)?)?;
         n_files += 1;
-    }
-
-    if meta.is_none() {
-        let m = serde_json::json!({"embedding_model": MODEL, "dim": DIM, "metric": "cosine"});
-        std::fs::write(&meta_path, serde_json::to_string_pretty(&m)?)?;
     }
 
     if table_exists {
