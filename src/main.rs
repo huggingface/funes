@@ -6,7 +6,7 @@
 use funes::{hub, index, mcp, recall};
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -41,6 +41,8 @@ enum Cmd {
         /// Restrict to a project (the path segment under `projects`).
         #[arg(long)]
         project: Option<String>,
+        #[command(flatten)]
+        src: SourceOpts,
     },
     /// List indexed sessions, newest activity first.
     List {
@@ -50,6 +52,8 @@ enum Cmd {
         /// Max sessions to show.
         #[arg(long, default_value_t = 50)]
         limit: usize,
+        #[command(flatten)]
+        src: SourceOpts,
     },
     /// Drill down on a recall hit: a turn plus the turns around it, reassembled.
     Get {
@@ -60,6 +64,8 @@ enum Cmd {
         /// Turns within this seq window of the target are included.
         #[arg(long, default_value_t = 3)]
         window: i64,
+        #[command(flatten)]
+        src: SourceOpts,
     },
     /// Build or update the index from session transcripts.
     Index {
@@ -70,9 +76,30 @@ enum Cmd {
         no_thinking: bool,
     },
     /// Show index statistics.
-    Status,
+    Status {
+        #[command(flatten)]
+        src: SourceOpts,
+    },
     /// Run as an MCP server over stdio (for Claude Code, Cursor, …).
     Mcp,
+}
+
+/// Which store the read commands act on. Shared by `recall`/`list`/`get`/`status`.
+#[derive(Args)]
+struct SourceOpts {
+    /// Store to read: `local` (default), an `hf://datasets/<org>/<repo>` URI, or a local path.
+    /// Falls back to $FUNES_SOURCE, then the local index.
+    #[arg(long)]
+    source: Option<String>,
+    /// Revision (branch/tag/sha) for a remote `hf://` source. Falls back to $FUNES_REVISION.
+    #[arg(long)]
+    revision: Option<String>,
+}
+
+impl SourceOpts {
+    fn resolve(self) -> hub::Source {
+        hub::Source::resolve(self.source, self.revision)
+    }
 }
 
 #[tokio::main]
@@ -86,11 +113,12 @@ async fn main() -> Result<()> {
             neighbors,
             block_type,
             project,
+            src,
         } => {
             print!(
                 "{}",
                 recall::recall(
-                    hub::Source::local(),
+                    src.resolve(),
                     query.join(" "),
                     k,
                     candidates,
@@ -103,16 +131,17 @@ async fn main() -> Result<()> {
             );
             Ok(())
         }
-        Cmd::List { project, limit } => {
-            print!("{}", recall::list(project, limit).await?);
+        Cmd::List { project, limit, src } => {
+            print!("{}", recall::list(src.resolve(), project, limit).await?);
             Ok(())
         }
         Cmd::Get {
             session_id,
             turn_uuid,
             window,
+            src,
         } => {
-            print!("{}", recall::get(session_id, turn_uuid, window).await?);
+            print!("{}", recall::get(src.resolve(), session_id, turn_uuid, window).await?);
             Ok(())
         }
         Cmd::Index { source, no_thinking } => {
@@ -122,8 +151,8 @@ async fn main() -> Result<()> {
             });
             index::run_index(&src, no_thinking).await
         }
-        Cmd::Status => {
-            print!("{}", recall::status().await?);
+        Cmd::Status { src } => {
+            print!("{}", recall::status(src.resolve()).await?);
             Ok(())
         }
         Cmd::Mcp => mcp::run().await,

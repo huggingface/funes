@@ -328,9 +328,8 @@ async fn attach_neighbors(table: &Table, hits: &mut [&mut Hit], window: i64) -> 
 }
 
 /// Browse indexed sessions: one line per session, newest activity first.
-pub async fn list(project: Option<String>, limit: usize) -> Result<String> {
-    let db = db::open_db().await?;
-    let table = db.open_table(db::TABLE).execute().await?;
+pub async fn list(source: Source, project: Option<String>, limit: usize) -> Result<String> {
+    let table = source.open().await?;
 
     let cols = ["session_id", "project", "ts", "role", "text"];
     let mut q = table.query().select(Select::columns(&cols)).limit(SCAN_LIMIT);
@@ -405,9 +404,8 @@ pub async fn list(project: Option<String>, limit: usize) -> Result<String> {
 
 /// Drill down on a recall hit: the named turn plus the turns within `window` of it, each
 /// reassembled (blocks in order, splits de-overlapped) into one readable passage.
-pub async fn get(session_id: String, turn_uuid: String, window: i64) -> Result<String> {
-    let db = db::open_db().await?;
-    let table = db.open_table(db::TABLE).execute().await?;
+pub async fn get(source: Source, session_id: String, turn_uuid: String, window: i64) -> Result<String> {
+    let table = source.open().await?;
 
     let cols = ["turn_uuid", "seq", "ts", "role", "text", "block_idx", "split_idx"];
     let mut stream = table
@@ -488,13 +486,12 @@ pub async fn get(session_id: String, turn_uuid: String, window: i64) -> Result<S
     Ok(out)
 }
 
-pub async fn status() -> Result<String> {
-    let db = db::open_db().await?;
-    let table = db.open_table(db::TABLE).execute().await?;
+pub async fn status(source: Source) -> Result<String> {
+    let table = source.open().await?;
     let rows = table.count_rows(None).await?;
     Ok(format!(
-        "db:     {}\ntable:  {}\nchunks: {rows}\n",
-        db::lancedb_uri(),
+        "source: {}\ntable:  {}\nchunks: {rows}\n",
+        source.label(),
         db::TABLE
     ))
 }

@@ -48,6 +48,13 @@ impl Source {
         }
     }
 
+    /// Resolve the store the read commands should use: an explicit `spec` (a CLI `--source`)
+    /// wins, else `$FUNES_SOURCE`, else the default local store. `revision` is taken from the
+    /// flag, else `$FUNES_REVISION` (only meaningful for a remote `hf://` source).
+    pub fn resolve(spec: Option<String>, revision: Option<String>) -> Self {
+        resolve_from(spec, revision, |k| std::env::var(k).ok())
+    }
+
     /// Short label for output/provenance.
     pub fn label(&self) -> String {
         match self {
@@ -78,6 +85,17 @@ impl Source {
         };
         check_dim(&tbl).await?;
         Ok(tbl)
+    }
+}
+
+/// Pure core of [`Source::resolve`]: explicit `spec` wins over `$FUNES_SOURCE`, explicit
+/// `revision` over `$FUNES_REVISION`; blank env values are ignored. Split out so it's testable
+/// without mutating process env.
+fn resolve_from(spec: Option<String>, revision: Option<String>, env: impl Fn(&str) -> Option<String>) -> Source {
+    let nonempty = |k: &str| env(k).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    match spec.or_else(|| nonempty("FUNES_SOURCE")) {
+        Some(s) => Source::parse(&s, revision.or_else(|| nonempty("FUNES_REVISION"))),
+        None => Source::local(),
     }
 }
 
@@ -181,6 +199,43 @@ mod tests {
     fn token_blank_env_is_skipped_none_when_no_file() {
         let env: HashMap<&str, &str> = [("HF_TOKEN", "   ")].into_iter().collect();
         assert_eq!(token_from(|k| env.get(k).map(|s| s.to_string()), None), None);
+    }
+
+    #[test]
+    fn resolve_prefers_explicit_then_env_then_local() {
+        let none = |_: &str| None;
+        // Explicit spec + revision win outright.
+        match resolve_from(Some("hf://datasets/o/r".into()), Some("v1".into()), none) {
+            Source::Remote { uri, revision } => {
+                assert_eq!(uri, "hf://datasets/o/r");
+                assert_eq!(revision.as_deref(), Some("v1"));
+            }
+            _ => panic!("expected remote"),
+        }
+        // No spec, no env -> default local store.
+        assert!(matches!(resolve_from(None, None, none), Source::Local { .. }));
+        // No explicit spec -> $FUNES_SOURCE used, $FUNES_REVISION fills the revision.
+        let env = |k: &str| match k {
+            "FUNES_SOURCE" => Some("hf://datasets/e/r".to_string()),
+            "FUNES_REVISION" => Some("envrev".to_string()),
+            _ => None,
+        };
+        match resolve_from(None, None, env) {
+            Source::Remote { uri, revision } => {
+                assert_eq!(uri, "hf://datasets/e/r");
+                assert_eq!(revision.as_deref(), Some("envrev"));
+            }
+            _ => panic!("expected remote from env"),
+        }
+        // An explicit (local) spec beats a remote $FUNES_SOURCE.
+        let env2 = |k: &str| (k == "FUNES_SOURCE").then(|| "hf://datasets/env/wins".to_string());
+        match resolve_from(Some("/local/path".into()), None, env2) {
+            Source::Local { path } => assert_eq!(path, std::path::PathBuf::from("/local/path")),
+            _ => panic!("explicit local path should beat env remote"),
+        }
+        // A blank $FUNES_SOURCE is ignored -> local.
+        let blank = |k: &str| (k == "FUNES_SOURCE").then(|| "   ".to_string());
+        assert!(matches!(resolve_from(None, None, blank), Source::Local { .. }));
     }
 
     // --- dim guard against real local tables ---

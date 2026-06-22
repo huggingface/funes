@@ -77,4 +77,20 @@ async fn recall_from_remote_fixture() {
     }
     assert!(vrows > 0, "vector query returned no rows from the remote fixture");
     eprintln!("remote vector-query rows = {vrows}");
+
+    // End-to-end: the full recall pipeline (hybrid → rerank → recency → format) over the remote
+    // store surfaces the marker chunk. recency off, no neighbors, to keep the assertion tight.
+    let out = funes::recall::recall(
+        Source::parse(FIXTURE_URI, None),
+        MARKER.to_string(),
+        5,
+        30,
+        0.0,
+        0,
+        None,
+        None,
+    )
+    .await
+    .expect("recall over remote fixture");
+    assert!(out.contains(MARKER), "recall did not surface the marker chunk: {out}");
 }
