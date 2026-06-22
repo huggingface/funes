@@ -16,8 +16,10 @@ ways.
 
 ## The choices, and why
 
-funes makes three deliberate, load-bearing choices. Each is a constraint we keep on purpose,
-because it buys a property we care about more than the flexibility we give up.
+funes makes four deliberate, load-bearing choices. They are facets of one principle —
+**defer to the reader**: keep the raw record intact, and let whoever reads it (you, or the
+model) do the judging, interpreting, and asking. Each choice is a constraint we keep on
+purpose, because it buys a property we value more than the flexibility we give up.
 
 ### 1. An append-only event log, not a mutable knowledge base
 
@@ -43,10 +45,9 @@ provenance (`session_id` + `turn_uuid`), not a distilled paraphrase.
 **Why:** putting an LLM in ingest means your memory is only as faithful as that model's
 extraction, and the link back to the source turn is severed — you can no longer cite *where*
 a "fact" came from or check whether it was distorted. Deterministic ingest keeps funes
-**stable** (the same transcript always indexes the same way), **debuggable** (a bad result
-is traceable to a real line of a real transcript), and **private** (no conversation content
-is sent to a model to be "learned"). Interpretation is deferred to read time, where it
-belongs.
+**faithful** (you get the words that were actually written), **stable** (the same transcript
+always indexes the same way), and **debuggable** (a bad result is traceable to a real line of
+a real transcript).
 
 There is also a bet on the future here. Distilling at ingest freezes your memory at the
 interpretation quality of *today's* model — whatever it failed to connect or wrongly
@@ -76,20 +77,36 @@ laptop": the optional hub tier lets you share a memory across your own machines 
 deterministic index, just hosted somewhere you own. Model-agnostic ingest means funes
 outlives whichever model you use today.
 
+### 4. Recall is pulled, not pushed
+
+funes never volunteers memory. Recall is something the model (or you) *calls* — a query, when
+there's a reason to look — and it returns nothing unless asked. There is no per-turn
+injection, no memory block sitting permanently in the context window.
+
+**Why:** the reflex elsewhere is to be always-on — prepend recalled snippets to every turn,
+keep a resident memory block in the prompt. That spends context on guesses (a blind recall
+against whatever the user just typed, relevant or not) and pre-empts the model's own judgment
+about what matters right now. funes bets the model is the best judge of *when* its memory is
+worth consulting — the same bet, applied to timing, that the other choices apply to
+interpretation. Pulled on demand, context stays clean and recall happens for a reason.
+
 ## Why not just use a memory provider?
 
 Agent-memory providers are now plentiful — frameworks like [hermes-agent](https://github.com/NousResearch/hermes-agent/tree/main/plugins/memory) bundle a
 dozen. We surveyed the field. The specific tools and their feature lists churn monthly, but
 the *paradigm* is remarkably uniform, and it is the opposite of funes on the choices above:
 
-**They distill conversations with an LLM into a mutable store, typically run as a managed
-service.** Three consequences follow, and they are structural, not incidental:
+**They distill conversations with an LLM into a mutable store, inject it proactively, and
+typically run as a managed service.** The consequences are structural, not incidental:
 
 - **No provenance.** Because the original passage is distilled into a "fact", there is no
   link back to the verbatim turn it came from — you can't cite or audit the source.
 - **Silent loss on reconcile.** A mutable store has to decide when new information supersedes
   old, and that decision is [unsolved](https://arxiv.org/abs/2605.06527) — when it's wrong, it overwrites the right
   answer instead of keeping both.
+- **Always on, never asked.** Recalled snippets are injected into every turn and a memory
+  block sits resident in the prompt — the model never chooses when to consult it. The
+  relevance call is made by a heuristic, not by the reader.
 - **Your data, processed by someone else's model, on someone else's infrastructure.** Even
   the self-hostable ones put an LLM in the loop; the hosted ones also take custody of the
   data.
@@ -101,8 +118,8 @@ with a single synthesized statement and you need neither provenance nor data own
 one.
 
 funes optimizes for the opposite: **verbatim, auditable, local-first recall with exact
-provenance, no LLM in the loop, and no dependency on infrastructure you don't own** (sharing,
-when you want it, is to a hub repo you control). It is a different contract with your data —
+provenance, no LLM in the loop, pulled on demand rather than injected, and no dependency on
+infrastructure you don't own** (sharing, when you want it, is to a hub repo you control). It is a different contract with your data —
 note that the *retrieval* machinery (hybrid vector + lexical search, fused and reranked) is
 common to mature memory systems; funes does not differentiate on search. The difference is
 entirely *upstream*: deterministic no-LLM ingest, immutable passages, and provenance.
