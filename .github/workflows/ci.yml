@@ -71,6 +71,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: lint-test
     timeout-minutes: 45
+    env:
+      # The sync round-trip test awaits one large combined future (embed + Xet upload + lance);
+      # it overflows the default ~2 MB test-thread stack under the CI toolchain. Give it headroom.
+      RUST_MIN_STACK: "16777216"
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
