@@ -117,8 +117,15 @@ pub async fn run_sync(target: Store) -> Result<String> {
     }
     let first_publish = remote_ids.is_empty();
 
-    // 2. Rows + pre-publish secret gate.
-    let batches = rows_to_push(&local, &to_push, first_publish).await?;
+    // 2. Rows + pre-publish secret gate. Re-stamp each batch with the local table's schema so its
+    // metadata (the embedding-model id) rides along — query-result batches drop it, and on first
+    // publish that schema is what create_table persists.
+    let schema = local.schema().await?;
+    let batches: Vec<RecordBatch> = rows_to_push(&local, &to_push, first_publish)
+        .await?
+        .into_iter()
+        .map(|b| RecordBatch::try_new(schema.clone(), b.columns().to_vec()))
+        .collect::<std::result::Result<_, _>>()?;
     scan::ensure_no_secrets(&texts(&batches))?;
 
     // 3. HF repo handle.

@@ -12,7 +12,7 @@ use anyhow::{anyhow, Result};
 use lancedb::Table;
 
 use crate::db;
-use crate::index::DIM;
+use crate::index::{DIM, MODEL};
 
 /// A store to recall from: a local Lance directory or a remote dataset on the HF Hub.
 #[derive(Debug, Clone)]
@@ -83,7 +83,7 @@ impl Store {
                 conn.execute().await?.open_table(db::TABLE).execute().await?
             }
         };
-        check_dim(&tbl).await?;
+        check_compat(&tbl).await?;
         Ok(tbl)
     }
 }
@@ -124,22 +124,33 @@ fn token_from(env: impl Fn(&str) -> Option<String>, token_file: Option<&Path>) -
     (!t.is_empty()).then(|| t.to_string())
 }
 
-/// Refuse a remote index whose vectors don't match the local embedding model's dimension —
-/// querying it with our embeddings would be meaningless.
-async fn check_dim(tbl: &Table) -> Result<()> {
+/// Reject a store funes can't query with its own embeddings: the `vector` dimension must be
+/// funes's `DIM`, and — when the store records an embedding model in its schema metadata — that
+/// model must be funes's. A store with no recorded model (pre-metadata) is guarded by the
+/// dimension alone.
+async fn check_compat(tbl: &Table) -> Result<()> {
     let schema = tbl.schema().await?;
+
+    if let Some(model) = schema.metadata().get("embedding_model") {
+        if model != MODEL {
+            return Err(anyhow!(
+                "store built with embedding model {model:?}, not funes's {MODEL:?}"
+            ));
+        }
+    }
+
     let field = schema
         .field_with_name("vector")
-        .map_err(|_| anyhow!("remote index has no `vector` column"))?;
+        .map_err(|_| anyhow!("store has no `vector` column"))?;
     if let arrow_schema::DataType::FixedSizeList(_, dim) = field.data_type() {
         if *dim != DIM {
             return Err(anyhow!(
-                "remote index vector dim {dim} != local {DIM}; it was built with a different embedding model"
+                "store vector dim {dim} != funes's {DIM}; it was built with a different embedding model"
             ));
         }
         Ok(())
     } else {
-        Err(anyhow!("remote index `vector` column is not a fixed-size list"))
+        Err(anyhow!("store `vector` column is not a fixed-size list"))
     }
 }
 
@@ -268,31 +279,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn check_dim_accepts_matching_dimension() {
+    async fn check_compat_accepts_matching_dimension() {
         let (_d, tbl) = table_with(
             vec![Field::new("id", DataType::Int64, true), vector_field(DIM)],
             vec![ids(2), vectors(2, DIM)],
         )
         .await;
-        assert!(check_dim(&tbl).await.is_ok());
+        assert!(check_compat(&tbl).await.is_ok());
     }
 
     #[tokio::test]
-    async fn check_dim_rejects_wrong_dimension() {
+    async fn check_compat_rejects_wrong_dimension() {
         let (_d, tbl) = table_with(
             vec![Field::new("id", DataType::Int64, true), vector_field(DIM / 2)],
             vec![ids(2), vectors(2, DIM / 2)],
         )
         .await;
-        let err = check_dim(&tbl).await.unwrap_err().to_string();
+        let err = check_compat(&tbl).await.unwrap_err().to_string();
         assert!(err.contains("different embedding model"), "{err}");
     }
 
     #[tokio::test]
-    async fn check_dim_rejects_missing_or_scalar_vector() {
+    async fn check_compat_rejects_missing_or_scalar_vector() {
         // no vector column
         let (_d, t1) = table_with(vec![Field::new("id", DataType::Int64, true)], vec![ids(2)]).await;
-        assert!(check_dim(&t1).await.is_err());
+        assert!(check_compat(&t1).await.is_err());
 
         // a `vector` column that isn't a fixed-size list
         let (_d2, t2) = table_with(
@@ -303,6 +314,20 @@ mod tests {
             vec![ids(2), ids(2)],
         )
         .await;
-        assert!(check_dim(&t2).await.is_err());
+        assert!(check_compat(&t2).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn check_compat_rejects_wrong_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = lancedb::connect(dir.path().to_str().unwrap()).execute().await.unwrap();
+        let schema = Arc::new(Schema::new_with_metadata(
+            vec![Field::new("id", DataType::Int64, true), vector_field(DIM)],
+            HashMap::from([("embedding_model".to_string(), "some/other-model".to_string())]),
+        ));
+        let batch = RecordBatch::try_new(schema, vec![ids(2), vectors(2, DIM)]).unwrap();
+        let tbl = db.create_table("chunks", batch).execute().await.unwrap();
+        let err = check_compat(&tbl).await.unwrap_err().to_string();
+        assert!(err.contains("other-model") && err.contains("not funes's"), "{err}");
     }
 }

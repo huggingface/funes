@@ -88,6 +88,15 @@ async fn sync_round_trip_create_append_recall() {
     let append = funes::sync::run_sync(Store::parse(&uri, None)).await;
     let recall_base = recall_remote(&uri, "SYNCSMOKE parsing").await;
     let recall_new = recall_remote(&uri, "SYNCSMOKE2 continuation").await;
+    // The model id must travel with the store (stamped in the schema metadata, uploaded by sync).
+    let remote_model = match Store::parse(&uri, None).open().await {
+        Ok(t) => t
+            .schema()
+            .await
+            .ok()
+            .and_then(|s| s.metadata().get("embedding_model").cloned()),
+        Err(_) => None,
+    };
 
     // Cleanup before asserting, so a failed assertion can't leave the scratch path behind.
     let client = HFClient::builder().token(token).build().unwrap();
@@ -113,5 +122,10 @@ async fn sync_round_trip_create_append_recall() {
     assert!(
         recall_new.contains("SYNCSMOKE2"),
         "remote recall should surface the appended turn: {recall_new}"
+    );
+    assert_eq!(
+        remote_model.as_deref(),
+        Some(funes::index::MODEL),
+        "the model id should travel with the store via sync"
     );
 }
