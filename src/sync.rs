@@ -24,6 +24,12 @@ use lancedb::table::OptimizeAction;
 use lancedb::Table;
 use std::collections::HashSet;
 
+// funes publishes by manipulating a Lance dataset's files directly — lancedb exposes no
+// write-to-`hf://` or partial-fetch API — so sync couples to Lance's 7.x on-disk layout:
+//   <db>/<table>.lance/{ data/ (immutable fragments), _versions/, _indices/, _transactions/ }
+const TABLE_DIR_SUFFIX: &str = ".lance";
+const DATA_DIR: &str = "data";
+
 /// Parse `hf://datasets/<owner>/<name>/<prefix…>` into (owner, name, prefix-within-repo).
 fn parse_hf(uri: &str) -> Result<(String, String, String)> {
     let rest = uri.strip_prefix("hf://").context("remote store must be an hf:// URI")?;
@@ -137,7 +143,7 @@ pub async fn run_sync(target: Store) -> Result<String> {
         .context("building hf-hub client")?;
     let repo = client.dataset(owner, name);
     let rev = revision.unwrap_or_else(|| "main".to_string());
-    let table_prefix = format!("{prefix}/{}.lance", db::TABLE); // <prefix>/chunks.lance
+    let table_prefix = format!("{prefix}/{}{TABLE_DIR_SUFFIX}", db::TABLE);
 
     // 4. Shallow-stage the existing remote (manifest + indices, not data/) and note its files.
     let staging = tempfile::tempdir()?;
@@ -155,9 +161,15 @@ pub async fn run_sync(target: Store) -> Result<String> {
                 }
             }
         }
+        if remote_files.is_empty() {
+            bail!(
+                "no files under {table_prefix} on the remote — wrong store URI, or lancedb's \
+                 on-disk layout changed (sync assumes Lance 7.x; see tests/sync_round_trip.rs)"
+            );
+        }
         for f in &remote_files {
             let rel = f.strip_prefix(&format!("{table_prefix}/")).unwrap_or_default();
-            if rel.starts_with("data/") {
+            if rel.starts_with(&format!("{DATA_DIR}/")) {
                 continue; // shallow: skip the base fragments
             }
             repo.download_file()
