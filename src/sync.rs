@@ -1,51 +1,44 @@
 //! `sync`: publish the local store's not-yet-remote chunks into a remote store on the HF Hub.
 //!
 //! Streamed, never a full mirror. "What's already there" is the store's own chunk ids, so the
-//! delta is `local_ids − remote_ids` — the same primitive `index` uses.
+//! delta is `local_ids − remote_ids` — the same primitive `index` uses. `sync` is orchestration:
+//! it computes the delta, runs the pre-publish secret gate, and drives the HF write operations in
+//! [`crate::hf_dataset`], which own the atomic, parent-commit-guarded commits.
 //!
-//! - **First publish:** build the dataset locally (data + FTS/IVF indexes) and upload every file.
-//! - **Append:** run Lance's *native* append against the remote dataset over `hf://`, through a
-//!   write-capturing object store ([`crate::hf_dataset`]). The append writes only data — a new
-//!   fragment, a manifest, a transaction — captured and shipped as one `create_commit` guarded by
-//!   the current branch head. The new rows are left unindexed (a query still finds them by brute
-//!   force).
-//! - **Reindex:** folding those rows into the index is a *separate* commit, kept off the data
-//!   commit so the data commit stays small and cheap to retry. `sync` runs it after the data
-//!   commit when the unindexed backlog crosses [`REINDEX_THRESHOLD`] (best-effort: a head-moved
-//!   conflict is a warning, not a failure — the next sync retries), or eagerly with
-//!   `--force-reindex` (retried until it lands).
-//!
-//! Why one `create_commit` rather than letting Lance write straight to `hf://`: the hf object
-//! store *can* write (OpenDAL, token-gated), but one Hub commit per file — non-atomic, no CAS. A
-//! single `create_commit(parent_commit=…)` gives atomicity and a fail-loud guard: if the head
-//! moved, the commit fails and we say so (re-run sync). Capturing Lance's own writes also frees
-//! `sync` from knowing the on-disk layout — it ships whatever Lance wrote, by Lance's own paths.
+//! - **First publish:** build the dataset locally (data + FTS/IVF indexes) and upload every file in
+//!   one commit.
+//! - **Append:** [`hf_dataset::append`] lands the new fragment + manifest + transaction in one
+//!   guarded `create_commit`, retried against a fresh head if a concurrent push moved it. The new
+//!   rows are left unindexed (a query still finds them by brute force).
+//! - **Reindex:** a *separate* guarded commit ([`hf_dataset::reindex`]), kept off the data commit so
+//!   the data commit stays small. `sync` runs it after the data commit when the unindexed backlog
+//!   crosses [`REINDEX_THRESHOLD`] (best-effort: a head-moved conflict is a warning, the next sync
+//!   retries), or eagerly with `--force-reindex` (retried until it lands).
 
 use crate::db;
-use crate::hf_dataset;
+use crate::hf_dataset::{self, Appended, Reindexed};
 use crate::hub::{self, Store};
 use crate::scan;
 use anyhow::{bail, Context, Result};
 use arrow_array::{RecordBatch, StringArray};
-use bytes::Bytes;
 use futures::TryStreamExt;
-use hf_hub::repository::{CommitInfo, CommitOperation};
-use hf_hub::{HFClient, HFError, HFRepository, RepoTypeDataset};
+use hf_hub::repository::CommitOperation;
+use hf_hub::{HFClient, HFRepository, RepoTypeDataset};
 use lancedb::index::scalar::FtsIndexBuilder;
 use lancedb::index::vector::IvfPqIndexBuilder;
 use lancedb::index::Index;
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
 use lancedb::Table;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 /// Reindex the remote once this many appended rows are sitting unindexed (answered by a
 /// brute-force scan until folded in). Bounds per-query cost, not sync count, and is stateless —
 /// [`hf_dataset::append`] reads it straight from Lance's index stats.
 const REINDEX_THRESHOLD: u64 = 2_000;
 
-/// Cap on `--force-reindex` retries when the branch head keeps moving under it, so a busy remote
-/// can't spin forever.
-const REINDEX_MAX_RETRIES: u32 = 10;
+/// Cap on CAS-conflict retries (the data append, and a forced reindex) when the branch head keeps
+/// moving under us, so a busy remote can't spin forever.
+const MAX_COMMIT_RETRIES: u32 = 10;
 
 /// Parse `hf://datasets/<owner>/<name>/<prefix…>` into (owner, name, prefix-within-repo).
 fn parse_hf(uri: &str) -> Result<(String, String, String)> {
@@ -160,8 +153,7 @@ pub async fn run_sync(target: Store, force_reindex: bool) -> Result<String> {
 
     // 3. Forced reindex with no new data: just refresh the remote index and stop.
     if to_push.is_empty() {
-        let head = head_oid(&repo, &rev).await?;
-        let note = reindex_forced(&repo, &dataset_uri, &opts, &rev, Some(head)).await?;
+        let note = reindex_forced(&repo, &dataset_uri, &opts, &rev).await?;
         return Ok(format!(
             "{}: up to date ({} chunks)\n{note}",
             target.label(),
@@ -211,7 +203,12 @@ pub async fn run_sync(target: Store, force_reindex: bool) -> Result<String> {
         if ops.is_empty() {
             return Ok(format!("{}: nothing new to upload\n", target.label()));
         }
-        let info = send_commit(&repo, ops, None, &rev, format!("funes sync: +{n_chunks} chunks"))
+        let info = repo
+            .create_commit()
+            .operations(ops)
+            .commit_message(format!("funes sync: +{n_chunks} chunks"))
+            .revision(rev.clone())
+            .send()
             .await
             .map_err(|e| anyhow::anyhow!("create_commit failed: {e}"))?;
         return Ok(format!(
@@ -221,152 +218,75 @@ pub async fn run_sync(target: Store, force_reindex: bool) -> Result<String> {
         ));
     }
 
-    // 6. Append: capture Lance's native data append over hf:// (data only — no index), guarded by
-    // the current head so a concurrent push trips the parent-commit CAS.
-    let parent = head_oid(&repo, &rev).await?;
-    let (data_files, unindexed) = hf_dataset::append(&dataset_uri, opts.clone(), batches, schema).await?;
-    if data_files.is_empty() {
-        return Ok(format!("{}: nothing new to upload\n", target.label()));
-    }
-    let (ops, _dir) = write_ops(&data_files)?;
-    let info = send_commit(
-        &repo,
-        ops,
-        Some(parent),
-        &rev,
-        format!("funes sync: +{n_chunks} chunks"),
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("data commit failed (if the remote head moved, re-run sync): {e}"))?;
-    let mut out = format!(
-        "{}: pushed {n_chunks} chunks (commit {})\n",
-        target.label(),
-        info.commit_oid.as_deref().unwrap_or("?")
-    );
+    // 6. Append the data and commit it, retrying against a fresh head if a concurrent push moved it
+    // (each attempt re-appends onto the new manifest — the data commit is small, so this is cheap).
+    let message = format!("funes sync: +{n_chunks} chunks");
+    let mut attempts = 0u32;
+    let (oid, unindexed) = loop {
+        let attempt = hf_dataset::append(
+            &repo,
+            &dataset_uri,
+            opts.clone(),
+            &rev,
+            message.clone(),
+            batches.clone(),
+            schema.clone(),
+        )
+        .await?;
+        match attempt {
+            Appended::Committed { oid, unindexed } => break (oid, unindexed),
+            Appended::Conflict => {
+                attempts += 1;
+                if attempts > MAX_COMMIT_RETRIES {
+                    bail!("data commit kept conflicting after {MAX_COMMIT_RETRIES} retries; re-run sync");
+                }
+            }
+        }
+    };
+    let mut out = format!("{}: pushed {n_chunks} chunks (commit {oid})\n", target.label());
 
-    // 7. Reindex as a *separate* commit, so the cheap data commit above stays retry-friendly:
-    // forced (retried until it lands) or, past the threshold, best-effort (one shot, warn on a
-    // conflict — the next sync retries).
-    let after_data = info.commit_oid.clone();
+    // 7. Reindex as a separate commit: forced (retried until it lands) or, past the threshold,
+    // best-effort (one shot, warn on a conflict — the next sync retries).
     if force_reindex {
-        out.push_str(&reindex_forced(&repo, &dataset_uri, &opts, &rev, after_data).await?);
+        out.push_str(&reindex_forced(&repo, &dataset_uri, &opts, &rev).await?);
     } else if unindexed > REINDEX_THRESHOLD {
-        out.push_str(&reindex_auto(&repo, &dataset_uri, &opts, &rev, after_data).await);
+        out.push_str(&reindex_auto(&repo, &dataset_uri, &opts, &rev).await);
     }
     Ok(out)
 }
 
-/// Read the commit at the tip of branch `rev` (the parent-commit guard for the next commit).
-async fn head_oid(repo: &HFRepository<RepoTypeDataset>, rev: &str) -> Result<String> {
-    let refs = repo.list_refs().send().await.context("listing remote refs")?;
-    refs.branches
-        .iter()
-        .find(|b| b.name == rev)
-        .map(|b| b.target_commit.clone())
-        .context("target branch not found on the remote")
-}
-
-/// Write captured Lance files (path → bytes) to a scratch dir and turn them into add-file commit
-/// operations — hf-hub uploads from local paths. The returned `TempDir` must outlive the commit.
-fn write_ops(files: &BTreeMap<String, Bytes>) -> Result<(Vec<CommitOperation>, tempfile::TempDir)> {
-    let dir = tempfile::tempdir()?;
-    let mut ops = Vec::with_capacity(files.len());
-    for (i, (repo_path, body)) in files.iter().enumerate() {
-        let local = dir.path().join(format!("f{i}"));
-        std::fs::write(&local, body)?;
-        ops.push(CommitOperation::add_file(repo_path.clone(), local));
-    }
-    Ok((ops, dir))
-}
-
-/// One `create_commit` of `ops` on branch `rev`. `parent` guards the head; `None` skips the guard
-/// (first publish). Returns the raw hf-hub result so callers can tell a head-moved
-/// [`HFError::Conflict`] from other failures.
-async fn send_commit(
-    repo: &HFRepository<RepoTypeDataset>,
-    ops: Vec<CommitOperation>,
-    parent: Option<String>,
-    rev: &str,
-    message: String,
-) -> std::result::Result<CommitInfo, HFError> {
-    match parent {
-        Some(p) => {
-            repo.create_commit()
-                .operations(ops)
-                .commit_message(message)
-                .parent_commit(p)
-                .revision(rev.to_string())
-                .send()
-                .await
-        }
-        None => {
-            repo.create_commit()
-                .operations(ops)
-                .commit_message(message)
-                .revision(rev.to_string())
-                .send()
-                .await
-        }
-    }
-}
-
-/// Forced reindex: optimize the remote index and commit it, retrying on a head-moved conflict
-/// (re-reading the head each time) until it lands or [`REINDEX_MAX_RETRIES`] is exceeded. The data
-/// is already committed, so this only ever redoes the cheap index step.
+/// Forced reindex: ask [`hf_dataset::reindex`] to refresh and commit, retrying on a head-moved
+/// conflict (it re-reads the head each call) until it lands or [`MAX_COMMIT_RETRIES`] is exceeded.
 async fn reindex_forced(
     repo: &HFRepository<RepoTypeDataset>,
     dataset_uri: &str,
     opts: &HashMap<String, String>,
     rev: &str,
-    mut parent: Option<String>,
 ) -> Result<String> {
-    let mut attempts = 0u32;
-    loop {
-        let files = hf_dataset::reindex(dataset_uri, opts.clone()).await?;
-        if files.is_empty() {
-            return Ok("  index already current\n".to_string());
-        }
-        let (ops, _dir) = write_ops(&files)?;
-        match send_commit(repo, ops, parent.clone(), rev, "funes sync: reindex".to_string()).await {
-            Ok(info) => {
-                return Ok(format!(
-                    "  reindexed (commit {})\n",
-                    info.commit_oid.as_deref().unwrap_or("?")
-                ))
-            }
-            Err(HFError::Conflict { .. }) => {
-                attempts += 1;
-                if attempts > REINDEX_MAX_RETRIES {
-                    bail!("reindex still conflicting after {REINDEX_MAX_RETRIES} retries; re-run sync --force-reindex");
-                }
-                parent = Some(head_oid(repo, rev).await?);
-            }
-            Err(e) => return Err(anyhow::anyhow!("reindex commit failed: {e}")),
+    for _ in 0..=MAX_COMMIT_RETRIES {
+        match hf_dataset::reindex(repo, dataset_uri, opts.clone(), rev, "funes sync: reindex".to_string()).await? {
+            Reindexed::Committed(oid) => return Ok(format!("  reindexed (commit {oid})\n")),
+            Reindexed::AlreadyCurrent => return Ok("  index already current\n".to_string()),
+            Reindexed::Conflict => continue,
         }
     }
+    bail!("reindex still conflicting after {MAX_COMMIT_RETRIES} retries; re-run sync --force-reindex")
 }
 
 /// Best-effort reindex during a normal sync: one attempt, never retried. The data is already
-/// safely committed, so any failure here is a warning — the next sync past the threshold tries
-/// again.
+/// committed, so any failure here is a warning — the next sync past the threshold tries again.
 async fn reindex_auto(
     repo: &HFRepository<RepoTypeDataset>,
     dataset_uri: &str,
     opts: &HashMap<String, String>,
     rev: &str,
-    parent: Option<String>,
 ) -> String {
-    let files = match hf_dataset::reindex(dataset_uri, opts.clone()).await {
-        Ok(f) if f.is_empty() => return String::new(),
-        Ok(f) => f,
-        Err(e) => return format!("  note: index not refreshed ({e}); will retry on a later sync\n"),
-    };
-    let (ops, _dir) = match write_ops(&files) {
-        Ok(x) => x,
-        Err(e) => return format!("  note: index not refreshed ({e})\n"),
-    };
-    match send_commit(repo, ops, parent, rev, "funes sync: reindex".to_string()).await {
-        Ok(info) => format!("  reindexed (commit {})\n", info.commit_oid.as_deref().unwrap_or("?")),
+    match hf_dataset::reindex(repo, dataset_uri, opts.clone(), rev, "funes sync: reindex".to_string()).await {
+        Ok(Reindexed::Committed(oid)) => format!("  reindexed (commit {oid})\n"),
+        Ok(Reindexed::AlreadyCurrent) => String::new(),
+        Ok(Reindexed::Conflict) => {
+            "  note: index not refreshed (remote head moved); will retry on a later sync\n".to_string()
+        }
         Err(e) => format!("  note: index not refreshed ({e}); will retry on a later sync\n"),
     }
 }

@@ -1,20 +1,24 @@
 //! Append and reindex for the remote HF Lance dataset.
 //!
-//! Neither operation commits: each runs a native Lance op against the remote, captures the files
-//! Lance writes, and returns them for `sync` to land in one `create_commit` guarded by the branch
-//! head. Capture is needed because Lance does all of its IO through the `object_store` trait, and
-//! for an `hf://` URI that store is OpenDAL's HuggingFace service, where every `put` is its *own
-//! git commit*:
+//! [`append`] adds rows; [`reindex`] folds the unindexed backlog into the FTS/IVF indexes. Each
+//! runs a native Lance op and lands the result in one `create_commit` on the branch, guarded by a
+//! `parent_commit` against the head it read — atomic. Each is a single attempt: if the head moved
+//! first it reports a conflict ([`Appended::Conflict`] / [`Reindexed::Conflict`]) and the caller
+//! retries against the new head.
+//!
+//! The result goes up as a *single* `create_commit` because Lance, left to write straight to
+//! `hf://`, would commit each file on its own: that store is OpenDAL's HuggingFace service, where
+//! every `put` is its own git commit.
 //!
 //! ```text
 //!   Lance Dataset → object_store → OpenDAL hf service → HF Hub
 //!       put = XET upload + one git commit, per file
 //! ```
 //!
-//! Letting those `put`s through would make several separate commits — not atomic, and with no
-//! compare-and-swap against the branch head. So both operations run the Lance op through a
+//! A multi-file write would then be several commits — non-atomic, no CAS. So the op runs through a
 //! [`CaptureStore`](crate::capture_store::CaptureStore) installed via Lance's
-//! [`WrappingObjectStore`] seam: Lance's writes are captured instead of hitting the Hub.
+//! [`WrappingObjectStore`] seam: Lance's writes are captured in memory instead of hitting the Hub,
+//! and we ship the whole set as one guarded `create_commit`.
 //!
 //! # Why this shape
 //!
@@ -33,13 +37,13 @@
 //!
 //! # The two operations
 //!
-//! Kept separate so `sync` commits each on its own:
-//! - [`append`] runs a native append — a new data fragment, a new manifest, a transaction.
-//!   The appended rows are left *unindexed*; a query still finds them, by brute force over the
-//!   delta. It also reports how many rows are now unindexed, so `sync` can decide when to reindex.
-//! - [`reindex`] runs `optimize_indices` — folding the unindexed rows into the FTS/IVF
-//!   indexes (new `_indices/*`, a manifest, a transaction). Bigger and not urgent, so `sync` runs
-//!   it as its own commit, only past a threshold or when forced.
+//! Each lands its own `create_commit`, so the cheap data commit isn't entangled with the bigger,
+//! non-urgent index commit:
+//! - [`append`] commits a new data fragment (+ manifest + transaction). The appended rows are left
+//!   *unindexed* — a query still finds them, by brute force over the delta — and it returns the
+//!   unindexed-row backlog so `sync` can decide when to reindex.
+//! - [`reindex`] commits the FTS/IVF index delta (`optimize_indices`). Bigger and not urgent, so
+//!   `sync` runs it only past a threshold or when forced.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -48,6 +52,8 @@ use anyhow::{Context, Result};
 use arrow_array::{RecordBatch, RecordBatchIterator};
 use arrow_schema::SchemaRef;
 use bytes::Bytes;
+use hf_hub::repository::{CommitInfo, CommitOperation};
+use hf_hub::{HFError, HFRepository, RepoTypeDataset};
 use lance::dataset::builder::DatasetBuilder;
 use lance::dataset::Dataset;
 use lance::index::DatasetIndexExt;
@@ -57,20 +63,41 @@ use object_store::ObjectStore as OSObjectStore;
 
 use crate::capture_store::{CaptureStore, Captured};
 
-/// Append `batches` to the remote Lance dataset at `dataset_uri` (an `hf://…/<table>.lance` URI),
-/// capturing the files Lance writes without committing them. `storage_options` carries the hf
-/// token and revision. The append writes only data — a new immutable fragment, a version-numbered
-/// manifest, a transaction — and leaves the new rows unindexed (refresh the index separately with
-/// [`reindex`]). Returns `(repo_path → bytes, num_unindexed_rows)`: every captured entry is
-/// a new file, so the caller can add them all in one commit without clobbering anything, and the
-/// count is the largest unindexed-row backlog across the dataset's indexes — what `sync` thresholds
-/// on to decide whether a reindex is due.
-pub async fn append(
+/// Outcome of an [`append`] commit.
+pub(crate) enum Appended {
+    /// The data was committed; carries the new commit oid and the resulting unindexed-row backlog.
+    Committed { oid: String, unindexed: u64 },
+    /// The branch head moved before our commit; the caller may retry against the new head.
+    Conflict,
+}
+
+/// Outcome of a [`reindex`] commit.
+pub(crate) enum Reindexed {
+    /// The index delta was committed; carries the new commit oid.
+    Committed(String),
+    /// Nothing to optimize — the index was already current.
+    AlreadyCurrent,
+    /// The branch head moved before our commit; the caller may retry against the new head.
+    Conflict,
+}
+
+/// Append `batches` to the remote Lance dataset at `dataset_uri` (an `hf://…/<table>.lance` URI)
+/// and land them in one `create_commit` on branch `rev`, guarded by the current head. The append
+/// writes only data — a new fragment, manifest, and transaction — and leaves the new rows
+/// unindexed (refresh the index separately with [`reindex`]). Returns [`Appended::Committed`] with
+/// the new commit oid and the resulting unindexed-row backlog (the largest across the dataset's
+/// indexes — what `sync` thresholds on), or [`Appended::Conflict`] if the head moved first — a
+/// single attempt against the head it read, so the caller drives the retry.
+pub(crate) async fn append(
+    repo: &HFRepository<RepoTypeDataset>,
     dataset_uri: &str,
     storage_options: HashMap<String, String>,
+    rev: &str,
+    message: String,
     batches: Vec<RecordBatch>,
     schema: SchemaRef,
-) -> Result<(BTreeMap<String, Bytes>, u64)> {
+) -> Result<Appended> {
+    let parent = head_oid(repo, rev).await?;
     let (mut ds, wrapper) = open_capturing(dataset_uri, storage_options).await?;
 
     let reader = RecordBatchIterator::new(batches.into_iter().map(Ok), schema);
@@ -80,22 +107,48 @@ pub async fn append(
 
     // Snapshot the captured writes before reading index stats: `index_statistics` can write a stats
     // migration through the same wrapper, and that must not leak into the data commit.
-    let data_files = captured_files(&wrapper);
+    let files = captured_files(&wrapper);
     let unindexed = max_unindexed_rows(&ds).await;
-    Ok((data_files, unindexed))
+
+    let (ops, _dir) = write_ops(&files)?;
+    match send_commit(repo, ops, parent, rev, message).await {
+        Ok(info) => Ok(Appended::Committed {
+            oid: info.commit_oid.unwrap_or_else(|| "?".to_string()),
+            unindexed,
+        }),
+        Err(HFError::Conflict { .. }) => Ok(Appended::Conflict),
+        Err(e) => Err(anyhow::anyhow!("data commit failed: {e}")),
+    }
 }
 
-/// Refresh the remote dataset's indexes (`optimize_indices`) and capture the files Lance writes —
-/// new `_indices/*`, a manifest, a transaction — without committing. No data is appended. Returns
-/// `repo_path → bytes`, empty when the indexes are already current.
-pub async fn reindex(dataset_uri: &str, storage_options: HashMap<String, String>) -> Result<BTreeMap<String, Bytes>> {
+/// Refresh the remote dataset's indexes (`optimize_indices`) and land the delta in one
+/// `create_commit` on branch `rev`, guarded by the current head. [`Reindexed::AlreadyCurrent`] if
+/// there was nothing to optimize, [`Reindexed::Conflict`] if the head moved first (retry against
+/// the new head).
+pub(crate) async fn reindex(
+    repo: &HFRepository<RepoTypeDataset>,
+    dataset_uri: &str,
+    storage_options: HashMap<String, String>,
+    rev: &str,
+    message: String,
+) -> Result<Reindexed> {
+    let parent = head_oid(repo, rev).await?;
     let (mut ds, wrapper) = open_capturing(dataset_uri, storage_options).await?;
 
     ds.optimize_indices(&OptimizeOptions::default())
         .await
         .context("optimizing the remote index")?;
 
-    Ok(captured_files(&wrapper))
+    let files = captured_files(&wrapper);
+    if files.is_empty() {
+        return Ok(Reindexed::AlreadyCurrent);
+    }
+    let (ops, _dir) = write_ops(&files)?;
+    match send_commit(repo, ops, parent, rev, message).await {
+        Ok(info) => Ok(Reindexed::Committed(info.commit_oid.unwrap_or_else(|| "?".to_string()))),
+        Err(HFError::Conflict { .. }) => Ok(Reindexed::Conflict),
+        Err(e) => Err(anyhow::anyhow!("reindex commit failed: {e}")),
+    }
 }
 
 /// Open the remote dataset with a [`CaptureStore`] installed, returning the wrapped dataset and the
@@ -145,6 +198,47 @@ async fn max_unindexed_rows(ds: &Dataset) -> u64 {
         }
     }
     max
+}
+
+/// Read the commit at the tip of branch `rev` — the parent-commit guard for the next commit.
+async fn head_oid(repo: &HFRepository<RepoTypeDataset>, rev: &str) -> Result<String> {
+    let refs = repo.list_refs().send().await.context("listing remote refs")?;
+    refs.branches
+        .iter()
+        .find(|b| b.name == rev)
+        .map(|b| b.target_commit.clone())
+        .context("target branch not found on the remote")
+}
+
+/// Write captured files (path → bytes) to a scratch dir and turn them into add-file commit
+/// operations — hf-hub uploads from local paths. The returned `TempDir` must outlive the commit.
+fn write_ops(files: &BTreeMap<String, Bytes>) -> Result<(Vec<CommitOperation>, tempfile::TempDir)> {
+    let dir = tempfile::tempdir()?;
+    let mut ops = Vec::with_capacity(files.len());
+    for (i, (repo_path, body)) in files.iter().enumerate() {
+        let local = dir.path().join(format!("f{i}"));
+        std::fs::write(&local, body)?;
+        ops.push(CommitOperation::add_file(repo_path.clone(), local));
+    }
+    Ok((ops, dir))
+}
+
+/// One `create_commit` of `ops` on branch `rev`, guarded by `parent`. Returns the raw hf-hub
+/// result so callers can tell a head-moved [`HFError::Conflict`] from other failures.
+async fn send_commit(
+    repo: &HFRepository<RepoTypeDataset>,
+    ops: Vec<CommitOperation>,
+    parent: String,
+    rev: &str,
+    message: String,
+) -> std::result::Result<CommitInfo, HFError> {
+    repo.create_commit()
+        .operations(ops)
+        .commit_message(message)
+        .parent_commit(parent)
+        .revision(rev.to_string())
+        .send()
+        .await
 }
 
 /// Installs a [`CaptureStore`] in front of the store Lance built for the dataset URI, and holds the
