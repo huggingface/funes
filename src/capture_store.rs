@@ -1,52 +1,31 @@
-//! Capture-commit publishing.
+//! A write-capturing object-store decorator.
 //!
-//! Lance never speaks to the HF Hub directly. A Lance `Dataset` does all of its IO through the
-//! `object_store` trait, and for an `hf://` URI that store is backed by OpenDAL's HuggingFace
-//! service: a `get` is a range read, and every `put` uploads the file over XET and finalizes it
-//! as its own git commit.
-//!
-//! ```text
-//!   Lance Dataset → object_store → OpenDAL hf service → HF Hub
-//!       put = XET upload + one git commit, per file
-//! ```
-//!
-//! Letting Lance's `put`s through would make several separate commits — not atomic, and with no
-//! compare-and-swap against the branch head. So both entry points here slip a
-//! [`WrappingObjectStore`] between Lance and OpenDAL: writes are captured in memory and never
-//! forwarded, reads pass through.
+//! [`CaptureStore`] wraps an inner [`ObjectStore`](object_store::ObjectStore): it records every
+//! write in memory instead of forwarding it, and delegates reads to the inner store — except for a
+//! path it has already captured, which it serves back (read-your-writes). A caller can run a
+//! sequence of writes against it and then recover exactly the files that would have been written,
+//! keyed by path, with nothing reaching the backend.
 //!
 //! ```text
-//!   Lance Dataset → CaptureStore:
-//!       put → captured in memory             (never reaches the Hub)
-//!       get → OpenDAL hf service → HF Hub
+//!   put → captured in memory      (never reaches the inner store)
+//!   get → captured if present, else delegated to the inner store
 //! ```
 //!
-//! What comes back is exactly the files Lance wrote, keyed by the repo paths it wrote them to, so
-//! `sync` uploads them in a single `create_commit` with a parent-commit guard.
+//! It is generic: the inner store is any `ObjectStore`, so the tests exercise it over an in-memory
+//! backend, and what to do with the captured files is left to the caller.
 //!
-//! Two operations, kept separate so each commits on its own:
-//! - [`capture_append`] runs a native append — a new data fragment, a new manifest, a transaction.
-//!   The appended rows are left *unindexed*; a query still finds them, by brute force over the
-//!   delta. It also reports how many rows are now unindexed, so `sync` can decide when to reindex.
-//! - [`capture_reindex`] runs `optimize_indices` — folding the unindexed rows into the FTS/IVF
-//!   indexes (new `_indices/*`, a manifest, a transaction). Bigger and not urgent, so `sync` runs
-//!   it as its own commit, only past a threshold or when forced.
+//! **A decorator, because Rust has no inheritance.** You can't subclass a store and override
+//! `put`; the idiomatic stand-in is to hold the `inner` store, forward every method unchanged, and
+//! intercept the ones that matter. The cost is the hand-written delegation of each `ObjectStore`
+//! method below — Rust has no auto-delegation.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result};
-use arrow_array::{RecordBatch, RecordBatchIterator};
-use arrow_schema::SchemaRef;
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::Utc;
 use futures::stream::{self, BoxStream, StreamExt};
-use lance::dataset::builder::DatasetBuilder;
-use lance::dataset::Dataset;
-use lance::index::DatasetIndexExt;
-use lance_index::optimize::OptimizeOptions;
-use lance_io::object_store::WrappingObjectStore;
 use object_store::path::Path as OPath;
 use object_store::{
     Attributes, CopyOptions, GetOptions, GetRange, GetResult, GetResultPayload, ListResult, MultipartUpload,
@@ -54,116 +33,23 @@ use object_store::{
     Result as OSResult, UploadPart,
 };
 
-/// In-memory capture of object-store writes: repo path → bytes.
-type Captured = Arc<Mutex<BTreeMap<OPath, Bytes>>>;
+/// In-memory capture of object-store writes: path → bytes. Shared between a [`CaptureStore`] and
+/// whatever holds it, so the writes can be read back after the fact.
+pub(crate) type Captured = Arc<Mutex<BTreeMap<OPath, Bytes>>>;
 
-/// Append `batches` to the remote Lance dataset at `dataset_uri` (an `hf://…/<table>.lance` URI),
-/// capturing the files Lance writes without committing them. `storage_options` carries the hf
-/// token and revision. The append writes only data — a new immutable fragment, a version-numbered
-/// manifest, a transaction — and leaves the new rows unindexed (refresh the index separately with
-/// [`capture_reindex`]). Returns `(repo_path → bytes, num_unindexed_rows)`: every captured entry is
-/// a new file, so the caller can add them all in one commit without clobbering anything, and the
-/// count is the largest unindexed-row backlog across the dataset's indexes — what `sync` thresholds
-/// on to decide whether a reindex is due.
-pub async fn capture_append(
-    dataset_uri: &str,
-    storage_options: HashMap<String, String>,
-    batches: Vec<RecordBatch>,
-    schema: SchemaRef,
-) -> Result<(BTreeMap<String, Bytes>, u64)> {
-    let wrapper = Arc::new(CaptureWrapper {
-        captured: Captured::default(),
-    });
-    let ds = DatasetBuilder::from_uri(dataset_uri)
-        .with_storage_options(storage_options)
-        .load()
-        .await
-        .context("opening the remote dataset for append")?;
-    let mut ds = ds.with_object_store_wrappers([wrapper.clone() as Arc<dyn WrappingObjectStore>]);
-
-    let reader = RecordBatchIterator::new(batches.into_iter().map(Ok), schema);
-    ds.append(reader, None)
-        .await
-        .context("appending to the remote dataset")?;
-
-    // Snapshot the append's writes (fragment, manifest, transaction) before reading index stats:
-    // `index_statistics` can write a stats migration through the same wrapper, and that must not
-    // leak into the data commit.
-    let data_files: BTreeMap<String, Bytes> = {
-        let captured = wrapper.captured.lock().unwrap();
-        captured.iter().map(|(p, b)| (p.to_string(), b.clone())).collect()
-    };
-    let unindexed = max_unindexed_rows(&ds).await;
-    Ok((data_files, unindexed))
-}
-
-/// Refresh the remote dataset's indexes (`optimize_indices`) and capture the files Lance writes —
-/// new `_indices/*`, a manifest, a transaction — without committing. No data is appended. Returns
-/// `repo_path → bytes`, empty when the indexes are already current.
-pub async fn capture_reindex(
-    dataset_uri: &str,
-    storage_options: HashMap<String, String>,
-) -> Result<BTreeMap<String, Bytes>> {
-    let wrapper = Arc::new(CaptureWrapper {
-        captured: Captured::default(),
-    });
-    let ds = DatasetBuilder::from_uri(dataset_uri)
-        .with_storage_options(storage_options)
-        .load()
-        .await
-        .context("opening the remote dataset for reindex")?;
-    let mut ds = ds.with_object_store_wrappers([wrapper.clone() as Arc<dyn WrappingObjectStore>]);
-
-    ds.optimize_indices(&OptimizeOptions::default())
-        .await
-        .context("optimizing the remote index")?;
-
-    let captured = wrapper.captured.lock().unwrap();
-    Ok(captured.iter().map(|(p, b)| (p.to_string(), b.clone())).collect())
-}
-
-/// The largest `num_unindexed_rows` across the dataset's indexes — how many rows aren't yet folded
-/// into an index (and so are answered by a brute-force scan at query time). 0 when there are no
-/// indexes. Best-effort: a stats read that errors is skipped rather than failing the append.
-async fn max_unindexed_rows(ds: &Dataset) -> u64 {
-    let Ok(indices) = ds.load_indices().await else {
-        return 0;
-    };
-    let mut max = 0u64;
-    for idx in indices.iter() {
-        if let Ok(json) = ds.index_statistics(&idx.name).await {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) {
-                if let Some(n) = v.get("num_unindexed_rows").and_then(|x| x.as_u64()) {
-                    max = max.max(n);
-                }
-            }
-        }
-    }
-    max
-}
-
-/// Wraps the remote dataset's object store so writes are captured, not forwarded.
+/// Reads delegate to `inner` unless the path was already captured (read-your-writes, so a caller
+/// can read back what it just wrote); writes are captured and never forwarded.
 #[derive(Debug)]
-struct CaptureWrapper {
-    captured: Captured,
-}
-
-impl WrappingObjectStore for CaptureWrapper {
-    fn wrap(&self, _prefix: &str, original: Arc<dyn OSObjectStore>) -> Arc<dyn OSObjectStore> {
-        Arc::new(CaptureStore {
-            inner: original,
-            captured: self.captured.clone(),
-        })
-    }
-}
-
-/// Reads delegate to `inner` (the hf store) unless already captured (read-your-writes, needed so
-/// Lance's commit can read back the manifest it just wrote); writes are captured and never
-/// forwarded, so OpenDAL never issues a per-file commit.
-#[derive(Debug)]
-struct CaptureStore {
+pub(crate) struct CaptureStore {
     inner: Arc<dyn OSObjectStore>,
     captured: Captured,
+}
+
+impl CaptureStore {
+    /// Decorate `inner`, recording writes into the shared `captured` map.
+    pub(crate) fn new(inner: Arc<dyn OSObjectStore>, captured: Captured) -> Self {
+        Self { inner, captured }
+    }
 }
 
 impl std::fmt::Display for CaptureStore {
@@ -252,8 +138,8 @@ impl OSObjectStore for CaptureStore {
     }
 
     async fn copy_opts(&self, from: &OPath, to: &OPath, _opts: CopyOptions) -> OSResult<()> {
-        // The wrapper never writes to the underlying (hf) store — a copy lands in the capture.
-        // The source comes from the capture if present, else a read of the underlying store.
+        // The decorator never writes to the underlying store — a copy lands in the capture. The
+        // source comes from the capture if present, else a read of the underlying store.
         let hit = self.captured.lock().unwrap().get(from).cloned();
         let body = match hit {
             Some(b) => b,
@@ -317,15 +203,12 @@ mod tests {
 
     fn capture_over_memory() -> (CaptureStore, Arc<InMemory>) {
         let inner = Arc::new(InMemory::new());
-        let store = CaptureStore {
-            inner: inner.clone(),
-            captured: Captured::default(),
-        };
+        let store = CaptureStore::new(inner.clone(), Captured::default());
         (store, inner)
     }
 
-    /// The load-bearing invariant: a write is captured and never reaches the underlying (hf)
-    /// store — that is what stops OpenDAL from issuing a per-file commit.
+    /// The load-bearing invariant: a write is captured and never reaches the underlying store —
+    /// that is what stops the backend from issuing a per-file commit.
     #[tokio::test]
     async fn put_is_captured_not_forwarded() {
         let (store, inner) = capture_over_memory();
@@ -344,8 +227,8 @@ mod tests {
         );
     }
 
-    /// Reads serve the capture first (so Lance's commit can read back the manifest it just wrote),
-    /// then fall through to the underlying store.
+    /// Reads serve the capture first (so a caller can read back what it just wrote), then fall
+    /// through to the underlying store.
     #[tokio::test]
     async fn reads_capture_first_then_delegates() {
         let (store, inner) = capture_over_memory();
@@ -378,8 +261,8 @@ mod tests {
         assert_eq!(got, Bytes::from_static(b"base"), "delegates to the underlying store");
     }
 
-    /// `copy` must land in the capture, never in the underlying store (the fallback that used to
-    /// delegate to `inner` would have triggered a stray hf write).
+    /// `copy` must land in the capture, never in the underlying store (a fallback that delegated to
+    /// `inner` would trigger a stray backend write).
     #[tokio::test]
     async fn copy_lands_in_capture_never_underlying() {
         let (store, inner) = capture_over_memory();
@@ -397,8 +280,8 @@ mod tests {
         );
     }
 
-    /// `list` shows both the underlying files and the captured ones, so Lance's commit sees the
-    /// version it just wrote alongside the existing ones.
+    /// `list` shows both the underlying files and the captured ones, so a caller sees the version
+    /// it just wrote alongside the existing ones.
     #[tokio::test]
     async fn list_merges_underlying_and_captured() {
         let (store, inner) = capture_over_memory();

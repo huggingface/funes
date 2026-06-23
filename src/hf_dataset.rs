@@ -1,0 +1,161 @@
+//! Append and reindex for the remote HF Lance dataset.
+//!
+//! Neither operation commits: each runs a native Lance op against the remote, captures the files
+//! Lance writes, and returns them for `sync` to land in one `create_commit` guarded by the branch
+//! head. Capture is needed because Lance does all of its IO through the `object_store` trait, and
+//! for an `hf://` URI that store is OpenDAL's HuggingFace service, where every `put` is its *own
+//! git commit*:
+//!
+//! ```text
+//!   Lance Dataset → object_store → OpenDAL hf service → HF Hub
+//!       put = XET upload + one git commit, per file
+//! ```
+//!
+//! Letting those `put`s through would make several separate commits — not atomic, and with no
+//! compare-and-swap against the branch head. So both operations run the Lance op through a
+//! [`CaptureStore`](crate::capture_store::CaptureStore) installed via Lance's
+//! [`WrappingObjectStore`] seam: Lance's writes are captured instead of hitting the Hub.
+//!
+//! # Why this shape
+//!
+//! **Intercept at the object-store layer.** Every file an append or optimize produces — data
+//! fragment, manifest, transaction, index — is written through `object_store`, so it is the one
+//! hook that captures the *whole* write set with no knowledge of Lance's on-disk layout. A
+//! narrower seam can't do it: a custom `CommitHandler` only governs the final manifest commit and
+//! never sees the data fragments, which are written earlier.
+//!
+//! **Decorate Lance's store rather than inject our own.** Lance does support dependency injection
+//! (`DatasetBuilder::with_object_store`, now deprecated, or an `ObjectStoreProvider`), but both
+//! make *us* construct the HF store — reproducing Lance's OpenDAL-hf setup, XET wiring, and
+//! token/revision plumbing, and keeping it in lockstep. [`WrappingObjectStore`] instead hands us
+//! the store Lance already built (`wrap`'s `original`), so we decorate it and never reconstruct
+//! anything. It is also the non-deprecated seam.
+//!
+//! # The two operations
+//!
+//! Kept separate so `sync` commits each on its own:
+//! - [`append`] runs a native append — a new data fragment, a new manifest, a transaction.
+//!   The appended rows are left *unindexed*; a query still finds them, by brute force over the
+//!   delta. It also reports how many rows are now unindexed, so `sync` can decide when to reindex.
+//! - [`reindex`] runs `optimize_indices` — folding the unindexed rows into the FTS/IVF
+//!   indexes (new `_indices/*`, a manifest, a transaction). Bigger and not urgent, so `sync` runs
+//!   it as its own commit, only past a threshold or when forced.
+
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
+use arrow_array::{RecordBatch, RecordBatchIterator};
+use arrow_schema::SchemaRef;
+use bytes::Bytes;
+use lance::dataset::builder::DatasetBuilder;
+use lance::dataset::Dataset;
+use lance::index::DatasetIndexExt;
+use lance_index::optimize::OptimizeOptions;
+use lance_io::object_store::WrappingObjectStore;
+use object_store::ObjectStore as OSObjectStore;
+
+use crate::capture_store::{CaptureStore, Captured};
+
+/// Append `batches` to the remote Lance dataset at `dataset_uri` (an `hf://…/<table>.lance` URI),
+/// capturing the files Lance writes without committing them. `storage_options` carries the hf
+/// token and revision. The append writes only data — a new immutable fragment, a version-numbered
+/// manifest, a transaction — and leaves the new rows unindexed (refresh the index separately with
+/// [`reindex`]). Returns `(repo_path → bytes, num_unindexed_rows)`: every captured entry is
+/// a new file, so the caller can add them all in one commit without clobbering anything, and the
+/// count is the largest unindexed-row backlog across the dataset's indexes — what `sync` thresholds
+/// on to decide whether a reindex is due.
+pub async fn append(
+    dataset_uri: &str,
+    storage_options: HashMap<String, String>,
+    batches: Vec<RecordBatch>,
+    schema: SchemaRef,
+) -> Result<(BTreeMap<String, Bytes>, u64)> {
+    let (mut ds, wrapper) = open_capturing(dataset_uri, storage_options).await?;
+
+    let reader = RecordBatchIterator::new(batches.into_iter().map(Ok), schema);
+    ds.append(reader, None)
+        .await
+        .context("appending to the remote dataset")?;
+
+    // Snapshot the captured writes before reading index stats: `index_statistics` can write a stats
+    // migration through the same wrapper, and that must not leak into the data commit.
+    let data_files = captured_files(&wrapper);
+    let unindexed = max_unindexed_rows(&ds).await;
+    Ok((data_files, unindexed))
+}
+
+/// Refresh the remote dataset's indexes (`optimize_indices`) and capture the files Lance writes —
+/// new `_indices/*`, a manifest, a transaction — without committing. No data is appended. Returns
+/// `repo_path → bytes`, empty when the indexes are already current.
+pub async fn reindex(dataset_uri: &str, storage_options: HashMap<String, String>) -> Result<BTreeMap<String, Bytes>> {
+    let (mut ds, wrapper) = open_capturing(dataset_uri, storage_options).await?;
+
+    ds.optimize_indices(&OptimizeOptions::default())
+        .await
+        .context("optimizing the remote index")?;
+
+    Ok(captured_files(&wrapper))
+}
+
+/// Open the remote dataset with a [`CaptureStore`] installed, returning the wrapped dataset and the
+/// wrapper that holds the shared capture map.
+async fn open_capturing(
+    dataset_uri: &str,
+    storage_options: HashMap<String, String>,
+) -> Result<(Dataset, Arc<CaptureWrapper>)> {
+    let wrapper = Arc::new(CaptureWrapper {
+        captured: Captured::default(),
+    });
+    let ds = DatasetBuilder::from_uri(dataset_uri)
+        .with_storage_options(storage_options)
+        .load()
+        .await
+        .context("opening the remote dataset")?;
+    let ds = ds.with_object_store_wrappers([wrapper.clone() as Arc<dyn WrappingObjectStore>]);
+    Ok((ds, wrapper))
+}
+
+/// The captured writes as repo-path → bytes — the files Lance wrote, ready to commit.
+fn captured_files(wrapper: &CaptureWrapper) -> BTreeMap<String, Bytes> {
+    wrapper
+        .captured
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(p, b)| (p.to_string(), b.clone()))
+        .collect()
+}
+
+/// The largest `num_unindexed_rows` across the dataset's indexes — how many rows aren't yet folded
+/// into an index (and so are answered by a brute-force scan at query time). 0 when there are no
+/// indexes. Best-effort: a stats read that errors is skipped rather than failing the append.
+async fn max_unindexed_rows(ds: &Dataset) -> u64 {
+    let Ok(indices) = ds.load_indices().await else {
+        return 0;
+    };
+    let mut max = 0u64;
+    for idx in indices.iter() {
+        if let Ok(json) = ds.index_statistics(&idx.name).await {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) {
+                if let Some(n) = v.get("num_unindexed_rows").and_then(|x| x.as_u64()) {
+                    max = max.max(n);
+                }
+            }
+        }
+    }
+    max
+}
+
+/// Installs a [`CaptureStore`] in front of the store Lance built for the dataset URI, and holds the
+/// shared capture map so the operation that created it can read the files back once Lance is done.
+#[derive(Debug)]
+struct CaptureWrapper {
+    captured: Captured,
+}
+
+impl WrappingObjectStore for CaptureWrapper {
+    fn wrap(&self, _prefix: &str, original: Arc<dyn OSObjectStore>) -> Arc<dyn OSObjectStore> {
+        Arc::new(CaptureStore::new(original, self.captured.clone()))
+    }
+}

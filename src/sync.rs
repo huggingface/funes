@@ -5,7 +5,7 @@
 //!
 //! - **First publish:** build the dataset locally (data + FTS/IVF indexes) and upload every file.
 //! - **Append:** run Lance's *native* append against the remote dataset over `hf://`, through a
-//!   write-capturing object store ([`crate::capture`]). The append writes only data — a new
+//!   write-capturing object store ([`crate::hf_dataset`]). The append writes only data — a new
 //!   fragment, a manifest, a transaction — captured and shipped as one `create_commit` guarded by
 //!   the current branch head. The new rows are left unindexed (a query still finds them by brute
 //!   force).
@@ -21,8 +21,8 @@
 //! moved, the commit fails and we say so (re-run sync). Capturing Lance's own writes also frees
 //! `sync` from knowing the on-disk layout — it ships whatever Lance wrote, by Lance's own paths.
 
-use crate::capture;
 use crate::db;
+use crate::hf_dataset;
 use crate::hub::{self, Store};
 use crate::scan;
 use anyhow::{bail, Context, Result};
@@ -40,7 +40,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Reindex the remote once this many appended rows are sitting unindexed (answered by a
 /// brute-force scan until folded in). Bounds per-query cost, not sync count, and is stateless —
-/// [`capture::capture_append`] reads it straight from Lance's index stats.
+/// [`hf_dataset::append`] reads it straight from Lance's index stats.
 const REINDEX_THRESHOLD: u64 = 2_000;
 
 /// Cap on `--force-reindex` retries when the branch head keeps moving under it, so a busy remote
@@ -224,7 +224,7 @@ pub async fn run_sync(target: Store, force_reindex: bool) -> Result<String> {
     // 6. Append: capture Lance's native data append over hf:// (data only — no index), guarded by
     // the current head so a concurrent push trips the parent-commit CAS.
     let parent = head_oid(&repo, &rev).await?;
-    let (data_files, unindexed) = capture::capture_append(&dataset_uri, opts.clone(), batches, schema).await?;
+    let (data_files, unindexed) = hf_dataset::append(&dataset_uri, opts.clone(), batches, schema).await?;
     if data_files.is_empty() {
         return Ok(format!("{}: nothing new to upload\n", target.label()));
     }
@@ -322,7 +322,7 @@ async fn reindex_forced(
 ) -> Result<String> {
     let mut attempts = 0u32;
     loop {
-        let files = capture::capture_reindex(dataset_uri, opts.clone()).await?;
+        let files = hf_dataset::reindex(dataset_uri, opts.clone()).await?;
         if files.is_empty() {
             return Ok("  index already current\n".to_string());
         }
@@ -356,7 +356,7 @@ async fn reindex_auto(
     rev: &str,
     parent: Option<String>,
 ) -> String {
-    let files = match capture::capture_reindex(dataset_uri, opts.clone()).await {
+    let files = match hf_dataset::reindex(dataset_uri, opts.clone()).await {
         Ok(f) if f.is_empty() => return String::new(),
         Ok(f) => f,
         Err(e) => return format!("  note: index not refreshed ({e}); will retry on a later sync\n"),
