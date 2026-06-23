@@ -8,6 +8,7 @@
 pub mod capture_store;
 pub mod chunk;
 pub mod dataset;
+pub mod hello;
 pub mod hf_dataset;
 pub mod hub;
 pub mod index;

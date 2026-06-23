@@ -4,6 +4,7 @@
 //! prints it and the MCP server returns it verbatim.
 
 use crate::dataset;
+use crate::hello;
 use crate::hub::Store;
 use anyhow::{Context, Result};
 use arrow_array::{Float32Array, Int64Array, RecordBatch, StringArray, UInt64Array};
@@ -113,6 +114,31 @@ fn stitch(a: &str, b: &str) -> String {
     format!("{a}{b}")
 }
 
+/// A dataset opened for reading, plus an optional temp dir keeping a built-in fallback alive.
+struct Read {
+    /// Keeps the hello-world temp dir alive for the dataset's lifetime; `None` for a real store.
+    _hello: Option<tempfile::TempDir>,
+    ds: Dataset,
+}
+
+/// Open a store for reading. When the default local index is absent, fall back to the built-in
+/// hello-world corpus so a fresh install can recall something useful with zero indexing — passing
+/// `embedder` gives the corpus real vectors for search (recall), `None` is fine for `get`/`list`.
+/// An explicit path or remote store that can't open is a real error, never masked by the corpus.
+async fn open_read(store: &Store, embedder: Option<&mut TextEmbedding>) -> Result<Read> {
+    match store.open().await {
+        Ok(ds) => Ok(Read { _hello: None, ds }),
+        Err(e) => {
+            if store.is_default_local() {
+                let (dir, ds) = hello::dataset(embedder).await?;
+                Ok(Read { _hello: Some(dir), ds })
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
 /// Run the recall pipeline over one store and return the formatted results as text.
 #[allow(clippy::too_many_arguments)]
 pub async fn recall(
@@ -132,13 +158,14 @@ pub async fn recall(
         .next()
         .context("empty embedding")?;
 
-    let ds = store.open().await?;
+    let read = open_read(&store, Some(&mut embedder)).await?;
+    let ds = &read.ds;
     let where_clause = build_where(block_type.as_deref(), project.as_deref());
 
     // Hybrid retrieval: a vector ANN scan and a BM25 scan, fused by reciprocal rank. The FTS index
     // can be absent (it's best-effort at index time), so the FTS leg is skipped when it errors —
     // recall then falls back to vector-only.
-    let hits = hybrid_candidates(&ds, &qv, &query, candidates, where_clause.as_deref()).await?;
+    let hits = hybrid_candidates(ds, &qv, &query, candidates, where_clause.as_deref()).await?;
     if hits.is_empty() {
         return Ok("no results".to_string());
     }
@@ -169,7 +196,7 @@ pub async fn recall(
 
     if neighbors > 0 {
         let mut refs: Vec<&mut Hit> = top.iter_mut().map(|(h, _)| h).collect();
-        attach_neighbors(&ds, &mut refs, neighbors).await?;
+        attach_neighbors(ds, &mut refs, neighbors).await?;
     }
 
     let mut out = String::new();
@@ -367,11 +394,12 @@ async fn attach_neighbors(ds: &Dataset, hits: &mut [&mut Hit], window: i64) -> R
 
 /// Browse indexed sessions: one line per session, newest activity first.
 pub async fn list(store: Store, project: Option<String>, limit: usize) -> Result<String> {
-    let ds = store.open().await?;
+    let read = open_read(&store, None).await?;
+    let ds = &read.ds;
 
     let cols = ["session_id", "project", "ts", "role", "text"];
     let filter = project.as_deref().map(|p| format!("project = '{}'", esc(p)));
-    let batches = dataset::scan_rows(&ds, &cols, filter.as_deref(), None).await?;
+    let batches = dataset::scan_rows(ds, &cols, filter.as_deref(), None).await?;
 
     struct Sess {
         project: String,
@@ -440,11 +468,12 @@ pub async fn list(store: Store, project: Option<String>, limit: usize) -> Result
 /// Drill down on a recall hit: the named turn plus the turns within `window` of it, each
 /// reassembled (blocks in order, splits de-overlapped) into one readable passage.
 pub async fn get(store: Store, session_id: String, turn_uuid: String, window: i64) -> Result<String> {
-    let ds = store.open().await?;
+    let read = open_read(&store, None).await?;
+    let ds = &read.ds;
 
     let cols = ["turn_uuid", "seq", "ts", "role", "text", "block_idx", "split_idx"];
     let filter = format!("session_id = '{}'", esc(&session_id));
-    let batches = dataset::scan_rows(&ds, &cols, Some(filter.as_str()), None).await?;
+    let batches = dataset::scan_rows(ds, &cols, Some(filter.as_str()), None).await?;
 
     // `text` is already the rendered chunk as stored by the indexer — do not re-render.
     let mut rows: Vec<TurnRow> = Vec::new();
@@ -517,13 +546,24 @@ pub async fn get(store: Store, session_id: String, turn_uuid: String, window: i6
 }
 
 pub async fn status(store: Store) -> Result<String> {
-    let ds = store.open().await?;
-    let rows = ds.count_rows(None).await?;
-    Ok(format!(
-        "store: {}\ntable:  {}\nchunks: {rows}\n",
-        store.label(),
-        dataset::TABLE
-    ))
+    match store.open().await {
+        Ok(ds) => {
+            let rows = ds.count_rows(None).await?;
+            Ok(format!(
+                "store: {}\ntable:  {}\nchunks: {rows}\n",
+                store.label(),
+                dataset::TABLE
+            ))
+        }
+        // No personal index yet: point the user at `funes index` instead of erroring. (Recall/get/
+        // list quietly serve the built-in hello-world guide in the same situation.)
+        Err(_) if store.is_default_local() => Ok(format!(
+            "store: {}\nno personal index yet — showing the built-in guide ({} passages).\nrun `funes index` to index ~/.claude/projects, then recall your own history.\n",
+            store.label(),
+            hello::PASSAGES.len()
+        )),
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(test)]

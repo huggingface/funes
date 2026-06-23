@@ -56,6 +56,13 @@ impl Store {
         resolve_from(spec, revision, |k| std::env::var(k).ok())
     }
 
+    /// True only for the *default* local store (`$FUNES_DB`/`~/.funes`), the one a fresh install
+    /// uses. An explicit `--store <path>` or `hf://…` is not the default, even when it can't open —
+    /// so the hello-world fallback never masks a real "your store is missing" error.
+    pub fn is_default_local(&self) -> bool {
+        matches!(self, Store::Local { path } if path.as_path() == Path::new(&dataset::local_store_dir()))
+    }
+
     /// Short label for output/provenance.
     pub fn label(&self) -> String {
         match self {
