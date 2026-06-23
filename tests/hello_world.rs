@@ -1,6 +1,6 @@
 //! A fresh install with no personal index recalls the built-in hello-world corpus, so the first
 //! `funes recall` returns something useful. Mirrors index_recall.rs but builds *no* index: it
-//! points `$FUNES_DB` at an empty temp dir and exercises the read surface's fallback. Runs the
+//! points `$FUNES_HOME` at an empty temp dir and exercises the read surface's fallback. Runs the
 //! real BGE embedder + reranker (downloaded to the fastembed cache on first run).
 
 use funes::hub::Store;
@@ -8,9 +8,9 @@ use funes::hub::Store;
 #[tokio::test]
 async fn recall_without_an_index_uses_the_builtin_guide() {
     let empty = tempfile::tempdir().unwrap();
-    // $FUNES_DB points at an empty dir: Store::local() resolves there, there is no dataset to open,
+    // $FUNES_HOME points at an empty dir: Store::local() resolves there, there is no dataset to open,
     // so the read surface must fall back to the hello-world corpus.
-    std::env::set_var("FUNES_DB", empty.path());
+    std::env::set_var("FUNES_HOME", empty.path());
 
     // recall: a question about wiring funes into an agent surfaces the MCP-setup passage.
     let out = funes::recall::recall(

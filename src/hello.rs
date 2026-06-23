@@ -1,7 +1,7 @@
 //! The built-in hello-world corpus: a tiny set of onboarding passages funes can recall before
 //! the user has indexed anything. A fresh install runs the real recall pipeline against this, so
 //! the first `funes recall` returns something useful — and the passages double as the
-//! getting-started guide (how to index, recall, wire into an agent, and optionally sync).
+//! getting-started guide (how to index, recall, wire into an agent, and optionally push).
 //!
 //! It's a read-only fallback: the moment `funes index` builds the local store, recall reads the
 //! user's own history and this corpus steps aside (see [`crate::recall`]).
@@ -65,10 +65,11 @@ pub const PASSAGES: &[(&str, &str)] = &[
     ),
     (
         "assistant",
-        "Optional, and later: share your memory across machines or a team by syncing to the \
-         Hugging Face Hub. `funes sync` publishes your local index to a dataset repo you own; \
-         reads then work over `hf://` via `--store hf://datasets/<org>/<repo>`. You never need the \
-         Hub to use funes locally — it's a tier you opt into.",
+        "Optional, and later: share your memory across machines or a team via the Hugging Face \
+         Hub. `funes use <org>/<repo>` attaches a dataset repo you own as your active store — from \
+         then on `index` publishes to it and recall reads it; `funes use local` detaches. To query \
+         a different store for one call without changing your default, pass `recall --remote \
+         <org>/<repo>`. You never need the Hub to use funes locally — it's a tier you opt into.",
     ),
     (
         "assistant",

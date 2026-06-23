@@ -1,7 +1,7 @@
 //! End-to-end: build a real index from a tiny transcript in a temp dir, then exercise
 //! the read surface (recall / get / list / status). No mocking — this runs the real
 //! BGE embedder + reranker (downloaded to the fastembed cache on first run) against a
-//! real lancedb store under a temp `$FUNES_DB`.
+//! real lancedb store under a temp `$FUNES_HOME`.
 
 use std::io::Write;
 
@@ -28,8 +28,8 @@ fn write_transcript(source: &std::path::Path) -> (String, String) {
 async fn index_then_read_surface() {
     let db_dir = tempfile::tempdir().unwrap();
     let source = tempfile::tempdir().unwrap();
-    // db::funes_dir() reads $FUNES_DB; point the whole read/write surface at the temp dir.
-    std::env::set_var("FUNES_DB", db_dir.path());
+    // db::funes_dir() reads $FUNES_HOME; point the whole read/write surface at the temp dir.
+    std::env::set_var("FUNES_HOME", db_dir.path());
     let (session, project) = write_transcript(source.path());
 
     // Build the index for real: parse → chunk → embed → lancedb + FTS.

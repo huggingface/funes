@@ -1,15 +1,15 @@
-//! Gated live round-trip for `sync`. Build a synthetic local store, publish it to a unique
+//! Gated live round-trip for `push`. Build a synthetic local store, publish it to a unique
 //! scratch path on the shared test dataset (create), grow it by a turn and publish again
 //! (append → capture Lance's native append), recall both markers back from the remote, then delete the
 //! scratch path. No real data.
 //!
 //! Skipped unless `HF_FUNES_TEST_TOKEN` is set (it provides `HF_TOKEN` for `Store::open` / the
-//! hf-hub client) AND `trufflehog` is on PATH (sync's pre-publish gate is fail-closed). Needs a
+//! hf-hub client) AND `trufflehog` is on PATH (push's pre-publish gate is fail-closed). Needs a
 //! bigger thread stack than the default — lance + fastembed recurse deeply — so set
 //! `RUST_MIN_STACK` (CI uses the same value). To run:
 //!
 //!   export HF_FUNES_TEST_TOKEN="$(cat hf_funes_test_token.txt)"
-//!   RUST_MIN_STACK=16777216 cargo test --test sync_round_trip -- --nocapture
+//!   RUST_MIN_STACK=16777216 cargo test --test push_round_trip -- --nocapture
 
 use std::io::Write;
 use std::process::Command;
@@ -44,13 +44,13 @@ fn tool_ok(bin: &str, arg: &str) -> bool {
 }
 
 async fn recall_remote(uri: &str, query: &str) -> String {
-    funes::recall::recall(Store::parse(uri, None), query.into(), 5, 30, 0.0, 0, None, None)
+    funes::recall::recall(Store::parse(uri), query.into(), 5, 30, 0.0, 0, None, None)
         .await
         .unwrap_or_else(|e| format!("<recall error: {e}>"))
 }
 
 #[tokio::test]
-async fn sync_round_trip_create_append_recall() {
+async fn push_round_trip_create_append_recall() {
     let token = std::env::var("HF_FUNES_TEST_TOKEN")
         .unwrap_or_default()
         .trim()
@@ -60,7 +60,7 @@ async fn sync_round_trip_create_append_recall() {
         return;
     }
     if !tool_ok("trufflehog", "--version") {
-        eprintln!("skip: trufflehog not installed (sync's secret gate is fail-closed)");
+        eprintln!("skip: trufflehog not installed (push's secret gate is fail-closed)");
         return;
     }
     std::env::set_var("HF_TOKEN", &token);
@@ -73,14 +73,14 @@ async fn sync_round_trip_create_append_recall() {
     // Synthetic local store with one marked turn.
     let db_dir = tempfile::tempdir().unwrap();
     let src = tempfile::tempdir().unwrap();
-    std::env::set_var("FUNES_DB", db_dir.path());
+    std::env::set_var("FUNES_HOME", db_dir.path());
     write_session(src.path(), &[("s1", "SYNCSMOKE parsing transcripts into turns")]);
     funes::index::run_index(src.path(), false).await.unwrap();
 
     // create (first publish) → grow → append (data-only, no reindex) → recall both. The appended
     // turn is left unindexed, so recalling it back exercises Lance's brute-force fallback. Then
     // force a reindex and recall it again, now served by the index.
-    let create = funes::sync::run_sync(Store::parse(&uri, None), false).await;
+    let create = funes::push::run_push(Store::parse(&uri), false).await;
     write_session(
         src.path(),
         &[
@@ -89,15 +89,15 @@ async fn sync_round_trip_create_append_recall() {
         ],
     );
     funes::index::run_index(src.path(), false).await.unwrap();
-    let append = funes::sync::run_sync(Store::parse(&uri, None), false).await;
+    let append = funes::push::run_push(Store::parse(&uri), false).await;
     let recall_base = recall_remote(&uri, "SYNCSMOKE parsing").await;
     let recall_new = recall_remote(&uri, "SYNCSMOKE2 continuation").await;
     // Nothing new to push, so this is a pure forced reindex: fold the unindexed appended turn into
     // the index as its own commit (capture_reindex + a separate commit), then recall it again.
-    let reindex = funes::sync::run_sync(Store::parse(&uri, None), true).await;
+    let reindex = funes::push::run_push(Store::parse(&uri), true).await;
     let recall_reindexed = recall_remote(&uri, "SYNCSMOKE2 continuation").await;
-    // The model id must travel with the store (stamped in the schema metadata, uploaded by sync).
-    let remote_model = match Store::parse(&uri, None).open().await {
+    // The model id must travel with the store (stamped in the schema metadata, uploaded by push).
+    let remote_model = match Store::parse(&uri).open().await {
         Ok(t) => t.schema().metadata.get("embedding_model").cloned(),
         Err(_) => None,
     };
@@ -108,13 +108,13 @@ async fn sync_round_trip_create_append_recall() {
         .dataset(OWNER, NAME)
         .delete_folder()
         .path_in_repo(prefix)
-        .commit_message("cleanup funes sync round-trip test")
+        .commit_message("cleanup funes push round-trip test")
         .send()
         .await;
 
-    let create = create.expect("create sync");
+    let create = create.expect("create push");
     assert!(create.contains("pushed"), "create should publish: {create}");
-    let append = append.expect("append sync");
+    let append = append.expect("append push");
     assert!(
         append.contains("pushed 1 chunks"),
         "append should publish only the new chunk: {append}"
@@ -139,6 +139,6 @@ async fn sync_round_trip_create_append_recall() {
     assert_eq!(
         remote_model.as_deref(),
         Some(funes::index::MODEL),
-        "the model id should travel with the store via sync"
+        "the model id should travel with the store via push"
     );
 }

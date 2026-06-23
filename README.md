@@ -113,15 +113,27 @@ reaches for prior decisions and rationale without you pasting context. (The repo
 an optional skill at [skills/funes/](skills/funes/) for richer recall-triggering and a
 `/funes` command — optional, since the MCP server already carries when-to-use instructions.)
 
-**4. Share it across machines or a team (optional).** Publish your index to a dataset repo
-you own on the Hugging Face Hub, then read it back over `hf://`:
+**4. Share it across machines or a team (optional).** Attach a dataset repo you own on the
+Hugging Face Hub as your **active store**. From then on `index` publishes to it and `recall`
+reads it — no per-command flags:
 
 ```bash
-funes sync --store hf://datasets/<org>/<repo>           # push local → your HF dataset repo
-funes recall "..." --store hf://datasets/<org>/<repo>   # read from the shared tier
+funes use acme/kb        # attach hf://datasets/acme/kb as the active store (persisted in funes.json)
+funes index              # builds locally, then publishes to the active remote
+funes recall "..."       # reads the active remote
+funes use local          # detach — back to the local index
 ```
 
-You never need the Hub to use funes locally — it's a tier you opt into.
+`funes use` is the one place you name a store; everything else just uses it. To **query a
+different remote for a single call** — say, someone's published memories on a topic — without
+changing your default, pass `--remote`:
+
+```bash
+funes recall "..." --remote other-org/subject-kb
+```
+
+`push` is a manual re-publish to the active remote (`index` already publishes on its own). You
+never need the Hub to use funes locally — it's a tier you opt into.
 
 ## Building from source
 

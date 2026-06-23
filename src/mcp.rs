@@ -59,7 +59,7 @@ impl Funes {
         }): Parameters<RecallRequest>,
     ) -> String {
         match recall::recall(
-            crate::hub::Store::resolve(None, None),
+            crate::hub::Store::resolve(None),
             query,
             k.unwrap_or(8),
             30,
@@ -88,7 +88,7 @@ impl Funes {
         }): Parameters<GetRequest>,
     ) -> String {
         match recall::get(
-            crate::hub::Store::resolve(None, None),
+            crate::hub::Store::resolve(None),
             session_id,
             turn_uuid,
             window.unwrap_or(3),
@@ -103,7 +103,7 @@ impl Funes {
 
     #[tool(description = "Show funes index statistics (chunk count and store).")]
     async fn status(&self) -> String {
-        recall::status(crate::hub::Store::resolve(None, None))
+        recall::status(crate::hub::Store::resolve(None))
             .await
             .unwrap_or_else(|e| format!("status error: {e}"))
     }

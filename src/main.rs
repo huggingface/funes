@@ -1,11 +1,11 @@
 //! funes — recall over your past AI Agent sessions.
 //!
 //! `recall` reads the index (hybrid → rerank → recency); `index` builds/updates it
-//! from `~/.claude/projects/**/*.jsonl`. Index location is `$FUNES_DB` or `~/.funes`.
+//! from `~/.claude/projects/**/*.jsonl`. funes's home is `$FUNES_HOME` or `~/.funes`.
 
-use funes::{hub, index, mcp, recall, sync};
+use funes::{config, hub, index, mcp, push, recall};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -80,10 +80,16 @@ enum Cmd {
         #[command(flatten)]
         store: StoreOpts,
     },
-    /// Publish the local store's new chunks to a remote store on the HF Hub.
-    Sync {
-        #[command(flatten)]
-        store: StoreOpts,
+    /// Set the active store: the remote this host reads from and publishes to (persisted in
+    /// funes.json; honored by recall/push and the MCP server).
+    Use {
+        /// Remote to attach: `<org>/<repo>` (→ `hf://datasets/<org>/<repo>`) or a full `hf://…`
+        /// URI. Pass `local` to detach and go back to the local index.
+        store: String,
+    },
+    /// Re-publish the local index's new chunks to the active remote (manual; `index` already
+    /// publishes automatically when a remote is attached).
+    Push {
         /// Refresh the remote index after pushing (retrying on conflict) even if the unindexed
         /// backlog is below the auto-reindex threshold. With nothing new to push, reindex only.
         #[arg(long)]
@@ -96,18 +102,15 @@ enum Cmd {
 /// Which store the read commands act on. Shared by `recall`/`list`/`get`/`status`.
 #[derive(Args)]
 struct StoreOpts {
-    /// Store to read: `local` (default), an `hf://datasets/<org>/<repo>` URI, or a local path.
-    /// Falls back to $FUNES_STORE, then the local index.
+    /// A remote to read for this call — an `<org>/<repo>` shorthand or `hf://…` URI — overriding
+    /// the active store. Defaults to the active store, else the local index.
     #[arg(long)]
-    store: Option<String>,
-    /// Revision (branch/tag/sha) for a remote `hf://` store. Falls back to $FUNES_REVISION.
-    #[arg(long)]
-    revision: Option<String>,
+    remote: Option<String>,
 }
 
 impl StoreOpts {
     fn resolve(self) -> hub::Store {
-        hub::Store::resolve(self.store, self.revision)
+        hub::Store::resolve(self.remote)
     }
 }
 
@@ -164,10 +167,36 @@ async fn main() -> Result<()> {
             print!("{}", recall::status(store.resolve()).await?);
             Ok(())
         }
-        Cmd::Sync { store, force_reindex } => {
-            print!("{}", sync::run_sync(store.resolve(), force_reindex).await?);
+        Cmd::Use { store } => use_store(store),
+        Cmd::Push { force_reindex } => {
+            let remote = config::load()
+                .remote
+                .ok_or_else(|| anyhow!("no active remote — attach one with `funes use <org>/<repo>`"))?;
+            print!("{}", push::run_push(hub::Store::parse(&remote), force_reindex).await?);
             Ok(())
         }
         Cmd::Mcp => mcp::run().await,
+    }
+}
+
+/// `funes use <store>`: attach a remote (or `local` to detach), persisted in funes.json.
+fn use_store(spec: String) -> Result<()> {
+    let mut cfg = config::load();
+    if spec == "local" {
+        cfg.remote = None;
+        config::save(&cfg)?;
+        println!("active store: local index");
+        return Ok(());
+    }
+    match hub::Store::parse(&spec) {
+        hub::Store::Remote { uri } => {
+            println!("active store: {uri}");
+            cfg.remote = Some(uri);
+            config::save(&cfg)
+        }
+        hub::Store::Local { .. } => Err(anyhow!(
+            "`funes use` takes a remote (e.g. `acme/kb` or `hf://datasets/<org>/<repo>`); for the \
+             local index use `funes use local`, or relocate funes's home with $FUNES_HOME"
+        )),
     }
 }

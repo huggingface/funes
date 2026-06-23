@@ -1,7 +1,7 @@
-//! `sync`: publish the local store's not-yet-remote chunks into a remote store on the HF Hub.
+//! `push`: publish the local store's not-yet-remote chunks into a remote store on the HF Hub.
 //!
 //! Streamed, never a full mirror. "What's already there" is the store's own chunk ids, so the
-//! delta is `local_ids − remote_ids` — the same primitive `index` uses. `sync` is orchestration:
+//! delta is `local_ids − remote_ids` — the same primitive `index` uses. `push` is orchestration:
 //! it computes the delta, runs the pre-publish secret gate, and drives the HF write operations in
 //! [`crate::hf_dataset`], which own the atomic, parent-commit-guarded commits.
 //!
@@ -11,8 +11,8 @@
 //!   guarded `create_commit`, retried against a fresh head if a concurrent push moved it. The new
 //!   rows are left unindexed (a query still finds them by brute force).
 //! - **Reindex:** a *separate* guarded commit ([`hf_dataset::reindex`]), kept off the data commit so
-//!   the data commit stays small. `sync` runs it after the data commit when the unindexed backlog
-//!   crosses [`REINDEX_THRESHOLD`] (best-effort: a head-moved conflict is a warning, the next sync
+//!   the data commit stays small. `push` runs it after the data commit when the unindexed backlog
+//!   crosses [`REINDEX_THRESHOLD`] (best-effort: a head-moved conflict is a warning, the next push
 //!   retries), or eagerly with `--force-reindex` (retried until it lands).
 
 use crate::dataset;
@@ -29,7 +29,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// Reindex the remote once this many appended rows are sitting unindexed (answered by a
-/// brute-force scan until folded in). Bounds per-query cost, not sync count, and is stateless —
+/// brute-force scan until folded in). Bounds per-query cost, not push count, and is stateless —
 /// [`hf_dataset::append`] reads it straight from Lance's index stats.
 const REINDEX_THRESHOLD: u64 = 2_000;
 
@@ -37,15 +37,15 @@ const REINDEX_THRESHOLD: u64 = 2_000;
 /// moving under us, so a busy remote can't spin forever.
 const MAX_COMMIT_RETRIES: u32 = 10;
 
-/// Parse `hf://datasets/<owner>/<name>/<prefix…>` into (owner, name, prefix-within-repo).
+/// Parse `hf://datasets/<owner>/<name>[/<prefix…>]` into (owner, name, prefix-within-repo). An
+/// empty prefix means the dataset lives at the repo root — matching how reads resolve a remote,
+/// so an attached `<org>/<repo>` and `recall --remote <org>/<repo>` resolve the same dataset.
 fn parse_hf(uri: &str) -> Result<(String, String, String)> {
     let rest = uri.strip_prefix("hf://").context("remote store must be an hf:// URI")?;
     let segs: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
     match segs.as_slice() {
-        ["datasets", owner, name, prefix @ ..] if !prefix.is_empty() => {
-            Ok((owner.to_string(), name.to_string(), prefix.join("/")))
-        }
-        _ => bail!("expected hf://datasets/<owner>/<name>/<path>, got {uri}"),
+        ["datasets", owner, name, prefix @ ..] => Ok((owner.to_string(), name.to_string(), prefix.join("/"))),
+        _ => bail!("expected hf://datasets/<owner>/<name>[/<path>], got {uri}"),
     }
 }
 
@@ -100,13 +100,11 @@ fn texts(batches: &[RecordBatch]) -> Vec<String> {
 /// `force_reindex`, refresh the remote index after the data commit (retrying until it lands) even
 /// if the unindexed backlog is below [`REINDEX_THRESHOLD`]; with no new chunks pending it's a pure
 /// index refresh.
-pub async fn run_sync(target: Store, force_reindex: bool) -> Result<String> {
-    let (uri, revision) = match &target {
-        Store::Remote { uri, revision } => (uri.clone(), revision.clone()),
+pub async fn run_push(target: Store, force_reindex: bool) -> Result<String> {
+    let uri = match &target {
+        Store::Remote { uri } => uri.clone(),
         Store::Local { .. } => {
-            bail!(
-                "sync needs a remote `hf://` target; the configured store is local (pass --store or set $FUNES_STORE)"
-            )
+            bail!("push target must be a remote `hf://` store — it publishes your local index up to the Hub")
         }
     };
 
@@ -138,7 +136,9 @@ pub async fn run_sync(target: Store, force_reindex: bool) -> Result<String> {
         .build()
         .context("building hf-hub client")?;
     let repo = client.dataset(owner, name);
-    let rev = revision.unwrap_or_else(|| "main".to_string());
+    // The dataset always lives on the default branch; reads/push never pin a revision (a pin would
+    // freeze you behind the last push), so HEAD of `main` is the one source of truth.
+    let rev = "main".to_string();
     let dataset_uri = format!("{uri}/{}.lance", dataset::TABLE);
     let opts = HashMap::from([("hf_token".to_string(), token), ("revision".to_string(), rev.clone())]);
 
@@ -167,7 +167,12 @@ pub async fn run_sync(target: Store, force_reindex: bool) -> Result<String> {
     // 5. First publish: build the whole dataset locally (data + indexes) and push it in one commit.
     if first_publish {
         let staging = tempfile::tempdir()?;
-        let db_dir = staging.path().join(&prefix);
+        // Empty prefix = dataset at the repo root; joining "" would leave a stray trailing separator.
+        let db_dir = if prefix.is_empty() {
+            staging.path().to_path_buf()
+        } else {
+            staging.path().join(&prefix)
+        };
         std::fs::create_dir_all(&db_dir)?;
         let table_uri = dataset::table_uri(&db_dir.to_string_lossy());
         let reader = RecordBatchIterator::new(batches.into_iter().map(Ok), schema.clone());
@@ -193,7 +198,7 @@ pub async fn run_sync(target: Store, force_reindex: bool) -> Result<String> {
         let info = repo
             .create_commit()
             .operations(ops)
-            .commit_message(format!("funes sync: +{n_chunks} chunks"))
+            .commit_message(format!("funes push: +{n_chunks} chunks"))
             .revision(rev.clone())
             .send()
             .await
@@ -207,7 +212,7 @@ pub async fn run_sync(target: Store, force_reindex: bool) -> Result<String> {
 
     // 6. Append the data and commit it, retrying against a fresh head if a concurrent push moved it
     // (each attempt re-appends onto the new manifest — the data commit is small, so this is cheap).
-    let message = format!("funes sync: +{n_chunks} chunks");
+    let message = format!("funes push: +{n_chunks} chunks");
     let mut attempts = 0u32;
     let (oid, unindexed) = loop {
         let attempt = hf_dataset::append(
@@ -225,7 +230,7 @@ pub async fn run_sync(target: Store, force_reindex: bool) -> Result<String> {
             Appended::Conflict => {
                 attempts += 1;
                 if attempts > MAX_COMMIT_RETRIES {
-                    bail!("data commit kept conflicting after {MAX_COMMIT_RETRIES} retries; re-run sync");
+                    bail!("data commit kept conflicting after {MAX_COMMIT_RETRIES} retries; re-run push");
                 }
             }
         }
@@ -233,7 +238,7 @@ pub async fn run_sync(target: Store, force_reindex: bool) -> Result<String> {
     let mut out = format!("{}: pushed {n_chunks} chunks (commit {oid})\n", target.label());
 
     // 7. Reindex as a separate commit: forced (retried until it lands) or, past the threshold,
-    // best-effort (one shot, warn on a conflict — the next sync retries).
+    // best-effort (one shot, warn on a conflict — the next push retries).
     if force_reindex {
         out.push_str(&reindex_forced(&repo, &dataset_uri, &opts, &rev).await?);
     } else if unindexed > REINDEX_THRESHOLD {
@@ -251,29 +256,51 @@ async fn reindex_forced(
     rev: &str,
 ) -> Result<String> {
     for _ in 0..=MAX_COMMIT_RETRIES {
-        match hf_dataset::reindex(repo, dataset_uri, opts.clone(), rev, "funes sync: reindex".to_string()).await? {
+        match hf_dataset::reindex(repo, dataset_uri, opts.clone(), rev, "funes push: reindex".to_string()).await? {
             Reindexed::Committed(oid) => return Ok(format!("  reindexed (commit {oid})\n")),
             Reindexed::AlreadyCurrent => return Ok("  index already current\n".to_string()),
             Reindexed::Conflict => continue,
         }
     }
-    bail!("reindex still conflicting after {MAX_COMMIT_RETRIES} retries; re-run sync --force-reindex")
+    bail!("reindex still conflicting after {MAX_COMMIT_RETRIES} retries; re-run push --force-reindex")
 }
 
-/// Best-effort reindex during a normal sync: one attempt, never retried. The data is already
-/// committed, so any failure here is a warning — the next sync past the threshold tries again.
+/// Best-effort reindex during a normal push: one attempt, never retried. The data is already
+/// committed, so any failure here is a warning — the next push past the threshold tries again.
 async fn reindex_auto(
     repo: &HFRepository<RepoTypeDataset>,
     dataset_uri: &str,
     opts: &HashMap<String, String>,
     rev: &str,
 ) -> String {
-    match hf_dataset::reindex(repo, dataset_uri, opts.clone(), rev, "funes sync: reindex".to_string()).await {
+    match hf_dataset::reindex(repo, dataset_uri, opts.clone(), rev, "funes push: reindex".to_string()).await {
         Ok(Reindexed::Committed(oid)) => format!("  reindexed (commit {oid})\n"),
         Ok(Reindexed::AlreadyCurrent) => String::new(),
         Ok(Reindexed::Conflict) => {
-            "  note: index not refreshed (remote head moved); will retry on a later sync\n".to_string()
+            "  note: index not refreshed (remote head moved); will retry on a later push\n".to_string()
         }
-        Err(e) => format!("  note: index not refreshed ({e}); will retry on a later sync\n"),
+        Err(e) => format!("  note: index not refreshed ({e}); will retry on a later push\n"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_hf_accepts_repo_root_and_a_prefix() {
+        // repo root: no path after <owner>/<name> -> empty prefix
+        assert_eq!(
+            parse_hf("hf://datasets/acme/kb").unwrap(),
+            ("acme".into(), "kb".into(), "".into())
+        );
+        // an explicit path within the repo is kept
+        assert_eq!(
+            parse_hf("hf://datasets/acme/kb/sub/dir").unwrap(),
+            ("acme".into(), "kb".into(), "sub/dir".into())
+        );
+        // not a dataset URI -> error
+        assert!(parse_hf("hf://acme/kb").is_err());
+        assert!(parse_hf("s3://acme/kb").is_err());
     }
 }

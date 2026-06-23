@@ -76,7 +76,7 @@ pub(crate) enum Reindexed {
 /// writes only data — a new fragment, manifest, and transaction — and leaves the new rows
 /// unindexed (refresh the index separately with [`reindex`]). Returns [`Appended::Committed`] with
 /// the new commit oid and the resulting unindexed-row backlog (the largest across the dataset's
-/// indexes — what `sync` thresholds on), or [`Appended::Conflict`] if the head moved first — a
+/// indexes — what `push` thresholds on), or [`Appended::Conflict`] if the head moved first — a
 /// single attempt against the head it read, so the caller drives the retry.
 pub(crate) async fn append(
     repo: &HFRepository<RepoTypeDataset>,
