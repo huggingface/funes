@@ -84,6 +84,10 @@ enum Cmd {
     Sync {
         #[command(flatten)]
         store: StoreOpts,
+        /// Refresh the remote index after pushing (retrying on conflict) even if the unindexed
+        /// backlog is below the auto-reindex threshold. With nothing new to push, reindex only.
+        #[arg(long)]
+        force_reindex: bool,
     },
     /// Run as an MCP server over stdio (for Claude Code, Cursor, …).
     Mcp,
@@ -160,8 +164,8 @@ async fn main() -> Result<()> {
             print!("{}", recall::status(store.resolve()).await?);
             Ok(())
         }
-        Cmd::Sync { store } => {
-            print!("{}", sync::run_sync(store.resolve()).await?);
+        Cmd::Sync { store, force_reindex } => {
+            print!("{}", sync::run_sync(store.resolve(), force_reindex).await?);
             Ok(())
         }
         Cmd::Mcp => mcp::run().await,

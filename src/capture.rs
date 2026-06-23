@@ -10,12 +10,10 @@
 //!       put = XET upload + one git commit, per file
 //! ```
 //!
-//! One append is several files — a new fragment, a new manifest, a transaction, plus any index
-//! delta — so letting those `put`s through would make several separate commits: not atomic, and
-//! with no compare-and-swap against the branch head.
-//!
-//! [`capture_append`] runs that same native append, but slips a [`WrappingObjectStore`] between
-//! Lance and OpenDAL — writes are captured in memory and never forwarded, reads pass through:
+//! Letting Lance's `put`s through would make several separate commits — not atomic, and with no
+//! compare-and-swap against the branch head. So both entry points here slip a
+//! [`WrappingObjectStore`] between Lance and OpenDAL: writes are captured in memory and never
+//! forwarded, reads pass through.
 //!
 //! ```text
 //!   Lance Dataset → CaptureStore:
@@ -25,6 +23,14 @@
 //!
 //! What comes back is exactly the files Lance wrote, keyed by the repo paths it wrote them to, so
 //! `sync` uploads them in a single `create_commit` with a parent-commit guard.
+//!
+//! Two operations, kept separate so each commits on its own:
+//! - [`capture_append`] runs a native append — a new data fragment, a new manifest, a transaction.
+//!   The appended rows are left *unindexed*; a query still finds them, by brute force over the
+//!   delta. It also reports how many rows are now unindexed, so `sync` can decide when to reindex.
+//! - [`capture_reindex`] runs `optimize_indices` — folding the unindexed rows into the FTS/IVF
+//!   indexes (new `_indices/*`, a manifest, a transaction). Bigger and not urgent, so `sync` runs
+//!   it as its own commit, only past a threshold or when forced.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -37,6 +43,7 @@ use bytes::Bytes;
 use chrono::Utc;
 use futures::stream::{self, BoxStream, StreamExt};
 use lance::dataset::builder::DatasetBuilder;
+use lance::dataset::Dataset;
 use lance::index::DatasetIndexExt;
 use lance_index::optimize::OptimizeOptions;
 use lance_io::object_store::WrappingObjectStore;
@@ -52,15 +59,18 @@ type Captured = Arc<Mutex<BTreeMap<OPath, Bytes>>>;
 
 /// Append `batches` to the remote Lance dataset at `dataset_uri` (an `hf://…/<table>.lance` URI),
 /// capturing the files Lance writes without committing them. `storage_options` carries the hf
-/// token and revision. Returns `repo_path → bytes` — every entry is a *new* Lance file (immutable
-/// fragment, version-numbered manifest, transaction, index delta), so the caller can add them all
-/// in one commit with no risk of clobbering existing remote files.
+/// token and revision. The append writes only data — a new immutable fragment, a version-numbered
+/// manifest, a transaction — and leaves the new rows unindexed (refresh the index separately with
+/// [`capture_reindex`]). Returns `(repo_path → bytes, num_unindexed_rows)`: every captured entry is
+/// a new file, so the caller can add them all in one commit without clobbering anything, and the
+/// count is the largest unindexed-row backlog across the dataset's indexes — what `sync` thresholds
+/// on to decide whether a reindex is due.
 pub async fn capture_append(
     dataset_uri: &str,
     storage_options: HashMap<String, String>,
     batches: Vec<RecordBatch>,
     schema: SchemaRef,
-) -> Result<BTreeMap<String, Bytes>> {
+) -> Result<(BTreeMap<String, Bytes>, u64)> {
     let wrapper = Arc::new(CaptureWrapper {
         captured: Captured::default(),
     });
@@ -76,13 +86,60 @@ pub async fn capture_append(
         .await
         .context("appending to the remote dataset")?;
 
-    // Best-effort: fold the new fragment into the FTS/IVF indexes so the delta is searchable both
-    // ways immediately. Captured like every other write; on failure the delta is still found by
-    // brute force at query time, so a miss here is not fatal (matches the local-index behaviour).
-    let _ = ds.optimize_indices(&OptimizeOptions::default()).await;
+    // Snapshot the append's writes (fragment, manifest, transaction) before reading index stats:
+    // `index_statistics` can write a stats migration through the same wrapper, and that must not
+    // leak into the data commit.
+    let data_files: BTreeMap<String, Bytes> = {
+        let captured = wrapper.captured.lock().unwrap();
+        captured.iter().map(|(p, b)| (p.to_string(), b.clone())).collect()
+    };
+    let unindexed = max_unindexed_rows(&ds).await;
+    Ok((data_files, unindexed))
+}
+
+/// Refresh the remote dataset's indexes (`optimize_indices`) and capture the files Lance writes —
+/// new `_indices/*`, a manifest, a transaction — without committing. No data is appended. Returns
+/// `repo_path → bytes`, empty when the indexes are already current.
+pub async fn capture_reindex(
+    dataset_uri: &str,
+    storage_options: HashMap<String, String>,
+) -> Result<BTreeMap<String, Bytes>> {
+    let wrapper = Arc::new(CaptureWrapper {
+        captured: Captured::default(),
+    });
+    let ds = DatasetBuilder::from_uri(dataset_uri)
+        .with_storage_options(storage_options)
+        .load()
+        .await
+        .context("opening the remote dataset for reindex")?;
+    let mut ds = ds.with_object_store_wrappers([wrapper.clone() as Arc<dyn WrappingObjectStore>]);
+
+    ds.optimize_indices(&OptimizeOptions::default())
+        .await
+        .context("optimizing the remote index")?;
 
     let captured = wrapper.captured.lock().unwrap();
     Ok(captured.iter().map(|(p, b)| (p.to_string(), b.clone())).collect())
+}
+
+/// The largest `num_unindexed_rows` across the dataset's indexes — how many rows aren't yet folded
+/// into an index (and so are answered by a brute-force scan at query time). 0 when there are no
+/// indexes. Best-effort: a stats read that errors is skipped rather than failing the append.
+async fn max_unindexed_rows(ds: &Dataset) -> u64 {
+    let Ok(indices) = ds.load_indices().await else {
+        return 0;
+    };
+    let mut max = 0u64;
+    for idx in indices.iter() {
+        if let Ok(json) = ds.index_statistics(&idx.name).await {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) {
+                if let Some(n) = v.get("num_unindexed_rows").and_then(|x| x.as_u64()) {
+                    max = max.max(n);
+                }
+            }
+        }
+    }
+    max
 }
 
 /// Wraps the remote dataset's object store so writes are captured, not forwarded.

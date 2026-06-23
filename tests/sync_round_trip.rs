@@ -4,10 +4,12 @@
 //! scratch path. No real data.
 //!
 //! Skipped unless `HF_FUNES_TEST_TOKEN` is set (it provides `HF_TOKEN` for `Store::open` / the
-//! hf-hub client) AND `trufflehog` is on PATH (sync's pre-publish gate is fail-closed). To run:
+//! hf-hub client) AND `trufflehog` is on PATH (sync's pre-publish gate is fail-closed). Needs a
+//! bigger thread stack than the default — lance + fastembed recurse deeply — so set
+//! `RUST_MIN_STACK` (CI uses the same value). To run:
 //!
 //!   export HF_FUNES_TEST_TOKEN="$(cat hf_funes_test_token.txt)"
-//!   cargo test --test sync_round_trip -- --nocapture
+//!   RUST_MIN_STACK=16777216 cargo test --test sync_round_trip -- --nocapture
 
 use std::io::Write;
 use std::process::Command;
@@ -75,8 +77,10 @@ async fn sync_round_trip_create_append_recall() {
     write_session(src.path(), &[("s1", "SYNCSMOKE parsing transcripts into turns")]);
     funes::index::run_index(src.path(), false).await.unwrap();
 
-    // create (first publish) → grow → append (capture-commit) → recall both, all captured.
-    let create = funes::sync::run_sync(Store::parse(&uri, None)).await;
+    // create (first publish) → grow → append (data-only, no reindex) → recall both. The appended
+    // turn is left unindexed, so recalling it back exercises Lance's brute-force fallback. Then
+    // force a reindex and recall it again, now served by the index.
+    let create = funes::sync::run_sync(Store::parse(&uri, None), false).await;
     write_session(
         src.path(),
         &[
@@ -85,9 +89,13 @@ async fn sync_round_trip_create_append_recall() {
         ],
     );
     funes::index::run_index(src.path(), false).await.unwrap();
-    let append = funes::sync::run_sync(Store::parse(&uri, None)).await;
+    let append = funes::sync::run_sync(Store::parse(&uri, None), false).await;
     let recall_base = recall_remote(&uri, "SYNCSMOKE parsing").await;
     let recall_new = recall_remote(&uri, "SYNCSMOKE2 continuation").await;
+    // Nothing new to push, so this is a pure forced reindex: fold the unindexed appended turn into
+    // the index as its own commit (capture_reindex + a separate commit), then recall it again.
+    let reindex = funes::sync::run_sync(Store::parse(&uri, None), true).await;
+    let recall_reindexed = recall_remote(&uri, "SYNCSMOKE2 continuation").await;
     // The model id must travel with the store (stamped in the schema metadata, uploaded by sync).
     let remote_model = match Store::parse(&uri, None).open().await {
         Ok(t) => t
@@ -122,6 +130,15 @@ async fn sync_round_trip_create_append_recall() {
     assert!(
         recall_new.contains("SYNCSMOKE2"),
         "remote recall should surface the appended turn: {recall_new}"
+    );
+    let reindex = reindex.expect("force reindex");
+    assert!(
+        reindex.contains("reindexed"),
+        "force-reindex should commit an index delta: {reindex}"
+    );
+    assert!(
+        recall_reindexed.contains("SYNCSMOKE2"),
+        "remote recall should still surface the turn after reindex: {recall_reindexed}"
     );
     assert_eq!(
         remote_model.as_deref(),
