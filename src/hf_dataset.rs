@@ -34,16 +34,6 @@
 //! token/revision plumbing, and keeping it in lockstep. [`WrappingObjectStore`] instead hands us
 //! the store Lance already built (`wrap`'s `original`), so we decorate it and never reconstruct
 //! anything. It is also the non-deprecated seam.
-//!
-//! # The two operations
-//!
-//! Each lands its own `create_commit`, so the cheap data commit isn't entangled with the bigger,
-//! non-urgent index commit:
-//! - [`append`] commits a new data fragment (+ manifest + transaction). The appended rows are left
-//!   *unindexed* — a query still finds them, by brute force over the delta — and it returns the
-//!   unindexed-row backlog so `sync` can decide when to reindex.
-//! - [`reindex`] commits the FTS/IVF index delta (`optimize_indices`). Bigger and not urgent, so
-//!   `sync` runs it only past a threshold or when forced.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
