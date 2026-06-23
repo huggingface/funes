@@ -1,6 +1,6 @@
 //! Remote, shared memory tiers.
 //!
-//! A [`Source`] is either the local index or a remote Lance dataset on the HF Hub. Remote
+//! A [`Store`] is either the local index or a remote Lance dataset on the HF Hub. Remote
 //! reads go over `hf://` and are lazy by construction: the IVF_PQ index bounds which
 //! fragments a query touches, and lancedb's HF object store fetches only those byte ranges.
 //! Caching across CLI runs is handled by the **Xet chunk cache** (`~/.cache/huggingface/xet`,
@@ -12,47 +12,67 @@ use anyhow::{anyhow, Result};
 use lancedb::Table;
 
 use crate::db;
-use crate::index::DIM;
+use crate::index::{DIM, MODEL};
 
-/// Where to recall from.
+/// A store to recall from: a local Lance directory or a remote dataset on the HF Hub.
 #[derive(Debug, Clone)]
-pub enum Source {
-    /// The local index under `funes_dir()`.
-    Local,
+pub enum Store {
+    /// A local Lance store directory (e.g. `~/.funes/lancedb`).
+    Local { path: PathBuf },
     /// A remote Lance dataset on the HF Hub, e.g. `hf://datasets/<org>/<repo>`.
     Remote { uri: String, revision: Option<String> },
 }
 
-impl Source {
-    /// `"local"` → [`Source::Local`]; anything else is treated as a remote dataset URI.
+impl Store {
+    /// The default local store (`$FUNES_DB` / `~/.funes` → `…/lancedb`).
+    pub fn local() -> Self {
+        Store::Local {
+            path: PathBuf::from(db::lancedb_uri()),
+        }
+    }
+
+    /// Parse a store spec: `"local"` → the default local store; an `hf://…` URI → a remote
+    /// dataset; anything else → a local store at that path.
     pub fn parse(spec: &str, revision: Option<String>) -> Self {
         if spec == "local" {
-            Source::Local
-        } else {
-            Source::Remote {
+            Store::local()
+        } else if spec.starts_with("hf://") {
+            Store::Remote {
                 uri: spec.to_string(),
                 revision,
             }
+        } else {
+            Store::Local {
+                path: PathBuf::from(spec),
+            }
         }
+    }
+
+    /// Resolve the store the read commands should use: an explicit `spec` (a CLI `--store`)
+    /// wins, else `$FUNES_STORE`, else the default local store. `revision` is taken from the
+    /// flag, else `$FUNES_REVISION` (only meaningful for a remote `hf://` store).
+    pub fn resolve(spec: Option<String>, revision: Option<String>) -> Self {
+        resolve_from(spec, revision, |k| std::env::var(k).ok())
     }
 
     /// Short label for output/provenance.
     pub fn label(&self) -> String {
         match self {
-            Source::Local => "local".to_string(),
-            Source::Remote { uri, .. } => uri.clone(),
+            Store::Local { path } => path.display().to_string(),
+            Store::Remote { uri, .. } => uri.clone(),
         }
     }
 
-    /// Open the `chunks` table for this source. Remote sources read lazily over `hf://`
-    /// (cached by Xet) and are dimension-checked against the local embedding model.
+    /// Open the `chunks` table for this store; remote stores stream lazily over `hf://`.
+    /// Rejects a store whose `vector` dimension isn't funes's `DIM` — a coarse guard, since a
+    /// matching dimension doesn't prove a matching embedding model.
     pub async fn open(&self) -> Result<Table> {
-        match self {
-            Source::Local => {
-                let db = db::open_db().await?;
-                Ok(db.open_table(db::TABLE).execute().await?)
+        let tbl = match self {
+            Store::Local { path } => {
+                let db = lancedb::connect(&path.to_string_lossy()).execute().await?;
+                db.open_table(db::TABLE).execute().await?
             }
-            Source::Remote { uri, revision } => {
+            Store::Remote { uri, revision } => {
                 let mut conn = lancedb::connect(uri);
                 if let Some(rev) = revision {
                     conn = conn.storage_option("revision", rev.clone());
@@ -60,17 +80,27 @@ impl Source {
                 if let Some(token) = hf_token() {
                     conn = conn.storage_option("hf_token", token);
                 }
-                let db = conn.execute().await?;
-                let tbl = db.open_table(db::TABLE).execute().await?;
-                check_dim(&tbl).await?;
-                Ok(tbl)
+                conn.execute().await?.open_table(db::TABLE).execute().await?
             }
-        }
+        };
+        check_compat(&tbl).await?;
+        Ok(tbl)
+    }
+}
+
+/// Pure core of [`Store::resolve`]: explicit `spec` wins over `$FUNES_STORE`, explicit
+/// `revision` over `$FUNES_REVISION`; blank env values are ignored. Split out so it's testable
+/// without mutating process env.
+fn resolve_from(spec: Option<String>, revision: Option<String>, env: impl Fn(&str) -> Option<String>) -> Store {
+    let nonempty = |k: &str| env(k).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    match spec.or_else(|| nonempty("FUNES_STORE")) {
+        Some(s) => Store::parse(&s, revision.or_else(|| nonempty("FUNES_REVISION"))),
+        None => Store::local(),
     }
 }
 
 /// HF token from the standard env var, else the `huggingface_hub` cached token file.
-fn hf_token() -> Option<String> {
+pub(crate) fn hf_token() -> Option<String> {
     let token_file = std::env::var("HOME")
         .ok()
         .map(|h| PathBuf::from(h).join(".cache/huggingface/token"));
@@ -94,22 +124,33 @@ fn token_from(env: impl Fn(&str) -> Option<String>, token_file: Option<&Path>) -
     (!t.is_empty()).then(|| t.to_string())
 }
 
-/// Refuse a remote index whose vectors don't match the local embedding model's dimension —
-/// querying it with our embeddings would be meaningless.
-async fn check_dim(tbl: &Table) -> Result<()> {
+/// Reject a store funes can't query with its own embeddings: the `vector` dimension must be
+/// funes's `DIM`, and — when the store records an embedding model in its schema metadata — that
+/// model must be funes's. A store with no recorded model (pre-metadata) is guarded by the
+/// dimension alone.
+async fn check_compat(tbl: &Table) -> Result<()> {
     let schema = tbl.schema().await?;
+
+    if let Some(model) = schema.metadata().get("embedding_model") {
+        if model != MODEL {
+            return Err(anyhow!(
+                "store built with embedding model {model:?}, not funes's {MODEL:?}"
+            ));
+        }
+    }
+
     let field = schema
         .field_with_name("vector")
-        .map_err(|_| anyhow!("remote index has no `vector` column"))?;
+        .map_err(|_| anyhow!("store has no `vector` column"))?;
     if let arrow_schema::DataType::FixedSizeList(_, dim) = field.data_type() {
         if *dim != DIM {
             return Err(anyhow!(
-                "remote index vector dim {dim} != local {DIM}; it was built with a different embedding model"
+                "store vector dim {dim} != funes's {DIM}; it was built with a different embedding model"
             ));
         }
         Ok(())
     } else {
-        Err(anyhow!("remote index `vector` column is not a fixed-size list"))
+        Err(anyhow!("store `vector` column is not a fixed-size list"))
     }
 }
 
@@ -124,10 +165,14 @@ mod tests {
     use arrow_schema::{DataType, Field, Schema};
 
     #[test]
-    fn source_parse_local_vs_remote() {
-        assert!(matches!(Source::parse("local", None), Source::Local));
-        match Source::parse("hf://datasets/org/kb", Some("abc".into())) {
-            Source::Remote { uri, revision } => {
+    fn store_parse_local_path_remote() {
+        assert!(matches!(Store::parse("local", None), Store::Local { .. }));
+        match Store::parse("/tmp/store", None) {
+            Store::Local { path } => assert_eq!(path, std::path::PathBuf::from("/tmp/store")),
+            _ => panic!("expected a local path"),
+        }
+        match Store::parse("hf://datasets/org/kb", Some("abc".into())) {
+            Store::Remote { uri, revision } => {
                 assert_eq!(uri, "hf://datasets/org/kb");
                 assert_eq!(revision.as_deref(), Some("abc"));
             }
@@ -136,10 +181,10 @@ mod tests {
     }
 
     #[test]
-    fn source_label() {
-        assert_eq!(Source::Local.label(), "local");
+    fn store_label() {
+        assert_eq!(Store::Local { path: "/tmp/x".into() }.label(), "/tmp/x");
         assert_eq!(
-            Source::parse("hf://datasets/org/kb", None).label(),
+            Store::parse("hf://datasets/org/kb", None).label(),
             "hf://datasets/org/kb"
         );
     }
@@ -165,6 +210,43 @@ mod tests {
     fn token_blank_env_is_skipped_none_when_no_file() {
         let env: HashMap<&str, &str> = [("HF_TOKEN", "   ")].into_iter().collect();
         assert_eq!(token_from(|k| env.get(k).map(|s| s.to_string()), None), None);
+    }
+
+    #[test]
+    fn resolve_prefers_explicit_then_env_then_local() {
+        let none = |_: &str| None;
+        // Explicit spec + revision win outright.
+        match resolve_from(Some("hf://datasets/o/r".into()), Some("v1".into()), none) {
+            Store::Remote { uri, revision } => {
+                assert_eq!(uri, "hf://datasets/o/r");
+                assert_eq!(revision.as_deref(), Some("v1"));
+            }
+            _ => panic!("expected remote"),
+        }
+        // No spec, no env -> default local store.
+        assert!(matches!(resolve_from(None, None, none), Store::Local { .. }));
+        // No explicit spec -> $FUNES_STORE used, $FUNES_REVISION fills the revision.
+        let env = |k: &str| match k {
+            "FUNES_STORE" => Some("hf://datasets/e/r".to_string()),
+            "FUNES_REVISION" => Some("envrev".to_string()),
+            _ => None,
+        };
+        match resolve_from(None, None, env) {
+            Store::Remote { uri, revision } => {
+                assert_eq!(uri, "hf://datasets/e/r");
+                assert_eq!(revision.as_deref(), Some("envrev"));
+            }
+            _ => panic!("expected remote from env"),
+        }
+        // An explicit (local) spec beats a remote $FUNES_STORE.
+        let env2 = |k: &str| (k == "FUNES_STORE").then(|| "hf://datasets/env/wins".to_string());
+        match resolve_from(Some("/local/path".into()), None, env2) {
+            Store::Local { path } => assert_eq!(path, std::path::PathBuf::from("/local/path")),
+            _ => panic!("explicit local path should beat env remote"),
+        }
+        // A blank $FUNES_STORE is ignored -> local.
+        let blank = |k: &str| (k == "FUNES_STORE").then(|| "   ".to_string());
+        assert!(matches!(resolve_from(None, None, blank), Store::Local { .. }));
     }
 
     // --- dim guard against real local tables ---
@@ -197,31 +279,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn check_dim_accepts_matching_dimension() {
+    async fn check_compat_accepts_matching_dimension() {
         let (_d, tbl) = table_with(
             vec![Field::new("id", DataType::Int64, true), vector_field(DIM)],
             vec![ids(2), vectors(2, DIM)],
         )
         .await;
-        assert!(check_dim(&tbl).await.is_ok());
+        assert!(check_compat(&tbl).await.is_ok());
     }
 
     #[tokio::test]
-    async fn check_dim_rejects_wrong_dimension() {
+    async fn check_compat_rejects_wrong_dimension() {
         let (_d, tbl) = table_with(
             vec![Field::new("id", DataType::Int64, true), vector_field(DIM / 2)],
             vec![ids(2), vectors(2, DIM / 2)],
         )
         .await;
-        let err = check_dim(&tbl).await.unwrap_err().to_string();
+        let err = check_compat(&tbl).await.unwrap_err().to_string();
         assert!(err.contains("different embedding model"), "{err}");
     }
 
     #[tokio::test]
-    async fn check_dim_rejects_missing_or_scalar_vector() {
+    async fn check_compat_rejects_missing_or_scalar_vector() {
         // no vector column
         let (_d, t1) = table_with(vec![Field::new("id", DataType::Int64, true)], vec![ids(2)]).await;
-        assert!(check_dim(&t1).await.is_err());
+        assert!(check_compat(&t1).await.is_err());
 
         // a `vector` column that isn't a fixed-size list
         let (_d2, t2) = table_with(
@@ -232,6 +314,20 @@ mod tests {
             vec![ids(2), ids(2)],
         )
         .await;
-        assert!(check_dim(&t2).await.is_err());
+        assert!(check_compat(&t2).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn check_compat_rejects_wrong_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = lancedb::connect(dir.path().to_str().unwrap()).execute().await.unwrap();
+        let schema = Arc::new(Schema::new_with_metadata(
+            vec![Field::new("id", DataType::Int64, true), vector_field(DIM)],
+            HashMap::from([("embedding_model".to_string(), "some/other-model".to_string())]),
+        ));
+        let batch = RecordBatch::try_new(schema, vec![ids(2), vectors(2, DIM)]).unwrap();
+        let tbl = db.create_table("chunks", batch).execute().await.unwrap();
+        let err = check_compat(&tbl).await.unwrap_err().to_string();
+        assert!(err.contains("other-model") && err.contains("not funes's"), "{err}");
     }
 }

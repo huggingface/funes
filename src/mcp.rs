@@ -58,7 +58,18 @@ impl Funes {
             project,
         }): Parameters<RecallRequest>,
     ) -> String {
-        match recall::recall(query, k.unwrap_or(8), 30, 30.0, 1, block_type, project).await {
+        match recall::recall(
+            crate::hub::Store::resolve(None, None),
+            query,
+            k.unwrap_or(8),
+            30,
+            30.0,
+            1,
+            block_type,
+            project,
+        )
+        .await
+        {
             Ok(s) if !s.is_empty() => s,
             Ok(_) => "no results".to_string(),
             Err(e) => format!("recall error: {e}"),
@@ -76,16 +87,25 @@ impl Funes {
             window,
         }): Parameters<GetRequest>,
     ) -> String {
-        match recall::get(session_id, turn_uuid, window.unwrap_or(3)).await {
+        match recall::get(
+            crate::hub::Store::resolve(None, None),
+            session_id,
+            turn_uuid,
+            window.unwrap_or(3),
+        )
+        .await
+        {
             Ok(s) if !s.is_empty() => s,
             Ok(_) => "no results".to_string(),
             Err(e) => format!("get error: {e}"),
         }
     }
 
-    #[tool(description = "Show funes index statistics (chunk count and location).")]
+    #[tool(description = "Show funes index statistics (chunk count and store).")]
     async fn status(&self) -> String {
-        recall::status().await.unwrap_or_else(|e| format!("status error: {e}"))
+        recall::status(crate::hub::Store::resolve(None, None))
+            .await
+            .unwrap_or_else(|e| format!("status error: {e}"))
     }
 }
 

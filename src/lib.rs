@@ -5,10 +5,14 @@
 //! The binary ([`main`]) is a thin CLI over these modules; integration tests drive
 //! them directly.
 
+pub mod capture_store;
 pub mod chunk;
 pub mod db;
+pub mod hf_dataset;
 pub mod hub;
 pub mod index;
 pub mod mcp;
 pub mod parse;
 pub mod recall;
+pub mod scan;
+pub mod sync;

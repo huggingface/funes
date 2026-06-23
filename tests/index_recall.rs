@@ -36,17 +36,26 @@ async fn index_then_read_surface() {
     funes::index::run_index(source.path(), false).await.unwrap();
 
     // status: non-empty chunk count.
-    let status = funes::recall::status().await.unwrap();
+    let status = funes::recall::status(funes::hub::Store::local()).await.unwrap();
     assert!(status.contains("chunks:"), "status missing chunk count: {status}");
 
     // list: the session appears under its project.
-    let list = funes::recall::list(None, 50).await.unwrap();
+    let list = funes::recall::list(funes::hub::Store::local(), None, 50).await.unwrap();
     assert!(list.contains(&project), "list should name the project: {list}");
 
     // recall: the parsing turn surfaces, and the `→ get` line carries the full session id.
-    let out = funes::recall::recall("parse transcripts into turns".into(), 5, 30, 30.0, 1, None, None)
-        .await
-        .unwrap();
+    let out = funes::recall::recall(
+        funes::hub::Store::local(),
+        "parse transcripts into turns".into(),
+        5,
+        30,
+        30.0,
+        1,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     assert_ne!(out, "no results", "recall returned nothing");
     assert!(
         out.contains(&session),
@@ -54,12 +63,23 @@ async fn index_then_read_surface() {
     );
 
     // type filter: restrict to tool_use → the Bash call.
-    let tu = funes::recall::recall("cargo test".into(), 5, 30, 0.0, 0, Some("tool_use".into()), None)
-        .await
-        .unwrap();
+    let tu = funes::recall::recall(
+        funes::hub::Store::local(),
+        "cargo test".into(),
+        5,
+        30,
+        0.0,
+        0,
+        Some("tool_use".into()),
+        None,
+    )
+    .await
+    .unwrap();
     assert!(tu.contains("tool_use"), "type filter should keep tool_use rows: {tu}");
 
     // get: reassemble the assistant turn by its uuid.
-    let got = funes::recall::get(session.clone(), "t2".into(), 3).await.unwrap();
+    let got = funes::recall::get(funes::hub::Store::local(), session.clone(), "t2".into(), 3)
+        .await
+        .unwrap();
     assert!(got.contains("typed blocks"), "get should return the turn text: {got}");
 }

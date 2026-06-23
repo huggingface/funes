@@ -3,10 +3,10 @@
 //! `recall` reads the index (hybrid → rerank → recency); `index` builds/updates it
 //! from `~/.claude/projects/**/*.jsonl`. Index location is `$FUNES_DB` or `~/.funes`.
 
-use funes::{index, mcp, recall};
+use funes::{hub, index, mcp, recall, sync};
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -41,6 +41,8 @@ enum Cmd {
         /// Restrict to a project (the path segment under `projects`).
         #[arg(long)]
         project: Option<String>,
+        #[command(flatten)]
+        store: StoreOpts,
     },
     /// List indexed sessions, newest activity first.
     List {
@@ -50,6 +52,8 @@ enum Cmd {
         /// Max sessions to show.
         #[arg(long, default_value_t = 50)]
         limit: usize,
+        #[command(flatten)]
+        store: StoreOpts,
     },
     /// Drill down on a recall hit: a turn plus the turns around it, reassembled.
     Get {
@@ -60,6 +64,8 @@ enum Cmd {
         /// Turns within this seq window of the target are included.
         #[arg(long, default_value_t = 3)]
         window: i64,
+        #[command(flatten)]
+        store: StoreOpts,
     },
     /// Build or update the index from session transcripts.
     Index {
@@ -70,9 +76,39 @@ enum Cmd {
         no_thinking: bool,
     },
     /// Show index statistics.
-    Status,
+    Status {
+        #[command(flatten)]
+        store: StoreOpts,
+    },
+    /// Publish the local store's new chunks to a remote store on the HF Hub.
+    Sync {
+        #[command(flatten)]
+        store: StoreOpts,
+        /// Refresh the remote index after pushing (retrying on conflict) even if the unindexed
+        /// backlog is below the auto-reindex threshold. With nothing new to push, reindex only.
+        #[arg(long)]
+        force_reindex: bool,
+    },
     /// Run as an MCP server over stdio (for Claude Code, Cursor, …).
     Mcp,
+}
+
+/// Which store the read commands act on. Shared by `recall`/`list`/`get`/`status`.
+#[derive(Args)]
+struct StoreOpts {
+    /// Store to read: `local` (default), an `hf://datasets/<org>/<repo>` URI, or a local path.
+    /// Falls back to $FUNES_STORE, then the local index.
+    #[arg(long)]
+    store: Option<String>,
+    /// Revision (branch/tag/sha) for a remote `hf://` store. Falls back to $FUNES_REVISION.
+    #[arg(long)]
+    revision: Option<String>,
+}
+
+impl StoreOpts {
+    fn resolve(self) -> hub::Store {
+        hub::Store::resolve(self.store, self.revision)
+    }
 }
 
 #[tokio::main]
@@ -86,10 +122,12 @@ async fn main() -> Result<()> {
             neighbors,
             block_type,
             project,
+            store,
         } => {
             print!(
                 "{}",
                 recall::recall(
+                    store.resolve(),
                     query.join(" "),
                     k,
                     candidates,
@@ -102,27 +140,32 @@ async fn main() -> Result<()> {
             );
             Ok(())
         }
-        Cmd::List { project, limit } => {
-            print!("{}", recall::list(project, limit).await?);
+        Cmd::List { project, limit, store } => {
+            print!("{}", recall::list(store.resolve(), project, limit).await?);
             Ok(())
         }
         Cmd::Get {
             session_id,
             turn_uuid,
             window,
+            store,
         } => {
-            print!("{}", recall::get(session_id, turn_uuid, window).await?);
+            print!("{}", recall::get(store.resolve(), session_id, turn_uuid, window).await?);
             Ok(())
         }
         Cmd::Index { source, no_thinking } => {
-            let src = source.unwrap_or_else(|| {
+            let dir = source.unwrap_or_else(|| {
                 let home = std::env::var("HOME").unwrap_or_default();
                 PathBuf::from(home).join(".claude").join("projects")
             });
-            index::run_index(&src, no_thinking).await
+            index::run_index(&dir, no_thinking).await
         }
-        Cmd::Status => {
-            print!("{}", recall::status().await?);
+        Cmd::Status { store } => {
+            print!("{}", recall::status(store.resolve()).await?);
+            Ok(())
+        }
+        Cmd::Sync { store, force_reindex } => {
+            print!("{}", sync::run_sync(store.resolve(), force_reindex).await?);
             Ok(())
         }
         Cmd::Mcp => mcp::run().await,

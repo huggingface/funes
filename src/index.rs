@@ -1,6 +1,7 @@
 //! The `index` command: walk transcripts → parse → chunk → embed → write to lancedb.
-//! Incremental (size:mtime signature in state.json), idempotent per session
-//! (delete-by-session then add).
+//! Incremental on two levels: skip unchanged files (size:mtime in state.json), and within a
+//! changed session add only chunks whose id is new — a grown session (the same memory)
+//! contributes just its new turns, nothing is re-embedded or deleted.
 
 use crate::{chunk, db, parse};
 use anyhow::{anyhow, Result};
@@ -8,16 +9,18 @@ use arrow_array::types::Float32Type;
 use arrow_array::{FixedSizeListArray, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use futures::TryStreamExt;
 use lancedb::index::scalar::FtsIndexBuilder;
 use lancedb::index::vector::IvfPqIndexBuilder;
 use lancedb::index::Index;
-use std::collections::HashMap;
+use lancedb::query::{ExecutableQuery, QueryBase, Select};
+use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Instant, UNIX_EPOCH};
 
-const MODEL: &str = "BAAI/bge-small-en-v1.5";
+pub const MODEL: &str = "BAAI/bge-small-en-v1.5";
 pub const DIM: i32 = 384;
 const EMBED_BATCH: usize = 256;
 
@@ -25,27 +28,30 @@ const EMBED_BATCH: usize = 256;
 fn schema() -> Arc<Schema> {
     let utf8 = |name: &str| Field::new(name, DataType::Utf8, true);
     let i64f = |name: &str| Field::new(name, DataType::Int64, true);
-    Arc::new(Schema::new(vec![
-        utf8("id"),
-        utf8("text"),
-        utf8("session_id"),
-        utf8("project"),
-        utf8("turn_uuid"),
-        utf8("parent_uuid"),
-        i64f("seq"),
-        utf8("ts"),
-        utf8("role"),
-        utf8("block_type"),
-        utf8("tool_name"),
-        utf8("source_path"),
-        i64f("block_idx"),
-        i64f("split_idx"),
-        Field::new(
-            "vector",
-            DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), DIM),
-            true,
-        ),
-    ]))
+    Arc::new(Schema::new_with_metadata(
+        vec![
+            utf8("id"),
+            utf8("text"),
+            utf8("session_id"),
+            utf8("project"),
+            utf8("turn_uuid"),
+            utf8("parent_uuid"),
+            i64f("seq"),
+            utf8("ts"),
+            utf8("role"),
+            utf8("block_type"),
+            utf8("tool_name"),
+            utf8("source_path"),
+            i64f("block_idx"),
+            i64f("split_idx"),
+            Field::new(
+                "vector",
+                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), DIM),
+                true,
+            ),
+        ],
+        HashMap::from([("embedding_model".to_string(), MODEL.to_string())]),
+    ))
 }
 
 fn build_batch(chunks: &[chunk::Chunk], vectors: &[Vec<f32>]) -> Result<RecordBatch> {
@@ -79,6 +85,30 @@ fn build_batch(chunks: &[chunk::Chunk], vectors: &[Vec<f32>]) -> Result<RecordBa
     )?)
 }
 
+/// The chunk ids already stored for `session_id`. Re-indexing keeps only the chunks whose id
+/// isn't here, so a grown session (the same memory) contributes just its new turns — nothing is
+/// re-embedded or deleted. (A rewritten turn arrives under new ids, i.e. as another memory.)
+async fn existing_ids(table: &lancedb::Table, session_id: &str) -> Result<HashSet<String>> {
+    let mut stream = table
+        .query()
+        .only_if(format!("session_id = '{}'", session_id.replace('\'', "''")))
+        .select(Select::columns(&["id"]))
+        .execute()
+        .await?;
+    let mut ids = HashSet::new();
+    while let Some(batch) = stream.try_next().await? {
+        if let Some(col) = batch
+            .column_by_name("id")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+        {
+            for i in 0..batch.num_rows() {
+                ids.insert(col.value(i).to_string());
+            }
+        }
+    }
+    Ok(ids)
+}
+
 /// "size:mtime_secs" for incremental skip, or None if the file can't be stat'd.
 fn file_sig(p: &Path) -> Option<String> {
     let md = std::fs::metadata(p).ok()?;
@@ -91,23 +121,20 @@ pub async fn run_index(source: &Path, no_thinking: bool) -> Result<()> {
     let dir = db::funes_dir();
     std::fs::create_dir_all(&dir)?;
 
-    // Model-pin guard: refuse to mix embedding models in one index.
-    let meta_path = dir.join("meta.json");
-    let meta: Option<serde_json::Value> = std::fs::read_to_string(&meta_path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok());
-    if let Some(em) = meta
-        .as_ref()
-        .and_then(|m| m.get("embedding_model"))
-        .and_then(|x| x.as_str())
-    {
-        if em != MODEL {
-            return Err(anyhow!("index built with model {em:?}, refusing to mix with {MODEL:?}"));
-        }
-    }
-
     let conn = db::open_db().await?;
     let mut table_exists = conn.table_names().execute().await?.iter().any(|t| t == db::TABLE);
+
+    // Model-pin: refuse to add to a store built with a different embedding model. The id rides
+    // in the table's schema metadata; a pre-metadata store (no id) is tolerated and guarded only
+    // by the dimension check until it is reindexed.
+    if table_exists {
+        let stored = conn.open_table(db::TABLE).execute().await?.schema().await?;
+        if let Some(em) = stored.metadata().get("embedding_model") {
+            if em != MODEL {
+                return Err(anyhow!("index built with model {em:?}, refusing to mix with {MODEL:?}"));
+            }
+        }
+    }
 
     // Incremental state: path -> "size:mtime".
     let state_path = dir.join("state.json");
@@ -152,50 +179,73 @@ pub async fn run_index(source: &Path, no_thinking: bool) -> Result<()> {
             }
         };
         let chunks = chunk::chunks_from_turns(&turns, include_thinking);
+        let total_chunks = chunks.len();
 
-        if !chunks.is_empty() {
-            let n = chunks.len();
-            eprintln!("[{}/{}] {sid} ({project}) — {n} chunks", idx + 1, total);
-            let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
-            let t0 = Instant::now();
-            let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(n);
-            for group in texts.chunks(EMBED_BATCH) {
-                vectors.extend(embedder.embed(group, None)?);
-                let secs = t0.elapsed().as_secs_f64().max(0.001);
-                eprint!(
-                    "\r    embedded {}/{n}  ({:.0}/s)   ",
-                    vectors.len(),
-                    vectors.len() as f64 / secs
-                );
-                let _ = std::io::stderr().flush();
-            }
-            eprintln!(
-                "\r    embedded {n} chunks in {:.1}s          ",
-                t0.elapsed().as_secs_f64()
-            );
-
-            let batch = build_batch(&chunks, &vectors)?;
-            if table_exists {
-                let t = conn.open_table(db::TABLE).execute().await?;
-                t.delete(&format!("session_id = '{sid}'")).await?;
-                t.add(batch).execute().await?;
-            } else {
-                conn.create_table(db::TABLE, batch).execute().await?;
-                table_exists = true;
-            }
-            n_chunks += n as u64;
-        } else {
+        if total_chunks == 0 {
             eprintln!("[{}/{}] {sid} — no indexable content", idx + 1, total);
+        } else {
+            // Add-only-new: keep just the chunks whose id isn't already stored for this session.
+            // A grown session is the same memory — embed and add only its new turns, never
+            // re-embedding or deleting what's unchanged. (A rewritten turn lands under new ids.)
+            let table = if table_exists {
+                Some(conn.open_table(db::TABLE).execute().await?)
+            } else {
+                None
+            };
+            let existing = match &table {
+                Some(t) => existing_ids(t, &sid).await?,
+                None => HashSet::new(),
+            };
+            let new_chunks: Vec<chunk::Chunk> = chunks.into_iter().filter(|c| !existing.contains(&c.id)).collect();
+
+            if new_chunks.is_empty() {
+                eprintln!(
+                    "[{}/{}] {sid} ({project}) — {total_chunks} chunks, all already indexed",
+                    idx + 1,
+                    total
+                );
+            } else {
+                let n = new_chunks.len();
+                eprintln!(
+                    "[{}/{}] {sid} ({project}) — {n} new of {total_chunks} chunks",
+                    idx + 1,
+                    total
+                );
+                let texts: Vec<&str> = new_chunks.iter().map(|c| c.text.as_str()).collect();
+                let t0 = Instant::now();
+                let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(n);
+                for group in texts.chunks(EMBED_BATCH) {
+                    vectors.extend(embedder.embed(group, None)?);
+                    let secs = t0.elapsed().as_secs_f64().max(0.001);
+                    eprint!(
+                        "\r    embedded {}/{n}  ({:.0}/s)   ",
+                        vectors.len(),
+                        vectors.len() as f64 / secs
+                    );
+                    let _ = std::io::stderr().flush();
+                }
+                eprintln!(
+                    "\r    embedded {n} chunks in {:.1}s          ",
+                    t0.elapsed().as_secs_f64()
+                );
+
+                let batch = build_batch(&new_chunks, &vectors)?;
+                match &table {
+                    Some(t) => {
+                        t.add(batch).execute().await?;
+                    }
+                    None => {
+                        conn.create_table(db::TABLE, batch).execute().await?;
+                        table_exists = true;
+                    }
+                }
+                n_chunks += n as u64;
+            }
         }
         state.insert(key, sig); // remembered even when empty
                                 // Persist after each file so progress survives interruption (a kill is resumable).
         std::fs::write(&state_path, serde_json::to_string_pretty(&state)?)?;
         n_files += 1;
-    }
-
-    if meta.is_none() {
-        let m = serde_json::json!({"embedding_model": MODEL, "dim": DIM, "metric": "cosine"});
-        std::fs::write(&meta_path, serde_json::to_string_pretty(&m)?)?;
     }
 
     if table_exists {
