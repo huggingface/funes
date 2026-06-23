@@ -98,11 +98,7 @@ async fn sync_round_trip_create_append_recall() {
     let recall_reindexed = recall_remote(&uri, "SYNCSMOKE2 continuation").await;
     // The model id must travel with the store (stamped in the schema metadata, uploaded by sync).
     let remote_model = match Store::parse(&uri, None).open().await {
-        Ok(t) => t
-            .schema()
-            .await
-            .ok()
-            .and_then(|s| s.metadata().get("embedding_model").cloned()),
+        Ok(t) => t.schema().metadata.get("embedding_model").cloned(),
         Err(_) => None,
     };
 

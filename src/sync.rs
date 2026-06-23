@@ -15,27 +15,18 @@
 //!   crosses [`REINDEX_THRESHOLD`] (best-effort: a head-moved conflict is a warning, the next sync
 //!   retries), or eagerly with `--force-reindex` (retried until it lands).
 
-use crate::db;
+use crate::dataset;
 use crate::hf_dataset::{self, Appended, Reindexed};
 use crate::hub::{self, Store};
 use crate::scan;
 use anyhow::{bail, Context, Result};
 use arrow_array::{RecordBatch, RecordBatchIterator, StringArray};
-use futures::TryStreamExt;
 use hf_hub::repository::CommitOperation;
 use hf_hub::{HFClient, HFRepository, RepoTypeDataset};
 use lance::dataset::WriteParams;
-use lance::index::vector::VectorIndexParams;
-use lance::index::DatasetIndexExt;
 use lance::Dataset;
-use lance_index::scalar::InvertedIndexParams;
-use lance_index::vector::ivf::IvfBuildParams;
-use lance_index::vector::pq::PQBuildParams;
-use lance_index::IndexType;
-use lance_linalg::distance::MetricType;
-use lancedb::query::{ExecutableQuery, QueryBase, Select};
-use lancedb::Table;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 /// Reindex the remote once this many appended rows are sitting unindexed (answered by a
 /// brute-force scan until folded in). Bounds per-query cost, not sync count, and is stateless —
@@ -59,10 +50,10 @@ fn parse_hf(uri: &str) -> Result<(String, String, String)> {
 }
 
 /// Every chunk id in a store (a plain `id`-column scan; plain scans aren't limit-capped).
-async fn all_ids(table: &Table) -> Result<HashSet<String>> {
-    let mut stream = table.query().select(Select::columns(&["id"])).execute().await?;
+async fn all_ids(ds: &Dataset) -> Result<HashSet<String>> {
+    let batches = dataset::scan_rows(ds, &["id"], None, None).await?;
     let mut ids = HashSet::new();
-    while let Some(batch) = stream.try_next().await? {
+    for batch in batches {
         if let Some(col) = batch
             .column_by_name("id")
             .and_then(|c| c.as_any().downcast_ref::<StringArray>())
@@ -75,24 +66,18 @@ async fn all_ids(table: &Table) -> Result<HashSet<String>> {
     Ok(ids)
 }
 
-/// The to-push rows from the local store. First publish reads everything; an append reads just
-/// the missing ids via an `id IN (…)` predicate.
-async fn rows_to_push(local: &Table, to_push: &HashSet<String>, first_publish: bool) -> Result<Vec<RecordBatch>> {
-    let mut q = local.query();
-    if !first_publish {
+/// The to-push rows (all columns) from the local store. First publish reads everything; an append
+/// reads just the missing ids via an `id IN (…)` predicate.
+async fn rows_to_push(local: &Dataset, to_push: &HashSet<String>, first_publish: bool) -> Result<Vec<RecordBatch>> {
+    let filter = (!first_publish).then(|| {
         let list = to_push
             .iter()
             .map(|id| format!("'{id}'"))
             .collect::<Vec<_>>()
             .join(", ");
-        q = q.only_if(format!("id IN ({list})"));
-    }
-    let mut stream = q.execute().await?;
-    let mut batches = Vec::new();
-    while let Some(batch) = stream.try_next().await? {
-        batches.push(batch);
-    }
-    Ok(batches)
+        format!("id IN ({list})")
+    });
+    dataset::scan_rows(local, &[], filter.as_deref(), None).await
 }
 
 /// Chunk `text` values across the batches, for the pre-publish secret scan.
@@ -109,29 +94,6 @@ fn texts(batches: &[RecordBatch]) -> Vec<String> {
         }
     }
     out
-}
-
-/// IVF_PQ parameters sized from the `vector` column's dimension (matching lancedb's defaults).
-/// `None` if the schema has no fixed-size `vector` column.
-fn ivf_pq_params(schema: &arrow_schema::Schema) -> Option<VectorIndexParams> {
-    let arrow_schema::DataType::FixedSizeList(_, dim) = schema.field_with_name("vector").ok()?.data_type() else {
-        return None;
-    };
-    let dim = *dim as usize;
-    let num_sub_vectors = if dim.is_multiple_of(16) {
-        dim / 16
-    } else if dim.is_multiple_of(8) {
-        dim / 8
-    } else {
-        1
-    };
-    let mut pq = PQBuildParams::new(num_sub_vectors, 8);
-    pq.max_iters = 50;
-    Some(VectorIndexParams::with_ivf_pq_params(
-        MetricType::L2,
-        IvfBuildParams::default(),
-        pq,
-    ))
 }
 
 /// Publish the local store's new chunks to `target` (a remote store on the HF Hub). With
@@ -177,7 +139,7 @@ pub async fn run_sync(target: Store, force_reindex: bool) -> Result<String> {
         .context("building hf-hub client")?;
     let repo = client.dataset(owner, name);
     let rev = revision.unwrap_or_else(|| "main".to_string());
-    let dataset_uri = format!("{uri}/{}.lance", db::TABLE);
+    let dataset_uri = format!("{uri}/{}.lance", dataset::TABLE);
     let opts = HashMap::from([("hf_token".to_string(), token), ("revision".to_string(), rev.clone())]);
 
     // 3. Forced reindex with no new data: just refresh the remote index and stop.
@@ -190,10 +152,10 @@ pub async fn run_sync(target: Store, force_reindex: bool) -> Result<String> {
         ));
     }
 
-    // 4. Rows + pre-publish secret gate. Re-stamp each batch with the local table's schema so its
-    // metadata (the embedding-model id) rides along — query-result batches drop it, and on first
-    // publish that schema is what create_table persists.
-    let schema = local.schema().await?;
+    // 4. Rows + pre-publish secret gate. Re-stamp each batch with the local dataset's schema so its
+    // metadata (the embedding-model id) rides along — scan-result batches drop it, and on first
+    // publish that schema is what the new dataset persists.
+    let schema: arrow_schema::SchemaRef = Arc::new(arrow_schema::Schema::from(local.schema()));
     let batches: Vec<RecordBatch> = rows_to_push(&local, &to_push, first_publish)
         .await?
         .into_iter()
@@ -207,27 +169,12 @@ pub async fn run_sync(target: Store, force_reindex: bool) -> Result<String> {
         let staging = tempfile::tempdir()?;
         let db_dir = staging.path().join(&prefix);
         std::fs::create_dir_all(&db_dir)?;
-        let table_uri = format!("{}/{}.lance", db_dir.to_string_lossy(), db::TABLE);
+        let table_uri = dataset::table_uri(&db_dir.to_string_lossy());
         let reader = RecordBatchIterator::new(batches.into_iter().map(Ok), schema.clone());
         let mut ds = Dataset::write(reader, &table_uri, Some(WriteParams::default()))
             .await
             .context("building the dataset for first publish")?;
-        // Best-effort indexes: a small corpus can't train IVF (lance needs ~256 rows), and recall
-        // then falls back to brute force.
-        let _ = ds
-            .create_index(
-                &["text"],
-                IndexType::Inverted,
-                None,
-                &InvertedIndexParams::default(),
-                true,
-            )
-            .await;
-        if let Some(params) = ivf_pq_params(&schema) {
-            let _ = ds
-                .create_index(&["vector"], IndexType::Vector, None, &params, true)
-                .await;
-        }
+        dataset::build_indexes(&mut ds).await;
 
         let mut ops = Vec::new();
         for entry in walkdir::WalkDir::new(&db_dir).into_iter().filter_map(|e| e.ok()) {

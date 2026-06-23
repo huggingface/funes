@@ -1,24 +1,22 @@
 //! The read surface: `recall`, `list`, `get`, `status` over the existing index.
-//! Recall pipeline: hybrid (vector + BM25, fused by lancedb) → cross-encoder rerank →
+//! Recall pipeline: hybrid (vector + BM25, fused by reciprocal rank) → cross-encoder rerank →
 //! recency reweight → neighbor expansion. Every command returns a `String` so the CLI
 //! prints it and the MCP server returns it verbatim.
 
-use crate::db;
+use crate::dataset;
 use crate::hub::Store;
 use anyhow::{Context, Result};
-use arrow_array::{Int64Array, RecordBatch, StringArray};
+use arrow_array::{Float32Array, Int64Array, RecordBatch, StringArray, UInt64Array};
 use chrono::{DateTime, Utc};
 use fastembed::{EmbeddingModel, InitOptions, RerankInitOptions, RerankerModel, TextEmbedding, TextRerank};
 use futures::TryStreamExt;
+use lance::dataset::{Dataset, ROW_ID};
 use lance_index::scalar::FullTextSearchQuery;
-use lancedb::index::IndexType;
-use lancedb::query::{ExecutableQuery, QueryBase, QueryExecutionOptions, Select};
-use lancedb::Table;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 
-/// A plain scan reads the whole matching set; Lance has no "no limit", so cap high.
-const SCAN_LIMIT: usize = 10_000_000;
+/// Columns a [`Hit`] needs from a search scan.
+const HIT_COLS: &[&str] = &["text", "session_id", "project", "turn_uuid", "ts", "block_type", "seq"];
 
 /// Scanned row for neighbor expansion: (session_id, seq, turn_uuid, block_idx, split_idx, role, block_type, text).
 type NeighborRow = (String, i64, String, i64, i64, String, String, String);
@@ -134,62 +132,13 @@ pub async fn recall(
         .next()
         .context("empty embedding")?;
 
-    let table = store.open().await?;
-
+    let ds = store.open().await?;
     let where_clause = build_where(block_type.as_deref(), project.as_deref());
 
-    // The pipeline is hybrid (vector + BM25). The FTS index is a soft failure at index
-    // time, so it may be absent; without it, a hybrid query would error here. Fall back
-    // to vector-only search so recall still returns results.
-    let has_fts = table
-        .list_indices()
-        .await?
-        .iter()
-        .any(|ix| ix.index_type == IndexType::FTS && ix.columns.iter().any(|c| c == "text"));
-
-    let mut stream = if has_fts {
-        let mut q = table
-            .query()
-            .full_text_search(FullTextSearchQuery::new(query.clone()))
-            .nearest_to(qv)?
-            .limit(candidates);
-        if let Some(w) = &where_clause {
-            q = q.only_if(w);
-        }
-        q.execute_hybrid(QueryExecutionOptions::default()).await?
-    } else {
-        eprintln!("note: no full-text index; falling back to vector-only search");
-        let mut q = table.query().nearest_to(qv)?.limit(candidates);
-        if let Some(w) = &where_clause {
-            q = q.only_if(w);
-        }
-        q.execute().await?
-    };
-
-    let mut hits: Vec<Hit> = Vec::new();
-    while let Some(batch) = stream.try_next().await? {
-        let (text, sess, proj, turn, ts, bt) = (
-            scol(&batch, "text"),
-            scol(&batch, "session_id"),
-            scol(&batch, "project"),
-            scol(&batch, "turn_uuid"),
-            scol(&batch, "ts"),
-            scol(&batch, "block_type"),
-        );
-        let seq = icol(&batch, "seq");
-        for i in 0..batch.num_rows() {
-            hits.push(Hit {
-                text: sval(text, i),
-                session_id: sval(sess, i),
-                project: sval(proj, i),
-                turn_uuid: sval(turn, i),
-                seq: ival(seq, i),
-                ts: sval(ts, i),
-                block_type: sval(bt, i),
-                neighbors: Vec::new(),
-            });
-        }
-    }
+    // Hybrid retrieval: a vector ANN scan and a BM25 scan, fused by reciprocal rank. The FTS index
+    // can be absent (it's best-effort at index time), so the FTS leg is skipped when it errors —
+    // recall then falls back to vector-only.
+    let hits = hybrid_candidates(&ds, &qv, &query, candidates, where_clause.as_deref()).await?;
     if hits.is_empty() {
         return Ok("no results".to_string());
     }
@@ -220,7 +169,7 @@ pub async fn recall(
 
     if neighbors > 0 {
         let mut refs: Vec<&mut Hit> = top.iter_mut().map(|(h, _)| h).collect();
-        attach_neighbors(&table, &mut refs, neighbors).await?;
+        attach_neighbors(&ds, &mut refs, neighbors).await?;
     }
 
     let mut out = String::new();
@@ -243,9 +192,104 @@ pub async fn recall(
     Ok(out)
 }
 
+/// Vector ANN + BM25 candidates fused by reciprocal rank, top `candidates`. The FTS leg is
+/// best-effort: a store with no FTS index makes that scan error, and we fall back to vector-only.
+async fn hybrid_candidates(
+    ds: &Dataset,
+    qv: &[f32],
+    query: &str,
+    candidates: usize,
+    filter: Option<&str>,
+) -> Result<Vec<Hit>> {
+    let vector = vector_candidates(ds, qv, candidates, filter).await?;
+    let fts = fts_candidates(ds, query, candidates, filter).await.unwrap_or_default();
+    Ok(rrf_fuse(vector, fts, candidates))
+}
+
+/// Top-`limit` rows by vector distance, each with its `_rowid` (the fusion key).
+async fn vector_candidates(ds: &Dataset, qv: &[f32], limit: usize, filter: Option<&str>) -> Result<Vec<(u64, Hit)>> {
+    let query = Float32Array::from(qv.to_vec());
+    let mut scan = ds.scan();
+    scan.nearest("vector", &query, limit)?;
+    if let Some(f) = filter {
+        scan.filter(f)?;
+    }
+    scan.project(HIT_COLS)?;
+    scan.with_row_id();
+    collect_hits(scan).await
+}
+
+/// Top-`limit` rows by BM25 score, each with its `_rowid`. Errors if the store has no FTS index.
+async fn fts_candidates(ds: &Dataset, query: &str, limit: usize, filter: Option<&str>) -> Result<Vec<(u64, Hit)>> {
+    let mut scan = ds.scan();
+    scan.full_text_search(FullTextSearchQuery::new(query.to_string()))?;
+    if let Some(f) = filter {
+        scan.filter(f)?;
+    }
+    scan.project(HIT_COLS)?;
+    scan.with_row_id();
+    scan.limit(Some(limit as i64), None)?;
+    collect_hits(scan).await
+}
+
+/// Drain a scan into `(rowid, Hit)` rows, preserving the scan's order (its rank).
+async fn collect_hits(scan: lance::dataset::scanner::Scanner) -> Result<Vec<(u64, Hit)>> {
+    let mut stream = scan.try_into_stream().await?;
+    let mut out = Vec::new();
+    while let Some(batch) = stream.try_next().await? {
+        let rowid = batch
+            .column_by_name(ROW_ID)
+            .and_then(|c| c.as_any().downcast_ref::<UInt64Array>());
+        let (text, sess, proj, turn, ts, bt) = (
+            scol(&batch, "text"),
+            scol(&batch, "session_id"),
+            scol(&batch, "project"),
+            scol(&batch, "turn_uuid"),
+            scol(&batch, "ts"),
+            scol(&batch, "block_type"),
+        );
+        let seq = icol(&batch, "seq");
+        for i in 0..batch.num_rows() {
+            let id = rowid.map(|c| c.value(i)).unwrap_or(0);
+            out.push((
+                id,
+                Hit {
+                    text: sval(text, i),
+                    session_id: sval(sess, i),
+                    project: sval(proj, i),
+                    turn_uuid: sval(turn, i),
+                    seq: ival(seq, i),
+                    ts: sval(ts, i),
+                    block_type: sval(bt, i),
+                    neighbors: Vec::new(),
+                },
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// Reciprocal-rank fusion (k=60): each list contributes `1/(rank + 60)` to a row's score; return
+/// the top `limit` rows by fused score, deduped by `_rowid`.
+fn rrf_fuse(vector: Vec<(u64, Hit)>, fts: Vec<(u64, Hit)>, limit: usize) -> Vec<Hit> {
+    const K: f32 = 60.0;
+    let mut scores: HashMap<u64, f32> = HashMap::new();
+    let mut rows: HashMap<u64, Hit> = HashMap::new();
+    for list in [vector, fts] {
+        for (rank, (id, hit)) in list.into_iter().enumerate() {
+            *scores.entry(id).or_insert(0.0) += 1.0 / (rank as f32 + K);
+            rows.entry(id).or_insert(hit);
+        }
+    }
+    let mut ranked: Vec<(u64, f32)> = scores.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.truncate(limit);
+    ranked.into_iter().filter_map(|(id, _)| rows.remove(&id)).collect()
+}
+
 /// For each hit, pull chunks in the same session within `window` of its seq (excluding the
 /// hit's own turn) as surrounding context. One combined scan covers every hit.
-async fn attach_neighbors(table: &Table, hits: &mut [&mut Hit], window: i64) -> Result<()> {
+async fn attach_neighbors(ds: &Dataset, hits: &mut [&mut Hit], window: i64) -> Result<()> {
     if hits.is_empty() {
         return Ok(());
     }
@@ -272,16 +316,10 @@ async fn attach_neighbors(table: &Table, hits: &mut [&mut Hit], window: i64) -> 
         "block_idx",
         "split_idx",
     ];
-    let mut stream = table
-        .query()
-        .only_if(pred)
-        .select(Select::columns(&cols))
-        .limit(SCAN_LIMIT)
-        .execute()
-        .await?;
+    let batches = dataset::scan_rows(ds, &cols, Some(pred.as_str()), None).await?;
 
     let mut rows: Vec<NeighborRow> = Vec::new();
-    while let Some(batch) = stream.try_next().await? {
+    for batch in batches {
         let (sess, turn, role, bt, text) = (
             scol(&batch, "session_id"),
             scol(&batch, "turn_uuid"),
@@ -329,14 +367,11 @@ async fn attach_neighbors(table: &Table, hits: &mut [&mut Hit], window: i64) -> 
 
 /// Browse indexed sessions: one line per session, newest activity first.
 pub async fn list(store: Store, project: Option<String>, limit: usize) -> Result<String> {
-    let table = store.open().await?;
+    let ds = store.open().await?;
 
     let cols = ["session_id", "project", "ts", "role", "text"];
-    let mut q = table.query().select(Select::columns(&cols)).limit(SCAN_LIMIT);
-    if let Some(p) = &project {
-        q = q.only_if(format!("project = '{}'", esc(p)));
-    }
-    let mut stream = q.execute().await?;
+    let filter = project.as_deref().map(|p| format!("project = '{}'", esc(p)));
+    let batches = dataset::scan_rows(&ds, &cols, filter.as_deref(), None).await?;
 
     struct Sess {
         project: String,
@@ -346,7 +381,7 @@ pub async fn list(store: Store, project: Option<String>, limit: usize) -> Result
         first_user: Option<String>,
     }
     let mut sessions: BTreeMap<String, Sess> = BTreeMap::new();
-    while let Some(batch) = stream.try_next().await? {
+    for batch in batches {
         let (sess, proj, ts, role, text) = (
             scol(&batch, "session_id"),
             scol(&batch, "project"),
@@ -405,20 +440,15 @@ pub async fn list(store: Store, project: Option<String>, limit: usize) -> Result
 /// Drill down on a recall hit: the named turn plus the turns within `window` of it, each
 /// reassembled (blocks in order, splits de-overlapped) into one readable passage.
 pub async fn get(store: Store, session_id: String, turn_uuid: String, window: i64) -> Result<String> {
-    let table = store.open().await?;
+    let ds = store.open().await?;
 
     let cols = ["turn_uuid", "seq", "ts", "role", "text", "block_idx", "split_idx"];
-    let mut stream = table
-        .query()
-        .only_if(format!("session_id = '{}'", esc(&session_id)))
-        .select(Select::columns(&cols))
-        .limit(SCAN_LIMIT)
-        .execute()
-        .await?;
+    let filter = format!("session_id = '{}'", esc(&session_id));
+    let batches = dataset::scan_rows(&ds, &cols, Some(filter.as_str()), None).await?;
 
     // `text` is already the rendered chunk as stored by the indexer — do not re-render.
     let mut rows: Vec<TurnRow> = Vec::new();
-    while let Some(batch) = stream.try_next().await? {
+    for batch in batches {
         let (turn, ts, role, text) = (
             scol(&batch, "turn_uuid"),
             scol(&batch, "ts"),
@@ -487,12 +517,12 @@ pub async fn get(store: Store, session_id: String, turn_uuid: String, window: i6
 }
 
 pub async fn status(store: Store) -> Result<String> {
-    let table = store.open().await?;
-    let rows = table.count_rows(None).await?;
+    let ds = store.open().await?;
+    let rows = ds.count_rows(None).await?;
     Ok(format!(
         "store: {}\ntable:  {}\nchunks: {rows}\n",
         store.label(),
-        db::TABLE
+        dataset::TABLE
     ))
 }
 

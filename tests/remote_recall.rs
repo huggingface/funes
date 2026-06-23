@@ -4,14 +4,9 @@
 //!   export HF_FUNES_TEST_TOKEN="$(cat hf_funes_test_token.txt)"   # or CI secret
 //!   cargo test --test remote_recall -- --nocapture
 //!
-//! The fixture is a stable, synthetic, read-only dataset (no real data). Generating an
-//! ephemeral dataset per run is deferred to Step 5, once funes can push/delete itself.
+//! The fixture is a stable, synthetic, read-only dataset (no real data).
 
-use arrow_array::{Array, StringArray};
 use funes::hub::Store;
-use futures::TryStreamExt;
-use lance_index::scalar::FullTextSearchQuery;
-use lancedb::query::{ExecutableQuery, QueryBase};
 
 const FIXTURE_URI: &str = "hf://datasets/optimum-internal-testing/funes-test/fixture/lancedb";
 const MARKER: &str = "UNIQUEMARKERXYZZY";
@@ -29,57 +24,18 @@ async fn recall_from_remote_fixture() {
     // funes' Store::open authenticates via HF_TOKEN.
     std::env::set_var("HF_TOKEN", token);
 
-    let tbl = Store::parse(FIXTURE_URI, None)
+    // Open + read over the wire (also exercises the dim guard in open()).
+    let ds = Store::parse(FIXTURE_URI, None)
         .open()
         .await
         .expect("open remote fixture over hf://");
-
-    // Open + read over the wire (also exercises the dim guard in open()).
-    let n = tbl.count_rows(None).await.expect("count_rows");
+    let n = ds.count_rows(None).await.expect("count_rows");
     assert!(n > 0, "remote fixture is empty");
     eprintln!("remote rows = {n}");
 
-    // FTS path: the remote inverted index surfaces the unique marker chunk.
-    let mut fts = tbl
-        .query()
-        .full_text_search(FullTextSearchQuery::new(MARKER.to_string()))
-        .limit(5)
-        .execute()
-        .await
-        .expect("full-text search");
-    let mut found = false;
-    while let Some(batch) = fts.try_next().await.expect("fts batch") {
-        if let Some(col) = batch
-            .column_by_name("text")
-            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-        {
-            for i in 0..col.len() {
-                if col.value(i).contains(MARKER) {
-                    found = true;
-                }
-            }
-        }
-    }
-    assert!(found, "FTS did not surface the marker chunk from the remote fixture");
-
-    // Vector path: a nearest_to query exercises the remote IVF_PQ read (lazy, Xet-cached).
-    let mut vq = tbl
-        .query()
-        .nearest_to(vec![0.0f32; 384])
-        .expect("nearest_to")
-        .limit(5)
-        .execute()
-        .await
-        .expect("vector query");
-    let mut vrows = 0;
-    while let Some(batch) = vq.try_next().await.expect("vec batch") {
-        vrows += batch.num_rows();
-    }
-    assert!(vrows > 0, "vector query returned no rows from the remote fixture");
-    eprintln!("remote vector-query rows = {vrows}");
-
-    // End-to-end: the full recall pipeline (hybrid → rerank → recency → format) over the remote
-    // store surfaces the marker chunk. recency off, no neighbors, to keep the assertion tight.
+    // End-to-end: the full recall pipeline (hybrid vector + BM25 → rerank → recency → format) over
+    // the remote store surfaces the marker chunk — exercising both the remote IVF_PQ and inverted-
+    // index reads (lazy, Xet-cached). recency off, no neighbors, to keep the assertion tight.
     let out = funes::recall::recall(
         Store::parse(FIXTURE_URI, None),
         MARKER.to_string(),

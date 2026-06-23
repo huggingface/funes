@@ -2,16 +2,17 @@
 //!
 //! A [`Store`] is either the local index or a remote Lance dataset on the HF Hub. Remote
 //! reads go over `hf://` and are lazy by construction: the IVF_PQ index bounds which
-//! fragments a query touches, and lancedb's HF object store fetches only those byte ranges.
+//! fragments a query touches, and lance's HF object store fetches only those byte ranges.
 //! Caching across CLI runs is handled by the **Xet chunk cache** (`~/.cache/huggingface/xet`,
 //! on by default), so funes adds no cache layer of its own.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
-use lancedb::Table;
+use lance::dataset::Dataset;
 
-use crate::db;
+use crate::dataset;
 use crate::index::{DIM, MODEL};
 
 /// A store to recall from: a local Lance directory or a remote dataset on the HF Hub.
@@ -27,7 +28,7 @@ impl Store {
     /// The default local store (`$FUNES_DB` / `~/.funes` → `…/lancedb`).
     pub fn local() -> Self {
         Store::Local {
-            path: PathBuf::from(db::lancedb_uri()),
+            path: PathBuf::from(dataset::local_store_dir()),
         }
     }
 
@@ -63,28 +64,27 @@ impl Store {
         }
     }
 
-    /// Open the `chunks` table for this store; remote stores stream lazily over `hf://`.
+    /// Open the `chunks` dataset for this store; remote stores stream lazily over `hf://`.
     /// Rejects a store whose `vector` dimension isn't funes's `DIM` — a coarse guard, since a
     /// matching dimension doesn't prove a matching embedding model.
-    pub async fn open(&self) -> Result<Table> {
-        let tbl = match self {
+    pub async fn open(&self) -> Result<Dataset> {
+        let ds = match self {
             Store::Local { path } => {
-                let db = lancedb::connect(&path.to_string_lossy()).execute().await?;
-                db.open_table(db::TABLE).execute().await?
+                dataset::open(&dataset::table_uri(&path.to_string_lossy()), HashMap::new()).await?
             }
             Store::Remote { uri, revision } => {
-                let mut conn = lancedb::connect(uri);
+                let mut opts = HashMap::new();
                 if let Some(rev) = revision {
-                    conn = conn.storage_option("revision", rev.clone());
+                    opts.insert("revision".to_string(), rev.clone());
                 }
                 if let Some(token) = hf_token() {
-                    conn = conn.storage_option("hf_token", token);
+                    opts.insert("hf_token".to_string(), token);
                 }
-                conn.execute().await?.open_table(db::TABLE).execute().await?
+                dataset::open(&dataset::table_uri(uri), opts).await?
             }
         };
-        check_compat(&tbl).await?;
-        Ok(tbl)
+        check_compat(&ds)?;
+        Ok(ds)
     }
 }
 
@@ -128,8 +128,8 @@ fn token_from(env: impl Fn(&str) -> Option<String>, token_file: Option<&Path>) -
 /// funes's `DIM`, and — when the store records an embedding model in its schema metadata — that
 /// model must be funes's. A store with no recorded model (pre-metadata) is guarded by the
 /// dimension alone.
-async fn check_compat(tbl: &Table) -> Result<()> {
-    let schema = tbl.schema().await?;
+fn check_compat(ds: &Dataset) -> Result<()> {
+    let schema = arrow_schema::Schema::from(ds.schema());
 
     if let Some(model) = schema.metadata().get("embedding_model") {
         if model != MODEL {
@@ -161,7 +161,7 @@ mod tests {
     use std::sync::Arc;
 
     use arrow_array::types::Float32Type;
-    use arrow_array::{ArrayRef, FixedSizeListArray, Int64Array, RecordBatch};
+    use arrow_array::{ArrayRef, FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator};
     use arrow_schema::{DataType, Field, Schema};
 
     #[test]
@@ -249,14 +249,16 @@ mod tests {
         assert!(matches!(resolve_from(None, None, blank), Store::Local { .. }));
     }
 
-    // --- dim guard against real local tables ---
+    // --- dim guard against real local datasets ---
 
-    async fn table_with(fields: Vec<Field>, columns: Vec<ArrayRef>) -> (tempfile::TempDir, Table) {
+    async fn dataset_with(fields: Vec<Field>, columns: Vec<ArrayRef>) -> (tempfile::TempDir, Dataset) {
         let dir = tempfile::tempdir().unwrap();
-        let db = lancedb::connect(dir.path().to_str().unwrap()).execute().await.unwrap();
-        let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap();
-        let tbl = db.create_table("chunks", batch).execute().await.unwrap();
-        (dir, tbl)
+        let schema = Arc::new(Schema::new(fields));
+        let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+        let uri = format!("{}/chunks.lance", dir.path().to_str().unwrap());
+        let reader = RecordBatchIterator::new(vec![Ok(batch)], schema);
+        let ds = Dataset::write(reader, &uri, None).await.unwrap();
+        (dir, ds)
     }
 
     fn ids(n: usize) -> ArrayRef {
@@ -280,33 +282,33 @@ mod tests {
 
     #[tokio::test]
     async fn check_compat_accepts_matching_dimension() {
-        let (_d, tbl) = table_with(
+        let (_d, ds) = dataset_with(
             vec![Field::new("id", DataType::Int64, true), vector_field(DIM)],
             vec![ids(2), vectors(2, DIM)],
         )
         .await;
-        assert!(check_compat(&tbl).await.is_ok());
+        assert!(check_compat(&ds).is_ok());
     }
 
     #[tokio::test]
     async fn check_compat_rejects_wrong_dimension() {
-        let (_d, tbl) = table_with(
+        let (_d, ds) = dataset_with(
             vec![Field::new("id", DataType::Int64, true), vector_field(DIM / 2)],
             vec![ids(2), vectors(2, DIM / 2)],
         )
         .await;
-        let err = check_compat(&tbl).await.unwrap_err().to_string();
+        let err = check_compat(&ds).unwrap_err().to_string();
         assert!(err.contains("different embedding model"), "{err}");
     }
 
     #[tokio::test]
     async fn check_compat_rejects_missing_or_scalar_vector() {
         // no vector column
-        let (_d, t1) = table_with(vec![Field::new("id", DataType::Int64, true)], vec![ids(2)]).await;
-        assert!(check_compat(&t1).await.is_err());
+        let (_d, d1) = dataset_with(vec![Field::new("id", DataType::Int64, true)], vec![ids(2)]).await;
+        assert!(check_compat(&d1).is_err());
 
         // a `vector` column that isn't a fixed-size list
-        let (_d2, t2) = table_with(
+        let (_d2, d2) = dataset_with(
             vec![
                 Field::new("id", DataType::Int64, true),
                 Field::new("vector", DataType::Int64, true),
@@ -314,20 +316,21 @@ mod tests {
             vec![ids(2), ids(2)],
         )
         .await;
-        assert!(check_compat(&t2).await.is_err());
+        assert!(check_compat(&d2).is_err());
     }
 
     #[tokio::test]
     async fn check_compat_rejects_wrong_model() {
         let dir = tempfile::tempdir().unwrap();
-        let db = lancedb::connect(dir.path().to_str().unwrap()).execute().await.unwrap();
         let schema = Arc::new(Schema::new_with_metadata(
             vec![Field::new("id", DataType::Int64, true), vector_field(DIM)],
             HashMap::from([("embedding_model".to_string(), "some/other-model".to_string())]),
         ));
-        let batch = RecordBatch::try_new(schema, vec![ids(2), vectors(2, DIM)]).unwrap();
-        let tbl = db.create_table("chunks", batch).execute().await.unwrap();
-        let err = check_compat(&tbl).await.unwrap_err().to_string();
+        let batch = RecordBatch::try_new(schema.clone(), vec![ids(2), vectors(2, DIM)]).unwrap();
+        let uri = format!("{}/chunks.lance", dir.path().to_str().unwrap());
+        let reader = RecordBatchIterator::new(vec![Ok(batch)], schema);
+        let ds = Dataset::write(reader, &uri, None).await.unwrap();
+        let err = check_compat(&ds).unwrap_err().to_string();
         assert!(err.contains("other-model") && err.contains("not funes's"), "{err}");
     }
 }

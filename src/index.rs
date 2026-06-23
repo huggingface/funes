@@ -1,19 +1,15 @@
-//! The `index` command: walk transcripts → parse → chunk → embed → write to lancedb.
+//! The `index` command: walk transcripts → parse → chunk → embed → write to a local Lance dataset.
 //! Incremental on two levels: skip unchanged files (size:mtime in state.json), and within a
 //! changed session add only chunks whose id is new — a grown session (the same memory)
 //! contributes just its new turns, nothing is re-embedded or deleted.
 
-use crate::{chunk, db, parse};
+use crate::{chunk, dataset, parse};
 use anyhow::{anyhow, Result};
 use arrow_array::types::Float32Type;
-use arrow_array::{FixedSizeListArray, Int64Array, RecordBatch, StringArray};
+use arrow_array::{FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
-use futures::TryStreamExt;
-use lancedb::index::scalar::FtsIndexBuilder;
-use lancedb::index::vector::IvfPqIndexBuilder;
-use lancedb::index::Index;
-use lancedb::query::{ExecutableQuery, QueryBase, Select};
+use lance::dataset::{Dataset, WriteParams};
 use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
 use std::path::Path;
@@ -88,15 +84,11 @@ fn build_batch(chunks: &[chunk::Chunk], vectors: &[Vec<f32>]) -> Result<RecordBa
 /// The chunk ids already stored for `session_id`. Re-indexing keeps only the chunks whose id
 /// isn't here, so a grown session (the same memory) contributes just its new turns — nothing is
 /// re-embedded or deleted. (A rewritten turn arrives under new ids, i.e. as another memory.)
-async fn existing_ids(table: &lancedb::Table, session_id: &str) -> Result<HashSet<String>> {
-    let mut stream = table
-        .query()
-        .only_if(format!("session_id = '{}'", session_id.replace('\'', "''")))
-        .select(Select::columns(&["id"]))
-        .execute()
-        .await?;
+async fn existing_ids(ds: &Dataset, session_id: &str) -> Result<HashSet<String>> {
+    let filter = format!("session_id = '{}'", session_id.replace('\'', "''"));
+    let batches = dataset::scan_rows(ds, &["id"], Some(filter.as_str()), None).await?;
     let mut ids = HashSet::new();
-    while let Some(batch) = stream.try_next().await? {
+    for batch in batches {
         if let Some(col) = batch
             .column_by_name("id")
             .and_then(|c| c.as_any().downcast_ref::<StringArray>())
@@ -118,18 +110,18 @@ fn file_sig(p: &Path) -> Option<String> {
 
 pub async fn run_index(source: &Path, no_thinking: bool) -> Result<()> {
     let include_thinking = !no_thinking;
-    let dir = db::funes_dir();
+    let dir = dataset::funes_dir();
     std::fs::create_dir_all(&dir)?;
 
-    let conn = db::open_db().await?;
-    let mut table_exists = conn.table_names().execute().await?.iter().any(|t| t == db::TABLE);
+    let uri = dataset::table_uri(&dataset::local_store_dir());
+    let mut ds = dataset::open(&uri, HashMap::new()).await.ok();
 
     // Model-pin: refuse to add to a store built with a different embedding model. The id rides
-    // in the table's schema metadata; a pre-metadata store (no id) is tolerated and guarded only
+    // in the dataset's schema metadata; a pre-metadata store (no id) is tolerated and guarded only
     // by the dimension check until it is reindexed.
-    if table_exists {
-        let stored = conn.open_table(db::TABLE).execute().await?.schema().await?;
-        if let Some(em) = stored.metadata().get("embedding_model") {
+    if let Some(ds) = &ds {
+        let schema = arrow_schema::Schema::from(ds.schema());
+        if let Some(em) = schema.metadata().get("embedding_model") {
             if em != MODEL {
                 return Err(anyhow!("index built with model {em:?}, refusing to mix with {MODEL:?}"));
             }
@@ -187,13 +179,8 @@ pub async fn run_index(source: &Path, no_thinking: bool) -> Result<()> {
             // Add-only-new: keep just the chunks whose id isn't already stored for this session.
             // A grown session is the same memory — embed and add only its new turns, never
             // re-embedding or deleting what's unchanged. (A rewritten turn lands under new ids.)
-            let table = if table_exists {
-                Some(conn.open_table(db::TABLE).execute().await?)
-            } else {
-                None
-            };
-            let existing = match &table {
-                Some(t) => existing_ids(t, &sid).await?,
+            let existing = match &ds {
+                Some(d) => existing_ids(d, &sid).await?,
                 None => HashSet::new(),
             };
             let new_chunks: Vec<chunk::Chunk> = chunks.into_iter().filter(|c| !existing.contains(&c.id)).collect();
@@ -230,13 +217,13 @@ pub async fn run_index(source: &Path, no_thinking: bool) -> Result<()> {
                 );
 
                 let batch = build_batch(&new_chunks, &vectors)?;
-                match &table {
-                    Some(t) => {
-                        t.add(batch).execute().await?;
+                let reader = RecordBatchIterator::new(vec![Ok(batch)], schema());
+                match &mut ds {
+                    Some(d) => {
+                        d.append(reader, None).await?;
                     }
                     None => {
-                        conn.create_table(db::TABLE, batch).execute().await?;
-                        table_exists = true;
+                        ds = Some(Dataset::write(reader, &uri, Some(WriteParams::default())).await?);
                     }
                 }
                 n_chunks += n as u64;
@@ -248,29 +235,13 @@ pub async fn run_index(source: &Path, no_thinking: bool) -> Result<()> {
         n_files += 1;
     }
 
-    if table_exists {
-        let t = conn.open_table(db::TABLE).execute().await?;
-        eprintln!("building BM25 full-text index…");
-        if let Err(e) = t
-            .create_index(&["text"], Index::FTS(FtsIndexBuilder::default()))
-            .execute()
-            .await
-        {
-            eprintln!("  (fts index skipped: {e})");
-        }
-
-        // Vector ANN index: bounds how much a query reads, which is what makes recall over a
-        // remote (hf://) tier lazy instead of a full-column scan. lance enforces its own
-        // training minimum (256 rows for default IVF_PQ) and errors cleanly below it, so just
-        // attempt the build and fall back to brute-force vector search on any failure.
-        eprintln!("building IVF_PQ vector index…");
-        if let Err(e) = t
-            .create_index(&["vector"], Index::IvfPq(IvfPqIndexBuilder::default()))
-            .execute()
-            .await
-        {
-            eprintln!("  (vector index skipped: {e})");
-        }
+    // Build the FTS + IVF_PQ indexes (best-effort). The vector index bounds how much a query reads,
+    // which is what makes recall over a remote (hf://) tier lazy instead of a full-column scan; lance
+    // enforces its own training minimum (256 rows for default IVF_PQ) and skips below it, so recall
+    // falls back to brute-force vector search.
+    if let Some(d) = &mut ds {
+        eprintln!("building FTS + IVF_PQ indexes…");
+        dataset::build_indexes(d).await;
     }
 
     println!("indexed files={n_files} skipped={n_skipped} chunks={n_chunks}");
