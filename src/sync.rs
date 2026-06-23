@@ -20,13 +20,19 @@ use crate::hf_dataset::{self, Appended, Reindexed};
 use crate::hub::{self, Store};
 use crate::scan;
 use anyhow::{bail, Context, Result};
-use arrow_array::{RecordBatch, StringArray};
+use arrow_array::{RecordBatch, RecordBatchIterator, StringArray};
 use futures::TryStreamExt;
 use hf_hub::repository::CommitOperation;
 use hf_hub::{HFClient, HFRepository, RepoTypeDataset};
-use lancedb::index::scalar::FtsIndexBuilder;
-use lancedb::index::vector::IvfPqIndexBuilder;
-use lancedb::index::Index;
+use lance::dataset::WriteParams;
+use lance::index::vector::VectorIndexParams;
+use lance::index::DatasetIndexExt;
+use lance::Dataset;
+use lance_index::scalar::InvertedIndexParams;
+use lance_index::vector::ivf::IvfBuildParams;
+use lance_index::vector::pq::PQBuildParams;
+use lance_index::IndexType;
+use lance_linalg::distance::MetricType;
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
 use lancedb::Table;
 use std::collections::{HashMap, HashSet};
@@ -105,6 +111,29 @@ fn texts(batches: &[RecordBatch]) -> Vec<String> {
     out
 }
 
+/// IVF_PQ parameters sized from the `vector` column's dimension (matching lancedb's defaults).
+/// `None` if the schema has no fixed-size `vector` column.
+fn ivf_pq_params(schema: &arrow_schema::Schema) -> Option<VectorIndexParams> {
+    let arrow_schema::DataType::FixedSizeList(_, dim) = schema.field_with_name("vector").ok()?.data_type() else {
+        return None;
+    };
+    let dim = *dim as usize;
+    let num_sub_vectors = if dim.is_multiple_of(16) {
+        dim / 16
+    } else if dim.is_multiple_of(8) {
+        dim / 8
+    } else {
+        1
+    };
+    let mut pq = PQBuildParams::new(num_sub_vectors, 8);
+    pq.max_iters = 50;
+    Some(VectorIndexParams::with_ivf_pq_params(
+        MetricType::L2,
+        IvfBuildParams::default(),
+        pq,
+    ))
+}
+
 /// Publish the local store's new chunks to `target` (a remote store on the HF Hub). With
 /// `force_reindex`, refresh the remote index after the data commit (retrying until it lands) even
 /// if the unindexed backlog is below [`REINDEX_THRESHOLD`]; with no new chunks pending it's a pure
@@ -178,16 +207,27 @@ pub async fn run_sync(target: Store, force_reindex: bool) -> Result<String> {
         let staging = tempfile::tempdir()?;
         let db_dir = staging.path().join(&prefix);
         std::fs::create_dir_all(&db_dir)?;
-        let conn = lancedb::connect(&db_dir.to_string_lossy()).execute().await?;
-        let t = conn.create_table(db::TABLE, batches).execute().await?;
-        let _ = t
-            .create_index(&["text"], Index::FTS(FtsIndexBuilder::default()))
-            .execute()
+        let table_uri = format!("{}/{}.lance", db_dir.to_string_lossy(), db::TABLE);
+        let reader = RecordBatchIterator::new(batches.into_iter().map(Ok), schema.clone());
+        let mut ds = Dataset::write(reader, &table_uri, Some(WriteParams::default()))
+            .await
+            .context("building the dataset for first publish")?;
+        // Best-effort indexes: a small corpus can't train IVF (lance needs ~256 rows), and recall
+        // then falls back to brute force.
+        let _ = ds
+            .create_index(
+                &["text"],
+                IndexType::Inverted,
+                None,
+                &InvertedIndexParams::default(),
+                true,
+            )
             .await;
-        let _ = t
-            .create_index(&["vector"], Index::IvfPq(IvfPqIndexBuilder::default()))
-            .execute()
-            .await;
+        if let Some(params) = ivf_pq_params(&schema) {
+            let _ = ds
+                .create_index(&["vector"], IndexType::Vector, None, &params, true)
+                .await;
+        }
 
         let mut ops = Vec::new();
         for entry in walkdir::WalkDir::new(&db_dir).into_iter().filter_map(|e| e.ok()) {

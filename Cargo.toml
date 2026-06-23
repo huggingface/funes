@@ -14,8 +14,9 @@ arrow-schema = "58"              # Schema/Field/DataType for building batches
 lance-index = "=7.0.0"           # FullTextSearchQuery for hybrid (must match lance 7.0)
 lance = "=7.0.0"                 # native Dataset append over hf:// for capture-commit sync
 lance-io = "=7.0.0"              # WrappingObjectStore: intercept Lance's writes during sync
+lance-linalg = "=7.0.0"         # MetricType, to build the IVF_PQ vector index without lancedb
 object_store = "=0.13.2"         # the ObjectStore trait the capture wrapper implements (matches lance-io)
-async-trait = "0.1"              # for the ObjectStore impl in src/capture.rs
+async-trait = "0.1"              # for the ObjectStore impl in src/capture_store.rs
 bytes = "1"                      # captured write payloads
 chrono = "0.4"                   # recency weighting
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std"] }
