@@ -115,6 +115,12 @@ pub async fn run_push(target: Store, force_reindex: bool) -> Result<String> {
         }
     };
 
+    // Fail fast when offline. Otherwise the remote read below sees an empty set, mistakes the
+    // unreachable remote for a first publish, and builds the whole dataset before the commit fails.
+    if !hub::remote_reachable(&uri).await {
+        bail!("{uri} is unreachable — can't push while offline (check your connection)");
+    }
+
     // 1. Delta: local_ids − remote_ids (remote absent => first publish).
     let local = Store::local().open().await?;
     let local_ids = all_ids(&local).await?;
