@@ -7,12 +7,14 @@
 
 pub mod capture_store;
 pub mod chunk;
+pub mod config;
 pub mod dataset;
+pub mod hello;
 pub mod hf_dataset;
 pub mod hub;
 pub mod index;
 pub mod mcp;
 pub mod parse;
+pub mod push;
 pub mod recall;
 pub mod scan;
-pub mod sync;

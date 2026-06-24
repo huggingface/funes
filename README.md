@@ -64,30 +64,76 @@ Prebuilt binaries are on [GitHub Releases](https://github.com/huggingface/funes/
 
 ```bash
 curl -fsSL https://github.com/huggingface/funes/releases/latest/download/funes-x86_64-linux -o funes
-chmod +x funes && ./funes status
+chmod +x funes && ./funes recall "how do I get started with funes"
 ```
+
+funes works the moment it lands: with no index yet, `recall` (and `get` / `list`) answer
+from a small **built-in guide to funes itself**, so you can feel recall before indexing
+anything. `funes status` tells you whether you're reading that built-in guide or your own index.
 
 To build it yourself instead, see [Building from source](#building-from-source).
 
-## Use
+## Getting started
 
-> `funes` is a single Rust binary (`lancedb` + `fastembed-rs`, CPU).
+> `funes` is a single Rust binary (`lance` + `fastembed-rs`, CPU). `index` writes; `recall`
+> / `list` / `get` / `status` read.
+
+**1. Index your own history.**
 
 ```bash
-funes index                                       # index ~/.claude/projects (incremental)
+funes index                                       # parse → chunk → embed ~/.claude/projects → ~/.funes
+```
+
+This replaces the built-in guide with recall over your real sessions. Re-run it to pick up
+new work — it's incremental (only new turns are embedded), so it's cheap to run often.
+
+**2. Recall.**
+
+```bash
 funes recall "how do we parse transcripts"        # hybrid → rerank → recency → neighbors
-funes recall "the lancedb schema" --type tool_use --project <project>
+funes recall "the lance schema" --type tool_use --project <project>
 funes list --project <project>                    # browse indexed sessions
 funes get <session_id> <turn_uuid>                # expand a hit into its full surrounding turns
 funes status
-funes mcp                                         # run as an MCP server over stdio
 ```
 
-`index` writes; `recall` / `list` / `get` / `status` read. `recall` narrows with `--type`
-(`text|thinking|tool_use|tool_result`) and `--project`, and each hit prints a
-`→ get <session_id> <turn_uuid>` line for drilling down into the full surrounding turns. An
-agent consumes funes either by shelling out to the CLI or via the `recall` / `get` MCP tools
-(`funes mcp`).
+`recall` narrows with `--type` (`text|thinking|tool_use|tool_result`) and `--project`, and
+each hit prints a `→ get <session_id> <turn_uuid>` line for drilling into the full
+surrounding turns.
+
+**3. Let your agent recall on its own.** Register funes as an MCP server, so Claude Code (or
+Cursor, …) gets `recall` and `get` as tools:
+
+```bash
+claude mcp add funes -- /path/to/funes mcp        # `funes mcp` runs the stdio server
+```
+
+New sessions then get the tools **plus** instructions on when to use them, so the agent
+reaches for prior decisions and rationale without you pasting context. (The repo also ships
+an optional skill at [skills/funes/](skills/funes/) for richer recall-triggering and a
+`/funes` command — optional, since the MCP server already carries when-to-use instructions.)
+
+**4. Share it across machines or a team (optional).** Attach a dataset repo you own on the
+Hugging Face Hub as your **active store**. From then on `index` publishes to it and `recall`
+reads it — no per-command flags:
+
+```bash
+funes use acme/kb        # attach hf://datasets/acme/kb as the active store (persisted in funes.json)
+funes index              # builds locally, then publishes to the active remote
+funes recall "..."       # reads the active remote
+funes use local          # detach — back to the local index
+```
+
+`funes use` is the one place you name a store; everything else just uses it. To **query a
+different remote for a single call** — say, someone's published memories on a topic — without
+changing your default, pass `--remote`:
+
+```bash
+funes recall "..." --remote other-org/subject-kb
+```
+
+`push` is a manual re-publish to the active remote (`index` already publishes on its own). You
+never need the Hub to use funes locally — it's a tier you opt into.
 
 ## Building from source
 

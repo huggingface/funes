@@ -21,26 +21,27 @@ pub enum Store {
     /// A local Lance store directory (e.g. `~/.funes/lancedb`).
     Local { path: PathBuf },
     /// A remote Lance dataset on the HF Hub, e.g. `hf://datasets/<org>/<repo>`.
-    Remote { uri: String, revision: Option<String> },
+    Remote { uri: String },
 }
 
 impl Store {
-    /// The default local store (`$FUNES_DB` / `~/.funes` → `…/lancedb`).
+    /// The default local store (`$FUNES_HOME` / `~/.funes` → `…/lancedb`).
     pub fn local() -> Self {
         Store::Local {
             path: PathBuf::from(dataset::local_store_dir()),
         }
     }
 
-    /// Parse a store spec: `"local"` → the default local store; an `hf://…` URI → a remote
-    /// dataset; anything else → a local store at that path.
-    pub fn parse(spec: &str, revision: Option<String>) -> Self {
+    /// Parse a store spec: `"local"` → the local store; an `hf://…` URI or `<org>/<repo>` shorthand
+    /// → a remote; a path (`/`, `.`, `~`, or a bare name) → a local store there.
+    pub fn parse(spec: &str) -> Self {
         if spec == "local" {
             Store::local()
         } else if spec.starts_with("hf://") {
+            Store::Remote { uri: spec.to_string() }
+        } else if is_remote_shorthand(spec) {
             Store::Remote {
-                uri: spec.to_string(),
-                revision,
+                uri: format!("hf://datasets/{spec}"),
             }
         } else {
             Store::Local {
@@ -49,11 +50,16 @@ impl Store {
         }
     }
 
-    /// Resolve the store the read commands should use: an explicit `spec` (a CLI `--store`)
-    /// wins, else `$FUNES_STORE`, else the default local store. `revision` is taken from the
-    /// flag, else `$FUNES_REVISION` (only meaningful for a remote `hf://` store).
-    pub fn resolve(spec: Option<String>, revision: Option<String>) -> Self {
-        resolve_from(spec, revision, |k| std::env::var(k).ok())
+    /// Resolve the store the read commands should use: an explicit `spec` (a CLI `--remote`) wins,
+    /// else the persisted active store (`funes use`), else the local index.
+    pub fn resolve(spec: Option<String>) -> Self {
+        resolve_with(spec, crate::config::load().remote)
+    }
+
+    /// True only for the default local store (`$FUNES_HOME`/`~/.funes`), so the hello-world
+    /// fallback fires only there — never masking a missing explicit store.
+    pub fn is_default_local(&self) -> bool {
+        matches!(self, Store::Local { path } if path.as_path() == Path::new(&dataset::local_store_dir()))
     }
 
     /// Short label for output/provenance.
@@ -72,11 +78,8 @@ impl Store {
             Store::Local { path } => {
                 dataset::open(&dataset::table_uri(&path.to_string_lossy()), HashMap::new()).await?
             }
-            Store::Remote { uri, revision } => {
+            Store::Remote { uri } => {
                 let mut opts = HashMap::new();
-                if let Some(rev) = revision {
-                    opts.insert("revision".to_string(), rev.clone());
-                }
                 if let Some(token) = hf_token() {
                     opts.insert("hf_token".to_string(), token);
                 }
@@ -88,15 +91,18 @@ impl Store {
     }
 }
 
-/// Pure core of [`Store::resolve`]: explicit `spec` wins over `$FUNES_STORE`, explicit
-/// `revision` over `$FUNES_REVISION`; blank env values are ignored. Split out so it's testable
-/// without mutating process env.
-fn resolve_from(spec: Option<String>, revision: Option<String>, env: impl Fn(&str) -> Option<String>) -> Store {
-    let nonempty = |k: &str| env(k).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
-    match spec.or_else(|| nonempty("FUNES_STORE")) {
-        Some(s) => Store::parse(&s, revision.or_else(|| nonempty("FUNES_REVISION"))),
+/// Pure core of [`Store::resolve`]: explicit `spec` over the active store, else local.
+fn resolve_with(spec: Option<String>, active: Option<String>) -> Store {
+    let clean = |o: Option<String>| o.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    match clean(spec).or_else(|| clean(active)) {
+        Some(s) => Store::parse(&s),
         None => Store::local(),
     }
+}
+
+/// `<org>/<repo>[/…]` with no scheme and not a path (`/` `.` `~`) → an HF dataset shorthand.
+fn is_remote_shorthand(spec: &str) -> bool {
+    !spec.starts_with(['/', '.', '~']) && spec.contains('/')
 }
 
 /// HF token from the standard env var, else the `huggingface_hub` cached token file.
@@ -165,28 +171,30 @@ mod tests {
     use arrow_schema::{DataType, Field, Schema};
 
     #[test]
-    fn store_parse_local_path_remote() {
-        assert!(matches!(Store::parse("local", None), Store::Local { .. }));
-        match Store::parse("/tmp/store", None) {
+    fn store_parse_local_remote_and_shorthand() {
+        assert!(matches!(Store::parse("local"), Store::Local { .. }));
+        // explicit local paths (leading / . ~)
+        match Store::parse("/tmp/store") {
             Store::Local { path } => assert_eq!(path, std::path::PathBuf::from("/tmp/store")),
             _ => panic!("expected a local path"),
         }
-        match Store::parse("hf://datasets/org/kb", Some("abc".into())) {
-            Store::Remote { uri, revision } => {
-                assert_eq!(uri, "hf://datasets/org/kb");
-                assert_eq!(revision.as_deref(), Some("abc"));
-            }
+        assert!(matches!(Store::parse("./rel/dir"), Store::Local { .. }));
+        // full hf:// URI
+        match Store::parse("hf://datasets/org/kb") {
+            Store::Remote { uri } => assert_eq!(uri, "hf://datasets/org/kb"),
             _ => panic!("expected remote"),
+        }
+        // org/repo shorthand expands to a dataset URI
+        match Store::parse("acme/kb") {
+            Store::Remote { uri } => assert_eq!(uri, "hf://datasets/acme/kb"),
+            _ => panic!("expected remote from shorthand"),
         }
     }
 
     #[test]
     fn store_label() {
         assert_eq!(Store::Local { path: "/tmp/x".into() }.label(), "/tmp/x");
-        assert_eq!(
-            Store::parse("hf://datasets/org/kb", None).label(),
-            "hf://datasets/org/kb"
-        );
+        assert_eq!(Store::parse("hf://datasets/org/kb").label(), "hf://datasets/org/kb");
     }
 
     #[test]
@@ -213,40 +221,30 @@ mod tests {
     }
 
     #[test]
-    fn resolve_prefers_explicit_then_env_then_local() {
-        let none = |_: &str| None;
-        // Explicit spec + revision win outright.
-        match resolve_from(Some("hf://datasets/o/r".into()), Some("v1".into()), none) {
-            Store::Remote { uri, revision } => {
-                assert_eq!(uri, "hf://datasets/o/r");
-                assert_eq!(revision.as_deref(), Some("v1"));
-            }
-            _ => panic!("expected remote"),
+    fn resolve_prefers_explicit_then_active_then_local() {
+        // Explicit spec wins, with the org/repo shorthand applied.
+        match resolve_with(Some("acme/kb".into()), Some("hf://datasets/active/one".into())) {
+            Store::Remote { uri } => assert_eq!(uri, "hf://datasets/acme/kb"),
+            _ => panic!("explicit spec should win"),
         }
-        // No spec, no env -> default local store.
-        assert!(matches!(resolve_from(None, None, none), Store::Local { .. }));
-        // No explicit spec -> $FUNES_STORE used, $FUNES_REVISION fills the revision.
-        let env = |k: &str| match k {
-            "FUNES_STORE" => Some("hf://datasets/e/r".to_string()),
-            "FUNES_REVISION" => Some("envrev".to_string()),
-            _ => None,
-        };
-        match resolve_from(None, None, env) {
-            Store::Remote { uri, revision } => {
-                assert_eq!(uri, "hf://datasets/e/r");
-                assert_eq!(revision.as_deref(), Some("envrev"));
-            }
-            _ => panic!("expected remote from env"),
+        // No spec -> the persisted active store.
+        match resolve_with(None, Some("hf://datasets/active/one".into())) {
+            Store::Remote { uri } => assert_eq!(uri, "hf://datasets/active/one"),
+            _ => panic!("expected the active store"),
         }
-        // An explicit (local) spec beats a remote $FUNES_STORE.
-        let env2 = |k: &str| (k == "FUNES_STORE").then(|| "hf://datasets/env/wins".to_string());
-        match resolve_from(Some("/local/path".into()), None, env2) {
+        // Neither -> local.
+        assert!(matches!(resolve_with(None, None), Store::Local { .. }));
+        // An explicit local spec beats an active remote.
+        match resolve_with(Some("/local/path".into()), Some("hf://datasets/active/one".into())) {
             Store::Local { path } => assert_eq!(path, std::path::PathBuf::from("/local/path")),
-            _ => panic!("explicit local path should beat env remote"),
+            _ => panic!("explicit local should beat the active remote"),
         }
-        // A blank $FUNES_STORE is ignored -> local.
-        let blank = |k: &str| (k == "FUNES_STORE").then(|| "   ".to_string());
-        assert!(matches!(resolve_from(None, None, blank), Store::Local { .. }));
+        // Blank spec falls through to the active store; both blank -> local.
+        assert!(matches!(resolve_with(Some("  ".into()), None), Store::Local { .. }));
+        match resolve_with(Some("   ".into()), Some("hf://datasets/active/one".into())) {
+            Store::Remote { uri } => assert_eq!(uri, "hf://datasets/active/one"),
+            _ => panic!("blank spec should fall through to active"),
+        }
     }
 
     // --- dim guard against real local datasets ---

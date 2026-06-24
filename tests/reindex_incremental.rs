@@ -1,6 +1,6 @@
 //! Re-indexing a grown session adds only the new turns (continuation = same memory) and
 //! converges to exactly the state of indexing the final session from scratch — no duplication,
-//! no loss. Own test binary so its `$FUNES_DB` can't race the other integration test's.
+//! no loss. Own test binary so its `$FUNES_HOME` can't race the other integration test's.
 
 use std::io::Write;
 
@@ -31,7 +31,7 @@ async fn incremental_reindex_matches_from_scratch() {
     // Incremental: index 4 turns, grow the same session to 6, re-index.
     let inc_src = tempfile::tempdir().unwrap();
     let inc_db = tempfile::tempdir().unwrap();
-    std::env::set_var("FUNES_DB", inc_db.path());
+    std::env::set_var("FUNES_HOME", inc_db.path());
     write_session(inc_src.path(), 4);
     funes::index::run_index(inc_src.path(), false).await.unwrap();
     let after_first = chunk_count().await;
@@ -49,7 +49,7 @@ async fn incremental_reindex_matches_from_scratch() {
     let scratch_src = tempfile::tempdir().unwrap();
     let scratch_db = tempfile::tempdir().unwrap();
     write_session(scratch_src.path(), 6);
-    std::env::set_var("FUNES_DB", scratch_db.path());
+    std::env::set_var("FUNES_HOME", scratch_db.path());
     funes::index::run_index(scratch_src.path(), false).await.unwrap();
     let from_scratch = chunk_count().await;
 

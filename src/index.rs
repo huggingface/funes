@@ -3,7 +3,7 @@
 //! changed session add only chunks whose id is new — a grown session (the same memory)
 //! contributes just its new turns, nothing is re-embedded or deleted.
 
-use crate::{chunk, dataset, parse};
+use crate::{chunk, config, dataset, hub, parse, push};
 use anyhow::{anyhow, Result};
 use arrow_array::types::Float32Type;
 use arrow_array::{FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator, StringArray};
@@ -50,7 +50,7 @@ fn schema() -> Arc<Schema> {
     ))
 }
 
-fn build_batch(chunks: &[chunk::Chunk], vectors: &[Vec<f32>]) -> Result<RecordBatch> {
+pub(crate) fn build_batch(chunks: &[chunk::Chunk], vectors: &[Vec<f32>]) -> Result<RecordBatch> {
     let s = |f: &dyn Fn(&chunk::Chunk) -> Option<String>| -> StringArray { chunks.iter().map(f).collect() };
     let i = |f: &dyn Fn(&chunk::Chunk) -> i64| -> Int64Array { chunks.iter().map(|c| Some(f(c))).collect() };
     let vector = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
@@ -245,6 +245,18 @@ pub async fn run_index(source: &Path, no_thinking: bool) -> Result<()> {
     }
 
     println!("indexed files={n_files} skipped={n_skipped} chunks={n_chunks}");
+
+    // Publish to the attached remote, best-effort: a failed push must not fail the local index.
+    if let Some(remote) = config::load().remote {
+        match push::run_push(hub::Store::parse(&remote), false).await {
+            Ok(report) => print!("{report}"),
+            Err(e) if push::is_read_only(&e) => {
+                eprintln!("indexed locally; {remote} is read-only for your token — recall reads it, but publishing needs write access")
+            }
+            Err(e) => eprintln!("indexed locally; couldn't publish to {remote}: {e}"),
+        }
+    }
+
     Ok(())
 }
 
