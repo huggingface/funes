@@ -1,7 +1,7 @@
 //! Gated live test: open the shared funes fixture hosted on the HF Hub over `hf://` and read
 //! from it. Skipped unless `HF_FUNES_TEST_TOKEN` is in the environment — to run it:
 //!
-//!   export HF_FUNES_TEST_TOKEN="$(cat hf_funes_test_token.txt)"   # or CI secret
+//!   export HF_FUNES_TEST_TOKEN=<your HF token>   # or a CI secret
 //!   cargo test --test remote_recall -- --nocapture
 //!
 //! The fixture is a stable, synthetic, read-only dataset (no real data).

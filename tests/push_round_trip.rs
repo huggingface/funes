@@ -8,7 +8,7 @@
 //! bigger thread stack than the default — lance + fastembed recurse deeply — so set
 //! `RUST_MIN_STACK` (CI uses the same value). To run:
 //!
-//!   export HF_FUNES_TEST_TOKEN="$(cat hf_funes_test_token.txt)"
+//!   export HF_FUNES_TEST_TOKEN=<your HF token>
 //!   RUST_MIN_STACK=16777216 cargo test --test push_round_trip -- --nocapture
 
 use std::io::Write;
