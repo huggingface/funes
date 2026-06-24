@@ -72,7 +72,7 @@ jobs:
     needs: lint-test
     timeout-minutes: 45
     env:
-      # The sync round-trip test awaits one large combined future (embed + Xet upload + lance);
+      # The push round-trip test awaits one large combined future (embed + Xet upload + lance);
       # it overflows the default ~2 MB test-thread stack under the CI toolchain. Give it headroom.
       RUST_MIN_STACK: "16777216"
     steps:
@@ -89,7 +89,7 @@ jobs:
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
-      # sync's pre-publish secret gate shells out to trufflehog (fail-closed), so the
+      # push's pre-publish secret gate shells out to trufflehog (fail-closed), so the
       # round-trip test below needs the binary on PATH. Pinned to the version used locally.
       - name: Install trufflehog
         run: |
@@ -116,10 +116,10 @@ jobs:
 
       # Gated: create→append→recall→clear against a unique scratch path. Skips without the
       # secret; cleans up the scratch path itself.
-      - name: Sync round-trip test
+      - name: Push round-trip test
         env:
           HF_FUNES_TEST_TOKEN: ${{ secrets.HF_FUNES_TEST_TOKEN }}
-        run: cargo test --profile ci --test sync_round_trip -- --nocapture
+        run: cargo test --profile ci --test push_round_trip -- --nocapture
 
       - name: Save fastembed models
         if: ${{ !cancelled() && github.ref == 'refs/heads/main' && steps.fastembed.outputs.cache-hit != 'true' }}
