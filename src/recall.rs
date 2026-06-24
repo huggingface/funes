@@ -15,6 +15,7 @@ use lance::dataset::{Dataset, ROW_ID};
 use lance_index::scalar::FullTextSearchQuery;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
+use tokio::sync::{Mutex, OnceCell};
 
 /// Columns a [`Hit`] needs from a search scan.
 const HIT_COLS: &[&str] = &["text", "session_id", "project", "turn_uuid", "ts", "block_type", "seq"];
@@ -187,6 +188,28 @@ async fn degrade_offline(uri: &str, embedder: Option<&mut TextEmbedding>) -> Res
     }
 }
 
+/// The embedder + reranker, loaded once and shared. Loading them (ONNX init) is the costly part of
+/// a recall, so a long-lived process — the MCP server — pays it on the first call and reuses them
+/// after. The `Mutex` serializes recalls (both models run with `&mut`), which is fine: the work is
+/// CPU-bound and the server's calls are serial anyway.
+struct Models {
+    embedder: TextEmbedding,
+    reranker: TextRerank,
+}
+
+static MODELS: OnceCell<Mutex<Models>> = OnceCell::const_new();
+
+/// The shared model cache, built on first use.
+async fn models() -> Result<&'static Mutex<Models>> {
+    MODELS
+        .get_or_try_init(|| async {
+            let embedder = TextEmbedding::try_new(InitOptions::new(EmbeddingModel::BGESmallENV15))?;
+            let reranker = TextRerank::try_new(RerankInitOptions::new(RerankerModel::BGERerankerBase))?;
+            Ok::<_, anyhow::Error>(Mutex::new(Models { embedder, reranker }))
+        })
+        .await
+}
+
 /// Run the recall pipeline over one store and return the formatted results as text.
 #[allow(clippy::too_many_arguments)]
 pub async fn recall(
@@ -199,14 +222,16 @@ pub async fn recall(
     block_type: Option<String>,
     project: Option<String>,
 ) -> Result<String> {
-    let mut embedder = TextEmbedding::try_new(InitOptions::new(EmbeddingModel::BGESmallENV15))?;
+    let mut guard = models().await?.lock().await;
+    let Models { embedder, reranker } = &mut *guard;
+
     let qv: Vec<f32> = embedder
         .embed(vec![query.clone()], None)?
         .into_iter()
         .next()
         .context("empty embedding")?;
 
-    let read = open_read(&store, Some(&mut embedder)).await?;
+    let read = open_read(&store, Some(&mut *embedder)).await?;
     let note = read.note.clone().unwrap_or_default();
     let ds = &read.ds;
     let where_clause = build_where(block_type.as_deref(), project.as_deref());
@@ -219,7 +244,6 @@ pub async fn recall(
         return Ok(format!("{note}no results"));
     }
 
-    let mut reranker = TextRerank::try_new(RerankInitOptions::new(RerankerModel::BGERerankerBase))?;
     let docs: Vec<&str> = hits.iter().map(|h| h.text.as_str()).collect();
     let reranked = reranker.rerank(query.as_str(), docs, false, None)?;
 

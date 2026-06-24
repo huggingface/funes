@@ -18,7 +18,7 @@ object_store = "=0.13.2"         # the ObjectStore trait the capture wrapper imp
 async-trait = "0.1"              # for the ObjectStore impl in src/capture_store.rs
 bytes = "1"                      # captured write payloads
 chrono = "0.4"                   # recency weighting
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "sync"] }  # sync: OnceCell/Mutex cache the recall models
 futures = "0.3"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
