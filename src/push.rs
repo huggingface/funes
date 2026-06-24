@@ -37,17 +37,6 @@ const REINDEX_THRESHOLD: u64 = 2_000;
 /// moving under us, so a busy remote can't spin forever.
 const MAX_COMMIT_RETRIES: u32 = 10;
 
-/// Parse `hf://datasets/<owner>/<name>[/<prefix…>]` into (owner, name, prefix). Empty prefix = repo
-/// root, matching how reads resolve a remote.
-fn parse_hf(uri: &str) -> Result<(String, String, String)> {
-    let rest = uri.strip_prefix("hf://").context("remote store must be an hf:// URI")?;
-    let segs: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
-    match segs.as_slice() {
-        ["datasets", owner, name, prefix @ ..] => Ok((owner.to_string(), name.to_string(), prefix.join("/"))),
-        _ => bail!("expected hf://datasets/<owner>/<name>[/<path>], got {uri}"),
-    }
-}
-
 /// Every chunk id in a store, or empty if it can't be opened (absent local index, not-yet-created
 /// or inaccessible remote).
 pub async fn store_ids(store: &Store) -> HashSet<String> {
@@ -147,7 +136,7 @@ pub async fn run_push(target: Store, force_reindex: bool) -> Result<String> {
     }
 
     // 2. HF repo handle (every write path below needs it).
-    let (owner, name, prefix) = parse_hf(&uri)?;
+    let (owner, name, prefix) = hub::parse_hf(&uri)?;
     let token = hub::hf_token().context("no HF token (set HF_TOKEN) — required to push")?;
     let client = HFClient::builder()
         .token(token.clone())
@@ -311,22 +300,5 @@ mod tests {
         // path can't be built here; it's exercised by the gated round-trip.)
         assert!(!is_read_only(&anyhow::anyhow!("server said 403 Forbidden")));
         assert!(!is_read_only(&anyhow::anyhow!("no HF token")));
-    }
-
-    #[test]
-    fn parse_hf_accepts_repo_root_and_a_prefix() {
-        // repo root: no path after <owner>/<name> -> empty prefix
-        assert_eq!(
-            parse_hf("hf://datasets/acme/kb").unwrap(),
-            ("acme".into(), "kb".into(), "".into())
-        );
-        // an explicit path within the repo is kept
-        assert_eq!(
-            parse_hf("hf://datasets/acme/kb/sub/dir").unwrap(),
-            ("acme".into(), "kb".into(), "sub/dir".into())
-        );
-        // not a dataset URI -> error
-        assert!(parse_hf("hf://acme/kb").is_err());
-        assert!(parse_hf("s3://acme/kb").is_err());
     }
 }
