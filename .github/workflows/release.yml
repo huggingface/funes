@@ -1,7 +1,9 @@
 name: Release
 
 on:
+  # main builds (no publish) so the release cache is seeded on main for PRs to restore.
   push:
+    branches: [main]
     tags: ["v*"]
   pull_request:
     branches: [main]
@@ -98,7 +100,7 @@ jobs:
     if: |
       !cancelled() &&
       (startsWith(github.ref, 'refs/tags/') || needs.compute.result == 'success'
-        || github.event_name == 'pull_request')
+        || github.event_name == 'pull_request' || github.ref == 'refs/heads/main')
     # 24.04 (glibc 2.39): the prebuilt onnxruntime pulled by ort_sys/fastembed needs the
     # glibc 2.38+ __isoc23_* symbols, so linking fails on 22.04.
     runs-on: ubuntu-24.04
@@ -152,7 +154,7 @@ jobs:
     if: |
       !cancelled() &&
       (startsWith(github.ref, 'refs/tags/') || needs.compute.result == 'success'
-        || github.event_name == 'pull_request')
+        || github.event_name == 'pull_request' || github.ref == 'refs/heads/main')
     runs-on: macos-14
     timeout-minutes: 45
     steps:

@@ -18,14 +18,14 @@ use crate::index::{DIM, MODEL};
 /// A store to recall from: a local Lance directory or a remote dataset on the HF Hub.
 #[derive(Debug, Clone)]
 pub enum Store {
-    /// A local Lance store directory (e.g. `~/.funes/lancedb`).
+    /// A local Lance store directory (e.g. `~/.funes/store`).
     Local { path: PathBuf },
     /// A remote Lance dataset on the HF Hub, e.g. `hf://datasets/<org>/<repo>`.
     Remote { uri: String },
 }
 
 impl Store {
-    /// The default local store (`$FUNES_HOME` / `~/.funes` → `…/lancedb`).
+    /// The default local store (`$FUNES_HOME` / `~/.funes` → `…/store`).
     pub fn local() -> Self {
         Store::Local {
             path: PathBuf::from(dataset::local_store_dir()),

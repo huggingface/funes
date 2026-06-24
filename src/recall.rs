@@ -102,6 +102,10 @@ fn recency_weight(ts: &str, now: DateTime<Utc>, half_life: f64) -> f64 {
 /// The search is capped at `chunk::OVERLAP`: consecutive splits share at most that many
 /// chars, so any longer suffix==prefix match is a coincidence of repetitive text and would
 /// wrongly drop real content.
+///
+/// `split` trims each piece, so the shared region can lose whitespace at the seam (a trailing
+/// space off `a`, a leading space off `b`). The scan down from `max_k` still finds the overlap
+/// at a smaller `k`, so a trimmed seam doesn't fall through to the duplicating concat fallback.
 fn stitch(a: &str, b: &str) -> String {
     let ac: Vec<char> = a.chars().collect();
     let bc: Vec<char> = b.chars().collect();
@@ -239,6 +243,10 @@ async fn vector_candidates(ds: &Dataset, qv: &[f32], limit: usize, filter: Optio
     let mut scan = ds.scan();
     scan.nearest("vector", &query, limit)?;
     if let Some(f) = filter {
+        // Prefilter: apply the filter before the ANN search, not as a post-filter on the top-`limit`
+        // nearest rows. A selective `--project`/`--type` would otherwise drop most (or all) of a
+        // globally-nearest pool, returning far fewer than `limit` hits even when matches exist.
+        scan.prefilter(true);
         scan.filter(f)?;
     }
     scan.project(HIT_COLS)?;
@@ -251,6 +259,8 @@ async fn fts_candidates(ds: &Dataset, query: &str, limit: usize, filter: Option<
     let mut scan = ds.scan();
     scan.full_text_search(FullTextSearchQuery::new(query.to_string()))?;
     if let Some(f) = filter {
+        // Prefilter so the filter shapes the FTS result set before `limit`, not after.
+        scan.prefilter(true);
         scan.filter(f)?;
     }
     scan.project(HIT_COLS)?;
@@ -628,5 +638,15 @@ mod tests {
     #[test]
     fn stitch_no_overlap_concatenates() {
         assert_eq!(stitch("alpha", "beta"), "alphabeta");
+    }
+
+    #[test]
+    fn stitch_recovers_overlap_with_trimmed_seam_whitespace() {
+        // The real shared region is "the quick brown fox " (trailing space), but split() trims it
+        // off `a`'s end and the leading space off `b`. stitch must still match the shorter overlap
+        // and not duplicate it (no "...foxfox..." and no doubled "the quick brown fox").
+        let a = "HEAD the quick brown fox"; // trailing space trimmed
+        let b = "the quick brown fox TAIL"; // leading already flush
+        assert_eq!(stitch(a, b), "HEAD the quick brown fox TAIL");
     }
 }
