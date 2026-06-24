@@ -209,6 +209,13 @@ async fn use_store(spec: String) -> Result<()> {
     config::save(&cfg)?;
     println!("active store: {uri}");
 
+    // The overlap heuristic reads the remote's chunk ids; an unreachable remote would read as empty
+    // and wrongly hint at pushing. Attach anyway and say so — recall falls back to the local index.
+    if !hub::remote_reachable(&uri).await {
+        println!("remote currently unreachable — recall will use your local index until it's back");
+        return Ok(());
+    }
+
     let local = push::store_ids(&hub::Store::local()).await;
     let remote = push::store_ids(&hub::Store::parse(&uri)).await;
     let unpushed = local.difference(&remote).count();

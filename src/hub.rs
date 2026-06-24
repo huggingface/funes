@@ -126,7 +126,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// responded at all: a 403/404/auth answer still counts, since those are real errors the open
 /// should surface rather than an offline signal. Only a transport failure (no connection, DNS, or
 /// timeout), a 5xx, or our own timeout marks it unreachable.
-pub(crate) async fn remote_reachable(uri: &str) -> bool {
+pub async fn remote_reachable(uri: &str) -> bool {
     let Ok((owner, name, _)) = parse_hf(uri) else {
         return true; // not an hf:// dataset URI — let the open report the real error
     };
