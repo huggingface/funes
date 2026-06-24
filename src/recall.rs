@@ -5,7 +5,7 @@
 
 use crate::dataset;
 use crate::hello;
-use crate::hub::Store;
+use crate::hub::{self, Store};
 use anyhow::{Context, Result};
 use arrow_array::{Float32Array, Int64Array, RecordBatch, StringArray, UInt64Array};
 use chrono::{DateTime, Utc};
@@ -123,22 +123,66 @@ struct Read {
     /// Keeps the hello-world temp dir alive for the dataset's lifetime; `None` for a real store.
     _hello: Option<tempfile::TempDir>,
     ds: Dataset,
+    /// A degradation note to prepend to the command's output (e.g. the remote was unreachable);
+    /// `None` when the requested store opened normally.
+    note: Option<String>,
 }
 
-/// Open a store for reading. When the default local index is absent, fall back to the built-in
-/// hello-world corpus so a fresh install can recall something useful with zero indexing — passing
-/// `embedder` gives the corpus real vectors for search (recall), `None` is fine for `get`/`list`.
-/// An explicit path or remote store that can't open is a real error, never masked by the corpus.
+/// Open a store for reading, degrading gracefully:
+/// - an active remote we can't reach (offline) falls back to the local index, then to the built-in
+///   guide — recall keeps working without the network;
+/// - the absent default local index falls back to the built-in guide, so a fresh install can recall
+///   something useful with zero indexing.
+///
+/// A remote that *is* reachable but fails to open (wrong schema, missing dataset) is a real error
+/// and surfaces. Passing `embedder` gives the built-in corpus real vectors for search (recall);
+/// `None` is fine for `get`/`list`.
 async fn open_read(store: &Store, embedder: Option<&mut TextEmbedding>) -> Result<Read> {
+    // Probe a remote up front: an offline host degrades fast instead of hanging on a slow open.
+    if let Store::Remote { uri } = store {
+        if !hub::remote_reachable(uri).await {
+            return degrade_offline(uri, embedder).await;
+        }
+    }
     match store.open().await {
-        Ok(ds) => Ok(Read { _hello: None, ds }),
+        Ok(ds) => Ok(Read {
+            _hello: None,
+            ds,
+            note: None,
+        }),
         Err(e) => {
             if store.is_default_local() {
                 let (dir, ds) = hello::dataset(embedder).await?;
-                Ok(Read { _hello: Some(dir), ds })
+                Ok(Read {
+                    _hello: Some(dir),
+                    ds,
+                    note: None,
+                })
             } else {
                 Err(e)
             }
+        }
+    }
+}
+
+/// Degrade an unreachable remote to the local index, or to the built-in guide if there's no local
+/// index either, carrying a note that explains what happened.
+async fn degrade_offline(uri: &str, embedder: Option<&mut TextEmbedding>) -> Result<Read> {
+    match Store::local().open().await {
+        Ok(ds) => Ok(Read {
+            _hello: None,
+            ds,
+            note: Some(format!("remote {uri} unreachable — recalling from your local index\n")),
+        }),
+        Err(_) => {
+            let (dir, ds) = hello::dataset(embedder).await?;
+            Ok(Read {
+                _hello: Some(dir),
+                ds,
+                note: Some(format!(
+                    "remote {uri} unreachable and no local index yet — showing the built-in guide\n"
+                )),
+            })
         }
     }
 }
@@ -163,6 +207,7 @@ pub async fn recall(
         .context("empty embedding")?;
 
     let read = open_read(&store, Some(&mut embedder)).await?;
+    let note = read.note.clone().unwrap_or_default();
     let ds = &read.ds;
     let where_clause = build_where(block_type.as_deref(), project.as_deref());
 
@@ -171,7 +216,7 @@ pub async fn recall(
     // recall then falls back to vector-only.
     let hits = hybrid_candidates(ds, &qv, &query, candidates, where_clause.as_deref()).await?;
     if hits.is_empty() {
-        return Ok("no results".to_string());
+        return Ok(format!("{note}no results"));
     }
 
     let mut reranker = TextRerank::try_new(RerankInitOptions::new(RerankerModel::BGERerankerBase))?;
@@ -203,7 +248,7 @@ pub async fn recall(
         attach_neighbors(ds, &mut refs, neighbors).await?;
     }
 
-    let mut out = String::new();
+    let mut out = note;
     for (h, score) in &top {
         let s8 = &h.session_id[..h.session_id.len().min(8)];
         let _ = writeln!(
@@ -405,6 +450,7 @@ async fn attach_neighbors(ds: &Dataset, hits: &mut [&mut Hit], window: i64) -> R
 /// Browse indexed sessions: one line per session, newest activity first.
 pub async fn list(store: Store, project: Option<String>, limit: usize) -> Result<String> {
     let read = open_read(&store, None).await?;
+    let note = read.note.clone().unwrap_or_default();
     let ds = &read.ds;
 
     let cols = ["session_id", "project", "ts", "role", "text"];
@@ -472,13 +518,14 @@ pub async fn list(store: Store, project: Option<String>, limit: usize) -> Result
     if out.is_empty() {
         out.push_str("no sessions\n");
     }
-    Ok(out)
+    Ok(format!("{note}{out}"))
 }
 
 /// Drill down on a recall hit: the named turn plus the turns within `window` of it, each
 /// reassembled (blocks in order, splits de-overlapped) into one readable passage.
 pub async fn get(store: Store, session_id: String, turn_uuid: String, window: i64) -> Result<String> {
     let read = open_read(&store, None).await?;
+    let note = read.note.clone().unwrap_or_default();
     let ds = &read.ds;
 
     let cols = ["turn_uuid", "seq", "ts", "role", "text", "block_idx", "split_idx"];
@@ -514,7 +561,7 @@ pub async fn get(store: Store, session_id: String, turn_uuid: String, window: i6
 
     let center = match rows.iter().find(|r| r.1 == turn_uuid) {
         Some(r) => r.0,
-        None => return Ok(format!("turn {turn_uuid} not found in session {session_id}\n")),
+        None => return Ok(format!("{note}turn {turn_uuid} not found in session {session_id}\n")),
     };
 
     // Group selected rows by (seq, turn_uuid).
@@ -552,10 +599,19 @@ pub async fn get(store: Store, session_id: String, turn_uuid: String, window: i6
         let _ = writeln!(out, "{}", blocks.join("\n\n"));
         let _ = writeln!(out, "---");
     }
-    Ok(out)
+    Ok(format!("{note}{out}"))
 }
 
 pub async fn status(store: Store) -> Result<String> {
+    // An unreachable remote degrades to the local index's status, like the read commands.
+    if let Store::Remote { uri } = &store {
+        if !hub::remote_reachable(uri).await {
+            let body = Box::pin(status(Store::local())).await?;
+            return Ok(format!(
+                "remote {uri} unreachable — showing the local index instead\n{body}"
+            ));
+        }
+    }
     match store.open().await {
         Ok(ds) => {
             let rows = ds.count_rows(None).await?;

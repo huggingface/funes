@@ -8,8 +8,10 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
+use hf_hub::{HFClient, HFError};
 use lance::dataset::Dataset;
 
 use crate::dataset;
@@ -105,6 +107,53 @@ fn is_remote_shorthand(spec: &str) -> bool {
     !spec.starts_with(['/', '.', '~']) && spec.contains('/')
 }
 
+/// Parse `hf://datasets/<owner>/<name>[/<prefix…>]` into (owner, name, prefix). Empty prefix = repo
+/// root, matching how reads resolve a remote.
+pub(crate) fn parse_hf(uri: &str) -> Result<(String, String, String)> {
+    let rest = uri.strip_prefix("hf://").context("remote store must be an hf:// URI")?;
+    let segs: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+    match segs.as_slice() {
+        ["datasets", owner, name, prefix @ ..] => Ok((owner.to_string(), name.to_string(), prefix.join("/"))),
+        _ => anyhow::bail!("expected hf://datasets/<owner>/<name>[/<path>], got {uri}"),
+    }
+}
+
+/// How long the reachability probe waits before treating a remote as offline.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Whether the remote dataset at `uri` answers a lightweight probe, so a read can fall back to the
+/// local index instead of hanging on a slow open when the remote is offline.
+pub async fn remote_reachable(uri: &str) -> bool {
+    let Ok((owner, name, _)) = parse_hf(uri) else {
+        return true; // not an hf:// dataset URI — let the open report the real error
+    };
+    // No retries: this is a reachability check, so one failed request already means offline. Without
+    // this, hf-hub's default exponential backoff (5 attempts) would drag the probe out for seconds.
+    let mut builder = HFClient::builder().retry_max_attempts(0);
+    if let Some(token) = hf_token() {
+        builder = builder.token(token);
+    }
+    let Ok(client) = builder.build() else {
+        return true;
+    };
+    let repo = client.dataset(owner, name);
+    match tokio::time::timeout(PROBE_TIMEOUT, repo.info().send()).await {
+        Err(_elapsed) => false,
+        Ok(Ok(_)) => true,
+        Ok(Err(e)) => !is_offline_error(&e),
+    }
+}
+
+/// A transport-level failure (no usable HTTP response) or a 5xx — the cases where degrading to the
+/// local index is appropriate (mirrors hf-hub's own transient-error classification).
+fn is_offline_error(e: &HFError) -> bool {
+    match e {
+        HFError::Request { source, .. } => source.is_connect() || source.is_timeout(),
+        HFError::Http { context } => matches!(context.status.as_u16(), 500 | 502 | 503 | 504),
+        _ => false,
+    }
+}
+
 /// HF token from the standard env var, else the `huggingface_hub` cached token file.
 pub(crate) fn hf_token() -> Option<String> {
     let token_file = std::env::var("HOME")
@@ -189,6 +238,31 @@ mod tests {
             Store::Remote { uri } => assert_eq!(uri, "hf://datasets/acme/kb"),
             _ => panic!("expected remote from shorthand"),
         }
+    }
+
+    #[test]
+    fn parse_hf_accepts_repo_root_and_a_prefix() {
+        // repo root: no path after <owner>/<name> -> empty prefix
+        assert_eq!(
+            parse_hf("hf://datasets/acme/kb").unwrap(),
+            ("acme".into(), "kb".into(), "".into())
+        );
+        // an explicit path within the repo is kept
+        assert_eq!(
+            parse_hf("hf://datasets/acme/kb/sub/dir").unwrap(),
+            ("acme".into(), "kb".into(), "sub/dir".into())
+        );
+        // not a dataset URI -> error
+        assert!(parse_hf("hf://acme/kb").is_err());
+        assert!(parse_hf("s3://acme/kb").is_err());
+    }
+
+    #[tokio::test]
+    async fn remote_reachable_short_circuits_non_hf_uri() {
+        // A spec that isn't an hf:// dataset URI can't be probed; we say "reachable" so the open
+        // surfaces the real error rather than masking it as offline. (No network is touched.)
+        assert!(remote_reachable("/local/path").await);
+        assert!(remote_reachable("not a uri").await);
     }
 
     #[test]
