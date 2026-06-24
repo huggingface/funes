@@ -115,10 +115,17 @@ pub async fn run_push(target: Store, force_reindex: bool) -> Result<String> {
         }
     };
 
-    // Fail fast when offline. Otherwise the remote read below sees an empty set, mistakes the
-    // unreachable remote for a first publish, and builds the whole dataset before the commit fails.
-    if !hub::remote_reachable(&uri).await {
-        bail!("{uri} is unreachable — can't push while offline (check your connection)");
+    // Fail fast, before any local build or scan: an unreachable or missing remote otherwise looks
+    // like a first publish, so push scans + builds the whole dataset before the commit finally fails.
+    match hub::remote_reachability(&uri).await {
+        hub::Reachability::Offline => {
+            bail!("{uri} is unreachable — can't push while offline (check your connection)")
+        }
+        hub::Reachability::Missing => bail!(
+            "{uri} doesn't exist on the Hub, and funes won't create it — create the dataset repo \
+             first (https://huggingface.co/new-dataset), then run push again"
+        ),
+        hub::Reachability::Ok => {}
     }
 
     // 1. Delta: local_ids − remote_ids (remote absent => first publish).
