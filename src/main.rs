@@ -209,11 +209,22 @@ async fn use_store(spec: String) -> Result<()> {
     config::save(&cfg)?;
     println!("active store: {uri}");
 
-    // The overlap heuristic reads the remote's chunk ids; an unreachable remote would read as empty
-    // and wrongly hint at pushing. Attach anyway and say so — recall falls back to the local index.
-    if !hub::remote_reachable(&uri).await {
-        println!("remote currently unreachable — recall will use your local index until it's back");
-        return Ok(());
+    // The overlap heuristic below reads the remote's chunk ids; a remote we can't read would come
+    // back empty and wrongly hint at pushing. Attach anyway (the intent is stored) but skip the
+    // heuristic and say what's wrong — caught here at attach time rather than at the next push.
+    match hub::remote_reachability(&uri).await {
+        hub::Reachability::Offline => {
+            println!("remote currently unreachable — recall will use your local index until it's back");
+            return Ok(());
+        }
+        hub::Reachability::Missing => {
+            println!(
+                "note: this repo doesn't exist on the Hub yet, and funes won't create it — create \
+                 the dataset repo (https://huggingface.co/new-dataset) before you push"
+            );
+            return Ok(());
+        }
+        hub::Reachability::Ok => {}
     }
 
     let local = push::store_ids(&hub::Store::local()).await;
