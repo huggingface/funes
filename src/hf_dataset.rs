@@ -107,7 +107,7 @@ pub(crate) async fn append(
             unindexed,
         }),
         Err(HFError::Conflict { .. }) => Ok(Appended::Conflict),
-        Err(e) => Err(anyhow::anyhow!("data commit failed: {e}")),
+        Err(e) => Err(anyhow::Error::new(e).context("data commit failed")),
     }
 }
 
@@ -137,7 +137,7 @@ pub(crate) async fn reindex(
     match send_commit(repo, ops, parent, rev, message).await {
         Ok(info) => Ok(Reindexed::Committed(info.commit_oid.unwrap_or_else(|| "?".to_string()))),
         Err(HFError::Conflict { .. }) => Ok(Reindexed::Conflict),
-        Err(e) => Err(anyhow::anyhow!("reindex commit failed: {e}")),
+        Err(e) => Err(anyhow::Error::new(e).context("reindex commit failed")),
     }
 }
 

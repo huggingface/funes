@@ -167,20 +167,28 @@ async fn main() -> Result<()> {
             print!("{}", recall::status(store.resolve()).await?);
             Ok(())
         }
-        Cmd::Use { store } => use_store(store),
+        Cmd::Use { store } => use_store(store).await,
         Cmd::Push { force_reindex } => {
             let remote = config::load()
                 .remote
                 .ok_or_else(|| anyhow!("no active remote — attach one with `funes use <org>/<repo>`"))?;
-            print!("{}", push::run_push(hub::Store::parse(&remote), force_reindex).await?);
-            Ok(())
+            match push::run_push(hub::Store::parse(&remote), force_reindex).await {
+                Ok(report) => {
+                    print!("{report}");
+                    Ok(())
+                }
+                Err(e) if push::is_read_only(&e) => Err(anyhow!(
+                    "{remote} is read-only for your token — recall can read it, but publishing needs write access (check your HF token)"
+                )),
+                Err(e) => Err(e),
+            }
         }
         Cmd::Mcp => mcp::run().await,
     }
 }
 
-/// `funes use <store>`: attach a remote (or `local` to detach), persisted in funes.json.
-fn use_store(spec: String) -> Result<()> {
+/// `funes use <store>`: attach a remote (or `local` to detach) and report the next step.
+async fn use_store(spec: String) -> Result<()> {
     let mut cfg = config::load();
     if spec == "local" {
         cfg.remote = None;
@@ -188,15 +196,66 @@ fn use_store(spec: String) -> Result<()> {
         println!("active store: local index");
         return Ok(());
     }
-    match hub::Store::parse(&spec) {
-        hub::Store::Remote { uri } => {
-            println!("active store: {uri}");
-            cfg.remote = Some(uri);
-            config::save(&cfg)
+    let uri = match hub::Store::parse(&spec) {
+        hub::Store::Remote { uri } => uri,
+        hub::Store::Local { .. } => {
+            return Err(anyhow!(
+                "`funes use` takes a remote (e.g. `acme/kb` or `hf://datasets/<org>/<repo>`); for the \
+                 local index use `funes use local`, or relocate funes's home with $FUNES_HOME"
+            ))
         }
-        hub::Store::Local { .. } => Err(anyhow!(
-            "`funes use` takes a remote (e.g. `acme/kb` or `hf://datasets/<org>/<repo>`); for the \
-             local index use `funes use local`, or relocate funes's home with $FUNES_HOME"
-        )),
+    };
+    cfg.remote = Some(uri.clone());
+    config::save(&cfg)?;
+    println!("active store: {uri}");
+
+    let local = push::store_ids(&hub::Store::local()).await;
+    let remote = push::store_ids(&hub::Store::parse(&uri)).await;
+    let unpushed = local.difference(&remote).count();
+    println!("{}", attach_hint(local.len(), remote.len(), unpushed));
+    Ok(())
+}
+
+/// The next-step hint for `funes use`.
+fn attach_hint(local: usize, remote: usize, unpushed: usize) -> String {
+    if local == 0 && remote == 0 {
+        "no memories indexed yet — run `funes index` to build your local index (it publishes here automatically)."
+            .to_string()
+    } else if local == 0 {
+        format!("the remote holds {remote} chunks — recall reads them now. if you own this remote store, run `funes index` to add this machine's sessions.")
+    } else if unpushed == 0 {
+        format!("local index: {local} chunks, all present on the remote.")
+    } else if remote == 0 {
+        format!("local index: {local} chunks, none on the remote yet — run `funes push`.")
+    } else if local > unpushed {
+        // Shares chunks with the remote → it's yours to add to; publish the extras.
+        format!("local index: {local} chunks, {unpushed} not yet on the remote — run `funes push`.")
+    } else {
+        // No shared chunks with a populated remote: a fresh host of yours, or a store you only read.
+        format!("local index: {local} chunks, remote: {remote} — no shared chunks: a new host of yours, or a store you only read. `funes push` to contribute, skip if it's not yours.")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::attach_hint;
+
+    #[test]
+    fn attach_hint_covers_each_state() {
+        // empty local + empty remote -> index
+        assert!(attach_hint(0, 0, 0).contains("funes index"));
+        // empty local + populated remote -> recall now, index to add local
+        let h = attach_hint(0, 5, 0);
+        assert!(h.contains("recall reads them") && h.contains("funes index"));
+        // local fully published -> no push hint
+        assert!(attach_hint(8, 8, 0).contains("all present"));
+        // empty remote -> first publish
+        assert!(attach_hint(8, 0, 8).contains("funes push"));
+        // local overlaps the remote (overlap = 8-5 = 3) -> push the extras
+        let h = attach_hint(8, 3, 5);
+        assert!(h.contains("5 not yet") && h.contains("funes push"));
+        // no overlap with a populated remote -> cautious, may be read-only
+        let h = attach_hint(8, 5, 8);
+        assert!(h.contains("no shared chunks") && h.contains("skip if it's not yours"));
     }
 }

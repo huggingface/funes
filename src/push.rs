@@ -22,7 +22,7 @@ use crate::scan;
 use anyhow::{bail, Context, Result};
 use arrow_array::{RecordBatch, RecordBatchIterator, StringArray};
 use hf_hub::repository::CommitOperation;
-use hf_hub::{HFClient, HFRepository, RepoTypeDataset};
+use hf_hub::{HFClient, HFError, HFRepository, RepoTypeDataset};
 use lance::dataset::WriteParams;
 use lance::Dataset;
 use std::collections::{HashMap, HashSet};
@@ -37,9 +37,8 @@ const REINDEX_THRESHOLD: u64 = 2_000;
 /// moving under us, so a busy remote can't spin forever.
 const MAX_COMMIT_RETRIES: u32 = 10;
 
-/// Parse `hf://datasets/<owner>/<name>[/<prefix…>]` into (owner, name, prefix-within-repo). An
-/// empty prefix means the dataset lives at the repo root — matching how reads resolve a remote,
-/// so an attached `<org>/<repo>` and `recall --remote <org>/<repo>` resolve the same dataset.
+/// Parse `hf://datasets/<owner>/<name>[/<prefix…>]` into (owner, name, prefix). Empty prefix = repo
+/// root, matching how reads resolve a remote.
 fn parse_hf(uri: &str) -> Result<(String, String, String)> {
     let rest = uri.strip_prefix("hf://").context("remote store must be an hf:// URI")?;
     let segs: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
@@ -47,6 +46,25 @@ fn parse_hf(uri: &str) -> Result<(String, String, String)> {
         ["datasets", owner, name, prefix @ ..] => Ok((owner.to_string(), name.to_string(), prefix.join("/"))),
         _ => bail!("expected hf://datasets/<owner>/<name>[/<path>], got {uri}"),
     }
+}
+
+/// Every chunk id in a store, or empty if it can't be opened (absent local index, not-yet-created
+/// or inaccessible remote).
+pub async fn store_ids(store: &Store) -> HashSet<String> {
+    match store.open().await {
+        Ok(ds) => all_ids(&ds).await.unwrap_or_default(),
+        Err(_) => HashSet::new(),
+    }
+}
+
+/// Whether a publish error is the Hub refusing the write — a 403/Forbidden, i.e. the token can't
+/// write to this remote. Matches the typed [`HFError`] preserved in the error chain.
+pub fn is_read_only(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| match cause.downcast_ref::<HFError>() {
+        Some(HFError::Forbidden { .. }) => true,
+        Some(HFError::Http { context }) => context.status.as_u16() == 403,
+        _ => false,
+    })
 }
 
 /// Every chunk id in a store (a plain `id`-column scan; plain scans aren't limit-capped).
@@ -136,8 +154,7 @@ pub async fn run_push(target: Store, force_reindex: bool) -> Result<String> {
         .build()
         .context("building hf-hub client")?;
     let repo = client.dataset(owner, name);
-    // The dataset always lives on the default branch; reads/push never pin a revision (a pin would
-    // freeze you behind the last push), so HEAD of `main` is the one source of truth.
+    // No revision pinning: always the `main` branch head.
     let rev = "main".to_string();
     let dataset_uri = format!("{uri}/{}.lance", dataset::TABLE);
     let opts = HashMap::from([("hf_token".to_string(), token), ("revision".to_string(), rev.clone())]);
@@ -202,7 +219,7 @@ pub async fn run_push(target: Store, force_reindex: bool) -> Result<String> {
             .revision(rev.clone())
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("create_commit failed: {e}"))?;
+            .map_err(|e| anyhow::Error::new(e).context("create_commit failed"))?;
         return Ok(format!(
             "{}: pushed {n_chunks} chunks (commit {})\n",
             target.label(),
@@ -286,6 +303,15 @@ async fn reindex_auto(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_read_only_matches_the_type_not_the_message() {
+        // We match the typed HFError, not the rendered text — a plain error that merely mentions
+        // 403/Forbidden is not a read-only signal. (HFError is #[non_exhaustive], so the positive
+        // path can't be built here; it's exercised by the gated round-trip.)
+        assert!(!is_read_only(&anyhow::anyhow!("server said 403 Forbidden")));
+        assert!(!is_read_only(&anyhow::anyhow!("no HF token")));
+    }
 
     #[test]
     fn parse_hf_accepts_repo_root_and_a_prefix() {

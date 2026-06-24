@@ -1,10 +1,5 @@
-//! The built-in hello-world corpus: a tiny set of onboarding passages funes can recall before
-//! the user has indexed anything. A fresh install runs the real recall pipeline against this, so
-//! the first `funes recall` returns something useful — and the passages double as the
-//! getting-started guide (how to index, recall, wire into an agent, and optionally push).
-//!
-//! It's a read-only fallback: the moment `funes index` builds the local store, recall reads the
-//! user's own history and this corpus steps aside (see [`crate::recall`]).
+//! The built-in hello-world corpus: onboarding passages recall falls back to when there's no local
+//! index yet, so a fresh install returns something useful. Superseded once `funes index` runs.
 
 use crate::chunk::Chunk;
 use crate::index::{self, DIM};
@@ -19,9 +14,8 @@ use tempfile::TempDir;
 const SESSION: &str = "hello";
 const PROJECT: &str = "funes";
 
-/// The onboarding passages, in reading order, as `(role, text)`. The first is phrased as the
-/// user's question so `list` has a sensible summary line; the rest are guidance. Edit these
-/// freely — they're plain text, embedded fresh at runtime.
+/// The onboarding passages as `(role, text)`. The first is the user's question (so `list` has a
+/// summary line); the rest are guidance.
 pub const PASSAGES: &[(&str, &str)] = &[
     ("user", "What is funes and how do I get started?"),
     (
@@ -79,10 +73,8 @@ pub const PASSAGES: &[(&str, &str)] = &[
     ),
 ];
 
-/// Build the hello-world corpus as an ephemeral lance dataset, returning the temp dir that backs
-/// it — keep it alive for as long as the dataset is read. With an `embedder`, passages get real
-/// vectors so `recall` can search them; without one, vectors are zero (enough for `get`/`list`,
-/// which scan columns but never the vector).
+/// Build the corpus as an ephemeral lance dataset; the returned temp dir backs it (keep alive
+/// while reading). With an `embedder`, passages get real vectors for search; without, zeros.
 pub async fn dataset(embedder: Option<&mut TextEmbedding>) -> Result<(TempDir, Dataset)> {
     let ts = chrono::Utc::now().to_rfc3339();
     let chunks: Vec<Chunk> = PASSAGES

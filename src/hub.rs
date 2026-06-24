@@ -32,10 +32,8 @@ impl Store {
         }
     }
 
-    /// Parse a store spec: `"local"` → the default local store; an `hf://…` URI or an
-    /// `<org>/<repo>` shorthand → a remote dataset; a filesystem path → a local store there. The
-    /// shorthand expands to `hf://datasets/<org>/<repo>`; a spec starting with `/`, `.`, or `~`
-    /// is always a local path (so a relative dir reads as a path, not a repo).
+    /// Parse a store spec: `"local"` → the local store; an `hf://…` URI or `<org>/<repo>` shorthand
+    /// → a remote; a path (`/`, `.`, `~`, or a bare name) → a local store there.
     pub fn parse(spec: &str) -> Self {
         if spec == "local" {
             Store::local()
@@ -58,9 +56,8 @@ impl Store {
         resolve_with(spec, crate::config::load().remote)
     }
 
-    /// True only for the *default* local store (`$FUNES_DB`/`~/.funes`), the one a fresh install
-    /// uses. An explicit `--remote` or a non-default path is not the default, even when it can't
-    /// open — so the hello-world fallback never masks a real "your store is missing" error.
+    /// True only for the default local store (`$FUNES_HOME`/`~/.funes`), so the hello-world
+    /// fallback fires only there — never masking a missing explicit store.
     pub fn is_default_local(&self) -> bool {
         matches!(self, Store::Local { path } if path.as_path() == Path::new(&dataset::local_store_dir()))
     }
@@ -94,8 +91,7 @@ impl Store {
     }
 }
 
-/// Pure core of [`Store::resolve`]: an explicit `spec` wins over the persisted active store; with
-/// neither (both blank), the local index. Split out so it's testable without touching the config.
+/// Pure core of [`Store::resolve`]: explicit `spec` over the active store, else local.
 fn resolve_with(spec: Option<String>, active: Option<String>) -> Store {
     let clean = |o: Option<String>| o.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     match clean(spec).or_else(|| clean(active)) {
@@ -104,8 +100,7 @@ fn resolve_with(spec: Option<String>, active: Option<String>) -> Store {
     }
 }
 
-/// `<org>/<repo>[/…]` with no scheme and not a filesystem path → an HF dataset shorthand. A spec
-/// starting with `/`, `.`, or `~` is treated as a local path, never a shorthand.
+/// `<org>/<repo>[/…]` with no scheme and not a path (`/` `.` `~`) → an HF dataset shorthand.
 fn is_remote_shorthand(spec: &str) -> bool {
     !spec.starts_with(['/', '.', '~']) && spec.contains('/')
 }

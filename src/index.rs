@@ -246,12 +246,13 @@ pub async fn run_index(source: &Path, no_thinking: bool) -> Result<()> {
 
     println!("indexed files={n_files} skipped={n_skipped} chunks={n_chunks}");
 
-    // If a remote is attached, publish what was just built so the active store stays current.
-    // Best-effort: a failed push (offline, no token, secret gate) does not fail the local index —
-    // the delta self-heals on the next `index`. A local active store is a no-op (nothing to push).
+    // Publish to the attached remote, best-effort: a failed push must not fail the local index.
     if let Some(remote) = config::load().remote {
         match push::run_push(hub::Store::parse(&remote), false).await {
             Ok(report) => print!("{report}"),
+            Err(e) if push::is_read_only(&e) => {
+                eprintln!("indexed locally; {remote} is read-only for your token — recall reads it, but publishing needs write access")
+            }
             Err(e) => eprintln!("indexed locally; couldn't publish to {remote}: {e}"),
         }
     }

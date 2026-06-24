@@ -1,7 +1,5 @@
-//! The funes config (`funes.json`): the persisted active store. Lives in `$FUNES_HOME` next to the
-//! local index. It holds the remote this host is attached to — its absence means "local only".
-//! This is the stateful replacement for the old `$FUNES_STORE` env var: set once with `funes use`,
-//! honored by every command (read source, push target, the MCP server's recall target).
+//! The funes config (`funes.json` in `$FUNES_HOME`): the attached remote, or absent for local-only.
+//! Set with `funes use`; read by recall, push, and the MCP server.
 
 use crate::dataset;
 use anyhow::{Context, Result};

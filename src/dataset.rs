@@ -21,9 +21,8 @@ use lance_linalg::distance::MetricType;
 /// The table (Lance dataset) name within a store.
 pub const TABLE: &str = "chunks";
 
-/// funes's home directory: `$FUNES_HOME` if set, else `~/.funes`. Holds `funes.json`, the
-/// incremental state, and the local store. The one bootstrap location — the config can't say
-/// where the config lives, so this is set by env (or defaulted), not by config.
+/// funes's home directory: `$FUNES_HOME`, else `~/.funes`. Holds `funes.json`, the incremental
+/// state, and the local store.
 pub fn funes_dir() -> PathBuf {
     if let Ok(d) = std::env::var("FUNES_HOME") {
         return PathBuf::from(d);
