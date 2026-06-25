@@ -14,6 +14,7 @@ use anyhow::{anyhow, Context, Result};
 use hf_hub::{HFClient, HFError};
 use lance::dataset::Dataset;
 
+use crate::config;
 use crate::dataset;
 use crate::index::{DIM, MODEL};
 
@@ -55,7 +56,7 @@ impl Store {
     /// Resolve the store the read commands should use: an explicit `spec` (a CLI `--remote`) wins,
     /// else the persisted active store (`funes use`), else the local index.
     pub fn resolve(spec: Option<String>) -> Self {
-        resolve_with(spec, crate::config::load().remote)
+        resolve_with(spec, config::load().remote)
     }
 
     /// True only for the default local store (`$FUNES_HOME`/`~/.funes`), so the hello-world
@@ -121,11 +122,21 @@ pub(crate) fn parse_hf(uri: &str) -> Result<(String, String, String)> {
 /// How long the reachability probe waits before treating a remote as offline.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Whether the remote dataset at `uri` answers a lightweight probe, so a read can fall back to the
-/// local index instead of hanging on a slow open when the remote is offline.
-pub async fn remote_reachable(uri: &str) -> bool {
+/// What a lightweight probe of a remote dataset repo found.
+pub enum Reachability {
+    /// The repo answered — a read or push can proceed.
+    Ok,
+    /// No usable response (no connection, DNS, timeout, or 5xx): treat as offline.
+    Offline,
+    /// The repo does not exist on the Hub. funes never creates it.
+    Missing,
+}
+
+/// Probe the remote dataset repo at `uri`. A 403/auth answer counts as [`Reachability::Ok`] — that's
+/// a real error the open or commit should surface, not an offline or missing signal.
+pub async fn remote_reachability(uri: &str) -> Reachability {
     let Ok((owner, name, _)) = parse_hf(uri) else {
-        return true; // not an hf:// dataset URI — let the open report the real error
+        return Reachability::Ok; // not an hf:// dataset URI — let the open/commit report the real error
     };
     // No retries: this is a reachability check, so one failed request already means offline. Without
     // this, hf-hub's default exponential backoff (5 attempts) would drag the probe out for seconds.
@@ -134,14 +145,23 @@ pub async fn remote_reachable(uri: &str) -> bool {
         builder = builder.token(token);
     }
     let Ok(client) = builder.build() else {
-        return true;
+        return Reachability::Ok;
     };
     let repo = client.dataset(owner, name);
     match tokio::time::timeout(PROBE_TIMEOUT, repo.info().send()).await {
-        Err(_elapsed) => false,
-        Ok(Ok(_)) => true,
-        Ok(Err(e)) => !is_offline_error(&e),
+        Err(_elapsed) => Reachability::Offline,
+        Ok(Ok(_)) => Reachability::Ok,
+        Ok(Err(HFError::RepoNotFound { .. })) => Reachability::Missing,
+        Ok(Err(e)) if is_offline_error(&e) => Reachability::Offline,
+        Ok(Err(_)) => Reachability::Ok,
     }
+}
+
+/// Whether the remote is reachable enough to read from — false only when offline, so a read can
+/// fall back to the local index. A missing or auth-failing repo is "reachable": the open then
+/// surfaces the real error.
+pub async fn remote_reachable(uri: &str) -> bool {
+    !matches!(remote_reachability(uri).await, Reachability::Offline)
 }
 
 /// A transport-level failure (no usable HTTP response) or a 5xx — the cases where degrading to the

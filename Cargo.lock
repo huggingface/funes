@@ -2880,6 +2880,7 @@ dependencies = [
  "anyhow",
  "arrow-array",
  "arrow-schema",
+ "arrow-select",
  "async-trait",
  "bytes",
  "chrono",

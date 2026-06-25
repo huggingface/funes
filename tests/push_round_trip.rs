@@ -112,9 +112,9 @@ async fn push_round_trip_create_append_recall() {
         .send()
         .await;
 
-    let create = create.expect("create push");
+    let create = create.expect("create push").report;
     assert!(create.contains("pushed"), "create should publish: {create}");
-    let append = append.expect("append push");
+    let append = append.expect("append push").report;
     assert!(
         append.contains("pushed 1 chunks"),
         "append should publish only the new chunk: {append}"
@@ -127,7 +127,7 @@ async fn push_round_trip_create_append_recall() {
         recall_new.contains("SYNCSMOKE2"),
         "remote recall should surface the appended turn: {recall_new}"
     );
-    let reindex = reindex.expect("force reindex");
+    let reindex = reindex.expect("force reindex").report;
     assert!(
         reindex.contains("reindexed"),
         "force-reindex should commit an index delta: {reindex}"

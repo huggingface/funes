@@ -3,10 +3,10 @@
 //! changed session add only chunks whose id is new — a grown session (the same memory)
 //! contributes just its new turns, nothing is re-embedded or deleted.
 
-use crate::{chunk, config, dataset, hub, parse, push};
+use crate::{chunk, config, dataset, hub, parse, push, scan};
 use anyhow::{anyhow, Result};
 use arrow_array::types::Float32Type;
-use arrow_array::{FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator, StringArray};
+use arrow_array::{Array, FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use lance::dataset::{Dataset, WriteParams};
@@ -21,7 +21,7 @@ pub const DIM: i32 = 384;
 const EMBED_BATCH: usize = 256;
 
 /// The table schema (column order is load-bearing for Lance).
-fn schema() -> Arc<Schema> {
+pub(crate) fn schema() -> Arc<Schema> {
     let utf8 = |name: &str| Field::new(name, DataType::Utf8, true);
     let i64f = |name: &str| Field::new(name, DataType::Int64, true);
     Arc::new(Schema::new_with_metadata(
@@ -81,6 +81,21 @@ pub(crate) fn build_batch(chunks: &[chunk::Chunk], vectors: &[Vec<f32>]) -> Resu
     )?)
 }
 
+/// Embed `texts` in batches of [`EMBED_BATCH`], calling `on_batch(embedded_so_far)` after each so a
+/// caller can report progress (or pass a no-op).
+pub(crate) fn embed_batched(
+    embedder: &mut TextEmbedding,
+    texts: &[&str],
+    mut on_batch: impl FnMut(usize),
+) -> Result<Vec<Vec<f32>>> {
+    let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
+    for group in texts.chunks(EMBED_BATCH) {
+        vectors.extend(embedder.embed(group, None)?);
+        on_batch(vectors.len());
+    }
+    Ok(vectors)
+}
+
 /// The chunk ids already stored for `session_id`. Re-indexing keeps only the chunks whose id
 /// isn't here, so a grown session (the same memory) contributes just its new turns — nothing is
 /// re-embedded or deleted. (A rewritten turn arrives under new ids, i.e. as another memory.)
@@ -99,6 +114,50 @@ async fn existing_ids(ds: &Dataset, session_id: &str) -> Result<HashSet<String>>
         }
     }
     Ok(ids)
+}
+
+/// Redact secrets from a session's turns *before* chunking — so a long key that chunking would
+/// split across pieces is whole when scanned, and never reaches the embedding, the local store, or
+/// (via push) the Hub. Best-effort: removes a secret whose value byte-matches the stored text (the
+/// common case, real newlines); anything that resists is caught downstream by the fail-closed push
+/// gate. Reports to stderr what it removed.
+fn redact_turns(turns: &mut [parse::Turn], scanner: &dyn scan::SecretScanner) -> Result<()> {
+    let texts: Vec<String> = turns
+        .iter()
+        .flat_map(|t| t.blocks.iter().map(|b| b.text.clone()))
+        .collect();
+    if texts.is_empty() {
+        return Ok(());
+    }
+    let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+    let per_block = scan::scan_blocks(&refs, scanner)?;
+
+    let mut removed: Vec<String> = Vec::new();
+    let redacted: Vec<String> = texts
+        .iter()
+        .zip(&per_block)
+        .map(|(text, findings)| {
+            let r = scan::excise(text, findings);
+            removed.extend(r.removed_detectors);
+            r.text
+        })
+        .collect();
+    if removed.is_empty() {
+        return Ok(());
+    }
+    let mut it = redacted.into_iter();
+    for t in turns.iter_mut() {
+        for b in t.blocks.iter_mut() {
+            b.text = it.next().expect("one redacted text per block");
+        }
+    }
+    let sid = turns.first().map(|t| t.session_id.as_str()).unwrap_or("?");
+    eprintln!(
+        "    redacted {} secret(s) in {sid}: {}",
+        removed.len(),
+        scan::summary(removed.iter().map(String::as_str))
+    );
+    Ok(())
 }
 
 /// "size:mtime_secs" for incremental skip, or None if the file can't be stat'd.
@@ -147,6 +206,15 @@ pub async fn run_index(source: &Path, no_thinking: bool) -> Result<()> {
         total - cached
     );
     let mut embedder = TextEmbedding::try_new(InitOptions::new(EmbeddingModel::BGESmallENV15))?;
+    // Best-effort secret redaction: if the scanner isn't installed, indexing continues unredacted —
+    // the push gate still scans, fail-closed, before any upload, so a secret can't reach the Hub.
+    let scanner = match scan::Trufflehog::find() {
+        Ok(s) => Some(s),
+        Err(e) => {
+            eprintln!("note: secret redaction disabled — {e}");
+            None
+        }
+    };
 
     let (mut n_files, mut n_skipped, mut n_chunks) = (0u64, 0u64, 0u64);
     for (idx, p) in files.iter().enumerate() {
@@ -162,7 +230,7 @@ pub async fn run_index(source: &Path, no_thinking: bool) -> Result<()> {
 
         let sid = parse::session_id_of(p);
         let project = parse::project_of(p);
-        let turns = match parse::turns_from_jsonl_file(p, &sid, &project) {
+        let mut turns = match parse::turns_from_jsonl_file(p, &sid, &project) {
             Ok(t) => t,
             Err(e) => {
                 // Don't record state, so a transient read failure is retried next run.
@@ -170,6 +238,9 @@ pub async fn run_index(source: &Path, no_thinking: bool) -> Result<()> {
                 continue;
             }
         };
+        if let Some(scanner) = &scanner {
+            redact_turns(&mut turns, scanner)?;
+        }
         let chunks = chunk::chunks_from_turns(&turns, include_thinking);
         let total_chunks = chunks.len();
 
@@ -200,17 +271,11 @@ pub async fn run_index(source: &Path, no_thinking: bool) -> Result<()> {
                 );
                 let texts: Vec<&str> = new_chunks.iter().map(|c| c.text.as_str()).collect();
                 let t0 = Instant::now();
-                let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(n);
-                for group in texts.chunks(EMBED_BATCH) {
-                    vectors.extend(embedder.embed(group, None)?);
+                let vectors = embed_batched(&mut embedder, &texts, |done| {
                     let secs = t0.elapsed().as_secs_f64().max(0.001);
-                    eprint!(
-                        "\r    embedded {}/{n}  ({:.0}/s)   ",
-                        vectors.len(),
-                        vectors.len() as f64 / secs
-                    );
+                    eprint!("\r    embedded {done}/{n}  ({:.0}/s)   ", done as f64 / secs);
                     let _ = std::io::stderr().flush();
-                }
+                })?;
                 eprintln!(
                     "\r    embedded {n} chunks in {:.1}s          ",
                     t0.elapsed().as_secs_f64()
@@ -249,7 +314,7 @@ pub async fn run_index(source: &Path, no_thinking: bool) -> Result<()> {
     // Publish to the attached remote, best-effort: a failed push must not fail the local index.
     if let Some(remote) = config::load().remote {
         match push::run_push(hub::Store::parse(&remote), false).await {
-            Ok(report) => print!("{report}"),
+            Ok(pushed) => print!("{}", pushed.report),
             Err(e) if push::is_read_only(&e) => {
                 eprintln!("indexed locally; {remote} is read-only for your token — recall reads it, but publishing needs write access")
             }
@@ -306,6 +371,51 @@ mod tests {
                 "split_idx",
                 "vector",
             ]
+        );
+    }
+
+    #[test]
+    fn redact_turns_replaces_secrets_in_block_text() {
+        struct Fake(Vec<scan::Finding>);
+        impl scan::SecretScanner for Fake {
+            fn scan(&self, _blob: &str) -> Result<Vec<scan::Finding>> {
+                Ok(self.0.clone())
+            }
+        }
+        let scanner = Fake(vec![
+            scan::Finding {
+                detector: "PrivateKey".into(),
+                raw: "TOPSECRET".into(),
+                line: None,
+                decoder: "PLAIN".into(),
+            },
+            scan::Finding {
+                detector: "VirusTotal".into(),
+                raw: "cafef00d".into(),
+                line: None,
+                decoder: "PLAIN".into(),
+            },
+        ]);
+        let mut turns = vec![parse::Turn {
+            session_id: "sess".into(),
+            project: "proj".into(),
+            turn_uuid: "turn".into(),
+            parent_uuid: None,
+            seq: 0,
+            ts: String::new(),
+            role: "user".into(),
+            blocks: vec![parse::Block {
+                block_type: "text".into(),
+                text: "key=TOPSECRET hash=cafef00d".into(),
+                tool_name: None,
+                tool_use_id: None,
+            }],
+            source_path: String::new(),
+        }];
+        redact_turns(&mut turns, &scanner).unwrap();
+        assert_eq!(
+            turns[0].blocks[0].text,
+            "key=[REDACTED:PrivateKey] hash=[REDACTED:VirusTotal]"
         );
     }
 }

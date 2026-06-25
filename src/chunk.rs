@@ -2,13 +2,16 @@
 //! All indexing is by Unicode code point (char), not bytes.
 
 use crate::parse::Turn;
+use arrow_array::{Array, Int64Array, RecordBatch, StringArray};
 use sha1::{Digest, Sha1};
+use std::collections::HashMap;
 
 const MAX_CHARS: usize = 1200;
 /// Consecutive splits of one block share this many leading/trailing chars, so reassembly
 /// (`recall::stitch`) never needs to match a longer overlap than this.
 pub const OVERLAP: usize = 150;
 
+#[derive(Clone)]
 pub struct Chunk {
     pub id: String,
     pub text: String,
@@ -94,6 +97,133 @@ fn cid(session_id: &str, turn_uuid: &str, block_idx: i64, split_idx: i64) -> Str
     let mut h = Sha1::new();
     h.update(raw.as_bytes());
     hex::encode(h.finalize())[..16].to_string()
+}
+
+/// Join two consecutive splits of one block, dropping the shared [`OVERLAP`] region once. The
+/// inverse of the overlap [`split`] introduces; the seam never exceeds `OVERLAP`, so a longer
+/// spurious match in periodic text can't swallow real content.
+pub(crate) fn stitch(a: &str, b: &str) -> String {
+    let ac: Vec<char> = a.chars().collect();
+    let bc: Vec<char> = b.chars().collect();
+    let max_k = ac.len().min(bc.len()).min(OVERLAP);
+    for k in (1..=max_k).rev() {
+        if ac[ac.len() - k..] == bc[..k] {
+            return ac.iter().chain(bc[k..].iter()).collect();
+        }
+    }
+    format!("{a}{b}")
+}
+
+/// Group `chunks` into their blocks, keyed by (session, turn, block_idx). Returns, in first-seen
+/// block order, the indices into `chunks` for each block, ordered by `split_idx` — so a caller can
+/// [`reconstruct`] each block and map a per-block result back to its rows.
+fn group_blocks(chunks: &[Chunk]) -> Vec<Vec<usize>> {
+    let mut order: Vec<(String, String, i64)> = Vec::new();
+    let mut groups: HashMap<(String, String, i64), Vec<usize>> = HashMap::new();
+    for (i, c) in chunks.iter().enumerate() {
+        let key = (c.session_id.clone(), c.turn_uuid.clone(), c.block_idx);
+        let entry = groups.entry(key.clone()).or_default();
+        if entry.is_empty() {
+            order.push(key);
+        }
+        entry.push(i);
+    }
+    order
+        .into_iter()
+        .map(|k| {
+            let mut idxs = groups.remove(&k).unwrap();
+            idxs.sort_by_key(|&i| chunks[i].split_idx);
+            idxs
+        })
+        .collect()
+}
+
+/// Reconstruct a block's contiguous text from its `pieces` (in `split_idx` order), undoing the
+/// overlap [`split`] added. The inverse of `split`: a secret that `split` cut across two chunks is
+/// whole again here, so a scanner sees it. `pieces` must be one block's splits, ordered.
+fn reconstruct(pieces: &[&str]) -> String {
+    let mut iter = pieces.iter();
+    match iter.next() {
+        None => String::new(),
+        Some(first) => iter.fold(first.to_string(), |acc, p| stitch(&acc, p)),
+    }
+}
+
+/// Reconstruct [`Chunk`]s from stored rows (all columns), so the store can be rewritten without its
+/// source. The `vector` column is dropped — rewritten rows are re-embedded.
+pub(crate) fn chunks_from_batches(batches: &[RecordBatch]) -> Vec<Chunk> {
+    let sv = |b: &RecordBatch, name: &str, i: usize| -> String {
+        b.column_by_name(name)
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .map(|c| c.value(i).to_string())
+            .unwrap_or_default()
+    };
+    let so = |b: &RecordBatch, name: &str, i: usize| -> Option<String> {
+        b.column_by_name(name)
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .filter(|c| !c.is_null(i))
+            .map(|c| c.value(i).to_string())
+    };
+    let iv = |b: &RecordBatch, name: &str, i: usize| -> i64 {
+        b.column_by_name(name)
+            .and_then(|c| c.as_any().downcast_ref::<Int64Array>())
+            .map(|c| c.value(i))
+            .unwrap_or(0)
+    };
+    let mut out = Vec::new();
+    for b in batches {
+        for i in 0..b.num_rows() {
+            out.push(Chunk {
+                id: sv(b, "id", i),
+                text: sv(b, "text", i),
+                session_id: sv(b, "session_id", i),
+                project: sv(b, "project", i),
+                turn_uuid: sv(b, "turn_uuid", i),
+                parent_uuid: so(b, "parent_uuid", i),
+                seq: iv(b, "seq", i),
+                ts: sv(b, "ts", i),
+                role: sv(b, "role", i),
+                block_type: sv(b, "block_type", i),
+                tool_name: so(b, "tool_name", i),
+                source_path: sv(b, "source_path", i),
+                block_idx: iv(b, "block_idx", i),
+                split_idx: iv(b, "split_idx", i),
+            });
+        }
+    }
+    out
+}
+
+/// Group `chunks` into blocks and reconstruct each block's contiguous text in one step — the single
+/// entry point both the push gate and `scrub` use to scan whole blocks. Returns, in first-seen block
+/// order, each block's chunk indices (ordered by `split_idx`) paired with its reconstructed text, so
+/// a per-block scan result maps straight back to the rows it covers.
+pub(crate) fn reconstruct_blocks(chunks: &[Chunk]) -> Vec<(Vec<usize>, String)> {
+    group_blocks(chunks)
+        .into_iter()
+        .map(|idxs| {
+            let pieces: Vec<&str> = idxs.iter().map(|&i| chunks[i].text.as_str()).collect();
+            let text = reconstruct(&pieces);
+            (idxs, text)
+        })
+        .collect()
+}
+
+/// Re-chunk a block's (already rendered) `text` after it changed — e.g. a secret was redacted out —
+/// reusing the block's identity (session, turn, block_idx, role, …) from `template`. Ids and
+/// `split_idx` are regenerated from the new split count, so they stay coordinate-stable. An empty
+/// result means nothing indexable survived.
+pub(crate) fn resplit(template: &Chunk, text: &str) -> Vec<Chunk> {
+    split(text)
+        .into_iter()
+        .enumerate()
+        .map(|(si, piece)| Chunk {
+            id: cid(&template.session_id, &template.turn_uuid, template.block_idx, si as i64),
+            text: piece,
+            split_idx: si as i64,
+            ..(*template).clone()
+        })
+        .collect()
 }
 
 pub fn chunks_from_turns(turns: &[Turn], include_thinking: bool) -> Vec<Chunk> {
@@ -196,6 +326,76 @@ mod tests {
         assert_eq!(cid("s", "u", 0, 0), cid("s", "u", 0, 0));
         assert_ne!(cid("s", "u", 0, 0), cid("s", "u", 0, 1));
         assert_eq!(cid("s", "u", 0, 0).len(), 16);
+    }
+
+    #[test]
+    fn stitch_drops_overlap_once() {
+        let overlap = "the quick brown fox jumps";
+        let a = format!("HEAD {overlap}");
+        let b = format!("{overlap} TAIL");
+        assert_eq!(stitch(&a, &b), "HEAD the quick brown fox jumps TAIL");
+    }
+
+    #[test]
+    fn stitch_does_not_over_merge_repetitive_text() {
+        // Periodic text: many suffix==prefix lengths match. The seam is bounded by OVERLAP, so a
+        // longer spurious match must not swallow real content.
+        let unit = "abcabcabc ";
+        let a = unit.repeat(60); // > OVERLAP chars, all periodic
+        let b = unit.repeat(60);
+        let joined = stitch(&a, &b);
+        // Reassembly must not be shorter than the longer input (no content dropped).
+        assert!(joined.chars().count() >= a.chars().count());
+    }
+
+    #[test]
+    fn stitch_no_overlap_concatenates() {
+        assert_eq!(stitch("alpha", "beta"), "alphabeta");
+    }
+
+    #[test]
+    fn stitch_recovers_overlap_with_trimmed_seam_whitespace() {
+        // The real shared region is "the quick brown fox " (trailing space), but split() trims it
+        // off `a`'s end and the leading space off `b`. stitch must still match the shorter overlap
+        // and not duplicate it (no "...foxfox..." and no doubled "the quick brown fox").
+        let a = "HEAD the quick brown fox"; // trailing space trimmed
+        let b = "the quick brown fox TAIL"; // leading already flush
+        assert_eq!(stitch(a, b), "HEAD the quick brown fox TAIL");
+    }
+
+    #[test]
+    fn reconstruct_inverts_split() {
+        // A long block that splits into several overlapping pieces must reassemble to the original
+        // (trimmed) text — so a scanner sees a secret split() had cut across chunk boundaries.
+        let text: String = (0..600).map(|i| format!("word{i} ")).collect();
+        let pieces = split(&text);
+        assert!(pieces.len() > 1, "precondition: text must split");
+        let refs: Vec<&str> = pieces.iter().map(String::as_str).collect();
+        assert_eq!(reconstruct(&refs), text.trim());
+    }
+
+    #[test]
+    fn reconstruct_handles_single_and_empty() {
+        assert_eq!(reconstruct(&["whole block"]), "whole block");
+        assert_eq!(reconstruct(&[]), "");
+    }
+
+    #[test]
+    fn resplit_regenerates_ids_matching_a_fresh_chunking() {
+        // Re-chunking a redacted block must yield exactly the ids/split_idx that chunks_from_turns
+        // would produce for that text — so a scrub's delete-by-id + append stays coordinate-stable.
+        let long: String = (0..600).map(|i| format!("word{i} ")).collect();
+        let t = turn(vec![block("text", &long, None)]);
+        let fresh = chunks_from_turns(std::slice::from_ref(&t), true);
+        let template = fresh[0].clone();
+        let rendered = render("text", &long, &None);
+        let re = resplit(&template, &rendered);
+        assert_eq!(re.len(), fresh.len());
+        for (a, b) in re.iter().zip(&fresh) {
+            assert_eq!(a.id, b.id);
+            assert_eq!(a.split_idx, b.split_idx);
+            assert_eq!(a.text, b.text);
+        }
     }
 
     #[test]

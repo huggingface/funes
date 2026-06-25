@@ -18,3 +18,4 @@ pub mod parse;
 pub mod push;
 pub mod recall;
 pub mod scan;
+pub mod scrub;

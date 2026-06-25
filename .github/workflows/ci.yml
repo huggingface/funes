@@ -61,6 +61,12 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --profile ci -- -D warnings
 
+      # trufflehog for the secret-scan unit tests, pinned to the version used locally.
+      - name: Install trufflehog
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin v3.95.5
+          trufflehog --version
+
       # Unit tests only here — hermetic, no network. The integration test that runs the
       # real embedder lives in its own job below.
       - name: Unit tests
@@ -107,6 +113,10 @@ jobs:
 
       - name: Integration test
         run: cargo test --profile ci --test index_recall -- --nocapture
+
+      # `cargo test --test <name>` runs only the named target.
+      - name: Secret redaction tests
+        run: cargo test --profile ci --test redact_on_index --test scrub --test scrub_drops_escaped_key --test scrub_drops_all -- --nocapture
 
       # Gated: runs only when the secret is present (skips on forks / missing secret).
       - name: Remote recall test

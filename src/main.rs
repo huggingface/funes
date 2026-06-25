@@ -3,7 +3,7 @@
 //! `recall` reads the index (hybrid → rerank → recency); `index` builds/updates it
 //! from `~/.claude/projects/**/*.jsonl`. funes's home is `$FUNES_HOME` or `~/.funes`.
 
-use funes::{config, hub, index, mcp, push, recall};
+use funes::{config, hub, index, mcp, push, recall, scrub};
 
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand};
@@ -95,6 +95,10 @@ enum Cmd {
         #[arg(long)]
         force_reindex: bool,
     },
+    /// Redact secrets from the local index in place — for rows indexed before redaction existed (or
+    /// flagged by an updated ruleset); needs no source transcript. Cleans the local store only: it
+    /// does NOT scrub an already-published remote, which the push gate can only stop adding to.
+    Scrub,
     /// Run as an MCP server over stdio (for Claude Code, Cursor, …).
     Mcp,
 }
@@ -173,8 +177,12 @@ async fn main() -> Result<()> {
                 .remote
                 .ok_or_else(|| anyhow!("no active remote — attach one with `funes use <org>/<repo>`"))?;
             match push::run_push(hub::Store::parse(&remote), force_reindex).await {
-                Ok(report) => {
-                    print!("{report}");
+                Ok(pushed) => {
+                    print!("{}", pushed.report);
+                    // Secrets held back everything — surface a non-zero exit so automation can react.
+                    if pushed.blocked {
+                        std::process::exit(2);
+                    }
                     Ok(())
                 }
                 Err(e) if push::is_read_only(&e) => Err(anyhow!(
@@ -183,6 +191,7 @@ async fn main() -> Result<()> {
                 Err(e) => Err(e),
             }
         }
+        Cmd::Scrub => scrub::run().await,
         Cmd::Mcp => mcp::run().await,
     }
 }
@@ -209,11 +218,22 @@ async fn use_store(spec: String) -> Result<()> {
     config::save(&cfg)?;
     println!("active store: {uri}");
 
-    // The overlap heuristic reads the remote's chunk ids; an unreachable remote would read as empty
-    // and wrongly hint at pushing. Attach anyway and say so — recall falls back to the local index.
-    if !hub::remote_reachable(&uri).await {
-        println!("remote currently unreachable — recall will use your local index until it's back");
-        return Ok(());
+    // The overlap heuristic below reads the remote's chunk ids; a remote we can't read would come
+    // back empty and wrongly hint at pushing. Attach anyway (the intent is stored) but skip the
+    // heuristic and say what's wrong — caught here at attach time rather than at the next push.
+    match hub::remote_reachability(&uri).await {
+        hub::Reachability::Offline => {
+            println!("remote currently unreachable — recall will use your local index until it's back");
+            return Ok(());
+        }
+        hub::Reachability::Missing => {
+            println!(
+                "note: this repo doesn't exist on the Hub yet, and funes won't create it — create \
+                 the dataset repo (https://huggingface.co/new-dataset) before you push"
+            );
+            return Ok(());
+        }
+        hub::Reachability::Ok => {}
     }
 
     let local = push::store_ids(&hub::Store::local()).await;

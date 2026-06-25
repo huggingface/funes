@@ -2,6 +2,7 @@
 //! so any MCP client (Claude Code, Cursor, …) can call funes as a first-class tool.
 //! stdout is the JSON-RPC channel — logs must go to stderr.
 
+use crate::hub::Store;
 use crate::recall;
 use anyhow::Result;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -59,7 +60,7 @@ impl Funes {
         }): Parameters<RecallRequest>,
     ) -> String {
         match recall::recall(
-            crate::hub::Store::resolve(None),
+            Store::resolve(None),
             query,
             k.unwrap_or(8),
             30,
@@ -87,14 +88,7 @@ impl Funes {
             window,
         }): Parameters<GetRequest>,
     ) -> String {
-        match recall::get(
-            crate::hub::Store::resolve(None),
-            session_id,
-            turn_uuid,
-            window.unwrap_or(3),
-        )
-        .await
-        {
+        match recall::get(Store::resolve(None), session_id, turn_uuid, window.unwrap_or(3)).await {
             Ok(s) if !s.is_empty() => s,
             Ok(_) => "no results".to_string(),
             Err(e) => format!("get error: {e}"),
@@ -103,7 +97,7 @@ impl Funes {
 
     #[tool(description = "Show funes index statistics (chunk count and store).")]
     async fn status(&self) -> String {
-        recall::status(crate::hub::Store::resolve(None))
+        recall::status(Store::resolve(None))
             .await
             .unwrap_or_else(|e| format!("status error: {e}"))
     }
