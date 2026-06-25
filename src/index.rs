@@ -3,14 +3,15 @@
 //! changed session add only chunks whose id is new — a grown session (the same memory)
 //! contributes just its new turns, nothing is re-embedded or deleted.
 
-use crate::{chunk, config, dataset, hub, parse, push};
+use crate::{chunk, config, dataset, hub, parse, preprocess, push, scan};
 use anyhow::{anyhow, Result};
 use arrow_array::types::Float32Type;
-use arrow_array::{FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator, StringArray};
+use arrow_array::{Array, FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use lance::dataset::{Dataset, WriteParams};
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::Path;
 use std::sync::Arc;
@@ -101,6 +102,20 @@ async fn existing_ids(ds: &Dataset, session_id: &str) -> Result<HashSet<String>>
     Ok(ids)
 }
 
+/// The index-time preprocessors, run over a session's turns before chunking. Secret redaction is
+/// best-effort: if the scanner isn't installed, indexing continues unredacted — the push gate still
+/// scans, fail-closed, before any upload, so a secret can't reach the Hub even if it lands in the
+/// local store.
+fn build_preprocessors() -> Vec<Box<dyn preprocess::Preprocessor>> {
+    match scan::Trufflehog::find() {
+        Ok(scanner) => vec![Box::new(preprocess::RedactSecrets::new(Box::new(scanner)))],
+        Err(e) => {
+            eprintln!("note: secret redaction disabled — {e}");
+            Vec::new()
+        }
+    }
+}
+
 /// "size:mtime_secs" for incremental skip, or None if the file can't be stat'd.
 fn file_sig(p: &Path) -> Option<String> {
     let md = std::fs::metadata(p).ok()?;
@@ -147,6 +162,7 @@ pub async fn run_index(source: &Path, no_thinking: bool) -> Result<()> {
         total - cached
     );
     let mut embedder = TextEmbedding::try_new(InitOptions::new(EmbeddingModel::BGESmallENV15))?;
+    let preprocessors = build_preprocessors();
 
     let (mut n_files, mut n_skipped, mut n_chunks) = (0u64, 0u64, 0u64);
     for (idx, p) in files.iter().enumerate() {
@@ -162,7 +178,7 @@ pub async fn run_index(source: &Path, no_thinking: bool) -> Result<()> {
 
         let sid = parse::session_id_of(p);
         let project = parse::project_of(p);
-        let turns = match parse::turns_from_jsonl_file(p, &sid, &project) {
+        let mut turns = match parse::turns_from_jsonl_file(p, &sid, &project) {
             Ok(t) => t,
             Err(e) => {
                 // Don't record state, so a transient read failure is retried next run.
@@ -170,6 +186,12 @@ pub async fn run_index(source: &Path, no_thinking: bool) -> Result<()> {
                 continue;
             }
         };
+        // Redact secrets (and any other preprocessors) on the contiguous block text before chunking,
+        // so a long secret split() would otherwise cut across chunks is whole when scanned — and so
+        // it never reaches the embedding, the local store, or, via push, the Hub.
+        for pp in &preprocessors {
+            pp.process(&mut turns)?;
+        }
         let chunks = chunk::chunks_from_turns(&turns, include_thinking);
         let total_chunks = chunks.len();
 
@@ -258,6 +280,164 @@ pub async fn run_index(source: &Path, no_thinking: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Redact secrets from the existing store in place. Scans every stored row; for any whose text
+/// still holds a secret, redacts the text, re-embeds it, and rewrites the row (delete + append).
+/// Works on the rows themselves — so it cleans sessions whose source transcripts are already gone,
+/// which re-indexing cannot. Fail-closed on the scanner: scrubbing is the whole point.
+pub async fn run_scrub() -> Result<()> {
+    let uri = dataset::table_uri(&dataset::local_store_dir());
+    let Ok(mut ds) = dataset::open(&uri, HashMap::new()).await else {
+        println!("no local index to scrub");
+        return Ok(());
+    };
+    let scanner = scan::Trufflehog::find()?;
+
+    let batches = dataset::scan_rows(&ds, &[], None, None).await?;
+    let chunks = chunks_from_batches(&batches);
+    let total = chunks.len();
+    if total == 0 {
+        println!("store is empty");
+        return Ok(());
+    }
+
+    // Work block by block: reconstruct each block's contiguous text (so a secret split() cut across
+    // chunks is whole), then redact across all blocks in one scan.
+    let blocks = chunk::group_blocks(&chunks);
+    let original: Vec<String> = blocks
+        .iter()
+        .map(|idxs| {
+            let pieces: Vec<&str> = idxs.iter().map(|&i| chunks[i].text.as_str()).collect();
+            chunk::reconstruct(&pieces)
+        })
+        .collect();
+    let mut redacted = original.clone();
+    let report = scan::redact(&mut redacted, &scanner)?;
+
+    // Verify: a secret whose bytes differ from trufflehog's canonical form (e.g. escaped `\n`) can't
+    // be excised by `redact`'s value match, so it survives. `locate` finds it by line, not value;
+    // any block still flagged can't be safely redacted, so it's dropped whole.
+    let refs: Vec<&str> = redacted.iter().map(String::as_str).collect();
+    let unredactable = scan::locate(&refs, &scanner)?;
+
+    // delete_ids: rows to remove (a block that changed, or one dropped whole). replacements: the
+    // re-chunked clean blocks to re-embed and append in their place.
+    let mut delete_ids: Vec<String> = Vec::new();
+    let mut replacements: Vec<chunk::Chunk> = Vec::new();
+    let (mut redacted_blocks, mut dropped_blocks, mut dropped_rows) = (0usize, 0usize, 0usize);
+    let mut dropped_detectors: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for (b, idxs) in blocks.iter().enumerate() {
+        if !unredactable[b].is_empty() {
+            for &i in idxs {
+                delete_ids.push(chunks[i].id.clone());
+            }
+            for d in &unredactable[b] {
+                *dropped_detectors.entry(d.clone()).or_default() += 1;
+            }
+            dropped_blocks += 1;
+            dropped_rows += idxs.len();
+        } else if redacted[b] != original[b] {
+            for &i in idxs {
+                delete_ids.push(chunks[i].id.clone());
+            }
+            replacements.extend(chunk::resplit(&chunks[idxs[0]], &redacted[b]));
+            redacted_blocks += 1;
+        }
+    }
+    if delete_ids.is_empty() {
+        println!("store is already clean ({total} chunks)");
+        return Ok(());
+    }
+
+    // Re-embed the replacement rows — their stored vectors were computed from secret-bearing text.
+    let new_batch = if replacements.is_empty() {
+        None
+    } else {
+        let mut embedder = TextEmbedding::try_new(InitOptions::new(EmbeddingModel::BGESmallENV15))?;
+        let texts: Vec<&str> = replacements.iter().map(|c| c.text.as_str()).collect();
+        let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(replacements.len());
+        for group in texts.chunks(EMBED_BATCH) {
+            vectors.extend(embedder.embed(group, None)?);
+        }
+        Some(build_batch(&replacements, &vectors)?)
+    };
+
+    // Delete by id (coordinate-based, stable), append the redacted re-chunked rows, rebuild indexes.
+    let ids = delete_ids
+        .iter()
+        .map(|id| format!("'{id}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    ds.delete(&format!("id IN ({ids})")).await?;
+    if let Some(batch) = new_batch {
+        let reader = RecordBatchIterator::new(vec![Ok(batch)], schema());
+        ds.append(reader, None).await?;
+    }
+    dataset::build_indexes(&mut ds).await;
+
+    let mut msg = format!(
+        "scrubbed {total} rows: redacted {} secret(s) in {redacted_blocks} block(s)",
+        report.len()
+    );
+    if dropped_blocks > 0 {
+        let summary = dropped_detectors
+            .iter()
+            .map(|(d, n)| format!("{d}×{n}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = write!(
+            msg,
+            "; dropped {dropped_rows} row(s) in {dropped_blocks} block(s) that couldn't be safely redacted ({summary})"
+        );
+    }
+    println!("{msg}");
+    Ok(())
+}
+
+/// Reconstruct [`chunk::Chunk`]s from stored rows (all columns), so the store can be rewritten
+/// without its source. The `vector` column is dropped — redacted rows are re-embedded.
+pub(crate) fn chunks_from_batches(batches: &[RecordBatch]) -> Vec<chunk::Chunk> {
+    let sv = |b: &RecordBatch, name: &str, i: usize| -> String {
+        b.column_by_name(name)
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .map(|c| c.value(i).to_string())
+            .unwrap_or_default()
+    };
+    let so = |b: &RecordBatch, name: &str, i: usize| -> Option<String> {
+        b.column_by_name(name)
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .filter(|c| !c.is_null(i))
+            .map(|c| c.value(i).to_string())
+    };
+    let iv = |b: &RecordBatch, name: &str, i: usize| -> i64 {
+        b.column_by_name(name)
+            .and_then(|c| c.as_any().downcast_ref::<Int64Array>())
+            .map(|c| c.value(i))
+            .unwrap_or(0)
+    };
+    let mut out = Vec::new();
+    for b in batches {
+        for i in 0..b.num_rows() {
+            out.push(chunk::Chunk {
+                id: sv(b, "id", i),
+                text: sv(b, "text", i),
+                session_id: sv(b, "session_id", i),
+                project: sv(b, "project", i),
+                turn_uuid: sv(b, "turn_uuid", i),
+                parent_uuid: so(b, "parent_uuid", i),
+                seq: iv(b, "seq", i),
+                ts: sv(b, "ts", i),
+                role: sv(b, "role", i),
+                block_type: sv(b, "block_type", i),
+                tool_name: so(b, "tool_name", i),
+                source_path: sv(b, "source_path", i),
+                block_idx: iv(b, "block_idx", i),
+                split_idx: iv(b, "split_idx", i),
+            });
+        }
+    }
+    out
 }
 
 #[cfg(test)]

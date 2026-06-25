@@ -97,28 +97,6 @@ fn recency_weight(ts: &str, now: DateTime<Utc>, half_life: f64) -> f64 {
     }
 }
 
-/// Join two consecutive splits of one block, dropping the overlapping region (the suffix
-/// of `a` that equals the prefix of `b`). Falls back to a plain concat. Char-indexed.
-///
-/// The search is capped at `chunk::OVERLAP`: consecutive splits share at most that many
-/// chars, so any longer suffix==prefix match is a coincidence of repetitive text and would
-/// wrongly drop real content.
-///
-/// `split` trims each piece, so the shared region can lose whitespace at the seam (a trailing
-/// space off `a`, a leading space off `b`). The scan down from `max_k` still finds the overlap
-/// at a smaller `k`, so a trimmed seam doesn't fall through to the duplicating concat fallback.
-fn stitch(a: &str, b: &str) -> String {
-    let ac: Vec<char> = a.chars().collect();
-    let bc: Vec<char> = b.chars().collect();
-    let max_k = ac.len().min(bc.len()).min(crate::chunk::OVERLAP);
-    for k in (1..=max_k).rev() {
-        if ac[ac.len() - k..] == bc[..k] {
-            return ac.iter().chain(bc[k..].iter()).collect();
-        }
-    }
-    format!("{a}{b}")
-}
-
 /// A dataset opened for reading, plus an optional temp dir keeping a built-in fallback alive.
 struct Read {
     /// Keeps the hello-world temp dir alive for the dataset's lifetime; `None` for a real store.
@@ -613,7 +591,7 @@ pub async fn get(store: Store, session_id: String, turn_uuid: String, window: i6
                 cur_bi = Some(bi);
                 cur = piece.clone();
             } else {
-                cur = stitch(&cur, piece);
+                cur = crate::chunk::stitch(&cur, piece);
             }
         }
         if !cur.is_empty() {
@@ -693,40 +671,5 @@ mod tests {
         assert!((recency_weight("2026-02-10T00:00:00Z", now, 30.0) - 1.0).abs() < 1e-9);
         // unparseable -> neutral 1.0
         assert_eq!(recency_weight("not-a-date", now, 30.0), 1.0);
-    }
-
-    #[test]
-    fn stitch_drops_overlap_once() {
-        let overlap = "the quick brown fox jumps";
-        let a = format!("HEAD {overlap}");
-        let b = format!("{overlap} TAIL");
-        assert_eq!(stitch(&a, &b), "HEAD the quick brown fox jumps TAIL");
-    }
-
-    #[test]
-    fn stitch_does_not_over_merge_repetitive_text() {
-        // Periodic text: many suffix==prefix lengths match. The seam is bounded by
-        // chunk::OVERLAP, so a longer spurious match must not swallow real content.
-        let unit = "abcabcabc ";
-        let a = unit.repeat(60); // > OVERLAP chars, all periodic
-        let b = unit.repeat(60);
-        let joined = stitch(&a, &b);
-        // Reassembly must not be shorter than the longer input (no content dropped).
-        assert!(joined.chars().count() >= a.chars().count());
-    }
-
-    #[test]
-    fn stitch_no_overlap_concatenates() {
-        assert_eq!(stitch("alpha", "beta"), "alphabeta");
-    }
-
-    #[test]
-    fn stitch_recovers_overlap_with_trimmed_seam_whitespace() {
-        // The real shared region is "the quick brown fox " (trailing space), but split() trims it
-        // off `a`'s end and the leading space off `b`. stitch must still match the shorter overlap
-        // and not duplicate it (no "...foxfox..." and no doubled "the quick brown fox").
-        let a = "HEAD the quick brown fox"; // trailing space trimmed
-        let b = "the quick brown fox TAIL"; // leading already flush
-        assert_eq!(stitch(a, b), "HEAD the quick brown fox TAIL");
     }
 }

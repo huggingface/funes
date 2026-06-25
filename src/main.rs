@@ -95,6 +95,9 @@ enum Cmd {
         #[arg(long)]
         force_reindex: bool,
     },
+    /// Redact secrets from the local index in place — for rows indexed before redaction existed (or
+    /// flagged by an updated ruleset). Rewrites and re-embeds only the affected rows; needs no source.
+    Scrub,
     /// Run as an MCP server over stdio (for Claude Code, Cursor, …).
     Mcp,
 }
@@ -183,6 +186,7 @@ async fn main() -> Result<()> {
                 Err(e) => Err(e),
             }
         }
+        Cmd::Scrub => index::run_scrub().await,
         Cmd::Mcp => mcp::run().await,
     }
 }

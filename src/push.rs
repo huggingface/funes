@@ -2,8 +2,9 @@
 //!
 //! Streamed, never a full mirror. "What's already there" is the store's own chunk ids, so the
 //! delta is `local_ids − remote_ids` — the same primitive `index` uses. `push` is orchestration:
-//! it computes the delta, runs the pre-publish secret gate, and drives the HF write operations in
-//! [`crate::hf_dataset`], which own the atomic, parent-commit-guarded commits.
+//! it computes the delta, holds back any row that still contains a secret (redaction happens at
+//! index time; this is the egress backstop — the rows wait for `funes scrub`), and drives the HF
+//! write operations in [`crate::hf_dataset`], which own the atomic, parent-commit-guarded commits.
 //!
 //! - **First publish:** build the dataset locally (data + FTS/IVF indexes) and upload every file in
 //!   one commit.
@@ -15,17 +16,17 @@
 //!   crosses [`REINDEX_THRESHOLD`] (best-effort: a head-moved conflict is a warning, the next push
 //!   retries), or eagerly with `--force-reindex` (retried until it lands).
 
-use crate::dataset;
 use crate::hf_dataset::{self, Appended, Reindexed};
 use crate::hub::{self, Store};
-use crate::scan;
+use crate::{chunk, dataset, index, scan};
 use anyhow::{bail, Context, Result};
-use arrow_array::{RecordBatch, RecordBatchIterator, StringArray};
+use arrow_array::{BooleanArray, RecordBatch, RecordBatchIterator, StringArray};
+use arrow_select::filter::filter_record_batch;
 use hf_hub::repository::CommitOperation;
 use hf_hub::{HFClient, HFError, HFRepository, RepoTypeDataset};
 use lance::dataset::WriteParams;
 use lance::Dataset;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 /// Reindex the remote once this many appended rows are sitting unindexed (answered by a
@@ -85,22 +86,6 @@ async fn rows_to_push(local: &Dataset, to_push: &HashSet<String>, first_publish:
         format!("id IN ({list})")
     });
     dataset::scan_rows(local, &[], filter.as_deref(), None).await
-}
-
-/// Chunk `text` values across the batches, for the pre-publish secret scan.
-fn texts(batches: &[RecordBatch]) -> Vec<String> {
-    let mut out = Vec::new();
-    for b in batches {
-        if let Some(col) = b
-            .column_by_name("text")
-            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-        {
-            for i in 0..b.num_rows() {
-                out.push(col.value(i).to_string());
-            }
-        }
-    }
-    out
 }
 
 /// Publish the local store's new chunks to `target` (a remote store on the HF Hub). With
@@ -171,17 +156,28 @@ pub async fn run_push(target: Store, force_reindex: bool) -> Result<String> {
         ));
     }
 
-    // 4. Rows + pre-publish secret gate. Re-stamp each batch with the local dataset's schema so its
-    // metadata (the embedding-model id) rides along — scan-result batches drop it, and on first
-    // publish that schema is what the new dataset persists.
+    // 4. Rows, then hold back any that still contain a secret. Re-stamp each batch with the local
+    // dataset's schema so its metadata (the embedding-model id) rides along — scan-result batches
+    // drop it, and on first publish that schema is what the new dataset persists.
     let schema: arrow_schema::SchemaRef = Arc::new(arrow_schema::Schema::from(local.schema()));
     let batches: Vec<RecordBatch> = rows_to_push(&local, &to_push, first_publish)
         .await?
         .into_iter()
         .map(|b| RecordBatch::try_new(schema.clone(), b.columns().to_vec()))
         .collect::<std::result::Result<_, _>>()?;
-    scan::ensure_no_secrets(&texts(&batches))?;
-    let n_chunks = to_push.len();
+
+    // Drop any row whose text still holds a secret — hold it back from the Hub rather than block the
+    // whole push. `funes scrub` redacts it in the local store; the next push then ships it.
+    let (batches, skipped) = drop_secret_rows(batches)?;
+    let n_chunks: usize = batches.iter().map(|b| b.num_rows()).sum();
+    if n_chunks == 0 {
+        return Ok(format!(
+            "{}: nothing published — held back {} row(s) with secrets ({}); run `funes scrub`, then push again\n",
+            target.label(),
+            skipped.rows,
+            skipped.summary
+        ));
+    }
 
     // 5. First publish: build the whole dataset locally (data + indexes) and push it in one commit.
     if first_publish {
@@ -223,9 +219,10 @@ pub async fn run_push(target: Store, force_reindex: bool) -> Result<String> {
             .await
             .map_err(|e| anyhow::Error::new(e).context("create_commit failed"))?;
         return Ok(format!(
-            "{}: pushed {n_chunks} chunks (commit {})\n",
+            "{}: pushed {n_chunks} chunks (commit {})\n{}",
             target.label(),
-            info.commit_oid.as_deref().unwrap_or("?")
+            info.commit_oid.as_deref().unwrap_or("?"),
+            skipped.warning()
         ));
     }
 
@@ -263,7 +260,90 @@ pub async fn run_push(target: Store, force_reindex: bool) -> Result<String> {
     } else if unindexed > REINDEX_THRESHOLD {
         out.push_str(&reindex_auto(&repo, &dataset_uri, &opts, &rev).await);
     }
+    out.push_str(&skipped.warning());
     Ok(out)
+}
+
+/// Rows held back from a push because their text still contained a secret.
+struct Skipped {
+    rows: usize,
+    /// Detectors that fired, e.g. `PrivateKey×1, AWS×2` — empty when nothing was held back.
+    summary: String,
+}
+
+impl Skipped {
+    /// A loud trailing line for the push output, or empty if nothing was held back.
+    fn warning(&self) -> String {
+        if self.rows == 0 {
+            return String::new();
+        }
+        format!(
+            "⚠ held back {} row(s) containing secrets ({}) — run `funes scrub` to redact them, then push again\n",
+            self.rows, self.summary
+        )
+    }
+}
+
+/// Scan the to-push `batches` and hold back every row of any *block* that holds a secret, returning
+/// the clean batches and what was held back. Detection works at block granularity: a block's chunks
+/// are reconstructed into their contiguous text (so a secret `split` cut across chunks is whole and
+/// detectable), scanned in one pass, and a finding is attributed to its block by line number — never
+/// by matching the secret's value, which fails on text stored with escaped or quoted bytes. If any
+/// chunk of a block is dirty, the whole block is held back (its other chunks carry the rest of the
+/// secret). Fail-closed on the scanner — a push must scan before it uploads.
+fn drop_secret_rows(batches: Vec<RecordBatch>) -> Result<(Vec<RecordBatch>, Skipped)> {
+    let scanner = scan::Trufflehog::find()?;
+    // Row order across batches matches `chunks_from_batches`, so a chunk's index is its global row.
+    let chunks = index::chunks_from_batches(&batches);
+    let blocks = chunk::group_blocks(&chunks);
+    let block_texts: Vec<String> = blocks
+        .iter()
+        .map(|idxs| {
+            let pieces: Vec<&str> = idxs.iter().map(|&i| chunks[i].text.as_str()).collect();
+            chunk::reconstruct(&pieces)
+        })
+        .collect();
+    let refs: Vec<&str> = block_texts.iter().map(String::as_str).collect();
+    let hits = scan::locate(&refs, &scanner)?;
+
+    let mut dirty = vec![false; chunks.len()];
+    let mut by_detector: BTreeMap<String, usize> = BTreeMap::new();
+    for (b, dets) in hits.iter().enumerate() {
+        if dets.is_empty() {
+            continue;
+        }
+        for &i in &blocks[b] {
+            dirty[i] = true;
+        }
+        for d in dets {
+            *by_detector.entry(d.clone()).or_default() += 1;
+        }
+    }
+    let dropped = dirty.iter().filter(|&&d| d).count();
+    if dropped == 0 {
+        return Ok((
+            batches,
+            Skipped {
+                rows: 0,
+                summary: String::new(),
+            },
+        ));
+    }
+
+    // Drop the dirty rows batch by batch, mapping each global row index back via a running offset.
+    let mut clean = Vec::with_capacity(batches.len());
+    let mut base = 0usize;
+    for b in &batches {
+        let mask: BooleanArray = (0..b.num_rows()).map(|i| !dirty[base + i]).collect();
+        clean.push(filter_record_batch(b, &mask)?);
+        base += b.num_rows();
+    }
+    let summary = by_detector
+        .iter()
+        .map(|(d, n)| format!("{d}×{n}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Ok((clean, Skipped { rows: dropped, summary }))
 }
 
 /// Forced reindex: ask [`hf_dataset::reindex`] to refresh and commit, retrying on a head-moved
@@ -313,5 +393,134 @@ mod tests {
         // path can't be built here; it's exercised by the gated round-trip.)
         assert!(!is_read_only(&anyhow::anyhow!("server said 403 Forbidden")));
         assert!(!is_read_only(&anyhow::anyhow!("no HF token")));
+    }
+
+    use crate::parse::{Block, Turn};
+    use std::process::Command;
+
+    /// Mint a throwaway key (never committed, so funes ships no secret) of the given type, or None
+    /// if keygen is unavailable.
+    fn keygen(args: &[&str]) -> Option<String> {
+        let dir = tempfile::tempdir().unwrap();
+        let kf = dir.path().join("k");
+        let ok = Command::new("ssh-keygen")
+            .args(args)
+            .args(["-N", "", "-q", "-f"])
+            .arg(&kf)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        ok.then(|| std::fs::read_to_string(&kf).unwrap())
+    }
+
+    /// One turn per text, each text its own block — so distinct texts land in distinct blocks.
+    fn turn(idx: i64, block_text: &str) -> Turn {
+        Turn {
+            session_id: "sess".into(),
+            project: "proj".into(),
+            turn_uuid: format!("turn{idx}"),
+            parent_uuid: None,
+            seq: idx,
+            ts: "2026-01-01T00:00:00Z".into(),
+            role: "assistant".into(),
+            blocks: vec![Block {
+                block_type: "text".into(),
+                text: block_text.into(),
+                tool_name: None,
+                tool_use_id: None,
+            }],
+            source_path: "/x.jsonl".into(),
+        }
+    }
+
+    /// Build a to-push batch the way the store stores it: chunk the turns, stamp zero vectors.
+    fn batch(turns: &[Turn]) -> (RecordBatch, Vec<crate::chunk::Chunk>) {
+        let chunks = chunk::chunks_from_turns(turns, true);
+        let vectors = vec![vec![0.0f32; index::DIM as usize]; chunks.len()];
+        (index::build_batch(&chunks, &vectors).unwrap(), chunks)
+    }
+
+    #[test]
+    fn drop_secret_rows_holds_back_a_single_chunk_secret() {
+        if scan::Trufflehog::find().is_err() {
+            eprintln!("skip: trufflehog not found");
+            return;
+        }
+        let Some(key) = keygen(&["-t", "ed25519"]) else {
+            eprintln!("skip: ssh-keygen unavailable");
+            return;
+        };
+        let (b, _) = batch(&[turn(0, "just chatting about parsers"), turn(1, &key)]);
+
+        let (clean, skipped) = drop_secret_rows(vec![b]).unwrap();
+        assert_eq!(skipped.rows, 1, "the secret block should be held back");
+        assert!(skipped.summary.contains("PrivateKey"), "summary: {}", skipped.summary);
+        assert_eq!(
+            clean.iter().map(|b| b.num_rows()).sum::<usize>(),
+            1,
+            "the clean row stays"
+        );
+        assert!(!skipped.warning().is_empty());
+    }
+
+    #[test]
+    fn drop_secret_rows_holds_back_an_escaped_key() {
+        // The exact shape that leaked: a key stored with escaped `\n` (literal backslash-n), as a
+        // JSON-encoded transcript or a logged blob would hold it. trufflehog still detects it, but
+        // its canonical `raw` (real newlines) is not a substring of the stored bytes — value
+        // matching missed it and pushed it. Line-based location must hold it back.
+        if scan::Trufflehog::find().is_err() {
+            eprintln!("skip: trufflehog not found");
+            return;
+        }
+        let Some(key) = keygen(&["-t", "ed25519"]) else {
+            eprintln!("skip: ssh-keygen unavailable");
+            return;
+        };
+        let escaped = key.replace('\n', "\\n"); // literal backslash-n, no real newline
+        assert!(!escaped.contains('\n'), "precondition: no real newlines remain");
+        let (b, _) = batch(&[turn(0, "clean note"), turn(1, &format!("deploy key: {escaped}"))]);
+
+        let (clean, skipped) = drop_secret_rows(vec![b]).unwrap();
+        assert_eq!(skipped.rows, 1, "the escaped key must be held back, not pushed");
+        assert!(skipped.summary.contains("PrivateKey"), "summary: {}", skipped.summary);
+        assert_eq!(
+            clean.iter().map(|b| b.num_rows()).sum::<usize>(),
+            1,
+            "the clean row stays"
+        );
+    }
+
+    #[test]
+    fn drop_secret_rows_holds_back_a_secret_split_across_chunks() {
+        // The regression that leaked: a key long enough to split across several chunks. No single
+        // chunk is a detectable key, so per-chunk scanning misses it — block reconstruction does not.
+        if scan::Trufflehog::find().is_err() {
+            eprintln!("skip: trufflehog not found");
+            return;
+        }
+        let Some(key) = keygen(&["-t", "rsa", "-b", "4096"]) else {
+            eprintln!("skip: ssh-keygen unavailable");
+            return;
+        };
+        let block_text = format!("Here is the deploy key we generated:\n{key}\nkeep it safe");
+        let (b, chunks) = batch(&[turn(0, "clean preamble"), turn(1, &block_text)]);
+        let key_chunks = chunks.iter().filter(|c| c.seq == 1).count();
+        assert!(
+            key_chunks > 1,
+            "precondition: the key must split into multiple chunks (got {key_chunks})"
+        );
+
+        let (clean, skipped) = drop_secret_rows(vec![b]).unwrap();
+        assert_eq!(
+            skipped.rows, key_chunks,
+            "every chunk of the secret block must be held back"
+        );
+        assert!(skipped.summary.contains("PrivateKey"), "summary: {}", skipped.summary);
+        assert_eq!(
+            clean.iter().map(|b| b.num_rows()).sum::<usize>(),
+            1,
+            "only the clean row stays"
+        );
     }
 }
