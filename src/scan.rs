@@ -1,6 +1,12 @@
-//! Secret scanning and redaction, kept modular: the detection engine sits behind the
-//! [`SecretScanner`] trait, so redaction and the pre-publish gate are written against the trait,
-//! not against any one tool — a different engine drops in without touching them.
+//! All of funes's secret handling, kept in one place: detection sits behind the [`SecretScanner`]
+//! trait, and everything built on it — [`scan_blocks`] (block-level detection), [`excise`]
+//! (value redaction), the index-time [`RedactSecrets`] preprocessor, and the [`summary`] for
+//! user-facing messages — is written against the trait, not against any one tool, so a different
+//! engine drops in without touching them. The index pass, the `scrub` verb, and the pre-publish
+//! push gate are all callers of these primitives.
+//!
+//! [`RedactSecrets`] runs over a session's turns *before* chunking, so a long key that chunking
+//! would split across pieces is whole when scanned.
 //!
 //! funes ships one scanner, [`Trufflehog`]. Discovery is via `$FUNES_TRUFFLEHOG`, then `$PATH`,
 //! then common install dirs — funes runs as an IDE-spawned MCP server, whose `$PATH` is often
@@ -137,45 +143,16 @@ fn find_in(env: impl Fn(&str) -> Option<OsString>, exists: impl Fn(&Path) -> boo
     })
 }
 
-/// Redact every secret in `texts`, in place, replacing each match with `[REDACTED:<detector>]`;
-/// return the detector name of each distinct secret removed. Finds secrets through `scanner`, so
-/// it's engine-agnostic.
-pub fn redact(texts: &mut [String], scanner: &dyn SecretScanner) -> Result<Vec<String>> {
-    let findings = scanner.scan(&texts.join("\n"))?;
-    let mut out = Vec::new();
-    let mut done: HashSet<String> = HashSet::new();
-    for f in findings {
-        // trufflehog normalizes a match's surrounding whitespace (a multiline key comes back with a
-        // trailing newline the stored chunk lacks), so match on the trimmed value, not the raw.
-        let needle = f.raw.trim();
-        if needle.is_empty() || !done.insert(needle.to_string()) {
-            continue;
-        }
-        let marker = format!("[REDACTED:{}]", f.detector);
-        let mut hit = false;
-        for t in texts.iter_mut() {
-            if t.contains(needle) {
-                *t = t.replace(needle, &marker);
-                hit = true;
-            }
-        }
-        if hit {
-            out.push(f.detector);
-        }
-    }
-    Ok(out)
-}
-
-/// Which of `texts` contain a secret, attributing each finding to its text by **line number**, not
-/// by matching `raw`. The texts are scanned together in one pass (joined by `\n`); a finding's
-/// reported line is mapped back through the join's per-text line ranges. This is robust where
-/// [`redact`]'s `raw`-substring matching is not — an escaped or quoted key still gets attributed to
-/// the right text, because the line number doesn't depend on the stored bytes matching trufflehog's
-/// canonical form. `out[i]` lists the distinct detectors that fired inside `texts[i]` (empty ⇒
-/// clean). Each text must be a contiguous unit (e.g. a reconstructed block), so a secret never
-/// straddles two of them. Fail-closed on the scanner.
-pub fn locate(texts: &[&str], scanner: &dyn SecretScanner) -> Result<Vec<Vec<String>>> {
-    let mut out = vec![Vec::new(); texts.len()];
+/// The one place a scanner is invoked for *block-level* detection. Scans `texts` together in a
+/// single pass and attributes each finding to the text it falls in — by **line number**, not by
+/// matching `raw`. The line number is robust where `raw`-substring matching is not: an escaped or
+/// quoted key still maps to the right text, because the line doesn't depend on the stored bytes
+/// matching trufflehog's canonical form. `texts` must each be a contiguous unit (a reconstructed
+/// block), so a secret never straddles two. `out[i]` holds the findings located in `texts[i]`.
+/// Redaction ([`excise`]) and the drop/hold-back decisions are derived from this result without
+/// re-scanning. Fail-closed on the scanner.
+pub fn scan_blocks(texts: &[&str], scanner: &dyn SecretScanner) -> Result<Vec<Vec<Finding>>> {
+    let mut out: Vec<Vec<Finding>> = (0..texts.len()).map(|_| Vec::new()).collect();
     if texts.is_empty() {
         return Ok(out);
     }
@@ -194,27 +171,22 @@ pub fn locate(texts: &[&str], scanner: &dyn SecretScanner) -> Result<Vec<Vec<Str
         cursor += lines;
     }
 
-    let mut push = |i: usize, det: &str| {
-        if !out[i].iter().any(|d| d == det) {
-            out[i].push(det.to_string());
-        }
-    };
-    for f in &findings {
+    for f in findings {
         match f.line {
             // Primary: map the reported line to the text whose span contains it.
             Some(line) => {
                 if let Some(i) = spans.iter().position(|&(s, e)| line >= s && line < e) {
-                    push(i, &f.detector);
+                    out[i].push(f);
                 }
             }
             // Fallback for a scanner that reports no line: best-effort `raw` containment, so an
             // engine without line info still flags *something* rather than silently passing.
             None => {
-                let needle = f.raw.trim();
+                let needle = f.raw.trim().to_string();
                 if !needle.is_empty() {
                     for (i, t) in texts.iter().enumerate() {
-                        if t.contains(needle) {
-                            push(i, &f.detector);
+                        if t.contains(&needle) {
+                            out[i].push(f.clone());
                         }
                     }
                 }
@@ -222,6 +194,131 @@ pub fn locate(texts: &[&str], scanner: &dyn SecretScanner) -> Result<Vec<Vec<Str
         }
     }
     Ok(out)
+}
+
+/// Excise each finding's value from `text`, replacing it with `[REDACTED:<detector>]`. Returns the
+/// redacted text, the detector of each distinct secret removed, and whether *every* finding was
+/// removed. `all_removed == false` means a secret's bytes didn't match trufflehog's canonical `raw`
+/// (e.g. a key stored with escaped newlines) and so survives — the caller must drop the text rather
+/// than store it. Takes findings from [`scan_blocks`] and never re-scans: it inserts a marker (never
+/// splices fragments together), so excision can't manufacture a new secret, and the fail-closed push
+/// gate re-scans every block before any upload regardless.
+pub fn excise(text: &str, findings: &[Finding]) -> (String, Vec<String>, bool) {
+    let mut out = text.to_string();
+    let mut removed = Vec::new();
+    let mut all_removed = true;
+    let mut done: HashSet<String> = HashSet::new();
+    for f in findings {
+        // trufflehog normalizes a match's surrounding whitespace (a multiline key comes back with a
+        // trailing newline the stored chunk lacks), so match on the trimmed value, not the raw.
+        let needle = f.raw.trim();
+        if needle.is_empty() {
+            all_removed = false; // nothing to match on — can't excise it
+            continue;
+        }
+        if !done.insert(needle.to_string()) {
+            continue;
+        }
+        // Decide presence against the *original* `text`, not the progressively-redacted `out`: a
+        // value that was a byte-substring of an already-excised one is genuinely gone (count it
+        // removed, replace is a no-op), whereas a value that was never present (e.g. a key stored
+        // with escaped newlines) marks the text unredactable so the caller drops it.
+        if text.contains(needle) {
+            out = out.replace(needle, &format!("[REDACTED:{}]", f.detector));
+            removed.push(f.detector.clone());
+        } else {
+            all_removed = false;
+        }
+    }
+    (out, removed, all_removed)
+}
+
+/// The distinct detector names among `findings`, in first-seen order — what each secret-bearing
+/// block contributes to a held-back/scrubbed message.
+pub fn detectors(findings: &[Finding]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for f in findings {
+        if !out.iter().any(|d| d == &f.detector) {
+            out.push(f.detector.clone());
+        }
+    }
+    out
+}
+
+/// `Detector×count` over the given detector names, for a user-facing held-back/scrubbed message.
+/// Counts each occurrence, so the caller controls multiplicity (per block, per secret, …).
+pub fn summary<'a>(detectors: impl IntoIterator<Item = &'a str>) -> String {
+    let mut by: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for d in detectors {
+        *by.entry(d).or_default() += 1;
+    }
+    by.iter()
+        .map(|(d, n)| format!("{d}×{n}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A transform over a session's turns, applied before they are chunked.
+pub trait Preprocessor {
+    /// Transform `turns` in place.
+    fn process(&self, turns: &mut [crate::parse::Turn]) -> Result<()>;
+}
+
+/// Index-time secret redaction, run over a session's turns *before* chunking — so a long key that
+/// chunking would split across pieces is whole when scanned. Best-effort: it removes a secret whose
+/// value byte-matches the stored text (the common case, real newlines); anything that resists is
+/// caught downstream by the fail-closed push gate.
+pub struct RedactSecrets {
+    scanner: Box<dyn SecretScanner>,
+}
+
+impl RedactSecrets {
+    pub fn new(scanner: Box<dyn SecretScanner>) -> Self {
+        Self { scanner }
+    }
+}
+
+impl Preprocessor for RedactSecrets {
+    fn process(&self, turns: &mut [crate::parse::Turn]) -> Result<()> {
+        // Every block's text, flattened in a stable order, scanned in one pass.
+        let texts: Vec<String> = turns
+            .iter()
+            .flat_map(|t| t.blocks.iter().map(|b| b.text.clone()))
+            .collect();
+        if texts.is_empty() {
+            return Ok(());
+        }
+        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let per_block = scan_blocks(&refs, self.scanner.as_ref())?;
+
+        let mut removed: Vec<String> = Vec::new();
+        let redacted: Vec<String> = texts
+            .iter()
+            .zip(&per_block)
+            .map(|(text, findings)| {
+                let (new_text, rem, _all) = excise(text, findings);
+                removed.extend(rem);
+                new_text
+            })
+            .collect();
+        if removed.is_empty() {
+            return Ok(());
+        }
+
+        let mut it = redacted.into_iter();
+        for t in turns.iter_mut() {
+            for b in t.blocks.iter_mut() {
+                b.text = it.next().expect("one redacted text per block");
+            }
+        }
+        let sid = turns.first().map(|t| t.session_id.as_str()).unwrap_or("?");
+        eprintln!(
+            "    redacted {} secret(s) in {sid}: {}",
+            removed.len(),
+            summary(removed.iter().map(String::as_str))
+        );
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -275,53 +372,85 @@ mod tests {
         assert!(err.contains("not found") && err.contains("FUNES_TRUFFLEHOG"), "{err}");
     }
 
-    #[test]
-    fn redact_replaces_each_distinct_match_in_place() {
-        let scanner = FakeScanner(vec![finding("PrivateKey", "SEKRET")]);
-        let mut texts = vec!["before SEKRET after".to_string(), "clean".to_string()];
-        let report = redact(&mut texts, &scanner).unwrap();
-        assert_eq!(texts[0], "before [REDACTED:PrivateKey] after");
-        assert_eq!(texts[1], "clean");
-        assert_eq!(report, vec!["PrivateKey".to_string()]);
+    /// Detectors located in each text — the view `scan_blocks` callers derive for "which texts are
+    /// dirty, with what".
+    fn detectors(texts: &[&str], scanner: &dyn SecretScanner) -> Vec<Vec<String>> {
+        scan_blocks(texts, scanner)
+            .unwrap()
+            .into_iter()
+            .map(|fs| fs.into_iter().map(|f| f.detector).collect())
+            .collect()
     }
 
     #[test]
-    fn redact_trims_normalized_matches() {
+    fn excise_replaces_each_distinct_match_in_place() {
+        let (text, removed, all) = excise("before SEKRET after", &[finding("PrivateKey", "SEKRET")]);
+        assert_eq!(text, "before [REDACTED:PrivateKey] after");
+        assert_eq!(removed, vec!["PrivateKey".to_string()]);
+        assert!(all);
+    }
+
+    #[test]
+    fn excise_trims_normalized_matches() {
         // trufflehog reports a multiline match with a trailing newline the stored text lacks; the
         // trimmed match must still be redacted.
-        let scanner = FakeScanner(vec![finding("PrivateKey", "KEYLINE\n")]);
-        let mut texts = vec!["x KEYLINE y".to_string()];
-        let report = redact(&mut texts, &scanner).unwrap();
-        assert_eq!(texts[0], "x [REDACTED:PrivateKey] y");
-        assert_eq!(report, vec!["PrivateKey".to_string()]);
+        let (text, removed, all) = excise("x KEYLINE y", &[finding("PrivateKey", "KEYLINE\n")]);
+        assert_eq!(text, "x [REDACTED:PrivateKey] y");
+        assert_eq!(removed, vec!["PrivateKey".to_string()]);
+        assert!(all);
     }
 
     #[test]
-    fn locate_maps_findings_to_texts_by_line() {
+    fn excise_keeps_a_block_when_one_value_is_a_substring_of_another() {
+        // Two findings where one value contains the other. Excising the longer also removes the
+        // shorter; presence is judged against the original text, so the shorter still counts as
+        // removed and the block is redacted (kept), not dropped.
+        let (text, _removed, all) = excise(
+            "x SECRET-TOKEN y",
+            &[finding("Long", "SECRET-TOKEN"), finding("Short", "TOKEN")],
+        );
+        assert!(!text.contains("TOKEN"), "both values must be gone: {text}");
+        assert!(all, "a transitively-removed value must not mark the block unredactable");
+    }
+
+    #[test]
+    fn excise_flags_a_value_it_cannot_match() {
+        // The escaped case: the canonical value (real newlines) isn't a substring of the stored text
+        // (escaped `\n`), so it can't be excised — `all_removed` must be false so the caller drops it.
+        let stored = "key: -----BEGIN-----\\nABC\\n-----END-----";
+        let finding = Finding {
+            detector: "PrivateKey".into(),
+            raw: "-----BEGIN-----\nABC\n-----END-----".into(), // real newlines
+            line: Some(1),
+        };
+        let (text, removed, all) = excise(stored, &[finding]);
+        assert_eq!(text, stored, "nothing matched, so nothing changed");
+        assert!(removed.is_empty());
+        assert!(!all, "an unremovable secret must mark the text for dropping");
+    }
+
+    #[test]
+    fn scan_blocks_maps_findings_to_texts_by_line() {
         // Two single-line texts then a 3-line one. A finding on line 4 (the second line of text 2)
         // must be attributed to text 2 — by line range, never by `raw`.
-        let texts = ["alpha", "beta", "k1\nk2\nk3"];
         let scanner = FakeScanner(vec![finding_at("PrivateKey", 4)]);
-        let refs: Vec<&str> = texts.to_vec();
-        let hits = locate(&refs, &scanner).unwrap();
+        let hits = detectors(&["alpha", "beta", "k1\nk2\nk3"], &scanner);
         assert_eq!(hits[0], Vec::<String>::new());
         assert_eq!(hits[1], Vec::<String>::new());
         assert_eq!(hits[2], vec!["PrivateKey".to_string()]);
     }
 
     #[test]
-    fn locate_does_not_use_raw_so_escaping_cannot_hide_a_secret() {
+    fn scan_blocks_does_not_use_raw_so_escaping_cannot_hide_a_secret() {
         // The regression that leaked: `raw` (real newlines) is NOT a substring of the stored text
-        // (escaped `\n`). `redact`'s containment misses it; `locate`'s line number does not.
+        // (escaped `\n`). Value-matching misses it; the reported line number does not.
         let escaped = "[tool_result] key: -----BEGIN-----\\nABC\\n-----END-----";
-        let texts = ["clean chatter", escaped, "more chatter"];
         let scanner = FakeScanner(vec![Finding {
             detector: "PrivateKey".to_string(),
             raw: "-----BEGIN-----\nABC\n-----END-----".to_string(), // real newlines: not in `escaped`
             line: Some(2),
         }]);
-        let refs: Vec<&str> = texts.to_vec();
-        let hits = locate(&refs, &scanner).unwrap();
+        let hits = detectors(&["clean chatter", escaped, "more chatter"], &scanner);
         assert_eq!(
             hits[1],
             vec!["PrivateKey".to_string()],
@@ -331,14 +460,48 @@ mod tests {
     }
 
     #[test]
-    fn locate_falls_back_to_raw_when_a_finding_has_no_line() {
+    fn scan_blocks_falls_back_to_raw_when_a_finding_has_no_line() {
         // A scanner that reports no line still flags via `raw` containment rather than passing.
-        let texts = ["nothing here", "contains SEKRET inline"];
         let scanner = FakeScanner(vec![finding("AWS", "SEKRET")]);
-        let refs: Vec<&str> = texts.to_vec();
-        let hits = locate(&refs, &scanner).unwrap();
+        let hits = detectors(&["nothing here", "contains SEKRET inline"], &scanner);
         assert!(hits[0].is_empty());
         assert_eq!(hits[1], vec!["AWS".to_string()]);
+    }
+
+    #[test]
+    fn summary_counts_detectors() {
+        assert_eq!(summary(["PrivateKey", "AWS", "AWS"]), "AWS×2, PrivateKey×1");
+        assert_eq!(summary(std::iter::empty()), "");
+    }
+
+    #[test]
+    fn redact_secrets_preprocessor_redacts_block_text() {
+        use crate::parse::{Block, Turn};
+        let scanner = Box::new(FakeScanner(vec![
+            finding("PrivateKey", "TOPSECRET"),
+            finding("VirusTotal", "cafef00d"),
+        ]));
+        let mut turns = vec![Turn {
+            session_id: "sess".into(),
+            project: "proj".into(),
+            turn_uuid: "turn".into(),
+            parent_uuid: None,
+            seq: 0,
+            ts: String::new(),
+            role: "user".into(),
+            blocks: vec![Block {
+                block_type: "text".into(),
+                text: "key=TOPSECRET hash=cafef00d".into(),
+                tool_name: None,
+                tool_use_id: None,
+            }],
+            source_path: String::new(),
+        }];
+        RedactSecrets::new(scanner).process(&mut turns).unwrap();
+        assert_eq!(
+            turns[0].blocks[0].text,
+            "key=[REDACTED:PrivateKey] hash=[REDACTED:VirusTotal]"
+        );
     }
 
     #[test]

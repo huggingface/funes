@@ -15,7 +15,6 @@ pub mod hub;
 pub mod index;
 pub mod mcp;
 pub mod parse;
-pub mod preprocess;
 pub mod push;
 pub mod recall;
 pub mod scan;

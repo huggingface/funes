@@ -26,7 +26,7 @@ use hf_hub::repository::CommitOperation;
 use hf_hub::{HFClient, HFError, HFRepository, RepoTypeDataset};
 use lance::dataset::WriteParams;
 use lance::Dataset;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// Reindex the remote once this many appended rows are sitting unindexed (answered by a
@@ -295,29 +295,21 @@ fn drop_secret_rows(batches: Vec<RecordBatch>) -> Result<(Vec<RecordBatch>, Skip
     let scanner = scan::Trufflehog::find()?;
     // Row order across batches matches `chunks_from_batches`, so a chunk's index is its global row.
     let chunks = index::chunks_from_batches(&batches);
-    let blocks = chunk::group_blocks(&chunks);
-    let block_texts: Vec<String> = blocks
-        .iter()
-        .map(|idxs| {
-            let pieces: Vec<&str> = idxs.iter().map(|&i| chunks[i].text.as_str()).collect();
-            chunk::reconstruct(&pieces)
-        })
-        .collect();
-    let refs: Vec<&str> = block_texts.iter().map(String::as_str).collect();
-    let hits = scan::locate(&refs, &scanner)?;
+    let blocks = chunk::reconstruct_blocks(&chunks);
+    let texts: Vec<&str> = blocks.iter().map(|(_, text)| text.as_str()).collect();
+    let found = scan::scan_blocks(&texts, &scanner)?;
 
     let mut dirty = vec![false; chunks.len()];
-    let mut by_detector: BTreeMap<String, usize> = BTreeMap::new();
-    for (b, dets) in hits.iter().enumerate() {
-        if dets.is_empty() {
+    let mut detectors: Vec<String> = Vec::new();
+    for ((idxs, _), findings) in blocks.iter().zip(&found) {
+        if findings.is_empty() {
             continue;
         }
-        for &i in &blocks[b] {
+        for &i in idxs {
             dirty[i] = true;
         }
-        for d in dets {
-            *by_detector.entry(d.clone()).or_default() += 1;
-        }
+        // One tally per (block, distinct detector), so the warning reads "PrivateKey×<blocks>".
+        detectors.extend(scan::detectors(findings));
     }
     let dropped = dirty.iter().filter(|&&d| d).count();
     if dropped == 0 {
@@ -338,11 +330,7 @@ fn drop_secret_rows(batches: Vec<RecordBatch>) -> Result<(Vec<RecordBatch>, Skip
         clean.push(filter_record_batch(b, &mask)?);
         base += b.num_rows();
     }
-    let summary = by_detector
-        .iter()
-        .map(|(d, n)| format!("{d}×{n}"))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let summary = scan::summary(detectors.iter().map(String::as_str));
     Ok((clean, Skipped { rows: dropped, summary }))
 }
 

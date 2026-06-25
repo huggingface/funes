@@ -116,7 +116,7 @@ pub(crate) fn stitch(a: &str, b: &str) -> String {
 /// Group `chunks` into their blocks, keyed by (session, turn, block_idx). Returns, in first-seen
 /// block order, the indices into `chunks` for each block, ordered by `split_idx` — so a caller can
 /// [`reconstruct`] each block and map a per-block result back to its rows.
-pub(crate) fn group_blocks(chunks: &[Chunk]) -> Vec<Vec<usize>> {
+fn group_blocks(chunks: &[Chunk]) -> Vec<Vec<usize>> {
     let mut order: Vec<(String, String, i64)> = Vec::new();
     let mut groups: HashMap<(String, String, i64), Vec<usize>> = HashMap::new();
     for (i, c) in chunks.iter().enumerate() {
@@ -140,12 +140,27 @@ pub(crate) fn group_blocks(chunks: &[Chunk]) -> Vec<Vec<usize>> {
 /// Reconstruct a block's contiguous text from its `pieces` (in `split_idx` order), undoing the
 /// overlap [`split`] added. The inverse of `split`: a secret that `split` cut across two chunks is
 /// whole again here, so a scanner sees it. `pieces` must be one block's splits, ordered.
-pub(crate) fn reconstruct(pieces: &[&str]) -> String {
+fn reconstruct(pieces: &[&str]) -> String {
     let mut iter = pieces.iter();
     match iter.next() {
         None => String::new(),
         Some(first) => iter.fold(first.to_string(), |acc, p| stitch(&acc, p)),
     }
+}
+
+/// Group `chunks` into blocks and reconstruct each block's contiguous text in one step — the single
+/// entry point both the push gate and `scrub` use to scan whole blocks. Returns, in first-seen block
+/// order, each block's chunk indices (ordered by `split_idx`) paired with its reconstructed text, so
+/// a per-block scan result maps straight back to the rows it covers.
+pub(crate) fn reconstruct_blocks(chunks: &[Chunk]) -> Vec<(Vec<usize>, String)> {
+    group_blocks(chunks)
+        .into_iter()
+        .map(|idxs| {
+            let pieces: Vec<&str> = idxs.iter().map(|&i| chunks[i].text.as_str()).collect();
+            let text = reconstruct(&pieces);
+            (idxs, text)
+        })
+        .collect()
 }
 
 /// Re-chunk a block's (already rendered) `text` after it changed — e.g. a secret was redacted out —
