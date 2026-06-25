@@ -206,7 +206,7 @@ pub async fn run_push(target: Store, force_reindex: bool) -> Result<Pushed> {
         let mut ds = Dataset::write(reader, &table_uri, Some(WriteParams::default()))
             .await
             .context("building the dataset for first publish")?;
-        dataset::build_indexes(&mut ds).await;
+        dataset::build_indexes(&mut ds, |_| {}).await;
 
         let mut ops = Vec::new();
         for entry in walkdir::WalkDir::new(&db_dir).into_iter().filter_map(|e| e.ok()) {
