@@ -84,7 +84,8 @@ jobs:
         id: version
         run: |
           CURRENT=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
-          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+          BASE="${CURRENT%%+*}" # drop any +dev build-metadata before bumping
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE"
           case "${{ steps.bump.outputs.type }}" in
             major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
             minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
@@ -208,18 +209,28 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      # Dispatch only: bump now that the builds passed, matching the version stamped into
-      # the artifacts, then tag and push.
-      - name: Commit and tag release
+      # Dispatch only: now that the builds passed, commit the release version (matching the
+      # artifacts) and tag it, then reopen main on `<version>+dev` so development never sits on a
+      # bare released version. Both commits go up in one push; the tag points at the release commit.
+      - name: Commit release, tag, then reopen the dev version
         if: needs.compute.outputs.version != ''
         run: |
-          perl -i -pe 'if (!$d && s/^version = ".*"/version = "${{ needs.compute.outputs.version }}"/) { $d = 1 }' Cargo.toml
-          perl -i -pe 'if ($h) { s/^version = .*/version = "${{ needs.compute.outputs.version }}"/; $h = 0 } $h = 1 if /^name = "funes"$/' Cargo.lock
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          stamp() {
+            perl -i -pe 'if (!$d && s/^version = ".*"/version = "'"$1"'"/) { $d = 1 }' Cargo.toml
+            perl -i -pe 'if ($h) { s/^version = .*/version = "'"$1"'"/; $h = 0 } $h = 1 if /^name = "funes"$/' Cargo.lock
+          }
+
+          stamp "${{ needs.compute.outputs.version }}"
           git add Cargo.toml Cargo.lock
           git commit -m "chore: release ${{ needs.compute.outputs.tag }}"
           git tag "${{ needs.compute.outputs.tag }}"
+
+          stamp "${{ needs.compute.outputs.version }}+dev"
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore: reopen dev (${{ needs.compute.outputs.version }}+dev)"
           git push origin HEAD:main --tags
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
