@@ -2,6 +2,7 @@
 //! All indexing is by Unicode code point (char), not bytes.
 
 use crate::parse::Turn;
+use arrow_array::{Array, Int64Array, RecordBatch, StringArray};
 use sha1::{Digest, Sha1};
 use std::collections::HashMap;
 
@@ -146,6 +147,51 @@ fn reconstruct(pieces: &[&str]) -> String {
         None => String::new(),
         Some(first) => iter.fold(first.to_string(), |acc, p| stitch(&acc, p)),
     }
+}
+
+/// Reconstruct [`Chunk`]s from stored rows (all columns), so the store can be rewritten without its
+/// source. The `vector` column is dropped — rewritten rows are re-embedded.
+pub(crate) fn chunks_from_batches(batches: &[RecordBatch]) -> Vec<Chunk> {
+    let sv = |b: &RecordBatch, name: &str, i: usize| -> String {
+        b.column_by_name(name)
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .map(|c| c.value(i).to_string())
+            .unwrap_or_default()
+    };
+    let so = |b: &RecordBatch, name: &str, i: usize| -> Option<String> {
+        b.column_by_name(name)
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .filter(|c| !c.is_null(i))
+            .map(|c| c.value(i).to_string())
+    };
+    let iv = |b: &RecordBatch, name: &str, i: usize| -> i64 {
+        b.column_by_name(name)
+            .and_then(|c| c.as_any().downcast_ref::<Int64Array>())
+            .map(|c| c.value(i))
+            .unwrap_or(0)
+    };
+    let mut out = Vec::new();
+    for b in batches {
+        for i in 0..b.num_rows() {
+            out.push(Chunk {
+                id: sv(b, "id", i),
+                text: sv(b, "text", i),
+                session_id: sv(b, "session_id", i),
+                project: sv(b, "project", i),
+                turn_uuid: sv(b, "turn_uuid", i),
+                parent_uuid: so(b, "parent_uuid", i),
+                seq: iv(b, "seq", i),
+                ts: sv(b, "ts", i),
+                role: sv(b, "role", i),
+                block_type: sv(b, "block_type", i),
+                tool_name: so(b, "tool_name", i),
+                source_path: sv(b, "source_path", i),
+                block_idx: iv(b, "block_idx", i),
+                split_idx: iv(b, "split_idx", i),
+            });
+        }
+    }
+    out
 }
 
 /// Group `chunks` into blocks and reconstruct each block's contiguous text in one step — the single

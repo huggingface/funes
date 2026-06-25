@@ -57,7 +57,7 @@ async fn scrub_dropping_every_block_leaves_a_valid_empty_store() {
 
     // Scrub with the real scanner: every block is unredactable, so the store is rewritten empty.
     std::env::remove_var("FUNES_TRUFFLEHOG");
-    funes::index::run_scrub().await.unwrap();
+    funes::scrub::run().await.unwrap();
 
     // The empty Overwrite must leave a valid, reopenable store with zero rows.
     let uri = funes::dataset::table_uri(&funes::dataset::local_store_dir());

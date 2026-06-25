@@ -3,7 +3,7 @@
 //! `recall` reads the index (hybrid → rerank → recency); `index` builds/updates it
 //! from `~/.claude/projects/**/*.jsonl`. funes's home is `$FUNES_HOME` or `~/.funes`.
 
-use funes::{config, hub, index, mcp, push, recall};
+use funes::{config, hub, index, mcp, push, recall, scrub};
 
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand};
@@ -96,7 +96,8 @@ enum Cmd {
         force_reindex: bool,
     },
     /// Redact secrets from the local index in place — for rows indexed before redaction existed (or
-    /// flagged by an updated ruleset). Rewrites and re-embeds only the affected rows; needs no source.
+    /// flagged by an updated ruleset); needs no source transcript. Cleans the local store only: it
+    /// does NOT scrub an already-published remote, which the push gate can only stop adding to.
     Scrub,
     /// Run as an MCP server over stdio (for Claude Code, Cursor, …).
     Mcp,
@@ -176,8 +177,12 @@ async fn main() -> Result<()> {
                 .remote
                 .ok_or_else(|| anyhow!("no active remote — attach one with `funes use <org>/<repo>`"))?;
             match push::run_push(hub::Store::parse(&remote), force_reindex).await {
-                Ok(report) => {
-                    print!("{report}");
+                Ok(pushed) => {
+                    print!("{}", pushed.report);
+                    // Secrets held back everything — surface a non-zero exit so automation can react.
+                    if pushed.blocked {
+                        std::process::exit(2);
+                    }
                     Ok(())
                 }
                 Err(e) if push::is_read_only(&e) => Err(anyhow!(
@@ -186,7 +191,7 @@ async fn main() -> Result<()> {
                 Err(e) => Err(e),
             }
         }
-        Cmd::Scrub => index::run_scrub().await,
+        Cmd::Scrub => scrub::run().await,
         Cmd::Mcp => mcp::run().await,
     }
 }

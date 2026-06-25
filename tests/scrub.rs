@@ -66,7 +66,7 @@ async fn scrub_redacts_an_existing_secret_in_place() {
 
     // Scrub with the real scanner: it must redact the key in place.
     std::env::remove_var("FUNES_TRUFFLEHOG");
-    funes::index::run_scrub().await.unwrap();
+    funes::scrub::run().await.unwrap();
     let clean = funes::recall::get(funes::hub::Store::local(), session.into(), "t1".into(), 3)
         .await
         .unwrap();

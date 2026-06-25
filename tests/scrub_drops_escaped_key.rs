@@ -73,7 +73,7 @@ async fn scrub_drops_an_escaped_key_it_cannot_redact() {
 
     // Scrub with the real scanner: it can't redact the escaped key, so it drops that row.
     std::env::remove_var("FUNES_TRUFFLEHOG");
-    funes::index::run_scrub().await.unwrap();
+    funes::scrub::run().await.unwrap();
 
     let after_key = funes::recall::get(funes::hub::Store::local(), session.into(), "t2".into(), 0)
         .await

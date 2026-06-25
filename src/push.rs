@@ -18,7 +18,7 @@
 
 use crate::hf_dataset::{self, Appended, Reindexed};
 use crate::hub::{self, Store};
-use crate::{chunk, dataset, index, scan};
+use crate::{chunk, dataset, scan};
 use anyhow::{bail, Context, Result};
 use arrow_array::{BooleanArray, RecordBatch, RecordBatchIterator, StringArray};
 use arrow_select::filter::filter_record_batch;
@@ -88,11 +88,26 @@ async fn rows_to_push(local: &Dataset, to_push: &HashSet<String>, first_publish:
     dataset::scan_rows(local, &[], filter.as_deref(), None).await
 }
 
+/// The outcome of a [`run_push`]: the report to print, and `blocked` — true when the secret gate
+/// held *everything* back so nothing was published. A caller (the CLI) can exit non-zero on
+/// `blocked` so automation sees that secrets, not success, stopped the publish.
+pub struct Pushed {
+    pub report: String,
+    pub blocked: bool,
+}
+
+/// A plain report (nothing blocked) — most return paths.
+impl From<String> for Pushed {
+    fn from(report: String) -> Self {
+        Pushed { report, blocked: false }
+    }
+}
+
 /// Publish the local store's new chunks to `target` (a remote store on the HF Hub). With
 /// `force_reindex`, refresh the remote index after the data commit (retrying until it lands) even
 /// if the unindexed backlog is below [`REINDEX_THRESHOLD`]; with no new chunks pending it's a pure
 /// index refresh.
-pub async fn run_push(target: Store, force_reindex: bool) -> Result<String> {
+pub async fn run_push(target: Store, force_reindex: bool) -> Result<Pushed> {
     let uri = match &target {
         Store::Remote { uri } => uri.clone(),
         Store::Local { .. } => {
@@ -126,11 +141,7 @@ pub async fn run_push(target: Store, force_reindex: bool) -> Result<String> {
     // Nothing to push => done (no token needed), unless this is a forced reindex of an existing
     // remote, which is still work.
     if to_push.is_empty() && (first_publish || !force_reindex) {
-        return Ok(format!(
-            "{}: already up to date ({} chunks)\n",
-            target.label(),
-            remote_ids.len()
-        ));
+        return Ok(format!("{}: already up to date ({} chunks)\n", target.label(), remote_ids.len()).into());
     }
 
     // 2. HF repo handle (every write path below needs it).
@@ -149,11 +160,7 @@ pub async fn run_push(target: Store, force_reindex: bool) -> Result<String> {
     // 3. Forced reindex with no new data: just refresh the remote index and stop.
     if to_push.is_empty() {
         let note = reindex_forced(&repo, &dataset_uri, &opts, &rev).await?;
-        return Ok(format!(
-            "{}: up to date ({} chunks)\n{note}",
-            target.label(),
-            remote_ids.len()
-        ));
+        return Ok(format!("{}: up to date ({} chunks)\n{note}", target.label(), remote_ids.len()).into());
     }
 
     // 4. Rows, then hold back any that still contain a secret. Re-stamp each batch with the local
@@ -171,12 +178,17 @@ pub async fn run_push(target: Store, force_reindex: bool) -> Result<String> {
     let (batches, skipped) = drop_secret_rows(batches)?;
     let n_chunks: usize = batches.iter().map(|b| b.num_rows()).sum();
     if n_chunks == 0 {
-        return Ok(format!(
-            "{}: nothing published — held back {} row(s) with secrets ({}); run `funes scrub`, then push again\n",
-            target.label(),
-            skipped.rows,
-            skipped.summary
-        ));
+        // Everything was held back: nothing reached the Hub. Mark `blocked` so the CLI exits non-zero
+        // — automation must not read this as a successful publish.
+        return Ok(Pushed {
+            report: format!(
+                "{}: nothing published — held back {} row(s) with secrets ({}); run `funes scrub`, then push again\n",
+                target.label(),
+                skipped.rows,
+                skipped.summary
+            ),
+            blocked: true,
+        });
     }
 
     // 5. First publish: build the whole dataset locally (data + indexes) and push it in one commit.
@@ -208,7 +220,7 @@ pub async fn run_push(target: Store, force_reindex: bool) -> Result<String> {
             ));
         }
         if ops.is_empty() {
-            return Ok(format!("{}: nothing new to upload\n", target.label()));
+            return Ok(format!("{}: nothing new to upload\n", target.label()).into());
         }
         let info = repo
             .create_commit()
@@ -223,7 +235,8 @@ pub async fn run_push(target: Store, force_reindex: bool) -> Result<String> {
             target.label(),
             info.commit_oid.as_deref().unwrap_or("?"),
             skipped.warning()
-        ));
+        )
+        .into());
     }
 
     // 6. Append the data and commit it, retrying against a fresh head if a concurrent push moved it
@@ -261,7 +274,7 @@ pub async fn run_push(target: Store, force_reindex: bool) -> Result<String> {
         out.push_str(&reindex_auto(&repo, &dataset_uri, &opts, &rev).await);
     }
     out.push_str(&skipped.warning());
-    Ok(out)
+    Ok(out.into())
 }
 
 /// Rows held back from a push because their text still contained a secret.
@@ -294,7 +307,7 @@ impl Skipped {
 fn drop_secret_rows(batches: Vec<RecordBatch>) -> Result<(Vec<RecordBatch>, Skipped)> {
     let scanner = scan::Trufflehog::find()?;
     // Row order across batches matches `chunks_from_batches`, so a chunk's index is its global row.
-    let chunks = index::chunks_from_batches(&batches);
+    let chunks = chunk::chunks_from_batches(&batches);
     let blocks = chunk::reconstruct_blocks(&chunks);
     let texts: Vec<&str> = blocks.iter().map(|(_, text)| text.as_str()).collect();
     let found = scan::scan_blocks(&texts, &scanner)?;
@@ -373,6 +386,7 @@ async fn reindex_auto(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::index;
 
     #[test]
     fn is_read_only_matches_the_type_not_the_message() {

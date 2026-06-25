@@ -1,12 +1,8 @@
-//! All of funes's secret handling, kept in one place: detection sits behind the [`SecretScanner`]
-//! trait, and everything built on it — [`scan_blocks`] (block-level detection), [`excise`]
-//! (value redaction), the index-time [`RedactSecrets`] preprocessor, and the [`summary`] for
-//! user-facing messages — is written against the trait, not against any one tool, so a different
-//! engine drops in without touching them. The index pass, the `scrub` verb, and the pre-publish
-//! push gate are all callers of these primitives.
-//!
-//! [`RedactSecrets`] runs over a session's turns *before* chunking, so a long key that chunking
-//! would split across pieces is whole when scanned.
+//! Secret scanning and redaction, behind the [`SecretScanner`] trait so the detection engine is
+//! pluggable. Built on it: [`scan_blocks`] (locate findings per text by line, in one pass),
+//! [`excise`] (redact matched values from a text), and [`summary`]/[`detectors`] for user-facing
+//! messages. Everything operates on plain text and [`Finding`]s; the module depends on no other
+//! funes module.
 //!
 //! funes ships one scanner, [`Trufflehog`]. Discovery is via `$FUNES_TRUFFLEHOG`, then `$PATH`,
 //! then common install dirs — funes runs as an IDE-spawned MCP server, whose `$PATH` is often
@@ -258,69 +254,6 @@ pub fn summary<'a>(detectors: impl IntoIterator<Item = &'a str>) -> String {
         .join(", ")
 }
 
-/// A transform over a session's turns, applied before they are chunked.
-pub trait Preprocessor {
-    /// Transform `turns` in place.
-    fn process(&self, turns: &mut [crate::parse::Turn]) -> Result<()>;
-}
-
-/// Index-time secret redaction, run over a session's turns *before* chunking — so a long key that
-/// chunking would split across pieces is whole when scanned. Best-effort: it removes a secret whose
-/// value byte-matches the stored text (the common case, real newlines); anything that resists is
-/// caught downstream by the fail-closed push gate.
-pub struct RedactSecrets {
-    scanner: Box<dyn SecretScanner>,
-}
-
-impl RedactSecrets {
-    pub fn new(scanner: Box<dyn SecretScanner>) -> Self {
-        Self { scanner }
-    }
-}
-
-impl Preprocessor for RedactSecrets {
-    fn process(&self, turns: &mut [crate::parse::Turn]) -> Result<()> {
-        // Every block's text, flattened in a stable order, scanned in one pass.
-        let texts: Vec<String> = turns
-            .iter()
-            .flat_map(|t| t.blocks.iter().map(|b| b.text.clone()))
-            .collect();
-        if texts.is_empty() {
-            return Ok(());
-        }
-        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-        let per_block = scan_blocks(&refs, self.scanner.as_ref())?;
-
-        let mut removed: Vec<String> = Vec::new();
-        let redacted: Vec<String> = texts
-            .iter()
-            .zip(&per_block)
-            .map(|(text, findings)| {
-                let (new_text, rem, _all) = excise(text, findings);
-                removed.extend(rem);
-                new_text
-            })
-            .collect();
-        if removed.is_empty() {
-            return Ok(());
-        }
-
-        let mut it = redacted.into_iter();
-        for t in turns.iter_mut() {
-            for b in t.blocks.iter_mut() {
-                b.text = it.next().expect("one redacted text per block");
-            }
-        }
-        let sid = turns.first().map(|t| t.session_id.as_str()).unwrap_or("?");
-        eprintln!(
-            "    redacted {} secret(s) in {sid}: {}",
-            removed.len(),
-            summary(removed.iter().map(String::as_str))
-        );
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -472,36 +405,6 @@ mod tests {
     fn summary_counts_detectors() {
         assert_eq!(summary(["PrivateKey", "AWS", "AWS"]), "AWS×2, PrivateKey×1");
         assert_eq!(summary(std::iter::empty()), "");
-    }
-
-    #[test]
-    fn redact_secrets_preprocessor_redacts_block_text() {
-        use crate::parse::{Block, Turn};
-        let scanner = Box::new(FakeScanner(vec![
-            finding("PrivateKey", "TOPSECRET"),
-            finding("VirusTotal", "cafef00d"),
-        ]));
-        let mut turns = vec![Turn {
-            session_id: "sess".into(),
-            project: "proj".into(),
-            turn_uuid: "turn".into(),
-            parent_uuid: None,
-            seq: 0,
-            ts: String::new(),
-            role: "user".into(),
-            blocks: vec![Block {
-                block_type: "text".into(),
-                text: "key=TOPSECRET hash=cafef00d".into(),
-                tool_name: None,
-                tool_use_id: None,
-            }],
-            source_path: String::new(),
-        }];
-        RedactSecrets::new(scanner).process(&mut turns).unwrap();
-        assert_eq!(
-            turns[0].blocks[0].text,
-            "key=[REDACTED:PrivateKey] hash=[REDACTED:VirusTotal]"
-        );
     }
 
     #[test]
