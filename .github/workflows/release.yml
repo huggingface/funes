@@ -42,8 +42,8 @@ env:
 jobs:
   # Dispatch-only: work out the release version (strip +dev, then bump). Nothing is written or
   # pushed here — the version is stamped into each build's working tree, and only the tag and the
-  # dev-bump PR are created by `publish` after the builds succeed, so a failed build never tags a
-  # release or opens a PR.
+  # dev-bump branch are pushed by `publish` after the builds succeed, so a failed build never tags a
+  # release or pushes a bump branch.
   compute:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
@@ -192,7 +192,8 @@ jobs:
 
   # Runs only after both builds succeed. The release itself — tag + GitHub Release with the binaries
   # — never touches main, so branch protection doesn't apply. The only change to main, advancing the
-  # `+dev` version marker, goes up as a PR the workflow opens for a maintainer to review and merge.
+  # `+dev` version marker, is pushed as a branch; the org blocks Actions from opening PRs, so a
+  # maintainer opens that PR (one click from the run summary) and merges it.
   publish:
     name: Publish Release
     needs: [compute, build-linux, build-macos]
@@ -204,8 +205,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
-      contents: write # create + push the tag, create the release
-      pull-requests: write # open the dev-bump PR
+      contents: write # push the tag, create the release, push the dev-bump branch
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -236,13 +236,11 @@ jobs:
             --title "$TAG" \
             --generate-notes
 
-      # Dispatch only: advance main's version marker to `<version>+dev`. main is protected, so the
-      # workflow opens the PR but a maintainer merges it — the one manual step in a release. (CI may
-      # not auto-run on a PR opened by GITHUB_TOKEN; merge as admin, or reopen the PR to trigger it.)
-      - name: Open the dev-bump PR
+      # Dispatch only: push a branch advancing main's version marker to `<version>+dev`. The org
+      # blocks Actions from opening PRs, so the workflow stops at the branch and surfaces a one-click
+      # "create PR" link in the run summary; a maintainer opens that PR and merges it.
+      - name: Push the dev-bump branch
         if: needs.compute.outputs.version != ''
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           DEV="${{ needs.compute.outputs.version }}+dev"
           BRANCH="chore/bump-dev-${{ needs.compute.outputs.version }}"
@@ -253,7 +251,13 @@ jobs:
           perl -i -pe 'if ($h) { s/^version = .*/version = "'"$DEV"'"/; $h = 0 } $h = 1 if /^name = "funes"$/' Cargo.lock
           git add Cargo.toml Cargo.lock
           git commit -m "chore: bump version to $DEV"
-          git push origin "$BRANCH"
-          gh pr create --base main --head "$BRANCH" \
-            --title "chore: bump version to $DEV" \
-            --body "Opens the next dev cycle after \`${{ needs.compute.outputs.tag }}\`. Merge to advance \`main\` to \`$DEV\`."
+          git push --force origin "$BRANCH"
+          URL="${{ github.server_url }}/${{ github.repository }}/compare/main...${BRANCH}?expand=1"
+          {
+            echo "### Version bump ready"
+            echo ""
+            echo "Advance \`main\` to \`$DEV\`: open the PR from \`$BRANCH\`, then merge it."
+            echo ""
+            echo "[Create pull request →]($URL)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Open the version-bump PR: $URL"
