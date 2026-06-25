@@ -40,10 +40,10 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
-  # Dispatch-only: work out the next version. Nothing is written or pushed here — the
-  # version is stamped into each build's working tree, and only committed + tagged by
-  # `publish` after the builds succeed, so a failed build never bumps the version or
-  # leaves a dangling tag.
+  # Dispatch-only: work out the release version (strip +dev, then bump). Nothing is written or
+  # pushed here — the version is stamped into each build's working tree, and only the tag and the
+  # dev-bump PR are created by `publish` after the builds succeed, so a failed build never tags a
+  # release or opens a PR.
   compute:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
@@ -190,9 +190,9 @@ jobs:
           name: macos-arm64
           path: dist/
 
-  # Runs only after both builds succeed. On dispatch it now commits the version bump,
-  # tags, and pushes — so the version/tag only ever advance for a release that actually
-  # built. On a tag push there's nothing to commit; it just publishes at that tag.
+  # Runs only after both builds succeed. The release itself — tag + GitHub Release with the binaries
+  # — never touches main, so branch protection doesn't apply. The only change to main, advancing the
+  # `+dev` version marker, goes up as a PR the workflow opens for a maintainer to review and merge.
   publish:
     name: Publish Release
     needs: [compute, build-linux, build-macos]
@@ -203,35 +203,14 @@ jobs:
       (startsWith(github.ref, 'refs/tags/') || needs.compute.result == 'success')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    permissions:
+      contents: write # create + push the tag, create the release
+      pull-requests: write # open the dev-bump PR
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
-
-      # Dispatch only: now that the builds passed, commit the release version (matching the
-      # artifacts) and tag it, then reopen main on `<version>+dev` so development never sits on a
-      # bare released version. Both commits go up in one push; the tag points at the release commit.
-      - name: Commit release, tag, then reopen the dev version
-        if: needs.compute.outputs.version != ''
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          stamp() {
-            perl -i -pe 'if (!$d && s/^version = ".*"/version = "'"$1"'"/) { $d = 1 }' Cargo.toml
-            perl -i -pe 'if ($h) { s/^version = .*/version = "'"$1"'"/; $h = 0 } $h = 1 if /^name = "funes"$/' Cargo.lock
-          }
-
-          stamp "${{ needs.compute.outputs.version }}"
-          git add Cargo.toml Cargo.lock
-          git commit -m "chore: release ${{ needs.compute.outputs.tag }}"
-          git tag "${{ needs.compute.outputs.tag }}"
-
-          stamp "${{ needs.compute.outputs.version }}+dev"
-          git add Cargo.toml Cargo.lock
-          git commit -m "chore: reopen dev (${{ needs.compute.outputs.version }}+dev)"
-          git push origin HEAD:main --tags
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -239,12 +218,42 @@ jobs:
           pattern: "{linux-*,macos-*}"
           merge-multiple: true
 
-      - name: Create release
+      # Tag the released commit and publish the binaries. On dispatch we create + push the tag at the
+      # current main commit — tags aren't branch-protected, so this isn't blocked; on a manual tag
+      # push the tag already exists. The published binaries carry the computed version (stamped at
+      # build time); the tagged commit's Cargo.toml still shows the in-progress `+dev` marker.
+      - name: Tag and publish the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ needs.compute.outputs.tag || github.ref_name }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
           gh release create "$TAG" artifacts/* \
             --repo "${{ github.repository }}" \
             --title "$TAG" \
             --generate-notes
+
+      # Dispatch only: advance main's version marker to `<version>+dev`. main is protected, so the
+      # workflow opens the PR but a maintainer merges it — the one manual step in a release. (CI may
+      # not auto-run on a PR opened by GITHUB_TOKEN; merge as admin, or reopen the PR to trigger it.)
+      - name: Open the dev-bump PR
+        if: needs.compute.outputs.version != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DEV="${{ needs.compute.outputs.version }}+dev"
+          BRANCH="chore/bump-dev-${{ needs.compute.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          perl -i -pe 'if (!$d && s/^version = ".*"/version = "'"$DEV"'"/) { $d = 1 }' Cargo.toml
+          perl -i -pe 'if ($h) { s/^version = .*/version = "'"$DEV"'"/; $h = 0 } $h = 1 if /^name = "funes"$/' Cargo.lock
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore: bump version to $DEV"
+          git push origin "$BRANCH"
+          gh pr create --base main --head "$BRANCH" \
+            --title "chore: bump version to $DEV" \
+            --body "Opens the next dev cycle after \`${{ needs.compute.outputs.tag }}\`. Merge to advance \`main\` to \`$DEV\`."
