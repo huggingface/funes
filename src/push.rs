@@ -129,6 +129,7 @@ pub async fn run_push(target: Store, force_reindex: bool) -> Result<Pushed> {
     }
 
     // 1. Delta: local_ids − remote_ids (remote absent => first publish).
+    eprintln!("comparing local and remote indexes…");
     let local = Store::local().open().await?;
     let local_ids = all_ids(&local).await?;
     let remote_ids = match target.open().await {
@@ -159,6 +160,7 @@ pub async fn run_push(target: Store, force_reindex: bool) -> Result<Pushed> {
 
     // 3. Forced reindex with no new data: just refresh the remote index and stop.
     if to_push.is_empty() {
+        eprintln!("refreshing the remote index…");
         let note = reindex_forced(&repo, &dataset_uri, &opts, &rev).await?;
         return Ok(format!("{}: up to date ({} chunks)\n{note}", target.label(), remote_ids.len()).into());
     }
@@ -175,6 +177,8 @@ pub async fn run_push(target: Store, force_reindex: bool) -> Result<Pushed> {
 
     // Drop any row whose text still holds a secret — hold it back from the Hub rather than block the
     // whole push. `funes scrub` redacts it in the local store; the next push then ships it.
+    let n_scanning: usize = batches.iter().map(|b| b.num_rows()).sum();
+    eprintln!("scanning {n_scanning} chunk(s) for secrets…");
     let (batches, skipped) = drop_secret_rows(batches)?;
     let n_chunks: usize = batches.iter().map(|b| b.num_rows()).sum();
     if n_chunks == 0 {
@@ -202,11 +206,12 @@ pub async fn run_push(target: Store, force_reindex: bool) -> Result<Pushed> {
         };
         std::fs::create_dir_all(&db_dir)?;
         let table_uri = dataset::table_uri(&db_dir.to_string_lossy());
+        eprintln!("building the dataset to publish…");
         let reader = RecordBatchIterator::new(batches.into_iter().map(Ok), schema.clone());
         let mut ds = Dataset::write(reader, &table_uri, Some(WriteParams::default()))
             .await
             .context("building the dataset for first publish")?;
-        dataset::build_indexes(&mut ds).await;
+        dataset::build_indexes(&mut ds, |phase| eprintln!("building {phase}…")).await;
 
         let mut ops = Vec::new();
         for entry in walkdir::WalkDir::new(&db_dir).into_iter().filter_map(|e| e.ok()) {
@@ -222,11 +227,13 @@ pub async fn run_push(target: Store, force_reindex: bool) -> Result<Pushed> {
         if ops.is_empty() {
             return Ok(format!("{}: nothing new to upload\n", target.label()).into());
         }
+        eprintln!("uploading {n_chunks} chunk(s) to {}…", target.label());
         let info = repo
             .create_commit()
             .operations(ops)
             .commit_message(format!("funes push: +{n_chunks} chunks"))
             .revision(rev.clone())
+            .progress(hf_dataset::upload_progress())
             .send()
             .await
             .map_err(|e| anyhow::Error::new(e).context("create_commit failed"))?;
@@ -242,6 +249,7 @@ pub async fn run_push(target: Store, force_reindex: bool) -> Result<Pushed> {
     // 6. Append the data and commit it, retrying against a fresh head if a concurrent push moved it
     // (each attempt re-appends onto the new manifest — the data commit is small, so this is cheap).
     let message = format!("funes push: +{n_chunks} chunks");
+    eprintln!("uploading {n_chunks} chunk(s) to {}…", target.label());
     let mut attempts = 0u32;
     let (oid, unindexed) = loop {
         let attempt = hf_dataset::append(
@@ -269,8 +277,10 @@ pub async fn run_push(target: Store, force_reindex: bool) -> Result<Pushed> {
     // 7. Reindex as a separate commit: forced (retried until it lands) or, past the threshold,
     // best-effort (one shot, warn on a conflict — the next push retries).
     if force_reindex {
+        eprintln!("refreshing the remote index…");
         out.push_str(&reindex_forced(&repo, &dataset_uri, &opts, &rev).await?);
     } else if unindexed > REINDEX_THRESHOLD {
+        eprintln!("refreshing the remote index…");
         out.push_str(&reindex_auto(&repo, &dataset_uri, &opts, &rev).await);
     }
     out.push_str(&skipped.warning());

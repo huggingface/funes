@@ -77,7 +77,12 @@ pub async fn scan_rows(
 
 /// Best-effort: build the FTS index on `text` and the IVF_PQ index on `vector`. A small corpus
 /// can't train IVF (lance needs ~256 rows) — that's fine, recall falls back to brute force.
-pub async fn build_indexes(ds: &mut Dataset) {
+///
+/// `on_phase` is called with a human label before each index is built, so a caller can report
+/// progress around these opaque (no incremental hook), potentially slow Lance calls. Pass `|_| {}`
+/// to stay silent.
+pub async fn build_indexes(ds: &mut Dataset, on_phase: impl Fn(&str)) {
+    on_phase("text search index");
     let _ = ds
         .create_index(
             &["text"],
@@ -88,6 +93,7 @@ pub async fn build_indexes(ds: &mut Dataset) {
         )
         .await;
     if let Some(params) = ivf_pq_params(ds) {
+        on_phase("vector index");
         let _ = ds
             .create_index(&["vector"], IndexType::Vector, None, &params, true)
             .await;

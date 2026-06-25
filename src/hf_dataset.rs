@@ -36,12 +36,14 @@
 //! anything. It is also the non-deprecated seam.
 
 use std::collections::{BTreeMap, HashMap};
+use std::io::Write as _;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use arrow_array::{RecordBatch, RecordBatchIterator};
 use arrow_schema::SchemaRef;
 use bytes::Bytes;
+use hf_hub::progress::{Progress, ProgressEvent, ProgressHandler, UploadEvent};
 use hf_hub::repository::{CommitInfo, CommitOperation};
 use hf_hub::{HFError, HFRepository, RepoTypeDataset};
 use lance::dataset::builder::DatasetBuilder;
@@ -227,8 +229,75 @@ async fn send_commit(
         .commit_message(message)
         .parent_commit(parent)
         .revision(rev.to_string())
+        .progress(upload_progress())
         .send()
         .await
+}
+
+/// A live stderr byte-bar for an upload `create_commit`, redrawn in place (`\r`) as xet streams the
+/// data. Small commits skip the byte phase (no `Progress` events) — then nothing is drawn and the
+/// caller's "uploading…" line is the only trace. `Send + Sync`: hf-hub calls it off the main thread.
+struct UploadBar;
+
+impl ProgressHandler for UploadBar {
+    fn on_progress(&self, event: &ProgressEvent) {
+        let ProgressEvent::Upload(e) = event else {
+            return;
+        };
+        match e {
+            UploadEvent::Progress {
+                bytes_completed,
+                total_bytes,
+                bytes_per_sec,
+                ..
+            } => {
+                let pct = if *total_bytes > 0 {
+                    100.0 * *bytes_completed as f64 / *total_bytes as f64
+                } else {
+                    0.0
+                };
+                let rate = bytes_per_sec
+                    .map(|r| format!(" ({}/s)", human_bytes(r as u64)))
+                    .unwrap_or_default();
+                eprint!(
+                    "\r    uploaded {} / {}  {pct:.0}%{rate}   ",
+                    human_bytes(*bytes_completed),
+                    human_bytes(*total_bytes),
+                );
+                let _ = std::io::stderr().flush();
+            }
+            UploadEvent::Committing => {
+                eprint!("\r    committing…                                        ");
+                let _ = std::io::stderr().flush();
+            }
+            UploadEvent::Complete => {
+                eprintln!("\r    upload complete                                     ");
+            }
+            UploadEvent::Start { .. } => {}
+        }
+    }
+}
+
+/// The upload progress handler for `create_commit`, shared by [`send_commit`] and the first-publish
+/// commit in [`crate::push`]. See [`UploadBar`].
+pub(crate) fn upload_progress() -> Progress {
+    Progress::new(UploadBar)
+}
+
+/// Human-readable byte count (binary units), for the upload bar.
+fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
+    let mut v = n as f64;
+    let mut i = 0;
+    while v >= 1024.0 && i < UNITS.len() - 1 {
+        v /= 1024.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.1} {}", UNITS[i])
+    }
 }
 
 /// Installs a [`CaptureStore`] in front of the store Lance built for the dataset URI, and holds the
@@ -241,5 +310,21 @@ struct CaptureWrapper {
 impl WrappingObjectStore for CaptureWrapper {
     fn wrap(&self, _prefix: &str, original: Arc<dyn OSObjectStore>) -> Arc<dyn OSObjectStore> {
         Arc::new(CaptureStore::new(original, self.captured.clone()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::human_bytes;
+
+    #[test]
+    fn human_bytes_scales_to_binary_units() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(512), "512 B");
+        assert_eq!(human_bytes(1023), "1023 B");
+        assert_eq!(human_bytes(1024), "1.0 KiB");
+        assert_eq!(human_bytes(1536), "1.5 KiB");
+        assert_eq!(human_bytes(5 * 1024 * 1024), "5.0 MiB");
+        assert_eq!(human_bytes(3 * 1024 * 1024 * 1024), "3.0 GiB");
     }
 }

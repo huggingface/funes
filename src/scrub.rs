@@ -11,6 +11,8 @@ use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use lance::dataset::{Dataset, WriteMode, WriteParams};
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::io::Write as _;
+use std::time::Instant;
 
 /// Reconstruct each block, scan them all in one pass, and for any block holding a secret either
 /// redact the matching values in place (re-chunked, re-embedded) or — when a value can't be matched
@@ -24,6 +26,7 @@ pub async fn run() -> Result<()> {
     };
     let scanner = scan::Trufflehog::find()?;
 
+    eprintln!("loading the local store…");
     let batches = dataset::scan_rows(&ds, &[], None, None).await?;
     let chunks = chunk::chunks_from_batches(&batches);
     let total = chunks.len();
@@ -36,6 +39,7 @@ pub async fn run() -> Result<()> {
     // scan them all in one pass.
     let blocks = chunk::reconstruct_blocks(&chunks);
     let texts: Vec<&str> = blocks.iter().map(|(_, text)| text.as_str()).collect();
+    eprintln!("scanning {} block(s) for secrets…", texts.len());
     let found = scan::scan_blocks(&texts, &scanner)?;
 
     // From that single scan, decide each block: excise the secrets whose value matches and re-chunk
@@ -77,7 +81,18 @@ pub async fn run() -> Result<()> {
     } else {
         let mut embedder = TextEmbedding::try_new(InitOptions::new(EmbeddingModel::BGESmallENV15))?;
         let rtexts: Vec<&str> = replacements.iter().map(|c| c.text.as_str()).collect();
-        let vectors = embed_batched(&mut embedder, &rtexts, |_| {})?;
+        let n = rtexts.len();
+        eprintln!("re-embedding {n} redacted chunk(s)…");
+        let t0 = Instant::now();
+        let vectors = embed_batched(&mut embedder, &rtexts, |done| {
+            let secs = t0.elapsed().as_secs_f64().max(0.001);
+            eprint!("\r    embedded {done}/{n}  ({:.0}/s)   ", done as f64 / secs);
+            let _ = std::io::stderr().flush();
+        })?;
+        eprintln!(
+            "\r    embedded {n} chunk(s) in {:.1}s          ",
+            t0.elapsed().as_secs_f64()
+        );
         Some(build_batch(&replacements, &vectors)?)
     };
 
@@ -100,6 +115,7 @@ pub async fn run() -> Result<()> {
         base += b.num_rows();
     }
     out.extend(replacement_batch);
+    eprintln!("rewriting the store…");
     let reader = RecordBatchIterator::new(out.into_iter().map(Ok), schema.clone());
     let mut ds = Dataset::write(
         reader,
@@ -110,7 +126,7 @@ pub async fn run() -> Result<()> {
         }),
     )
     .await?;
-    dataset::build_indexes(&mut ds).await;
+    dataset::build_indexes(&mut ds, |phase| eprintln!("building {phase}…")).await;
 
     let mut msg = format!(
         "scrubbed {total} rows: redacted {} secret(s) in {redacted_blocks} block(s)",

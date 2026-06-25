@@ -305,8 +305,7 @@ pub async fn run_index(source: &Path, no_thinking: bool) -> Result<()> {
     // enforces its own training minimum (256 rows for default IVF_PQ) and skips below it, so recall
     // falls back to brute-force vector search.
     if let Some(d) = &mut ds {
-        eprintln!("building FTS + IVF_PQ indexes…");
-        dataset::build_indexes(d).await;
+        dataset::build_indexes(d, |phase| eprintln!("building {phase}…")).await;
     }
 
     println!("indexed files={n_files} skipped={n_skipped} chunks={n_chunks}");
