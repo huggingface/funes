@@ -55,7 +55,15 @@ parser to the same shape, not touching the index or query path.
 
 ## Install
 
-Prebuilt binaries are on [GitHub Releases](https://github.com/huggingface/funes/releases):
+The [installer](scripts/install.sh) detects your platform, downloads the matching prebuilt
+binary, and puts it on your PATH (`~/.local/bin` by default):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/huggingface/funes/main/scripts/install.sh | sh
+```
+
+Pass `-b <dir>` to change the install dir or `-v <tag>` to pin a release, after `sh -s --`.
+Or grab a [binary](https://github.com/huggingface/funes/releases) by hand:
 
 | Platform | Binary |
 | --- | --- |
