@@ -233,6 +233,7 @@ pub async fn run_push(target: Store, force_reindex: bool) -> Result<Pushed> {
             .operations(ops)
             .commit_message(format!("funes push: +{n_chunks} chunks"))
             .revision(rev.clone())
+            .progress(hf_dataset::upload_progress())
             .send()
             .await
             .map_err(|e| anyhow::Error::new(e).context("create_commit failed"))?;
