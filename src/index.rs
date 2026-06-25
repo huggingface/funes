@@ -137,9 +137,9 @@ fn redact_turns(turns: &mut [parse::Turn], scanner: &dyn scan::SecretScanner) ->
         .iter()
         .zip(&per_block)
         .map(|(text, findings)| {
-            let (new_text, rem, _all) = scan::excise(text, findings);
-            removed.extend(rem);
-            new_text
+            let r = scan::excise(text, findings);
+            removed.extend(r.removed_detectors);
+            r.text
         })
         .collect();
     if removed.is_empty() {

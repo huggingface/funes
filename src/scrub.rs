@@ -54,10 +54,10 @@ pub async fn run() -> Result<()> {
         for &i in idxs {
             remove[i] = true;
         }
-        let (redacted_text, removed, all_removed) = scan::excise(text, findings);
-        if all_removed {
-            replacements.extend(chunk::resplit(&chunks[idxs[0]], &redacted_text));
-            redacted_detectors.extend(removed);
+        let r = scan::excise(text, findings);
+        if r.fully_redacted {
+            replacements.extend(chunk::resplit(&chunks[idxs[0]], &r.text));
+            redacted_detectors.extend(r.removed_detectors);
             redacted_blocks += 1;
         } else {
             dropped_detectors.extend(scan::detectors(findings));

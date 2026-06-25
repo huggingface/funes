@@ -192,41 +192,57 @@ pub fn scan_blocks(texts: &[&str], scanner: &dyn SecretScanner) -> Result<Vec<Ve
     Ok(out)
 }
 
-/// Excise each finding's value from `text`, replacing it with `[REDACTED:<detector>]`. Returns the
-/// redacted text, the detector of each distinct secret removed, and whether *every* finding was
-/// removed. `all_removed == false` means a secret's bytes didn't match trufflehog's canonical `raw`
-/// (e.g. a key stored with escaped newlines) and so survives — the caller must drop the text rather
-/// than store it. Takes findings from [`scan_blocks`] and never re-scans: it inserts a marker (never
-/// splices fragments together), so excision can't manufacture a new secret, and the fail-closed push
-/// gate re-scans every block before any upload regardless.
-pub fn excise(text: &str, findings: &[Finding]) -> (String, Vec<String>, bool) {
-    let mut out = text.to_string();
-    let mut removed = Vec::new();
-    let mut all_removed = true;
-    let mut done: HashSet<String> = HashSet::new();
+/// The outcome of excising one block's secrets; see [`excise`].
+pub struct Redaction {
+    /// `text` with every matched secret value replaced by `[REDACTED:<detector>]`.
+    pub text: String,
+    /// The detector name of each distinct secret removed (deduplicated by value), for the
+    /// user-facing summary.
+    pub removed_detectors: Vec<String>,
+    /// Whether *every* finding was excised. `false` means a secret's bytes didn't match trufflehog's
+    /// canonical `raw` (e.g. a key stored with escaped newlines) and so survives — the caller must
+    /// drop the text rather than store it. Not derivable from `removed_detectors.len()` vs
+    /// `findings.len()`: the detectors are deduplicated by value, so repeated findings collapse and
+    /// the lengths legitimately differ even when nothing survived.
+    pub fully_redacted: bool,
+}
+
+/// Excise each finding's value from `text`, replacing it with `[REDACTED:<detector>]`. Takes findings
+/// from [`scan_blocks`] and never re-scans: it inserts a marker (never splices fragments together), so
+/// excision can't manufacture a new secret, and the fail-closed push gate re-scans every block before
+/// any upload regardless.
+pub fn excise(text: &str, findings: &[Finding]) -> Redaction {
+    let mut redacted = text.to_string();
+    let mut removed_detectors = Vec::new();
+    let mut fully_redacted = true;
+    let mut seen: HashSet<String> = HashSet::new();
     for f in findings {
         // trufflehog normalizes a match's surrounding whitespace (a multiline key comes back with a
         // trailing newline the stored chunk lacks), so match on the trimmed value, not the raw.
         let needle = f.raw.trim();
         if needle.is_empty() {
-            all_removed = false; // nothing to match on — can't excise it
+            fully_redacted = false; // nothing to match on — can't excise it
             continue;
         }
-        if !done.insert(needle.to_string()) {
+        if !seen.insert(needle.to_string()) {
             continue;
         }
-        // Decide presence against the *original* `text`, not the progressively-redacted `out`: a
+        // Decide presence against the *original* `text`, not the progressively-redacted result: a
         // value that was a byte-substring of an already-excised one is genuinely gone (count it
         // removed, replace is a no-op), whereas a value that was never present (e.g. a key stored
         // with escaped newlines) marks the text unredactable so the caller drops it.
         if text.contains(needle) {
-            out = out.replace(needle, &format!("[REDACTED:{}]", f.detector));
-            removed.push(f.detector.clone());
+            redacted = redacted.replace(needle, &format!("[REDACTED:{}]", f.detector));
+            removed_detectors.push(f.detector.clone());
         } else {
-            all_removed = false;
+            fully_redacted = false;
         }
     }
-    (out, removed, all_removed)
+    Redaction {
+        text: redacted,
+        removed_detectors,
+        fully_redacted,
+    }
 }
 
 /// The distinct detector names among `findings`, in first-seen order — what each secret-bearing
@@ -317,20 +333,20 @@ mod tests {
 
     #[test]
     fn excise_replaces_each_distinct_match_in_place() {
-        let (text, removed, all) = excise("before SEKRET after", &[finding("PrivateKey", "SEKRET")]);
-        assert_eq!(text, "before [REDACTED:PrivateKey] after");
-        assert_eq!(removed, vec!["PrivateKey".to_string()]);
-        assert!(all);
+        let r = excise("before SEKRET after", &[finding("PrivateKey", "SEKRET")]);
+        assert_eq!(r.text, "before [REDACTED:PrivateKey] after");
+        assert_eq!(r.removed_detectors, vec!["PrivateKey".to_string()]);
+        assert!(r.fully_redacted);
     }
 
     #[test]
     fn excise_trims_normalized_matches() {
         // trufflehog reports a multiline match with a trailing newline the stored text lacks; the
         // trimmed match must still be redacted.
-        let (text, removed, all) = excise("x KEYLINE y", &[finding("PrivateKey", "KEYLINE\n")]);
-        assert_eq!(text, "x [REDACTED:PrivateKey] y");
-        assert_eq!(removed, vec!["PrivateKey".to_string()]);
-        assert!(all);
+        let r = excise("x KEYLINE y", &[finding("PrivateKey", "KEYLINE\n")]);
+        assert_eq!(r.text, "x [REDACTED:PrivateKey] y");
+        assert_eq!(r.removed_detectors, vec!["PrivateKey".to_string()]);
+        assert!(r.fully_redacted);
     }
 
     #[test]
@@ -338,28 +354,34 @@ mod tests {
         // Two findings where one value contains the other. Excising the longer also removes the
         // shorter; presence is judged against the original text, so the shorter still counts as
         // removed and the block is redacted (kept), not dropped.
-        let (text, _removed, all) = excise(
+        let r = excise(
             "x SECRET-TOKEN y",
             &[finding("Long", "SECRET-TOKEN"), finding("Short", "TOKEN")],
         );
-        assert!(!text.contains("TOKEN"), "both values must be gone: {text}");
-        assert!(all, "a transitively-removed value must not mark the block unredactable");
+        assert!(!r.text.contains("TOKEN"), "both values must be gone: {}", r.text);
+        assert!(
+            r.fully_redacted,
+            "a transitively-removed value must not mark the block unredactable"
+        );
     }
 
     #[test]
     fn excise_flags_a_value_it_cannot_match() {
         // The escaped case: the canonical value (real newlines) isn't a substring of the stored text
-        // (escaped `\n`), so it can't be excised — `all_removed` must be false so the caller drops it.
+        // (escaped `\n`), so it can't be excised — `fully_redacted` must be false so the caller drops it.
         let stored = "key: -----BEGIN-----\\nABC\\n-----END-----";
         let finding = Finding {
             detector: "PrivateKey".into(),
             raw: "-----BEGIN-----\nABC\n-----END-----".into(), // real newlines
             line: Some(1),
         };
-        let (text, removed, all) = excise(stored, &[finding]);
-        assert_eq!(text, stored, "nothing matched, so nothing changed");
-        assert!(removed.is_empty());
-        assert!(!all, "an unremovable secret must mark the text for dropping");
+        let r = excise(stored, &[finding]);
+        assert_eq!(r.text, stored, "nothing matched, so nothing changed");
+        assert!(r.removed_detectors.is_empty());
+        assert!(
+            !r.fully_redacted,
+            "an unremovable secret must mark the text for dropping"
+        );
     }
 
     #[test]
