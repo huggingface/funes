@@ -19,18 +19,27 @@ use std::process::Command;
 /// trufflehog's exit code (under `--fail`) when at least one result was found.
 const FOUND: i32 = 183;
 
+/// trufflehog's decoder name for a secret found directly in the text (not inside base64/UTF-16/…).
+/// Only these are redacted in place; an encoded match can't be reconstructed, so its block is dropped.
+const PLAIN: &str = "PLAIN";
+
 /// A potential secret a scanner flagged; never logged.
 ///
 /// - `raw` is the matched value in the scanner's *canonical* form (real newlines, surrounding
-///   quotes/escapes stripped). It's used to redact where it byte-matches the stored text — but it
-///   often won't (a key stored with escaped `\n`, or quoted), so it's unreliable for *locating*.
+///   quotes/escapes stripped). [`excise`] redacts by byte-matching it (or its JSON-escaped form)
+///   against the stored text; for *locating* a finding it's unreliable — an escaped or quoted key
+///   won't match verbatim — so location goes by `line`, not `raw`.
 /// - `line` is the 1-based line in the scanned blob where the match begins. This is robust to
-///   escaping, so it — not `raw` — is what [`locate`] uses to attribute a finding to its source.
+///   escaping, so it — not `raw` — is what [`scan_blocks`] uses to attribute a finding to its source.
+/// - `decoder` is the decoder trufflehog used to uncover the match (`PLAIN`, `BASE64`, …). `PLAIN`
+///   means the secret bytes are in the text directly (possibly string-escaped); anything else means
+///   it was inside an encoded region [`excise`] won't reconstruct, so that block is dropped, not redacted.
 #[derive(Debug, Clone)]
 pub struct Finding {
     pub detector: String,
     pub raw: String,
     pub line: Option<usize>,
+    pub decoder: String,
 }
 
 /// A pluggable secret-detection engine. The rest of this module — redaction, the allowlist, the
@@ -86,8 +95,8 @@ impl SecretScanner for Trufflehog {
 }
 
 /// Parse one trufflehog JSON result line into a [`Finding`], pulling the detector, the raw match,
-/// and the filesystem line number (`SourceMetadata.Data.Filesystem.line`). Non-result lines (no
-/// `DetectorName`) and unparseable lines are dropped.
+/// the filesystem line number (`SourceMetadata.Data.Filesystem.line`), and the decoder
+/// (`DecoderName`). Non-result lines (no `DetectorName`) and unparseable lines are dropped.
 fn parse_finding(line: &str) -> Option<Finding> {
     let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
     let detector = v.get("DetectorName")?.as_str()?.to_string();
@@ -101,6 +110,11 @@ fn parse_finding(line: &str) -> Option<Finding> {
             .pointer("/SourceMetadata/Data/Filesystem/line")
             .and_then(|x| x.as_u64())
             .map(|n| n as usize),
+        decoder: v
+            .get("DecoderName")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string(),
     })
 }
 
@@ -199,11 +213,12 @@ pub struct Redaction {
     /// The detector name of each distinct secret removed (deduplicated by value), for the
     /// user-facing summary.
     pub removed_detectors: Vec<String>,
-    /// Whether *every* finding was excised. `false` means a secret's bytes didn't match trufflehog's
-    /// canonical `raw` (e.g. a key stored with escaped newlines) and so survives — the caller must
-    /// drop the text rather than store it. Not derivable from `removed_detectors.len()` vs
-    /// `findings.len()`: the detectors are deduplicated by value, so repeated findings collapse and
-    /// the lengths legitimately differ even when nothing survived.
+    /// Whether *every* finding was excised. `false` means a secret survives — either it was found
+    /// inside an encoded region (a non-PLAIN decoder, e.g. base64) [`excise`] won't reconstruct, or
+    /// none of the byte forms it tries (canonical or JSON-escaped) matched — so the caller must drop
+    /// the text rather than store it. Not derivable from `removed_detectors.len()` vs `findings.len()`:
+    /// the detectors are deduplicated by value, so repeated findings collapse and the lengths
+    /// legitimately differ even when nothing survived.
     pub fully_redacted: bool,
 }
 
@@ -227,15 +242,23 @@ pub fn excise(text: &str, findings: &[Finding]) -> Redaction {
         if !seen.insert(needle.to_string()) {
             continue;
         }
-        // Decide presence against the *original* `text`, not the progressively-redacted result: a
-        // value that was a byte-substring of an already-excised one is genuinely gone (count it
-        // removed, replace is a no-op), whereas a value that was never present (e.g. a key stored
-        // with escaped newlines) marks the text unredactable so the caller drops it.
-        if text.contains(needle) {
-            redacted = redacted.replace(needle, &format!("[REDACTED:{}]", f.detector));
-            removed_detectors.push(f.detector.clone());
+        // Redact in place only when trufflehog found the secret directly in the text (the PLAIN
+        // decoder). Its bytes may be string-escaped — a compact-JSON `tool_use` input backslash-
+        // escapes a key's newlines and quotes — which `candidate_forms` covers; match against the
+        // *original* `text` so a value nested in an already-excised one still counts as removed. A
+        // non-PLAIN decoder (BASE64, …) means the secret sat inside an encoded region we won't
+        // reconstruct, so the block is unredactable and the caller must drop it.
+        let hit = if f.decoder == PLAIN {
+            candidate_forms(needle).into_iter().find(|c| text.contains(c.as_str()))
         } else {
-            fully_redacted = false;
+            None
+        };
+        match hit {
+            Some(form) => {
+                redacted = redacted.replace(&form, &format!("[REDACTED:{}]", f.detector));
+                removed_detectors.push(f.detector.clone());
+            }
+            None => fully_redacted = false,
         }
     }
     Redaction {
@@ -243,6 +266,21 @@ pub fn excise(text: &str, findings: &[Finding]) -> Redaction {
         removed_detectors,
         fully_redacted,
     }
+}
+
+/// The byte forms a secret value can take in stored text: the canonical value trufflehog reports
+/// (real newlines, unquoted), and its JSON-string escaping without the wrapping quotes — how it
+/// appears inside a compact-JSON `tool_use` block, where `serde_json::to_string` backslash-escapes
+/// newlines and quotes. Canonical first; the escaped form is added only when it differs.
+fn candidate_forms(value: &str) -> Vec<String> {
+    let mut forms = vec![value.to_string()];
+    if let Ok(json) = serde_json::to_string(value) {
+        let escaped = json[1..json.len() - 1].to_string(); // drop serde's wrapping quotes
+        if escaped != value {
+            forms.push(escaped);
+        }
+    }
+    forms
 }
 
 /// The distinct detector names among `findings`, in first-seen order — what each secret-bearing
@@ -288,6 +326,7 @@ mod tests {
             detector: detector.to_string(),
             raw: raw.to_string(),
             line: None,
+            decoder: "PLAIN".into(),
         }
     }
 
@@ -296,6 +335,7 @@ mod tests {
             detector: detector.to_string(),
             raw: String::new(),
             line: Some(line),
+            decoder: "PLAIN".into(),
         }
     }
 
@@ -366,22 +406,38 @@ mod tests {
     }
 
     #[test]
-    fn excise_flags_a_value_it_cannot_match() {
-        // The escaped case: the canonical value (real newlines) isn't a substring of the stored text
-        // (escaped `\n`), so it can't be excised — `fully_redacted` must be false so the caller drops it.
-        let stored = "key: -----BEGIN-----\\nABC\\n-----END-----";
+    fn excise_matches_a_json_escaped_value() {
+        // A tool_use input is stored as compact JSON, so a key's newlines arrive as literal `\n`
+        // (backslash-n) while trufflehog reports the canonical value (real newlines). excise must
+        // fall back to the JSON-escaped form and redact it rather than leave it for dropping.
+        let stored = "key: -----BEGIN-----\\nABC\\n-----END-----"; // literal backslash-n
         let finding = Finding {
             detector: "PrivateKey".into(),
             raw: "-----BEGIN-----\nABC\n-----END-----".into(), // real newlines
             line: Some(1),
+            decoder: "PLAIN".into(),
         };
         let r = excise(stored, &[finding]);
-        assert_eq!(r.text, stored, "nothing matched, so nothing changed");
+        assert_eq!(r.text, "key: [REDACTED:PrivateKey]");
+        assert!(r.fully_redacted, "the JSON-escaped form must match and redact");
+    }
+
+    #[test]
+    fn excise_drops_a_non_plain_finding_even_when_its_value_appears_in_text() {
+        // A BASE64 (non-PLAIN) decoder means the secret was uncovered inside an encoded blob. Even
+        // when its decoded value also appears in plaintext, redacting that copy would leave the
+        // encoded one live — so the block must be dropped, never kept as "fully redacted".
+        let stored = "plain SEKRET and blob U0VLUkVU"; // U0VLUkVU is base64("SEKRET")
+        let finding = Finding {
+            detector: "Generic".into(),
+            raw: "SEKRET".into(),
+            line: Some(1),
+            decoder: "BASE64".into(),
+        };
+        let r = excise(stored, &[finding]);
+        assert_eq!(r.text, stored, "a non-PLAIN finding is never redacted in place");
         assert!(r.removed_detectors.is_empty());
-        assert!(
-            !r.fully_redacted,
-            "an unremovable secret must mark the text for dropping"
-        );
+        assert!(!r.fully_redacted, "an encoded secret must mark the text for dropping");
     }
 
     #[test]
@@ -404,6 +460,7 @@ mod tests {
             detector: "PrivateKey".to_string(),
             raw: "-----BEGIN-----\nABC\n-----END-----".to_string(), // real newlines: not in `escaped`
             line: Some(2),
+            decoder: "PLAIN".to_string(),
         }]);
         let hits = detectors(&["clean chatter", escaped, "more chatter"], &scanner);
         assert_eq!(

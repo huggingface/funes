@@ -1,14 +1,15 @@
-//! Gated end-to-end: `funes scrub` drops a row whose secret it cannot safely redact — a key stored
-//! with escaped `\n` (literal backslash-n), as a JSON-encoded or logged transcript holds it. The
-//! scanner's canonical `raw` (real newlines) isn't a substring of the stored bytes, so it can't be
-//! excised in place; scrub locates it by line and removes the block whole. This is the exact shape
-//! that once leaked. Skipped unless trufflehog and ssh-keygen are available.
+//! Gated end-to-end: `funes scrub` redacts a key stored with escaped `\n` (literal backslash-n), as a
+//! compact-JSON `tool_use` input or logged transcript holds it. The scanner's canonical `raw` (real
+//! newlines) isn't a substring of the stored bytes, but its JSON-escaped form is, so scrub excises the
+//! key in place instead of dropping the whole block — and the secret's base64 body is fully gone, not
+//! left as residue. This is the exact shape that once leaked. Skipped unless trufflehog and ssh-keygen
+//! are available.
 
 use std::io::Write;
 use std::process::Command;
 
 #[tokio::test]
-async fn scrub_drops_an_escaped_key_it_cannot_redact() {
+async fn scrub_redacts_an_escaped_key_in_place() {
     if funes::scan::Trufflehog::find().is_err() {
         eprintln!("skip: trufflehog not found");
         return;
@@ -71,7 +72,7 @@ async fn scrub_drops_an_escaped_key_it_cannot_redact() {
         "setup: the escaped key should be in the store before scrub"
     );
 
-    // Scrub with the real scanner: it can't redact the escaped key, so it drops that row.
+    // Scrub with the real scanner: it matches the key's JSON-escaped form and excises it in place.
     std::env::remove_var("FUNES_TRUFFLEHOG");
     funes::scrub::run().await.unwrap();
 
@@ -83,8 +84,8 @@ async fn scrub_drops_an_escaped_key_it_cannot_redact() {
         "escaped key survived scrub: {after_key}"
     );
     assert!(
-        !after_key.contains("[REDACTED"),
-        "escaped key should be dropped, not redacted in place: {after_key}"
+        after_key.contains("[REDACTED"),
+        "escaped key should be redacted in place, not dropped: {after_key}"
     );
 
     // The clean turn is untouched.

@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::io::Write;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 #[tokio::test]
 async fn scrub_dropping_every_block_leaves_a_valid_empty_store() {
@@ -34,9 +34,15 @@ async fn scrub_dropping_every_block_leaves_a_valid_empty_store() {
     }
     let key = std::fs::read_to_string(&keyfile).unwrap();
     std::fs::remove_file(&keyfile).unwrap();
-    let escaped = key.replace('\n', "\\n"); // unredactable: canonical value never byte-matches
+    // Base64-wrap the key: trufflehog still decodes and flags it (a PrivateKey finding), but the
+    // stored bytes are neither the canonical key nor its JSON escaping, so excise can match neither
+    // form — the block is genuinely unredactable, which is the all-dropped case this test needs.
+    let Some(blob) = base64_line(&key) else {
+        eprintln!("skip: base64 unavailable");
+        return;
+    };
 
-    // A single session, a single block — the escaped key and nothing else. Scrub will drop it all.
+    // A single session, a single block — the unredactable key and nothing else. Scrub drops it all.
     let project = "-home-u-dev-demo";
     let session = "scrub-all-0001";
     let dir = source.path().join("projects").join(project);
@@ -45,7 +51,7 @@ async fn scrub_dropping_every_block_leaves_a_valid_empty_store() {
         "type": "user",
         "uuid": "t1",
         "timestamp": "2026-01-01T00:00:00Z",
-        "message": {"role": "user", "content": format!("deploy key: {escaped}")},
+        "message": {"role": "user", "content": format!("deploy key: {blob}")},
     })
     .to_string();
     let mut f = std::fs::File::create(dir.join(format!("{session}.jsonl"))).unwrap();
@@ -69,4 +75,21 @@ async fn scrub_dropping_every_block_leaves_a_valid_empty_store() {
         0,
         "every block was dropped, so the store is empty"
     );
+}
+
+/// Base64-encode `input` to a single line (wrapping stripped), via the `base64` CLI. `None` if it's
+/// absent, so the caller can skip rather than fail.
+fn base64_line(input: &str) -> Option<String> {
+    let mut child = Command::new("base64")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .ok()?;
+    child.stdin.take()?.write_all(input.as_bytes()).ok()?;
+    let out = child.wait_with_output().ok()?;
+    out.status.success().then(|| {
+        String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .collect::<String>()
+    })
 }

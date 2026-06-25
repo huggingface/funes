@@ -387,11 +387,13 @@ mod tests {
                 detector: "PrivateKey".into(),
                 raw: "TOPSECRET".into(),
                 line: None,
+                decoder: "PLAIN".into(),
             },
             scan::Finding {
                 detector: "VirusTotal".into(),
                 raw: "cafef00d".into(),
                 line: None,
+                decoder: "PLAIN".into(),
             },
         ]);
         let mut turns = vec![parse::Turn {
