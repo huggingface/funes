@@ -436,7 +436,7 @@ mod tests {
     }
 
     /// Build a to-push batch the way the store stores it: chunk the turns, stamp zero vectors.
-    fn batch(turns: &[Turn]) -> (RecordBatch, Vec<crate::chunk::Chunk>) {
+    fn batch(turns: &[Turn]) -> (RecordBatch, Vec<chunk::Chunk>) {
         let chunks = chunk::chunks_from_turns(turns, true);
         let vectors = vec![vec![0.0f32; index::DIM as usize]; chunks.len()];
         (index::build_batch(&chunks, &vectors).unwrap(), chunks)

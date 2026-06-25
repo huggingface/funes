@@ -14,6 +14,7 @@ use anyhow::{anyhow, Context, Result};
 use hf_hub::{HFClient, HFError};
 use lance::dataset::Dataset;
 
+use crate::config;
 use crate::dataset;
 use crate::index::{DIM, MODEL};
 
@@ -55,7 +56,7 @@ impl Store {
     /// Resolve the store the read commands should use: an explicit `spec` (a CLI `--remote`) wins,
     /// else the persisted active store (`funes use`), else the local index.
     pub fn resolve(spec: Option<String>) -> Self {
-        resolve_with(spec, crate::config::load().remote)
+        resolve_with(spec, config::load().remote)
     }
 
     /// True only for the default local store (`$FUNES_HOME`/`~/.funes`), so the hello-world

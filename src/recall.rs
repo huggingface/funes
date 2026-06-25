@@ -3,6 +3,7 @@
 //! recency reweight → neighbor expansion. Every command returns a `String` so the CLI
 //! prints it and the MCP server returns it verbatim.
 
+use crate::chunk;
 use crate::dataset;
 use crate::hello;
 use crate::hub::{self, Store};
@@ -591,7 +592,7 @@ pub async fn get(store: Store, session_id: String, turn_uuid: String, window: i6
                 cur_bi = Some(bi);
                 cur = piece.clone();
             } else {
-                cur = crate::chunk::stitch(&cur, piece);
+                cur = chunk::stitch(&cur, piece);
             }
         }
         if !cur.is_empty() {

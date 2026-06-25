@@ -2,6 +2,7 @@
 //! index yet, so a fresh install returns something useful. Superseded once `funes index` runs.
 
 use crate::chunk::Chunk;
+use crate::dataset;
 use crate::index::{self, DIM};
 use anyhow::Result;
 use arrow_array::RecordBatchIterator;
@@ -107,7 +108,7 @@ pub async fn dataset(embedder: Option<&mut TextEmbedding>) -> Result<(TempDir, D
     let batch = index::build_batch(&chunks, &vectors)?;
     let schema = batch.schema();
     let dir = tempfile::tempdir()?;
-    let uri = crate::dataset::table_uri(&dir.path().to_string_lossy());
+    let uri = dataset::table_uri(&dir.path().to_string_lossy());
     let reader = RecordBatchIterator::new(vec![Ok(batch)], schema);
     let ds = Dataset::write(reader, &uri, None).await?;
     Ok((dir, ds))
