@@ -44,14 +44,14 @@ recall(query) ──>  vector + BM25  →  RRF  →  cross-encoder rerank  →  
 
 ## Sources
 
-> **For now, the only supported source is Claude Code** — session transcripts under
-> `~/.claude/projects/**/*.jsonl` (subagent sidechains included). Support for other agent
-> frameworks is planned.
+> **Two sources are supported today:** Claude Code session transcripts under
+> `~/.claude/projects/**/*.jsonl` (subagent sidechains included — the default), and agent-trace
+> **parquet** datasets (HF-style, one row per session) via `funes index path/to/traces.parquet`.
 
-The Claude coupling is confined to the **parse** step: it reads Claude's transcript format
-into a generic turn/block shape. Everything downstream — chunk → embed → store → recall — is
-source-agnostic and operates on that shape. Adding another framework means writing one new
-parser to the same shape, not touching the index or query path.
+Each source is a [`TraceSource`](src/source.rs) that reads its format into a generic turn/block
+shape; everything downstream — chunk → embed → store → recall — is source-agnostic and operates on
+that shape. Adding another framework means implementing one trait (and a branch in `source::open`),
+not touching the index or query path.
 
 ## Install
 

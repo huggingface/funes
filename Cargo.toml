@@ -15,6 +15,7 @@ lance = "=7.0.0"                 # Dataset open/scan/append + create_index, loca
 lance-io = { version = "=7.0.0", features = ["huggingface", "gcp"] }  # hf:// object store + WrappingObjectStore
 lance-index = "=7.0.0"           # FTS/IVF index params + FullTextSearchQuery
 lance-linalg = "=7.0.0"          # MetricType for the IVF_PQ index
+parquet = "58"                   # read agent-trace datasets stored as parquet (arrow-rs, matches arrow-* = "58")
 object_store = "=0.13.2"         # the ObjectStore trait the capture wrapper implements (matches lance-io)
 async-trait = "0.1"              # for the ObjectStore impl in src/capture_store.rs
 bytes = "1"                      # captured write payloads

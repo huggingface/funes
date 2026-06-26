@@ -5,9 +5,10 @@
 //!
 //! A unit is both the incremental-tracking granule (skipped when its [`Unit::signature`] still
 //! matches `state.json`) and the single-append granule (all of a unit's turns are written in one
-//! commit). A JSONL tree is one session per file.
+//! commit). JSONL is one session per file; a parquet dataset is many sessions in one file.
 
 use crate::claude_traces;
+use crate::hf_traces;
 use crate::trace::Turn;
 
 use anyhow::Result;
@@ -36,20 +37,32 @@ pub trait TraceSource {
     fn read(&self, unit: &Unit) -> Result<Vec<Turn>>;
 
     /// Whether a `read` error aborts the whole index. Best-effort sources (a JSONL tree, where one
-    /// unreadable file shouldn't sink the run) return `false`; a single-artifact source returns
-    /// `true`, so a corrupt file is a hard failure rather than a silent skip.
+    /// unreadable file shouldn't sink the run) return `false`; a single-artifact source (a parquet
+    /// dataset) returns `true`, so a corrupt file is a hard failure rather than a silent skip.
     fn fatal_on_read_error(&self) -> bool {
         false
     }
 }
 
-/// Open the source for `path`. Today a path is a tree of Claude Code JSONL transcripts. `limit`
-/// caps how many sessions are read (`None` = all) — used to bound a benchmark's build time.
+/// Pick the source for `path`: a `*.parquet` file is a parquet trace dataset; anything else is a
+/// tree of Claude Code JSONL transcripts. `limit` caps how many sessions are read (`None` = all) —
+/// used to bound a benchmark's build time.
 pub fn open(path: &Path, limit: Option<usize>) -> Box<dyn TraceSource> {
-    Box::new(JsonlTree {
-        root: path.to_path_buf(),
-        limit,
-    })
+    let is_parquet = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("parquet"));
+    if is_parquet {
+        Box::new(ParquetDataset {
+            path: path.to_path_buf(),
+            limit,
+        })
+    } else {
+        Box::new(JsonlTree {
+            root: path.to_path_buf(),
+            limit,
+        })
+    }
 }
 
 /// "size:mtime_secs" for a file's incremental change-stamp, or `None` if it can't be stat'd.
@@ -93,6 +106,39 @@ impl TraceSource for JsonlTree {
     }
 }
 
+/// A parquet agent-trace dataset — many sessions in one file, indexed as a single bulk import.
+/// `signature: None` so it's never skipped on stats and never recorded: a re-run always re-reads
+/// and dedups by chunk id to a no-op, which also means a wiped store is never silently skipped.
+/// `limit` caps how many of its sessions (rows) are read.
+struct ParquetDataset {
+    path: PathBuf,
+    limit: Option<usize>,
+}
+
+impl TraceSource for ParquetDataset {
+    fn describe(&self) -> String {
+        format!("indexing parquet dataset {}", self.path.display())
+    }
+
+    fn units(&self) -> Result<Vec<Unit>> {
+        Ok(vec![Unit {
+            key: self.path.to_string_lossy().into_owned(),
+            signature: None,
+        }])
+    }
+
+    fn read(&self, unit: &Unit) -> Result<Vec<Turn>> {
+        let p = Path::new(&unit.key);
+        // The project facet for a parquet dataset is its file stem.
+        let project = p.file_stem().and_then(|s| s.to_str()).unwrap_or("parquet").to_string();
+        hf_traces::turns_from_parquet(p, &project, self.limit)
+    }
+
+    fn fatal_on_read_error(&self) -> bool {
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,13 +161,16 @@ mod tests {
     }
 
     #[test]
-    fn open_builds_a_jsonl_source() {
+    fn open_dispatches_by_extension() {
+        assert!(open(Path::new("/x/data.parquet"), None).describe().contains("parquet"));
+        assert!(open(Path::new("/x/DATA.PARQUET"), None).describe().contains("parquet"));
         assert!(open(Path::new("/x/projects"), None).describe().contains("transcripts"));
     }
 
     #[test]
     fn jsonl_tree_units_are_files_with_signatures() {
-        // A *.jsonl file under the tree becomes a unit keyed by its path, with a size:mtime stamp.
+        // A *.jsonl file under the tree becomes a unit keyed by its path, with a size:mtime stamp;
+        // a parquet dataset is a single signature-less unit (never skipped/recorded).
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("sess.jsonl");
         std::fs::write(&f, b"{}\n").unwrap();
@@ -130,6 +179,10 @@ mod tests {
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].key, f.to_string_lossy());
         assert!(units[0].signature.is_some());
+
+        let pq = open(Path::new("/x/data.parquet"), None).units().unwrap();
+        assert_eq!(pq.len(), 1);
+        assert!(pq[0].signature.is_none());
     }
 
     #[test]

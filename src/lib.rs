@@ -12,6 +12,7 @@ pub mod config;
 pub mod dataset;
 pub mod hello;
 pub mod hf_dataset;
+pub mod hf_traces;
 pub mod hub;
 pub mod index;
 pub mod mcp;
