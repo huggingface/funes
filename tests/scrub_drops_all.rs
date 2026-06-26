@@ -59,7 +59,7 @@ async fn scrub_dropping_every_block_leaves_a_valid_empty_store() {
 
     // Index with a no-op scanner so the escaped key lands in the store unredacted.
     std::env::set_var("FUNES_TRUFFLEHOG", "/usr/bin/true");
-    funes::index::run_index(source.path(), false).await.unwrap();
+    funes::index::run_index(source.path(), false, None).await.unwrap();
 
     // Scrub with the real scanner: every block is unredactable, so the store is rewritten empty.
     std::env::remove_var("FUNES_TRUFFLEHOG");

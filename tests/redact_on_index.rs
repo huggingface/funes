@@ -49,7 +49,7 @@ async fn planted_key_is_redacted_at_index_time() {
     writeln!(f, "{line}").unwrap();
 
     // Index for real — redaction runs over the block text before chunking/embedding/storing.
-    funes::index::run_index(source.path(), false).await.unwrap();
+    funes::index::run_index(source.path(), false, None).await.unwrap();
 
     // Read the stored turn back: the marker is present, the key body is gone.
     let got = funes::recall::get(funes::hub::Store::local(), session.into(), "t1".into(), 3)

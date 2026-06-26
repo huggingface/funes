@@ -1,7 +1,7 @@
 //! Render blocks to text and split into chunks.
 //! All indexing is by Unicode code point (char), not bytes.
 
-use crate::parse::Turn;
+use crate::trace::Turn;
 use arrow_array::{Array, Int64Array, RecordBatch, StringArray};
 use sha1::{Digest, Sha1};
 use std::collections::HashMap;
@@ -261,7 +261,7 @@ pub fn chunks_from_turns(turns: &[Turn], include_thinking: bool) -> Vec<Chunk> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parse::{Block, Turn};
+    use crate::trace::{Block, Turn};
 
     fn block(block_type: &str, text: &str, tool_name: Option<&str>) -> Block {
         Block {

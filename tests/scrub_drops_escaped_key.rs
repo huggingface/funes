@@ -63,7 +63,7 @@ async fn scrub_redacts_an_escaped_key_in_place() {
 
     // Index with a no-op scanner so the escaped key lands in the store unredacted.
     std::env::set_var("FUNES_TRUFFLEHOG", "/usr/bin/true");
-    funes::index::run_index(source.path(), false).await.unwrap();
+    funes::index::run_index(source.path(), false, None).await.unwrap();
     let dirty = funes::recall::get(funes::hub::Store::local(), session.into(), "t2".into(), 0)
         .await
         .unwrap();

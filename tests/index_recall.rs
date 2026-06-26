@@ -33,7 +33,7 @@ async fn index_then_read_surface() {
     let (session, project) = write_transcript(source.path());
 
     // Build the index for real: parse → chunk → embed → Lance + FTS.
-    funes::index::run_index(source.path(), false).await.unwrap();
+    funes::index::run_index(source.path(), false, None).await.unwrap();
 
     // status: non-empty chunk count.
     let status = funes::recall::status(funes::hub::Store::local()).await.unwrap();

@@ -1,28 +1,12 @@
-//! Parse Claude Code session transcripts (`*.jsonl`) into turns + blocks.
+//! Parse Claude Code session transcripts (`*.jsonl`) into the shared [`crate::trace`] turn/block
+//! model. This is the Claude Code source parser; the model itself lives in `trace.rs`.
 
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-pub struct Block {
-    pub block_type: String, // "text" | "thinking" | "tool_use" | "tool_result"
-    pub text: String,
-    pub tool_name: Option<String>,
-    pub tool_use_id: Option<String>,
-}
-
-pub struct Turn {
-    pub session_id: String,
-    pub project: String,
-    pub turn_uuid: String,
-    pub parent_uuid: Option<String>,
-    pub seq: i64,
-    pub ts: String,
-    pub role: String,
-    pub blocks: Vec<Block>,
-    pub source_path: String,
-}
+use crate::trace::{Block, Turn};
 
 /// All `*.jsonl` under `root`, recursively, sorted by path.
 pub fn iter_jsonl_files(root: &Path) -> Vec<PathBuf> {

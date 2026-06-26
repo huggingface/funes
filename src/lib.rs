@@ -7,15 +7,18 @@
 
 pub mod capture_store;
 pub mod chunk;
+pub mod claude_traces;
 pub mod config;
 pub mod dataset;
 pub mod hello;
 pub mod hf_dataset;
+pub mod hf_traces;
 pub mod hub;
 pub mod index;
 pub mod mcp;
-pub mod parse;
 pub mod push;
 pub mod recall;
 pub mod scan;
 pub mod scrub;
+pub mod source;
+pub mod trace;

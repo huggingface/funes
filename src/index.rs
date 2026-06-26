@@ -1,9 +1,12 @@
-//! The `index` command: walk transcripts → parse → chunk → embed → write to a local Lance dataset.
-//! Incremental on two levels: skip unchanged files (size:mtime in state.json), and within a
-//! changed session add only chunks whose id is new — a grown session (the same memory)
+//! The `index` command: read a [`crate::source::TraceSource`] → parse → chunk → embed → write to a
+//! local Lance dataset. One generic loop drives every source — a JSONL tree today, new formats by
+//! implementing the trait — indexing each of its units in a single append.
+//!
+//! Incremental on two levels: skip a unit whose signature is unchanged (size:mtime in state.json),
+//! and within a re-read unit add only chunks whose id is new — a grown session (the same memory)
 //! contributes just its new turns, nothing is re-embedded or deleted.
 
-use crate::{chunk, dataset, parse, scan};
+use crate::{chunk, dataset, scan, source, trace};
 use anyhow::{anyhow, Result};
 use arrow_array::types::Float32Type;
 use arrow_array::{Array, FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator, StringArray};
@@ -14,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Instant, UNIX_EPOCH};
+use std::time::Instant;
 
 pub const MODEL: &str = "BAAI/bge-small-en-v1.5";
 pub const DIM: i32 = 384;
@@ -96,12 +99,12 @@ pub(crate) fn embed_batched(
     Ok(vectors)
 }
 
-/// The chunk ids already stored for `session_id`. Re-indexing keeps only the chunks whose id
-/// isn't here, so a grown session (the same memory) contributes just its new turns — nothing is
-/// re-embedded or deleted. (A rewritten turn arrives under new ids, i.e. as another memory.)
-async fn existing_ids(ds: &Dataset, session_id: &str) -> Result<HashSet<String>> {
-    let filter = format!("session_id = '{}'", session_id.replace('\'', "''"));
-    let batches = dataset::scan_rows(ds, &["id"], Some(filter.as_str()), None).await?;
+/// Every chunk id already stored. Re-indexing keeps only the chunks whose id isn't here, so a grown
+/// session (the same memory) contributes just its new turns — nothing is re-embedded or deleted. (A
+/// rewritten turn arrives under new ids, i.e. as another memory.) Chunk ids are global, so one
+/// unfiltered scan dedups any unit, whether it holds one session or thousands.
+async fn stored_ids(ds: &Dataset) -> Result<HashSet<String>> {
+    let batches = dataset::scan_rows(ds, &["id"], None, None).await?;
     let mut ids = HashSet::new();
     for batch in batches {
         if let Some(col) = batch
@@ -121,7 +124,7 @@ async fn existing_ids(ds: &Dataset, session_id: &str) -> Result<HashSet<String>>
 /// (via push) the Hub. Best-effort: removes a secret whose value byte-matches the stored text (the
 /// common case, real newlines); anything that resists is caught downstream by the fail-closed push
 /// gate. Reports to stderr what it removed.
-fn redact_turns(turns: &mut [parse::Turn], scanner: &dyn scan::SecretScanner) -> Result<()> {
+fn redact_turns(turns: &mut [trace::Turn], scanner: &dyn scan::SecretScanner) -> Result<()> {
     let texts: Vec<String> = turns
         .iter()
         .flat_map(|t| t.blocks.iter().map(|b| b.text.clone()))
@@ -160,20 +163,110 @@ fn redact_turns(turns: &mut [parse::Turn], scanner: &dyn scan::SecretScanner) ->
     Ok(())
 }
 
-/// "size:mtime_secs" for incremental skip, or None if the file can't be stat'd.
-fn file_sig(p: &Path) -> Option<String> {
-    let md = std::fs::metadata(p).ok()?;
-    let mtime = md.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_secs();
-    Some(format!("{}:{}", md.len(), mtime))
+/// A unit's distinct-session count and a log label: `"<sid> (<project>)"` for a single session (a
+/// JSONL file), `"<n> sessions"` for a bulk unit (many sessions in one artifact), and the unit's `key` (its
+/// path) when it has no turns at all. The borrow of `turns` is confined here so callers keep it mutable.
+fn unit_summary(turns: &[trace::Turn], key: &str) -> (u64, String) {
+    let mut sids: Vec<&str> = turns.iter().map(|t| t.session_id.as_str()).collect();
+    sids.sort_unstable();
+    sids.dedup();
+    let label = match (sids.len(), turns.first()) {
+        (0, _) => key.to_string(),
+        (1, Some(t)) => format!("{} ({})", t.session_id, t.project),
+        (n, _) => format!("{n} sessions"),
+    };
+    (sids.len() as u64, label)
 }
 
-pub async fn run_index(source: &Path, no_thinking: bool) -> Result<()> {
+/// The run-wide indexing state: the local store uri, the dataset (created on the first write), the
+/// embedder, and the optional redaction scanner. Bundling it lets each unit be indexed by a method
+/// instead of threading the same handles through every call.
+struct Indexer<'a> {
+    uri: &'a str,
+    ds: Option<Dataset>,
+    embedder: TextEmbedding,
+    scanner: Option<&'a dyn scan::SecretScanner>,
+    include_thinking: bool,
+}
+
+impl Indexer<'_> {
+    /// Index one unit's turns: redact, chunk, keep only chunks whose id isn't already stored, and
+    /// embed those in a single append. Returns `(sessions read, new chunks added)`. `key` names the
+    /// unit in logs (and is the label when the unit has no sessions).
+    ///
+    /// Add-only-new: a grown session is the same memory — embed and add only its new turns, never
+    /// re-embedding or deleting what's unchanged. (A rewritten turn lands under new ids.) A unit's
+    /// turns are written in one append, so a bulk source (many sessions in one unit) stays a
+    /// single Lance fragment rather than one per session.
+    async fn index_unit(&mut self, progress: &str, key: &str, mut turns: Vec<trace::Turn>) -> Result<(u64, u64)> {
+        let (sessions, label) = unit_summary(&turns, key);
+
+        if let Some(scanner) = self.scanner {
+            redact_turns(&mut turns, scanner)?;
+        }
+        let chunks = chunk::chunks_from_turns(&turns, self.include_thinking);
+        let total_chunks = chunks.len();
+        if total_chunks == 0 {
+            eprintln!("{progress} {label} — no indexable content");
+            return Ok((sessions, 0));
+        }
+
+        let existing = match &self.ds {
+            Some(d) => stored_ids(d).await?,
+            None => HashSet::new(),
+        };
+        let new_chunks: Vec<chunk::Chunk> = chunks.into_iter().filter(|c| !existing.contains(&c.id)).collect();
+        if new_chunks.is_empty() {
+            eprintln!("{progress} {label} — {total_chunks} chunks, all already indexed");
+            return Ok((sessions, 0));
+        }
+
+        eprintln!("{progress} {label} — {} new of {total_chunks} chunks", new_chunks.len());
+        let added = self.embed_and_write(&new_chunks).await?;
+        Ok((sessions, added))
+    }
+
+    /// Embed `new_chunks` and add them — appending to the dataset, or creating it at `uri` on the
+    /// first write. Returns the count.
+    async fn embed_and_write(&mut self, new_chunks: &[chunk::Chunk]) -> Result<u64> {
+        let n = new_chunks.len();
+        let texts: Vec<&str> = new_chunks.iter().map(|c| c.text.as_str()).collect();
+        let t0 = Instant::now();
+        let vectors = embed_batched(&mut self.embedder, &texts, |done| {
+            let secs = t0.elapsed().as_secs_f64().max(0.001);
+            eprint!("\r    embedded {done}/{n}  ({:.0}/s)   ", done as f64 / secs);
+            let _ = std::io::stderr().flush();
+        })?;
+        eprintln!(
+            "\r    embedded {n} chunks in {:.1}s          ",
+            t0.elapsed().as_secs_f64()
+        );
+
+        let batch = build_batch(new_chunks, &vectors)?;
+        let reader = RecordBatchIterator::new(vec![Ok(batch)], schema());
+        let uri = self.uri;
+        match &mut self.ds {
+            Some(d) => {
+                d.append(reader, None).await?;
+            }
+            None => {
+                self.ds = Some(Dataset::write(reader, uri, Some(WriteParams::default())).await?);
+            }
+        }
+        Ok(n as u64)
+    }
+}
+
+/// Build/update the local index from `path` (a JSONL tree, or another `TraceSource`). Writes only
+/// locally — publishing is the separate `push`. `max_sessions` caps how many sessions are indexed
+/// (`None` = all) — the CLI passes `None`; a benchmark passes a cap to bound build time.
+pub async fn run_index(path: &Path, no_thinking: bool, max_sessions: Option<usize>) -> Result<()> {
     let include_thinking = !no_thinking;
     let dir = dataset::funes_dir();
     std::fs::create_dir_all(&dir)?;
 
     let uri = dataset::table_uri(&dataset::local_store_dir());
-    let mut ds = dataset::open(&uri, HashMap::new()).await.ok();
+    let ds = dataset::open(&uri, HashMap::new()).await.ok();
 
     // Model-pin: refuse to add to a store built with a different embedding model. The id rides
     // in the dataset's schema metadata; a pre-metadata store (no id) is tolerated and guarded only
@@ -194,18 +287,7 @@ pub async fn run_index(source: &Path, no_thinking: bool) -> Result<()> {
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
 
-    let files = parse::iter_jsonl_files(source);
-    let total = files.len();
-    let cached = files
-        .iter()
-        .filter(|p| file_sig(p).is_some_and(|s| state.get(&p.to_string_lossy().into_owned()) == Some(&s)))
-        .count();
-    eprintln!(
-        "scanning {total} transcripts under {} — {cached} cached, {} to index",
-        source.display(),
-        total - cached
-    );
-    let mut embedder = TextEmbedding::try_new(InitOptions::new(EmbeddingModel::BGESmallENV15))?;
+    let embedder = TextEmbedding::try_new(InitOptions::new(EmbeddingModel::BGESmallENV15))?;
     // Best-effort secret redaction: if the scanner isn't installed, indexing continues unredacted —
     // the push gate still scans, fail-closed, before any upload, so a secret can't reach the Hub.
     let scanner = match scan::Trufflehog::find() {
@@ -215,100 +297,68 @@ pub async fn run_index(source: &Path, no_thinking: bool) -> Result<()> {
             None
         }
     };
+    let scanner = scanner.as_ref().map(|s| s as &dyn scan::SecretScanner);
 
-    let (mut n_files, mut n_skipped, mut n_chunks) = (0u64, 0u64, 0u64);
-    for (idx, p) in files.iter().enumerate() {
-        let sig = match file_sig(p) {
-            Some(s) => s,
-            None => continue,
-        };
-        let key = p.to_string_lossy().into_owned();
-        if state.get(&key) == Some(&sig) {
-            n_skipped += 1;
-            continue;
-        }
+    let src = source::open(path, max_sessions);
+    let units = src.units()?;
+    let total = units.len();
+    let cached = units
+        .iter()
+        .filter(|u| u.signature.as_ref().is_some_and(|s| state.get(&u.key) == Some(s)))
+        .count();
+    eprintln!("{} — {} to index, {cached} cached", src.describe(), total - cached);
 
-        let sid = parse::session_id_of(p);
-        let project = parse::project_of(p);
-        let mut turns = match parse::turns_from_jsonl_file(p, &sid, &project) {
-            Ok(t) => t,
-            Err(e) => {
-                // Don't record state, so a transient read failure is retried next run.
-                eprintln!("[{}/{}] {sid} — read failed, skipping: {e}", idx + 1, total);
+    let mut indexer = Indexer {
+        uri: &uri,
+        ds,
+        embedder,
+        scanner,
+        include_thinking,
+    };
+    let (mut n_sessions, mut n_skipped, mut n_chunks) = (0u64, 0u64, 0u64);
+    for (idx, unit) in units.iter().enumerate() {
+        // Skip a unit only if it carries a signature that still matches what's recorded; a
+        // signature-less (bulk) unit has none, so it's never skipped here — always re-read (its
+        // chunk-id dedup makes a re-run a no-op).
+        if let Some(sig) = &unit.signature {
+            if state.get(&unit.key) == Some(sig) {
+                n_skipped += 1;
                 continue;
             }
-        };
-        if let Some(scanner) = &scanner {
-            redact_turns(&mut turns, scanner)?;
         }
-        let chunks = chunk::chunks_from_turns(&turns, include_thinking);
-        let total_chunks = chunks.len();
-
-        if total_chunks == 0 {
-            eprintln!("[{}/{}] {sid} — no indexable content", idx + 1, total);
-        } else {
-            // Add-only-new: keep just the chunks whose id isn't already stored for this session.
-            // A grown session is the same memory — embed and add only its new turns, never
-            // re-embedding or deleting what's unchanged. (A rewritten turn lands under new ids.)
-            let existing = match &ds {
-                Some(d) => existing_ids(d, &sid).await?,
-                None => HashSet::new(),
-            };
-            let new_chunks: Vec<chunk::Chunk> = chunks.into_iter().filter(|c| !existing.contains(&c.id)).collect();
-
-            if new_chunks.is_empty() {
-                eprintln!(
-                    "[{}/{}] {sid} ({project}) — {total_chunks} chunks, all already indexed",
-                    idx + 1,
-                    total
-                );
-            } else {
-                let n = new_chunks.len();
-                eprintln!(
-                    "[{}/{}] {sid} ({project}) — {n} new of {total_chunks} chunks",
-                    idx + 1,
-                    total
-                );
-                let texts: Vec<&str> = new_chunks.iter().map(|c| c.text.as_str()).collect();
-                let t0 = Instant::now();
-                let vectors = embed_batched(&mut embedder, &texts, |done| {
-                    let secs = t0.elapsed().as_secs_f64().max(0.001);
-                    eprint!("\r    embedded {done}/{n}  ({:.0}/s)   ", done as f64 / secs);
-                    let _ = std::io::stderr().flush();
-                })?;
-                eprintln!(
-                    "\r    embedded {n} chunks in {:.1}s          ",
-                    t0.elapsed().as_secs_f64()
-                );
-
-                let batch = build_batch(&new_chunks, &vectors)?;
-                let reader = RecordBatchIterator::new(vec![Ok(batch)], schema());
-                match &mut ds {
-                    Some(d) => {
-                        d.append(reader, None).await?;
-                    }
-                    None => {
-                        ds = Some(Dataset::write(reader, &uri, Some(WriteParams::default())).await?);
-                    }
-                }
-                n_chunks += n as u64;
+        let progress = format!("[{}/{}]", idx + 1, total);
+        let turns = match src.read(unit) {
+            Ok(t) => t,
+            // Best-effort sources retry a failed read next run (no state recorded); a fatal source
+            // aborts rather than silently dropping data.
+            Err(e) if !src.fatal_on_read_error() => {
+                eprintln!("{progress} {} — read failed, skipping: {e}", unit.key);
+                continue;
             }
+            Err(e) => return Err(e),
+        };
+        let (sessions, added) = indexer.index_unit(&progress, &unit.key, turns).await?;
+        n_sessions += sessions;
+        n_chunks += added;
+
+        // Record state only for signed units, even when they produced no chunks ("remembered when
+        // empty"), and persist after each so an interrupted run is resumable. Signature-less (bulk)
+        // units are never recorded: a re-run re-reads and dedups to a no-op.
+        if let Some(sig) = &unit.signature {
+            state.insert(unit.key.clone(), sig.clone());
+            std::fs::write(&state_path, serde_json::to_string_pretty(&state)?)?;
         }
-        state.insert(key, sig); // remembered even when empty
-                                // Persist after each file so progress survives interruption (a kill is resumable).
-        std::fs::write(&state_path, serde_json::to_string_pretty(&state)?)?;
-        n_files += 1;
     }
 
     // Build the FTS + IVF_PQ indexes (best-effort). The vector index bounds how much a query reads,
     // which is what makes recall over a remote (hf://) tier lazy instead of a full-column scan; lance
     // enforces its own training minimum (256 rows for default IVF_PQ) and skips below it, so recall
     // falls back to brute-force vector search.
-    if let Some(d) = &mut ds {
+    if let Some(d) = &mut indexer.ds {
         dataset::build_indexes(d, |phase| eprintln!("building {phase}…")).await;
     }
 
-    println!("indexed files={n_files} skipped={n_skipped} chunks={n_chunks}");
+    println!("indexed sessions={n_sessions} skipped={n_skipped} chunks={n_chunks}");
 
     Ok(())
 }
@@ -316,23 +366,6 @@ pub async fn run_index(source: &Path, no_thinking: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-
-    #[test]
-    fn file_sig_is_len_colon_mtime() {
-        let mut f = tempfile::NamedTempFile::new().unwrap();
-        f.write_all(b"hello").unwrap();
-        f.flush().unwrap();
-        let sig = file_sig(f.path()).expect("stat-able file has a signature");
-        let (len, mtime) = sig.split_once(':').expect("sig is len:mtime");
-        assert_eq!(len, "5");
-        assert!(mtime.parse::<u64>().is_ok());
-    }
-
-    #[test]
-    fn file_sig_is_none_for_missing_file() {
-        assert!(file_sig(Path::new("/no/such/file")).is_none());
-    }
 
     #[test]
     fn schema_column_order_is_load_bearing() {
@@ -384,7 +417,7 @@ mod tests {
                 decoder: "PLAIN".into(),
             },
         ]);
-        let mut turns = vec![parse::Turn {
+        let mut turns = vec![trace::Turn {
             session_id: "sess".into(),
             project: "proj".into(),
             turn_uuid: "turn".into(),
@@ -392,7 +425,7 @@ mod tests {
             seq: 0,
             ts: String::new(),
             role: "user".into(),
-            blocks: vec![parse::Block {
+            blocks: vec![trace::Block {
                 block_type: "text".into(),
                 text: "key=TOPSECRET hash=cafef00d".into(),
                 tool_name: None,

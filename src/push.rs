@@ -404,7 +404,7 @@ mod tests {
         assert!(!is_read_only(&anyhow::anyhow!("no HF token")));
     }
 
-    use crate::parse::{Block, Turn};
+    use crate::trace::{Block, Turn};
     use std::process::Command;
 
     /// Mint a throwaway key (never committed, so funes ships no secret) of the given type, or None
