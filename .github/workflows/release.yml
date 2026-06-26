@@ -112,6 +112,9 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             arch: x86_64
+          - target: aarch64-unknown-linux-gnu
+            arch: aarch64
+            features: --features vendored-openssl
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
@@ -129,6 +132,20 @@ jobs:
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
+      # aarch64 is cross-compiled on the x86_64 runner. gcc-aarch64-linux-gnu links the binary
+      # and (via the cc crate) builds vendored OpenSSL for the target; g++-aarch64-linux-gnu
+      # brings the target libstdc++ that onnxruntime (ort, C++) links against. cc derives the
+      # tool names from the target triple, so installing the packages is enough.
+      - name: Install aarch64 cross toolchain
+        if: matrix.arch == 'aarch64'
+        run: |
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          mkdir -p ~/.cargo
+          {
+            echo '[target.aarch64-unknown-linux-gnu]'
+            echo 'linker = "aarch64-linux-gnu-gcc"'
+          } >> ~/.cargo/config.toml
+
       # Stamp the computed version into the working tree (no commit) so the binary embeds
       # it via CARGO_PKG_VERSION. Skipped on tag/PR builds, which use Cargo.toml as-is.
       - name: Set release version
@@ -136,7 +153,7 @@ jobs:
         run: perl -i -pe 'if (!$d && s/^version = ".*"/version = "${{ needs.compute.outputs.version }}"/) { $d = 1 }' Cargo.toml
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }} ${{ matrix.features }}
 
       - name: Package
         run: |
