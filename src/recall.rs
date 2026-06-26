@@ -6,7 +6,7 @@
 use crate::chunk;
 use crate::dataset;
 use crate::hello;
-use crate::hub::{self, Store};
+use crate::hub::{self, Reachability, Store};
 use anyhow::{Context, Result};
 use arrow_array::{Float32Array, Int64Array, RecordBatch, StringArray, UInt64Array};
 use chrono::{DateTime, Utc};
@@ -120,8 +120,10 @@ struct Read {
 async fn open_read(store: &Store, embedder: Option<&mut TextEmbedding>) -> Result<Read> {
     // Probe a remote up front: an offline host degrades fast instead of hanging on a slow open.
     if let Store::Remote { uri } = store {
-        if !hub::remote_reachable(uri).await {
-            return degrade_offline(uri, embedder).await;
+        match hub::remote_reachability(uri).await {
+            Reachability::Offline => return degrade_offline(uri, embedder).await,
+            Reachability::Missing => return Err(empty_store(store)),
+            Reachability::Ok => {}
         }
     }
     match store.open().await {
@@ -165,6 +167,18 @@ async fn degrade_offline(uri: &str, embedder: Option<&mut TextEmbedding>) -> Res
             })
         }
     }
+}
+
+/// User-facing error for a store the Hub reports as [`Reachability::Missing`] — the repo doesn't
+/// exist (or holds no index) — instead of letting the open leak lance's internal
+/// `chunks.lance`/`_versions` path error.
+fn empty_store(store: &Store) -> anyhow::Error {
+    anyhow::anyhow!(
+        "the store at {} was not found on the Hub — it doesn't exist yet or holds no index. \
+         push one with `funes index` (or `funes push`), or `funes use local` to read your \
+         local index.",
+        store.label()
+    )
 }
 
 /// The embedder + reranker, loaded once and shared. Loading them (ONNX init) is the costly part of
@@ -608,11 +622,15 @@ pub async fn get(store: Store, session_id: String, turn_uuid: String, window: i6
 pub async fn status(store: Store) -> Result<String> {
     // An unreachable remote degrades to the local index's status, like the read commands.
     if let Store::Remote { uri } = &store {
-        if !hub::remote_reachable(uri).await {
-            let body = Box::pin(status(Store::local())).await?;
-            return Ok(format!(
-                "remote {uri} unreachable — showing the local index instead\n{body}"
-            ));
+        match hub::remote_reachability(uri).await {
+            Reachability::Offline => {
+                let body = Box::pin(status(Store::local())).await?;
+                return Ok(format!(
+                    "remote {uri} unreachable — showing the local index instead\n{body}"
+                ));
+            }
+            Reachability::Missing => return Err(empty_store(&store)),
+            Reachability::Ok => {}
         }
     }
     match store.open().await {
