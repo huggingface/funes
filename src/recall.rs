@@ -13,6 +13,7 @@ use chrono::{DateTime, Utc};
 use fastembed::{EmbeddingModel, InitOptions, RerankInitOptions, RerankerModel, TextEmbedding, TextRerank};
 use futures::TryStreamExt;
 use lance::dataset::{Dataset, ROW_ID};
+use lance::Error as LanceError;
 use lance_index::scalar::FullTextSearchQuery;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
@@ -120,10 +121,8 @@ struct Read {
 async fn open_read(store: &Store, embedder: Option<&mut TextEmbedding>) -> Result<Read> {
     // Probe a remote up front: an offline host degrades fast instead of hanging on a slow open.
     if let Store::Remote { uri } = store {
-        match hub::remote_reachability(uri).await {
-            Reachability::Offline => return degrade_offline(uri, embedder).await,
-            Reachability::Missing => return Err(empty_store(store)),
-            Reachability::Ok => {}
+        if matches!(hub::remote_reachability(uri).await, Reachability::Offline) {
+            return degrade_offline(uri, embedder).await;
         }
     }
     match store.open().await {
@@ -140,6 +139,8 @@ async fn open_read(store: &Store, embedder: Option<&mut TextEmbedding>) -> Resul
                     ds,
                     note: None,
                 })
+            } else if is_missing_dataset(&e) {
+                Err(empty_store(store))
             } else {
                 Err(e)
             }
@@ -169,14 +170,20 @@ async fn degrade_offline(uri: &str, embedder: Option<&mut TextEmbedding>) -> Res
     }
 }
 
-/// User-facing error for a store the Hub reports as [`Reachability::Missing`] — the repo doesn't
-/// exist (or holds no index) — instead of letting the open leak lance's internal
-/// `chunks.lance`/`_versions` path error.
+/// True if `e` is lance reporting the `chunks.lance` dataset isn't there — a reachable store with no
+/// index: a remote repo that's empty or never-pushed, one that doesn't exist, or a local path with
+/// no dataset. Lets the read commands report an empty store instead of leaking lance's internal
+/// path/`_versions` error.
+fn is_missing_dataset(e: &anyhow::Error) -> bool {
+    e.chain()
+        .any(|c| matches!(c.downcast_ref::<LanceError>(), Some(LanceError::DatasetNotFound { .. })))
+}
+
+/// User-facing error for a reachable store that holds no index — empty, never pushed, or absent.
 fn empty_store(store: &Store) -> anyhow::Error {
     anyhow::anyhow!(
-        "the store at {} was not found on the Hub — it doesn't exist yet or holds no index. \
-         push one with `funes index` (or `funes push`), or `funes use local` to read your \
-         local index.",
+        "the store at {} is empty — no index found there. publish a local index to it with \
+         `funes push`, or `funes use local` to read your local index.",
         store.label()
     )
 }
@@ -622,15 +629,11 @@ pub async fn get(store: Store, session_id: String, turn_uuid: String, window: i6
 pub async fn status(store: Store) -> Result<String> {
     // An unreachable remote degrades to the local index's status, like the read commands.
     if let Store::Remote { uri } = &store {
-        match hub::remote_reachability(uri).await {
-            Reachability::Offline => {
-                let body = Box::pin(status(Store::local())).await?;
-                return Ok(format!(
-                    "remote {uri} unreachable — showing the local index instead\n{body}"
-                ));
-            }
-            Reachability::Missing => return Err(empty_store(&store)),
-            Reachability::Ok => {}
+        if matches!(hub::remote_reachability(uri).await, Reachability::Offline) {
+            let body = Box::pin(status(Store::local())).await?;
+            return Ok(format!(
+                "remote {uri} unreachable — showing the local index instead\n{body}"
+            ));
         }
     }
     match store.open().await {
@@ -649,6 +652,7 @@ pub async fn status(store: Store) -> Result<String> {
             store.label(),
             hello::PASSAGES.len()
         )),
+        Err(e) if is_missing_dataset(&e) => Err(empty_store(&store)),
         Err(e) => Err(e),
     }
 }
@@ -657,6 +661,20 @@ pub async fn status(store: Store) -> Result<String> {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[tokio::test]
+    async fn missing_dataset_error_is_detected() {
+        // A path with no dataset is lance's DatasetNotFound — the empty/absent-store case.
+        let err = dataset::open("/nonexistent/funes-empty-store/chunks.lance", HashMap::new())
+            .await
+            .unwrap_err();
+        assert!(is_missing_dataset(&err));
+    }
+
+    #[test]
+    fn unrelated_error_is_not_missing_dataset() {
+        assert!(!is_missing_dataset(&anyhow::anyhow!("some other failure")));
+    }
 
     #[test]
     fn esc_doubles_single_quotes() {
