@@ -157,13 +157,6 @@ pub async fn remote_reachability(uri: &str) -> Reachability {
     }
 }
 
-/// Whether the remote is reachable enough to read from — false only when offline, so a read can
-/// fall back to the local index. A missing or auth-failing repo is "reachable": the open then
-/// surfaces the real error.
-pub async fn remote_reachable(uri: &str) -> bool {
-    !matches!(remote_reachability(uri).await, Reachability::Offline)
-}
-
 /// A transport-level failure (no usable HTTP response) or a 5xx — the cases where degrading to the
 /// local index is appropriate (mirrors hf-hub's own transient-error classification).
 fn is_offline_error(e: &HFError) -> bool {
@@ -172,6 +165,23 @@ fn is_offline_error(e: &HFError) -> bool {
         HFError::Http { context } => matches!(context.status.as_u16(), 500 | 502 | 503 | 504),
         _ => false,
     }
+}
+
+/// The active remote repo doesn't exist on the Hub — funes never creates it. Shared by recall,
+/// `push`, and `use` so the message is identical everywhere.
+pub fn missing_remote(uri: &str) -> anyhow::Error {
+    anyhow!(
+        "{uri} doesn't exist on the Hub, and funes won't create it — create the dataset repo \
+         first (https://huggingface.co/new-dataset)"
+    )
+}
+
+/// The remote repo exists but holds no index yet.
+pub fn empty_remote(uri: &str) -> anyhow::Error {
+    anyhow!(
+        "{uri} exists on the Hub but holds no index yet — `funes push` to publish your local \
+         index there, or `funes use local` to read your local index"
+    )
 }
 
 /// HF token from the standard env var, else the `huggingface_hub` cached token file.
@@ -278,11 +288,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remote_reachable_short_circuits_non_hf_uri() {
-        // A spec that isn't an hf:// dataset URI can't be probed; we say "reachable" so the open
+    async fn non_hf_uri_is_reachable_ok() {
+        // A spec that isn't an hf:// dataset URI can't be probed; it reports Ok so the open
         // surfaces the real error rather than masking it as offline. (No network is touched.)
-        assert!(remote_reachable("/local/path").await);
-        assert!(remote_reachable("not a uri").await);
+        assert!(matches!(remote_reachability("/local/path").await, Reachability::Ok));
+        assert!(matches!(remote_reachability("not a uri").await, Reachability::Ok));
     }
 
     #[test]

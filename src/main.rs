@@ -227,10 +227,7 @@ async fn use_store(spec: String) -> Result<()> {
             return Ok(());
         }
         hub::Reachability::Missing => {
-            println!(
-                "note: this repo doesn't exist on the Hub yet, and funes won't create it — create \
-                 the dataset repo (https://huggingface.co/new-dataset) before you push"
-            );
+            println!("note: {}", hub::missing_remote(&uri));
             return Ok(());
         }
         hub::Reachability::Ok => {}
