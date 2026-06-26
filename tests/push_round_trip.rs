@@ -75,7 +75,7 @@ async fn push_round_trip_create_append_recall() {
     let src = tempfile::tempdir().unwrap();
     std::env::set_var("FUNES_HOME", db_dir.path());
     write_session(src.path(), &[("s1", "SYNCSMOKE parsing transcripts into turns")]);
-    funes::index::run_index(src.path(), false).await.unwrap();
+    funes::index::run_index(src.path(), false, None).await.unwrap();
 
     // create (first publish) → grow → append (data-only, no reindex) → recall both. The appended
     // turn is left unindexed, so recalling it back exercises Lance's brute-force fallback. Then
@@ -88,7 +88,7 @@ async fn push_round_trip_create_append_recall() {
             ("s2", "SYNCSMOKE2 the continuation adds only this new turn"),
         ],
     );
-    funes::index::run_index(src.path(), false).await.unwrap();
+    funes::index::run_index(src.path(), false, None).await.unwrap();
     let append = funes::push::run_push(Store::parse(&uri), false).await;
     let recall_base = recall_remote(&uri, "SYNCSMOKE parsing").await;
     let recall_new = recall_remote(&uri, "SYNCSMOKE2 continuation").await;

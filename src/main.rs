@@ -165,7 +165,7 @@ async fn main() -> Result<()> {
                 let home = std::env::var("HOME").unwrap_or_default();
                 PathBuf::from(home).join(".claude").join("projects")
             });
-            index::run_index(&dir, no_thinking).await
+            index::run_index(&dir, no_thinking, None).await
         }
         Cmd::Status { store } => {
             print!("{}", recall::status(store.resolve()).await?);
