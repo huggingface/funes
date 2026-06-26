@@ -121,10 +121,7 @@ pub async fn run_push(target: Store, force_reindex: bool) -> Result<Pushed> {
         hub::Reachability::Offline => {
             bail!("{uri} is unreachable — can't push while offline (check your connection)")
         }
-        hub::Reachability::Missing => bail!(
-            "{uri} doesn't exist on the Hub, and funes won't create it — create the dataset repo \
-             first (https://huggingface.co/new-dataset), then run push again"
-        ),
+        hub::Reachability::Missing => return Err(hub::missing_remote(&uri)),
         hub::Reachability::Ok => {}
     }
 
