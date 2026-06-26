@@ -3,7 +3,7 @@
 //! changed session add only chunks whose id is new — a grown session (the same memory)
 //! contributes just its new turns, nothing is re-embedded or deleted.
 
-use crate::{chunk, config, dataset, hub, parse, push, scan};
+use crate::{chunk, dataset, parse, scan};
 use anyhow::{anyhow, Result};
 use arrow_array::types::Float32Type;
 use arrow_array::{Array, FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator, StringArray};
@@ -309,17 +309,6 @@ pub async fn run_index(source: &Path, no_thinking: bool) -> Result<()> {
     }
 
     println!("indexed files={n_files} skipped={n_skipped} chunks={n_chunks}");
-
-    // Publish to the attached remote, best-effort: a failed push must not fail the local index.
-    if let Some(remote) = config::load().remote {
-        match push::run_push(hub::Store::parse(&remote), false).await {
-            Ok(pushed) => print!("{}", pushed.report),
-            Err(e) if push::is_read_only(&e) => {
-                eprintln!("indexed locally; {remote} is read-only for your token — recall reads it, but publishing needs write access")
-            }
-            Err(e) => eprintln!("indexed locally; couldn't publish to {remote}: {e}"),
-        }
-    }
 
     Ok(())
 }
