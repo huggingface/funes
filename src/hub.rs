@@ -13,7 +13,6 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use hf_hub::{HFClient, HFError};
 use lance::dataset::Dataset;
-use lance::Error as LanceError;
 
 use crate::config;
 use crate::dataset;
@@ -168,55 +167,6 @@ fn is_offline_error(e: &HFError) -> bool {
     }
 }
 
-/// The outcome of resolving a store for reading. The embedder-backed fallbacks (`Offline` → the
-/// local index, `NoIndex` → the built-in guide) are the caller's to apply, so this stays free of
-/// `fastembed`; a missing or empty remote is a hard error with a clear message.
-// A transient return value, never stored en masse, so the `Ready(Dataset)`/unit size gap is fine —
-// boxing would only add indirection.
-#[allow(clippy::large_enum_variant)]
-pub enum ReadOutcome {
-    /// Opened and ready to query.
-    Ready(Dataset),
-    /// The remote is unreachable — recall from the local index instead.
-    Offline,
-    /// No local index yet — show the built-in guide.
-    NoIndex,
-}
-
-/// Resolve a store for reading — the one place every remote-source state is handled. An offline
-/// remote degrades (`Offline`); a missing or empty remote errors with a clear message; an absent
-/// default local index degrades (`NoIndex`); a present store opens (`Ready`). `recall`/`get`/`list`/
-/// `status` all route through this.
-pub async fn open_for_read(store: &Store) -> Result<ReadOutcome> {
-    if let Store::Remote { uri } = store {
-        match remote_reachability(uri).await {
-            Reachability::Offline => return Ok(ReadOutcome::Offline),
-            Reachability::Missing => return Err(missing_remote(uri)),
-            Reachability::Ok => {}
-        }
-    }
-    match store.open().await {
-        Ok(ds) => Ok(ReadOutcome::Ready(ds)),
-        // The default local store with no index yet → the built-in guide (the caller builds it).
-        Err(_) if store.is_default_local() => Ok(ReadOutcome::NoIndex),
-        // Opened to nothing: a reachable remote that was never pushed to, or a local path with no
-        // dataset. Either way, a clear message beats lance's internal path error.
-        Err(e) if is_missing_dataset(&e) => match store {
-            Store::Remote { uri } => Err(empty_remote(uri)),
-            Store::Local { path } => Err(anyhow!("no index found at {}", path.display())),
-        },
-        Err(e) => Err(e),
-    }
-}
-
-/// True if `e` is lance reporting the `chunks.lance` dataset isn't there — the store opened to no
-/// index (an empty or never-pushed remote, or a path with no dataset). Lets reads report an empty
-/// store instead of leaking lance's internal path/`_versions` error.
-fn is_missing_dataset(e: &anyhow::Error) -> bool {
-    e.chain()
-        .any(|c| matches!(c.downcast_ref::<LanceError>(), Some(LanceError::DatasetNotFound { .. })))
-}
-
 /// The active remote repo doesn't exist on the Hub — funes never creates it. Shared by recall,
 /// `push`, and `use` so the message is identical everywhere.
 pub fn missing_remote(uri: &str) -> anyhow::Error {
@@ -343,20 +293,6 @@ mod tests {
         // surfaces the real error rather than masking it as offline. (No network is touched.)
         assert!(matches!(remote_reachability("/local/path").await, Reachability::Ok));
         assert!(matches!(remote_reachability("not a uri").await, Reachability::Ok));
-    }
-
-    #[tokio::test]
-    async fn missing_dataset_is_detected() {
-        // Opening a path with no dataset is lance's DatasetNotFound — the empty/absent case.
-        let err = dataset::open("/nonexistent/funes-empty-store/chunks.lance", HashMap::new())
-            .await
-            .unwrap_err();
-        assert!(is_missing_dataset(&err));
-    }
-
-    #[test]
-    fn unrelated_error_is_not_missing_dataset() {
-        assert!(!is_missing_dataset(&anyhow!("some other failure")));
     }
 
     #[test]

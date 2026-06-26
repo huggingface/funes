@@ -6,13 +6,14 @@
 use crate::chunk;
 use crate::dataset;
 use crate::hello;
-use crate::hub::{self, ReadOutcome, Store};
+use crate::hub::{self, Reachability, Store};
 use anyhow::{Context, Result};
 use arrow_array::{Float32Array, Int64Array, RecordBatch, StringArray, UInt64Array};
 use chrono::{DateTime, Utc};
 use fastembed::{EmbeddingModel, InitOptions, RerankInitOptions, RerankerModel, TextEmbedding, TextRerank};
 use futures::TryStreamExt;
 use lance::dataset::{Dataset, ROW_ID};
+use lance::Error as LanceError;
 use lance_index::scalar::FullTextSearchQuery;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
@@ -108,13 +109,62 @@ struct Read {
     note: Option<String>,
 }
 
-/// Open a store for reading, applying the embedder-backed fallbacks [`hub::open_for_read`] leaves to
+/// The outcome of resolving a store for reading. The embedder-backed fallbacks (`Offline` → the
+/// local index, `NoIndex` → the built-in guide) are this module's to apply, so the resolver stays
+/// free of model/`hello` concerns; a missing or empty remote is a hard error with a clear message.
+// A transient return value, never stored en masse, so the `Ready(Dataset)`/unit size gap is fine —
+// boxing would only add indirection.
+#[allow(clippy::large_enum_variant)]
+enum ReadOutcome {
+    /// Opened and ready to query.
+    Ready(Dataset),
+    /// The remote is unreachable — recall from the local index instead.
+    Offline,
+    /// No local index yet — show the built-in guide.
+    NoIndex,
+}
+
+/// Resolve a store for reading — the one place every source state is handled. An offline remote
+/// degrades (`Offline`); a missing or empty remote errors with a clear message; an absent default
+/// local index degrades (`NoIndex`); a present store opens (`Ready`). All read verbs route through
+/// this; the remote-state classification and messages come from `hub`.
+async fn open_for_read(store: &Store) -> Result<ReadOutcome> {
+    if let Store::Remote { uri } = store {
+        match hub::remote_reachability(uri).await {
+            Reachability::Offline => return Ok(ReadOutcome::Offline),
+            Reachability::Missing => return Err(hub::missing_remote(uri)),
+            Reachability::Ok => {}
+        }
+    }
+    match store.open().await {
+        Ok(ds) => Ok(ReadOutcome::Ready(ds)),
+        // The default local store with no index yet → the built-in guide (built below).
+        Err(_) if store.is_default_local() => Ok(ReadOutcome::NoIndex),
+        // Opened to nothing: a reachable remote never pushed to, or a local path with no dataset.
+        // Either way, a clear message beats lance's internal path error.
+        Err(e) if is_missing_dataset(&e) => match store {
+            Store::Remote { uri } => Err(hub::empty_remote(uri)),
+            Store::Local { path } => Err(anyhow::anyhow!("no index found at {}", path.display())),
+        },
+        Err(e) => Err(e),
+    }
+}
+
+/// True if `e` is lance reporting the `chunks.lance` dataset isn't there — the store opened to no
+/// index (an empty or never-pushed remote, or a path with no dataset). Lets reads report an empty
+/// store instead of leaking lance's internal path/`_versions` error.
+fn is_missing_dataset(e: &anyhow::Error) -> bool {
+    e.chain()
+        .any(|c| matches!(c.downcast_ref::<LanceError>(), Some(LanceError::DatasetNotFound { .. })))
+}
+
+/// Open a store for reading, applying the embedder-backed fallbacks [`open_for_read`] leaves to
 /// the caller: an unreachable remote degrades to the local index (then the built-in guide), and an
 /// absent local index serves the guide — so recall keeps working offline and on a fresh install. A
 /// missing or empty remote surfaces as an error from the helper. Passing `embedder` gives the
 /// built-in corpus real vectors for search (recall); `None` suits `get`/`list`.
 async fn open_read(store: &Store, embedder: Option<&mut TextEmbedding>) -> Result<Read> {
-    match hub::open_for_read(store).await? {
+    match open_for_read(store).await? {
         ReadOutcome::Ready(ds) => Ok(Read {
             _hello: None,
             ds,
@@ -135,7 +185,7 @@ async fn open_read(store: &Store, embedder: Option<&mut TextEmbedding>) -> Resul
 /// An unreachable remote degrades to the local index, or to the built-in guide if there's no local
 /// index either, carrying a note that explains what happened.
 async fn degrade_offline(uri: &str, embedder: Option<&mut TextEmbedding>) -> Result<Read> {
-    match hub::open_for_read(&Store::local()).await {
+    match open_for_read(&Store::local()).await {
         Ok(ReadOutcome::Ready(ds)) => Ok(Read {
             _hello: None,
             ds,
@@ -593,7 +643,7 @@ pub async fn get(store: Store, session_id: String, turn_uuid: String, window: i6
 }
 
 pub async fn status(store: Store) -> Result<String> {
-    match hub::open_for_read(&store).await? {
+    match open_for_read(&store).await? {
         ReadOutcome::Ready(ds) => {
             let rows = ds.count_rows(None).await?;
             Ok(format!(
@@ -624,6 +674,20 @@ pub async fn status(store: Store) -> Result<String> {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[tokio::test]
+    async fn missing_dataset_is_detected() {
+        // Opening a path with no dataset is lance's DatasetNotFound — the empty/absent case.
+        let err = dataset::open("/nonexistent/funes-empty-store/chunks.lance", HashMap::new())
+            .await
+            .unwrap_err();
+        assert!(is_missing_dataset(&err));
+    }
+
+    #[test]
+    fn unrelated_error_is_not_missing_dataset() {
+        assert!(!is_missing_dataset(&anyhow::anyhow!("some other failure")));
+    }
 
     #[test]
     fn esc_doubles_single_quotes() {
