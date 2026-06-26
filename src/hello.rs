@@ -61,10 +61,11 @@ pub const PASSAGES: &[(&str, &str)] = &[
     (
         "assistant",
         "Optional, and later: share your memory across machines or a team via the Hugging Face \
-         Hub. `funes use <org>/<repo>` attaches a dataset repo you own as your active store — from \
-         then on `index` publishes to it and recall reads it; `funes use local` detaches. To query \
-         a different store for one call without changing your default, pass `recall --remote \
-         <org>/<repo>`. You never need the Hub to use funes locally — it's a tier you opt into.",
+         Hub. `funes use <org>/<repo>` attaches a dataset repo you own as your active store — \
+         recall then reads it, and `funes push` publishes your local index to it; `funes use \
+         local` detaches. To query a different store for one call without changing your default, \
+         pass `recall --remote <org>/<repo>`. You never need the Hub to use funes locally — it's \
+         a tier you opt into.",
     ),
     (
         "assistant",

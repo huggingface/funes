@@ -87,8 +87,8 @@ enum Cmd {
         /// URI. Pass `local` to detach and go back to the local index.
         store: String,
     },
-    /// Re-publish the local index's new chunks to the active remote (manual; `index` already
-    /// publishes automatically when a remote is attached).
+    /// Publish the local index's new chunks to the active remote. `index` only writes locally, so
+    /// this is the one step that uploads.
     Push {
         /// Refresh the remote index after pushing (retrying on conflict) even if the unindexed
         /// backlog is below the auto-reindex threshold. With nothing new to push, reindex only.
@@ -243,10 +243,10 @@ async fn use_store(spec: String) -> Result<()> {
 /// The next-step hint for `funes use`.
 fn attach_hint(local: usize, remote: usize, unpushed: usize) -> String {
     if local == 0 && remote == 0 {
-        "no memories indexed yet — run `funes index` to build your local index (it publishes here automatically)."
+        "no memories indexed yet — run `funes index` to build your local index, then `funes push` to publish it here."
             .to_string()
     } else if local == 0 {
-        format!("the remote holds {remote} chunks — recall reads them now. if you own this remote store, run `funes index` to add this machine's sessions.")
+        format!("the remote holds {remote} chunks — recall reads them now. if you own this remote store, run `funes index` then `funes push` to add this machine's sessions.")
     } else if unpushed == 0 {
         format!("local index: {local} chunks, all present on the remote.")
     } else if remote == 0 {

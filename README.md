@@ -123,12 +123,13 @@ an optional skill at [skills/funes/](skills/funes/) for richer recall-triggering
 `/funes` command — optional, since the MCP server already carries when-to-use instructions.)
 
 **4. Share it across machines or a team (optional).** Attach a dataset repo you own on the
-Hugging Face Hub as your **active store**. From then on `index` publishes to it and `recall`
-reads it — no per-command flags:
+Hugging Face Hub as your **active store**. `recall` then reads it, and `funes push` publishes
+your local index to it — no per-command flags:
 
 ```bash
 funes use acme/kb        # attach hf://datasets/acme/kb as the active store (persisted in funes.json)
-funes index              # builds locally, then publishes to the active remote
+funes index              # build/update the local index
+funes push               # publish the local index's new chunks to the active remote
 funes recall "..."       # reads the active remote
 funes use local          # detach — back to the local index
 ```
@@ -141,8 +142,9 @@ changing your default, pass `--remote`:
 funes recall "..." --remote other-org/subject-kb
 ```
 
-`push` is a manual re-publish to the active remote (`index` already publishes on its own). You
-never need the Hub to use funes locally — it's a tier you opt into.
+`push` publishes your local index's new chunks to the active remote; `index` only ever writes
+locally, so uploading is always an explicit step. You never need the Hub to use funes locally —
+it's a tier you opt into.
 
 ## Building from source
 
