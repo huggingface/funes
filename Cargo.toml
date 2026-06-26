@@ -40,6 +40,15 @@ openssl-sys = { version = "0.9", optional = true }
 [features]
 vendored-openssl = ["openssl-sys/vendored"]
 
+# Benchmarks live under benchmark/ alongside their README; run via `cargo run --example <name>`.
+[[example]]
+name = "bench_recall"
+path = "benchmark/bench_recall.rs"
+
+[[example]]
+name = "bench_index"
+path = "benchmark/bench_index.rs"
+
 [profile.release]
 opt-level = 3
 
