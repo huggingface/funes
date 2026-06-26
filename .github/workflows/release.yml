@@ -132,13 +132,14 @@ jobs:
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
-      # aarch64 is cross-compiled on the x86_64 runner: the cross gcc both links the binary
-      # and (via the cc crate) builds vendored OpenSSL for the target. cc derives the tool
-      # name from the target triple, so installing the package is enough.
+      # aarch64 is cross-compiled on the x86_64 runner. gcc-aarch64-linux-gnu links the binary
+      # and (via the cc crate) builds vendored OpenSSL for the target; g++-aarch64-linux-gnu
+      # brings the target libstdc++ that onnxruntime (ort, C++) links against. cc derives the
+      # tool names from the target triple, so installing the packages is enough.
       - name: Install aarch64 cross toolchain
         if: matrix.arch == 'aarch64'
         run: |
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
           mkdir -p ~/.cargo
           {
             echo '[target.aarch64-unknown-linux-gnu]'
