@@ -68,6 +68,7 @@ Or grab a [binary](https://github.com/huggingface/funes/releases) by hand:
 | Platform | Binary |
 | --- | --- |
 | Linux x86_64 | `funes-x86_64-linux` |
+| Linux aarch64 | `funes-aarch64-linux` |
 | macOS Apple Silicon | `funes-arm64-apple-darwin` |
 
 ```bash

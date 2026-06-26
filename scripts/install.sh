@@ -31,6 +31,7 @@ done
 # targets are built; everything else falls through to build-from-source.
 case "$(uname -s)-$(uname -m)" in
     Linux-x86_64)                  asset="funes-x86_64-linux" ;;
+    Linux-aarch64 | Linux-arm64)   asset="funes-aarch64-linux" ;;
     Darwin-arm64 | Darwin-aarch64) asset="funes-arm64-apple-darwin" ;;
     *)
         echo "funes: no prebuilt binary for $(uname -s)/$(uname -m)." >&2
