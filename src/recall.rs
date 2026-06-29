@@ -140,6 +140,11 @@ async fn open_for_read(store: &Store) -> Result<ReadOutcome> {
         Ok(ds) => Ok(ReadOutcome::Ready(ds)),
         // The default local store with no index yet → the built-in guide (built below).
         Err(_) if store.is_default_local() => Ok(ReadOutcome::NoIndex),
+        // The Hub refused the read on auth (401/403): a clear message beats lance's opendal dump.
+        Err(e) if is_auth_error(&e) => match store {
+            Store::Remote { uri } => Err(hub::unauthorized_remote(uri)),
+            Store::Local { .. } => Err(e),
+        },
         // Opened to nothing: a reachable remote never pushed to, or a local path with no dataset.
         // Either way, a clear message beats lance's internal path error.
         Err(e) if is_missing_dataset(&e) => match store {
@@ -156,6 +161,16 @@ async fn open_for_read(store: &Store) -> Result<ReadOutcome> {
 fn is_missing_dataset(e: &anyhow::Error) -> bool {
     e.chain()
         .any(|c| matches!(c.downcast_ref::<LanceError>(), Some(LanceError::DatasetNotFound { .. })))
+}
+
+/// True if `e` is the Hub refusing a remote read on auth (401/403). lance has no typed auth variant
+/// — it buries an opendal `PermissionDenied` (with the HTTP status) in an `IO` error — so match the
+/// chain's text.
+fn is_auth_error(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        let s = c.to_string();
+        s.contains("PermissionDenied") || s.contains("status: 401") || s.contains("status: 403")
+    })
 }
 
 /// Open a store for reading, applying the embedder-backed fallbacks [`open_for_read`] leaves to
@@ -687,6 +702,25 @@ mod tests {
     #[test]
     fn unrelated_error_is_not_missing_dataset() {
         assert!(!is_missing_dataset(&anyhow::anyhow!("some other failure")));
+    }
+
+    #[test]
+    fn auth_error_is_detected() {
+        // Shape verified against a live 401: an opendal PermissionDenied with the HTTP status.
+        let err = anyhow::anyhow!(
+            "LanceError(IO): Generic PermissionDenied error: PermissionDenied (permanent) at list, \
+             response: status: 401"
+        );
+        assert!(is_auth_error(&err));
+    }
+
+    #[test]
+    fn unrelated_error_is_not_auth_error() {
+        assert!(!is_auth_error(&anyhow::anyhow!("some other failure")));
+        // a missing-dataset error must not be misread as auth
+        assert!(!is_auth_error(&anyhow::anyhow!(
+            "LanceError: DatasetNotFound, no such file"
+        )));
     }
 
     #[test]
