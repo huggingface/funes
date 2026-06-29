@@ -253,6 +253,21 @@ jobs:
             --title "$TAG" \
             --generate-notes
 
+      # Publish the same binaries to the huggingface/funes storage bucket, which install.sh fetches
+      # from. The bucket root holds the latest binaries; each release also keeps a pinned copy under
+      # its tag, so `funes -v <tag>` resolves to it. Bucket support landed in huggingface_hub 1.21 —
+      # newer than the system package — so install it into a throwaway venv.
+      - name: Publish binaries to the Hugging Face bucket
+        env:
+          HF_TOKEN: ${{ secrets.HF_FUNES_RELEASE_TOKEN }}
+        run: |
+          TAG="${{ needs.compute.outputs.tag || github.ref_name }}"
+          python3 -m venv "$RUNNER_TEMP/hfvenv"
+          "$RUNNER_TEMP/hfvenv/bin/pip" install -q -U "huggingface_hub>=1.21"
+          HF="$RUNNER_TEMP/hfvenv/bin/hf"
+          "$HF" buckets sync ./artifacts hf://buckets/huggingface/funes
+          "$HF" buckets sync ./artifacts "hf://buckets/huggingface/funes/$TAG"
+
       # Dispatch only: push a branch advancing main's version marker to `<version>+dev`. The org
       # blocks Actions from opening PRs, so the workflow stops at the branch and surfaces a one-click
       # "create PR" link in the run summary; a maintainer opens that PR and merges it.

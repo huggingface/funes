@@ -1,5 +1,5 @@
 #!/bin/sh
-# Install the funes binary from GitHub Releases.
+# Install the funes binary from the Hugging Face bucket (huggingface/funes).
 #
 #   curl -fsSL https://raw.githubusercontent.com/huggingface/funes/main/scripts/install.sh | sh
 #
@@ -10,6 +10,7 @@
 set -eu
 
 REPO="huggingface/funes"
+BUCKET="huggingface/funes"
 BINDIR="${FUNES_INSTALL_DIR:-$HOME/.local/bin}"
 VERSION="${FUNES_VERSION:-latest}"
 
@@ -40,10 +41,12 @@ case "$(uname -s)-$(uname -m)" in
         ;;
 esac
 
+# Bucket files have no revision: the root holds the latest binaries, and each release keeps a
+# pinned copy under its tag. Buckets are non-versioned, so the resolve path carries no `main`.
 if [ "$VERSION" = latest ]; then
-    url="https://github.com/$REPO/releases/latest/download/$asset"
+    url="https://huggingface.co/buckets/$BUCKET/resolve/$asset"
 else
-    url="https://github.com/$REPO/releases/download/$VERSION/$asset"
+    url="https://huggingface.co/buckets/$BUCKET/resolve/$VERSION/$asset"
 fi
 
 # Download to a temp file so a failed/partial fetch never lands on PATH.
@@ -62,7 +65,7 @@ fi
 echo "Downloading $asset ($VERSION)…"
 if ! fetch "$url" "$tmp"; then
     echo "funes: download failed: $url" >&2
-    echo "  (no matching release published yet? see https://github.com/$REPO/releases)" >&2
+    echo "  (no matching release published yet? see https://huggingface.co/buckets/$BUCKET)" >&2
     exit 1
 fi
 

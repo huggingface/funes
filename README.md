@@ -63,7 +63,7 @@ curl -fsSL https://raw.githubusercontent.com/huggingface/funes/main/scripts/inst
 ```
 
 Pass `-b <dir>` to change the install dir or `-v <tag>` to pin a release, after `sh -s --`.
-Or grab a [binary](https://github.com/huggingface/funes/releases) by hand:
+Or grab a [binary](https://huggingface.co/buckets/huggingface/funes) by hand:
 
 | Platform | Binary |
 | --- | --- |
@@ -72,7 +72,7 @@ Or grab a [binary](https://github.com/huggingface/funes/releases) by hand:
 | macOS Apple Silicon | `funes-arm64-apple-darwin` |
 
 ```bash
-curl -fsSL https://github.com/huggingface/funes/releases/latest/download/funes-x86_64-linux -o funes
+curl -fsSL https://huggingface.co/buckets/huggingface/funes/resolve/funes-x86_64-linux -o funes
 chmod +x funes && ./funes recall "how do I get started with funes"
 ```
 
