@@ -3,7 +3,7 @@
 //! `recall` reads the index (hybrid → rerank → recency); `index` builds/updates it
 //! from `~/.claude/projects/**/*.jsonl`. funes's home is `$FUNES_HOME` or `~/.funes`.
 
-use funes::{config, hub, index, mcp, push, recall, scrub};
+use funes::{config, hub, index, mcp, pi, push, recall, scrub};
 
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand};
@@ -101,6 +101,28 @@ enum Cmd {
     Scrub,
     /// Run as an MCP server over stdio (for Claude Code, Cursor, …).
     Mcp,
+    /// Install funes into a coding agent.
+    Install {
+        #[command(subcommand)]
+        agent: InstallAgent,
+    },
+}
+
+#[derive(Subcommand)]
+enum InstallAgent {
+    /// pi: extract the bundled bridge extension and register it with pi (pi has no MCP client of
+    /// its own). Defaults to this project (`.pi/settings.json`); `-g` installs it user-wide.
+    Pi {
+        /// Install user-wide (all projects) instead of just the current one.
+        #[arg(short, long)]
+        global: bool,
+        /// Extract the extension here instead of under funes's home.
+        #[arg(long, value_name = "PATH")]
+        dest: Option<PathBuf>,
+        /// Re-extract the bundled extension even if it already exists at the destination.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 /// Which store the read commands act on. Shared by `recall`/`list`/`get`/`status`.
@@ -193,6 +215,9 @@ async fn main() -> Result<()> {
         }
         Cmd::Scrub => scrub::run().await,
         Cmd::Mcp => mcp::run().await,
+        Cmd::Install { agent } => match agent {
+            InstallAgent::Pi { global, dest, force } => pi::install(global, dest, force),
+        },
     }
 }
 

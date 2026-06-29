@@ -16,6 +16,7 @@ pub mod hf_traces;
 pub mod hub;
 pub mod index;
 pub mod mcp;
+pub mod pi;
 pub mod push;
 pub mod recall;
 pub mod scan;
