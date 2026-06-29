@@ -21,7 +21,7 @@ const MIN_PI: (u32, u32, u32) = (0, 73, 0);
 /// Extract the embedded pi extension and register it with pi. Defaults to the
 /// current project; `global` installs it user-wide. `dest` overrides where the
 /// extension is extracted (default: funes's home); `force` re-extracts even when
-/// it's already there. Flag vocabulary mirrors `hf skills add`.
+/// it's already there.
 pub fn install(global: bool, dest: Option<PathBuf>, force: bool) -> Result<()> {
     let dir = dest.unwrap_or_else(|| dataset::funes_dir().join("integrations").join("pi"));
     let present = dir.join("index.ts").exists() && dir.join("package.json").exists();

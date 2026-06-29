@@ -11,8 +11,8 @@ just fronted by a thin pi tool.
 ## Install
 
 Once `funes` is on your PATH, one command extracts this extension and registers
-it with pi. Like `hf skills add`, it installs into the current project by
-default; add `-g` to make it available in every project:
+it with pi. It installs into the current project by default; add `-g` to make
+it available in every project:
 
 ```sh
 funes install pi        # this project (.pi/settings.json)
