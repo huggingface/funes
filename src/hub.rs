@@ -184,6 +184,15 @@ pub fn empty_remote(uri: &str) -> anyhow::Error {
     )
 }
 
+/// The Hub refused the read on auth (HTTP 401/403): no HF token, or one that can't read this
+/// dataset. Shared so the message is identical everywhere.
+pub fn unauthorized_remote(uri: &str) -> anyhow::Error {
+    anyhow!(
+        "not authorized to read {uri} — set a Hugging Face token with read access to this dataset \
+         (HF_TOKEN, or `hf auth login`), or check the token you have can read it."
+    )
+}
+
 /// HF token from the standard env var, else the `huggingface_hub` cached token file.
 pub(crate) fn hf_token() -> Option<String> {
     let token_file = std::env::var("HOME")
