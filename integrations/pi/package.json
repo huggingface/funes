@@ -1,0 +1,17 @@
+{
+  "name": "funes-pi",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "pi extension: recall over past AI-assistant sessions, bridged to `funes mcp`.",
+  "scripts": {
+    "clean": "echo 'nothing to clean'",
+    "build": "echo 'nothing to build'",
+    "check": "echo 'nothing to check'"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
