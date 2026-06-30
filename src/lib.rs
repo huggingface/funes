@@ -10,6 +10,7 @@ pub mod chunk;
 pub mod claude_traces;
 pub mod config;
 pub mod dataset;
+pub mod fetch_store;
 pub mod hello;
 pub mod hermes;
 pub mod hf_dataset;
