@@ -48,7 +48,7 @@ impl Funes {
     }
 
     #[tool(
-        description = "Recall decisions, rationale, and context from the user's past AI agent sessions. Returns ranked passages with provenance (timestamp, session, block type) plus surrounding neighbor chunks. Each hit carries a `→ get <session_id> <turn_uuid>` line — call `get` with those to read the full surrounding turns. Use when the user references earlier work, or when you lack context that may exist in a prior session. Also recall before asserting the history of anything — that it was never built, was dropped, is out of scope, or was never discussed; a confident claim about a past decision is the cue you're missing context this holds."
+        description = "Recall decisions, rationale, and context from the user's past AI agent sessions. Returns ranked passages with provenance (timestamp, session, block type) plus surrounding neighbor chunks. Each hit carries a `→ get <session_id> <turn_uuid>` line — call `get` with those to read the full surrounding turns. Use when the user references earlier work, or when you lack context that may exist in a prior session. Recall subject-matter, not only decisions: before re-deriving how an API, library, or system behaves — or anything a past session already investigated — query the topic itself; research subagents accumulate exactly these findings and recall surfaces them, often as the top hit, so check before re-investigating from scratch. Also recall before asserting the history of anything — that it was never built, was dropped, is out of scope, or was never discussed; a confident claim about a past decision is the cue you're missing context this holds."
     )]
     async fn recall(
         &self,
@@ -117,7 +117,10 @@ impl ServerHandler for Funes {
                  rerank + recency). Call `recall` with a natural-language query when you need prior \
                  decisions, rationale, or context — and before asserting the history of anything \
                  (that it was never built, was dropped, or is out of scope): a confident claim \
-                 about a past decision is the cue to recall first. Drill into a hit with `get`."
+                 about a past decision is the cue to recall first. Recall subject-matter too, not \
+                 only decisions: before re-deriving how an API, library, or system behaves — or \
+                 anything a prior session (often a research subagent) investigated — query the \
+                 topic itself; recall surfaces those findings. Drill into a hit with `get`."
                     .to_string(),
             )
     }

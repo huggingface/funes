@@ -1,6 +1,6 @@
 ---
 name: funes
-description: Recall decisions, rationale, and context from the user's past Claude Code sessions. Use when the user refers to earlier work ("what did we decide", "why did we", "last time", "we discussed"), when you lack context the user assumes you already have, or before re-deriving something that may already have been figured out in a prior session. Also recall before asserting the history of anything — that it was never built, was dropped, is out of scope, or was never discussed; a confident claim about a past decision is the cue you're missing the context recall holds.
+description: Recall decisions, rationale, context, and subject-matter findings from the user's past Claude Code sessions. Use when the user refers to earlier work ("what did we decide", "why did we", "last time", "we discussed"), when you lack context the user assumes you already have, or before re-deriving a technical fact or re-investigating a subject (how an API/library/system behaves) that a prior session — often a research subagent — may already have figured out; query the subject, not just "what did we decide". Also recall before asserting the history of anything — that it was never built, was dropped, is out of scope, or was never discussed; a confident claim about a past decision is the cue you're missing the context recall holds.
 ---
 
 # funes — recall past sessions
@@ -11,6 +11,10 @@ description: Recall decisions, rationale, and context from the user's past Claud
 ## When to use
 - The user references prior decisions, discussions, or work not in the current context.
 - You are about to re-investigate or re-decide something that may already be settled.
+- **You're about to investigate a technical subject** — how a library/API/codebase behaves, what
+  some internals do — that a prior session may already have nailed. Research subagents accumulate
+  exactly this, and recall surfaces it (often as the top hit). Query the *subject* ("how does X's
+  read path work"), not just "what did we decide" — this is the easy mode to forget.
 - You need the user's previously stated preferences or the rationale behind a past choice.
 - You're about to claim something about the *past*: "this was never built", "we didn't do
   X", "that's out of scope", "I don't think we discussed Y". That phrasing is the trigger —
@@ -40,9 +44,10 @@ The full surface:
 Results are ~400-char previews. If a hit is fuzzy or dated, don't settle for it. Either
 re-query with a sharper phrase, or use the hit's `→ get <session_id> <turn_uuid>` line to
 pull the full surrounding turns (`funes get …`, or the `get` tool) — that's the second half
-of the drill-down, not optional. Treat tool-result hits (file reads, command output) as
-possibly **stale** — re-verify against the live source rather than trusting the recalled
-copy, even if recent.
+of the drill-down, not optional. A recalled finding still beats re-deriving from scratch — it
+hands you the answer *and* where to look — but treat tool-result hits (file reads, command
+output) as possibly **stale**: confirm the specific fact against the live source rather than
+trusting the recalled copy, even if recent.
 
 ## Freshness
 The index updates only when `funes index` runs; the latest turns of the current session may
