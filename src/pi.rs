@@ -129,13 +129,11 @@ mod tests {
 
     #[test]
     fn file_matches_detects_drift() {
-        let dir = std::env::temp_dir().join(format!("funes-pi-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("index.ts");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.ts");
         std::fs::write(&path, "embedded").unwrap();
         assert!(file_matches(&path, "embedded")); // unchanged → skip rewrite
         assert!(!file_matches(&path, "embedded v2")); // drifted after upgrade → rewrite
-        assert!(!file_matches(&dir.join("missing.ts"), "embedded")); // absent → extract
-        std::fs::remove_dir_all(&dir).ok();
+        assert!(!file_matches(&dir.path().join("missing.ts"), "embedded")); // absent → extract
     }
 }
