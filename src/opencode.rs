@@ -1,42 +1,42 @@
 //! `funes install opencode`: register funes recall as an MCP server with opencode.
 //!
-//! opencode reads MCP servers from `opencode.json` and merges a project-level config
-//! from the cwd. This adds funes as a `local` (stdio) MCP server (`funes mcp`) to that
-//! config, merging into any existing one rather than clobbering it. Defaults to the cwd
-//! (project); `global` writes the user config (`~/.config/opencode/opencode.json`). The
-//! command is `funes` from PATH (override with `FUNES_BIN`).
+//! opencode merges several config layers; funes targets the one matching the requested scope
+//! and adds itself as a `local` (stdio) MCP server (`funes mcp`), preserving any existing
+//! settings. Project scope (default) writes the cwd's config — opencode reads it walking up
+//! from the cwd to the git root, so the cwd is always in scope. `global` writes the user
+//! config (`$OPENCODE_CONFIG` if set, else `~/.config/opencode/opencode.json`). Both `.json`
+//! and `.jsonc` are honored; a config with comments is never rewritten (serde can't round-trip
+//! comments, so we print the block to add by hand rather than dropping them). The command is
+//! `funes` from PATH (override with `FUNES_BIN`).
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub fn install(global: bool) -> Result<()> {
-    let path = if global {
-        config_home().join("opencode").join("opencode.json")
-    } else {
-        std::env::current_dir()
-            .context("resolving the current directory")?
-            .join("opencode.json")
+    let path = target_path(global)?;
+    let funes = std::env::var("FUNES_BIN").unwrap_or_else(|_| "funes".to_string());
+    let server = json!({ "type": "local", "command": [funes, "mcp"], "enabled": true });
+
+    // An existing config may carry comments (JSONC), which serde can't round-trip. If the file
+    // is there but doesn't parse as plain JSON, leave it untouched and tell the user exactly
+    // what to add — clobbering it would silently drop their settings and comments.
+    let mut cfg = match std::fs::read_to_string(&path).ok().as_deref().map(str::trim) {
+        Some(s) if !s.is_empty() => match serde_json::from_str::<Value>(s) {
+            Ok(v) if v.is_object() => v,
+            _ => return manual_instructions(&path, &server),
+        },
+        _ => json!({ "$schema": "https://opencode.ai/config.json" }),
     };
 
-    // Merge into an existing config so we don't drop the user's other settings.
-    let mut cfg = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .filter(Value::is_object)
-        .unwrap_or_else(|| json!({ "$schema": "https://opencode.ai/config.json" }));
-
-    let funes = std::env::var("FUNES_BIN").unwrap_or_else(|_| "funes".to_string());
-    let obj = cfg.as_object_mut().expect("cfg is an object");
-    let mcp = obj
+    let mcp = cfg
+        .as_object_mut()
+        .expect("cfg is an object")
         .entry("mcp")
         .or_insert_with(|| json!({}))
         .as_object_mut()
-        .context("`mcp` in opencode.json is not an object")?;
-    mcp.insert(
-        "funes".to_string(),
-        json!({ "type": "local", "command": [funes, "mcp"], "enabled": true }),
-    );
+        .context("`mcp` in the opencode config is not an object")?;
+    mcp.insert("funes".to_string(), server);
 
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -52,9 +52,69 @@ pub fn install(global: bool) -> Result<()> {
     Ok(())
 }
 
+/// The config file to edit for the requested scope. Global scope is `$OPENCODE_CONFIG` if set,
+/// else the user config dir; project scope is the cwd. In a directory an existing
+/// `opencode.json` wins over an existing `opencode.jsonc`, which wins over creating a fresh
+/// `opencode.json`.
+fn target_path(global: bool) -> Result<PathBuf> {
+    if global {
+        if let Some(p) = std::env::var_os("OPENCODE_CONFIG") {
+            return Ok(PathBuf::from(p));
+        }
+        return Ok(choose(&config_home().join("opencode")));
+    }
+    let cwd = std::env::current_dir().context("resolving the current directory")?;
+    Ok(choose(&cwd))
+}
+
+/// Pick the config file in `dir`: an existing `opencode.json`, else an existing
+/// `opencode.jsonc`, else a new `opencode.json`.
+fn choose(dir: &Path) -> PathBuf {
+    let json = dir.join("opencode.json");
+    let jsonc = dir.join("opencode.jsonc");
+    if !json.exists() && jsonc.exists() {
+        jsonc
+    } else {
+        json
+    }
+}
+
 /// `$XDG_CONFIG_HOME`, else `~/.config`.
 fn config_home() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config"))
+}
+
+/// When an existing config can't be parsed (e.g. JSONC with comments), don't clobber it —
+/// print the MCP-server block for the user to merge by hand.
+fn manual_instructions(path: &Path, server: &Value) -> Result<()> {
+    let block = serde_json::to_string_pretty(&json!({ "mcp": { "funes": server.clone() } }))?;
+    println!(
+        "{} has comments or isn't plain JSON — leaving it untouched. Merge this in to enable funes recall:\n{block}",
+        path.display()
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::choose;
+
+    #[test]
+    fn choose_prefers_json_then_jsonc_then_new_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+
+        // Nothing present → create opencode.json.
+        assert_eq!(choose(p), p.join("opencode.json"));
+
+        // Only a .jsonc present → edit it (the file opencode actually reads).
+        std::fs::write(p.join("opencode.jsonc"), "{}").unwrap();
+        assert_eq!(choose(p), p.join("opencode.jsonc"));
+
+        // Both present → .json wins.
+        std::fs::write(p.join("opencode.json"), "{}").unwrap();
+        assert_eq!(choose(p), p.join("opencode.json"));
+    }
 }

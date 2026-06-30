@@ -129,11 +129,13 @@ enum InstallAgent {
     /// hermes: register funes as an MCP server via `hermes mcp add` (hermes has a native MCP
     /// client). User-wide — hermes' `mcp add` has no project scope. Requires `hermes` on PATH.
     Hermes,
-    /// opencode: register funes as a `local` MCP server in opencode.json (opencode merges a
-    /// project-level config from the cwd). Defaults to the current directory; `-g` writes the
-    /// user config (`~/.config/opencode/opencode.json`).
+    /// opencode: register funes as a `local` MCP server in opencode's config (opencode merges
+    /// it in, reading the cwd's config on the way up to the git root). Defaults to the current
+    /// directory's `opencode.json`; `-g` writes the user config (`$OPENCODE_CONFIG`, else
+    /// `~/.config/opencode/opencode.json`).
     Opencode {
-        /// Write the user config (`~/.config/opencode`) instead of the current directory.
+        /// Write the user config (`$OPENCODE_CONFIG`, else `~/.config/opencode`) instead of the
+        /// current directory.
         #[arg(short, long)]
         global: bool,
     },
