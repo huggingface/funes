@@ -37,6 +37,14 @@ class FunesMcp {
     if (this.child && this.ready) return this.ready;
     const child = spawn(FUNES_BIN, ["mcp"], { stdio: ["pipe", "pipe", "pipe"] });
     this.child = child;
+    // The server is kept warm for the whole session, so unref it (and its pipes)
+    // — an in-flight call's timer keeps the loop alive, but once the agent's turn
+    // is done nothing should. Without this the idle child pins the host's event
+    // loop open and the turn never exits.
+    child.unref();
+    child.stdin.unref();
+    child.stdout.unref();
+    child.stderr.unref();
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => this.onData(chunk));
     child.stderr.resume(); // drain logs so the pipe never blocks
