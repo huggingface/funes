@@ -8,7 +8,7 @@
 
 use crate::dataset;
 use anyhow::{Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const INDEX_TS: &str = include_str!("../integrations/pi/index.ts");
@@ -20,16 +20,18 @@ const MIN_PI: (u32, u32, u32) = (0, 73, 0);
 
 /// Extract the embedded pi extension and register it with pi. Defaults to the
 /// current project; `global` installs it user-wide. `dest` overrides where the
-/// extension is extracted (default: funes's home); `force` re-extracts even when
-/// it's already there.
+/// extension is extracted (default: funes's home). A copy that differs from this
+/// binary's embedded extension (e.g. after an upgrade) is refreshed automatically;
+/// `force` rewrites even when it already matches.
 pub fn install(global: bool, dest: Option<PathBuf>, force: bool) -> Result<()> {
     let dir = dest.unwrap_or_else(|| dataset::funes_dir().join("integrations").join("pi"));
-    let present = dir.join("index.ts").exists() && dir.join("package.json").exists();
-    if present && !force {
-        println!(
-            "funes pi extension already at {} (use --force to refresh)",
-            dir.display()
-        );
+    // Compare embedded bytes against the on-disk copy (not just existence) so an upgraded
+    // binary refreshes a stale extension; `force` rewrites even when they already match.
+    let current = !force
+        && file_matches(&dir.join("index.ts"), INDEX_TS)
+        && file_matches(&dir.join("package.json"), PACKAGE_JSON);
+    if current {
+        println!("funes pi extension already current at {}", dir.display());
     } else {
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         std::fs::write(dir.join("index.ts"), INDEX_TS).context("writing index.ts")?;
@@ -85,6 +87,11 @@ pub fn install(global: bool, dest: Option<PathBuf>, force: bool) -> Result<()> {
     }
 }
 
+/// True if `path` exists and already holds exactly `want`, so re-extraction can be skipped.
+fn file_matches(path: &Path, want: &str) -> bool {
+    std::fs::read_to_string(path).map(|got| got == want).unwrap_or(false)
+}
+
 /// Parse a leading `MAJOR.MINOR.PATCH` from pi's `--version` output (tolerates a `v`
 /// prefix, extra tokens, and a pre-release/build suffix on the patch).
 fn parse_semver(s: &str) -> Option<(u32, u32, u32)> {
@@ -102,7 +109,7 @@ fn parse_semver(s: &str) -> Option<(u32, u32, u32)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_semver, MIN_PI};
+    use super::{file_matches, parse_semver, MIN_PI};
 
     #[test]
     fn parses_versions_and_compares_to_min() {
@@ -118,5 +125,15 @@ mod tests {
         assert!(parse_semver("0.72.9").unwrap() < MIN_PI);
         assert!(parse_semver("0.73.0").unwrap() >= MIN_PI);
         assert!(parse_semver("1.0.0").unwrap() >= MIN_PI);
+    }
+
+    #[test]
+    fn file_matches_detects_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.ts");
+        std::fs::write(&path, "embedded").unwrap();
+        assert!(file_matches(&path, "embedded")); // unchanged → skip rewrite
+        assert!(!file_matches(&path, "embedded v2")); // drifted after upgrade → rewrite
+        assert!(!file_matches(&dir.path().join("missing.ts"), "embedded")); // absent → extract
     }
 }

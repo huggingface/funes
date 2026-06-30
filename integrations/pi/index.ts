@@ -52,15 +52,27 @@ class FunesMcp {
     child.on("exit", (code) => die(new Error(`funes mcp exited (code ${code})`)));
     child.on("error", (e) => die(new Error(`funes mcp failed to start: ${e.message}`)));
 
-    this.ready = (async () => {
-      await this.request("initialize", {
-        protocolVersion: PROTOCOL_VERSION,
-        capabilities: {},
-        clientInfo: { name: "pi-funes-bridge", version: "0.1.0" },
-      });
-      this.send({ jsonrpc: "2.0", method: "notifications/initialized", params: {} });
+    const start = (async () => {
+      try {
+        await this.request("initialize", {
+          protocolVersion: PROTOCOL_VERSION,
+          capabilities: {},
+          clientInfo: { name: "pi-funes-bridge", version: "0.1.0" },
+        });
+        this.send({ jsonrpc: "2.0", method: "notifications/initialized", params: {} });
+      } catch (err: any) {
+        // Initialize failed while the child may still be alive (e.g. it timed out): tear it
+        // down so the next call respawns instead of re-awaiting this rejected promise forever.
+        if (this.ready === start) {
+          this.child?.kill();
+          this.child = undefined;
+          this.ready = undefined;
+        }
+        throw err;
+      }
     })();
-    return this.ready;
+    this.ready = start;
+    return start;
   }
 
   private onData(chunk: string) {
@@ -98,7 +110,13 @@ class FunesMcp {
         reject(new Error(`funes ${method} timed out`));
       }, CALL_TIMEOUT_MS);
       this.pending.set(id, { resolve, reject, timer });
-      this.send({ jsonrpc: "2.0", id, method, params });
+      try {
+        this.send({ jsonrpc: "2.0", id, method, params });
+      } catch (err: any) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(err);
+      }
     });
   }
 
@@ -139,7 +157,7 @@ export default function (pi: any) {
       k: Type.Optional(Type.Number({ description: "Number of results (default 8)" })),
     }),
     execute: (_id: string, params: { query: string; k?: number }) =>
-      call("recall", params.k ? { query: params.query, k: params.k } : { query: params.query }),
+      call("recall", { query: params.query, k: params.k }),
   });
 
   pi.registerTool({
@@ -154,6 +172,6 @@ export default function (pi: any) {
       window: Type.Optional(Type.Number({ description: "Turns within this window are included (default 3)" })),
     }),
     execute: (_id: string, params: { session_id: string; turn_uuid: string; window?: number }) =>
-      call("get", params.window ? params : { session_id: params.session_id, turn_uuid: params.turn_uuid }),
+      call("get", { session_id: params.session_id, turn_uuid: params.turn_uuid, window: params.window }),
   });
 }

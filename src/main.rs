@@ -119,7 +119,7 @@ enum InstallAgent {
         /// Extract the extension here instead of under funes's home.
         #[arg(long, value_name = "PATH")]
         dest: Option<PathBuf>,
-        /// Re-extract the bundled extension even if it already exists at the destination.
+        /// Rewrite the bundled extension even when the on-disk copy already matches (a stale copy is refreshed automatically).
         #[arg(long)]
         force: bool,
     },

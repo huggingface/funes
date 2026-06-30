@@ -20,8 +20,9 @@ funes install pi -g     # all projects (user-wide)
 ```
 
 funes embeds the extension in its binary, so this always matches the installed
-funes version — no separate package to fetch. (`--dest` extracts elsewhere;
-`--force` refreshes after a funes upgrade.)
+funes version — no separate package to fetch, and a re-run after an upgrade
+re-extracts the refreshed copy automatically. (`--dest` extracts elsewhere;
+`--force` rewrites even when the on-disk copy is already current.)
 
 For development from a funes checkout you can also install the package directly
 with `pi install ./integrations/pi`, drop it under `<cwd>/.pi/extensions/` for
