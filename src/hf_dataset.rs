@@ -37,15 +37,17 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write as _;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use arrow_array::{RecordBatch, RecordBatchIterator};
 use arrow_schema::SchemaRef;
+use async_trait::async_trait;
 use bytes::Bytes;
 use hf_hub::progress::{Progress, ProgressEvent, ProgressHandler, UploadEvent};
 use hf_hub::repository::{CommitInfo, CommitOperation};
-use hf_hub::{HFError, HFRepository, RepoTypeDataset};
+use hf_hub::{HFClient, HFError, HFRepository, RepoTypeDataset};
 use lance::dataset::builder::DatasetBuilder;
 use lance::dataset::Dataset;
 use lance::index::DatasetIndexExt;
@@ -54,6 +56,7 @@ use lance_io::object_store::WrappingObjectStore;
 use object_store::ObjectStore as OSObjectStore;
 
 use crate::capture_store::{CaptureStore, Captured};
+use crate::fetch_store::{FetchStore, FileFetcher};
 
 /// Outcome of an [`append`] commit.
 pub(crate) enum Appended {
@@ -311,6 +314,72 @@ impl WrappingObjectStore for CaptureWrapper {
     fn wrap(&self, _prefix: &str, original: Arc<dyn OSObjectStore>) -> Arc<dyn OSObjectStore> {
         Arc::new(CaptureStore::new(original, self.captured.clone()))
     }
+}
+
+/// Fetches a repo file whole at the pinned revision, returning its path in hf-hub's local cache.
+/// Pinning to a commit SHA (not a branch) is what makes a warm read zero-network — hf-hub serves the
+/// cached blob without a request — and fixes every read at one immutable revision.
+#[derive(Debug)]
+struct HubFetcher {
+    repo: Arc<HFRepository<RepoTypeDataset>>,
+    revision: String,
+}
+
+#[async_trait]
+impl FileFetcher for HubFetcher {
+    async fn fetch(&self, filename: &str) -> Result<PathBuf> {
+        self.repo
+            .download_file()
+            .filename(filename)
+            .revision(self.revision.clone())
+            .send()
+            .await
+            .with_context(|| format!("caching {filename}@{}", self.revision))
+    }
+}
+
+/// Installs a [`FetchStore`] backed by a [`HubFetcher`] in front of the store Lance built for a
+/// remote read. The read mirror of [`CaptureWrapper`]; built by the caller, where the repo handle
+/// and head SHA are known, because `wrap` is handed only the built store and an opendal-internal
+/// prefix.
+#[derive(Debug)]
+pub(crate) struct FetchWrapper {
+    fetcher: Arc<dyn FileFetcher>,
+}
+
+impl FetchWrapper {
+    /// A wrapper that serves reads from `repo` at the pinned `revision` (a commit SHA).
+    pub(crate) fn new(repo: Arc<HFRepository<RepoTypeDataset>>, revision: String) -> Self {
+        Self {
+            fetcher: Arc::new(HubFetcher { repo, revision }),
+        }
+    }
+}
+
+impl WrappingObjectStore for FetchWrapper {
+    fn wrap(&self, _prefix: &str, original: Arc<dyn OSObjectStore>) -> Arc<dyn OSObjectStore> {
+        Arc::new(FetchStore::new(original, self.fetcher.clone()))
+    }
+}
+
+/// Resolve the head commit of `branch` for `owner/name` and build a [`FetchWrapper`] pinned to it,
+/// returning the wrapper and that SHA. The SHA is the read pin: the caller puts it in the dataset's
+/// `hf_revision` so Lance reads the exact commit the wrapper serves, and a commit SHA is what makes
+/// warm reads zero-network. A fresh repo handle is built from `token` and shared into the wrapper.
+pub(crate) async fn fetch_wrapper(
+    owner: &str,
+    name: &str,
+    token: Option<&str>,
+    branch: &str,
+) -> Result<(Arc<FetchWrapper>, String)> {
+    let mut builder = HFClient::builder();
+    if let Some(t) = token {
+        builder = builder.token(t.to_string());
+    }
+    let client = builder.build().context("building hf-hub client")?;
+    let repo = Arc::new(client.dataset(owner, name));
+    let sha = head_oid(&repo, branch).await?;
+    Ok((Arc::new(FetchWrapper::new(repo, sha.clone())), sha))
 }
 
 #[cfg(test)]
