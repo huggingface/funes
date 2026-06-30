@@ -11,18 +11,18 @@
 //!     --remote dacorvo/funes-bench --iters 5 --cold
 //! ```
 //!
-//! `--cold` points the Xet cache (`HF_XET_CACHE`) at a throwaway temp dir so the remote cold call
-//! is a true download, leaving your real `~/.cache/huggingface/xet` untouched. (It does not, and
+//! `--cold` points the hf-hub file cache (`HF_HUB_CACHE`) at a throwaway temp dir so the remote cold
+//! call is a true download, leaving your real `~/.cache/huggingface/hub` untouched. (It does not, and
 //! cannot portably, drop the OS page cache, so the local cold figure is only as cold as the page
-//! cache happens to be.) Downloading the dataset needs the `hf` CLI and, for a private repo, a
-//! logged-in token (the same token recall uses).
+//! cache happens to be.) The dataset is fetched through the hf-hub crate — no external CLI — and a
+//! private repo authenticates with the token from the environment (the same one recall uses).
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use funes::hub::Store;
 use funes::recall::recall;
+use hf_hub::HFClient;
 use std::path::Path;
-use std::process::Command;
 use std::time::Instant;
 use tempfile::TempDir;
 
@@ -38,8 +38,8 @@ struct Args {
     /// Warm iterations timed per store (after the one cold call).
     #[arg(long, default_value_t = 5)]
     iters: usize,
-    /// Give the remote leg a throwaway temp Xet cache so its cold call is a true download — your
-    /// real `~/.cache/huggingface/xet` is left untouched.
+    /// Give the remote leg a throwaway temp HF cache so its cold call is a true download — your real
+    /// `~/.cache/huggingface/hub` is left untouched.
     #[arg(long)]
     cold: bool,
     /// Results to return (recall `k`).
@@ -73,38 +73,40 @@ async fn time_recall(store: &Store, a: &Args) -> Result<(f64, usize)> {
     Ok((ms, hits))
 }
 
-/// Download the `--remote` dataset into `dest` (which then holds `chunks.lance`) so it can be opened
-/// as a local store. Shells out to the `hf` CLI; a private repo uses the logged-in token.
-///
-/// The download gets its OWN throwaway Xet cache: otherwise it would pre-warm the cache the remote
-/// leg reads (Xet reconstructs files through `HF_XET_CACHE`), and the remote "cold" call would hit
-/// chunks this very download just fetched — measuring a warm read, not a cold one.
-fn download_dataset(remote: &str, dest: &Path) -> Result<()> {
+/// Download the `--remote` dataset's files into `dest` via the hf-hub crate, so the same data can be
+/// opened as a local store for the local leg. `snapshot_download` with `local_dir` writes straight to
+/// `dest` and bypasses the hub cache, so it can't pre-warm the cache the remote leg reads — the
+/// remote "cold" call stays a true download. The client reads the token from the environment
+/// (`HF_TOKEN`, then the token file), the same source recall uses, so a private repo authenticates.
+async fn download_dataset(remote: &str, dest: &Path) -> Result<()> {
     let repo = remote.strip_prefix("hf://datasets/").unwrap_or(remote);
-    let dl_xet = tempfile::Builder::new().prefix("funes-bench-dl-xet-").tempdir()?;
-    eprintln!("downloading {repo} → {} (local leg)…", dest.display());
-    let ok = Command::new("hf")
-        .args(["download", repo, "--repo-type", "dataset", "--local-dir"])
-        .arg(dest)
-        .env("HF_XET_CACHE", dl_xet.path())
-        .status()
-        .context("run `hf download` (is the huggingface CLI installed?)")?
-        .success();
-    if !ok {
-        anyhow::bail!("`hf download {repo}` failed");
-    }
+    let mut seg = repo.split('/');
+    let (owner, name) = match (seg.next(), seg.next()) {
+        (Some(o), Some(n)) if !o.is_empty() && !n.is_empty() => (o, n),
+        _ => anyhow::bail!("--remote must be <owner>/<name>, got {remote}"),
+    };
+    eprintln!("downloading {owner}/{name} → {} (local leg)…", dest.display());
+    HFClient::builder()
+        .build()
+        .context("building hf-hub client")?
+        .dataset(owner, name)
+        .snapshot_download()
+        .local_dir(dest.to_path_buf())
+        .send()
+        .await
+        .with_context(|| format!("downloading {owner}/{name} via hf-hub"))?;
     Ok(())
 }
 
-/// Point the Xet chunk cache at a fresh temp dir so the first remote read is genuinely cold, without
-/// touching the user's real `~/.cache/huggingface/xet`. `HF_XET_CACHE` relocates only the chunk
-/// cache — the HF token and `HF_HOME` are untouched, so auth still works. The returned dir must stay
-/// alive for the run; dropping it removes the temp cache.
-fn isolate_xet_cache() -> Result<TempDir> {
-    let dir = tempfile::Builder::new().prefix("funes-bench-xet-").tempdir()?;
-    std::env::set_var("HF_XET_CACHE", dir.path());
+/// Point the hf-hub file cache at a fresh temp dir so the first remote read is a genuine download,
+/// without touching the user's real `~/.cache/huggingface/hub`. `HF_HUB_CACHE` relocates only the
+/// download cache — the token and `HF_HOME` are untouched, so auth still works. The returned dir must
+/// stay alive for the run; dropping it removes the temp cache.
+fn isolate_hub_cache() -> Result<TempDir> {
+    let dir = tempfile::Builder::new().prefix("funes-bench-hub-").tempdir()?;
+    std::env::set_var("HF_HUB_CACHE", dir.path());
     eprintln!(
-        "cold: isolated Xet cache at {} (real cache untouched)",
+        "cold: isolated HF cache at {} (real cache untouched)",
         dir.path().display()
     );
     Ok(dir)
@@ -146,15 +148,16 @@ async fn main() -> Result<()> {
     let a = Args::parse();
     let remote = Store::parse(a.remote.trim());
 
-    // With --cold, redirect the Xet cache to a temp dir for the whole run (held alive here) so the
-    // remote leg starts cold without disturbing the user's real cache. The local leg uses no Xet.
-    let _xet_guard = if a.cold { Some(isolate_xet_cache()?) } else { None };
+    // With --cold, redirect the hf-hub file cache to a temp dir for the whole run (held alive here)
+    // so the remote leg's first read is a genuine download. The local-leg download writes via
+    // `local_dir`, which bypasses this cache, so it can't pre-warm the remote leg.
+    let _hub_guard = if a.cold { Some(isolate_hub_cache()?) } else { None };
 
     // The local leg is a fresh download of the SAME dataset, so local vs remote isolates the hf://
     // I/O path rather than comparing two different stores. `local_dir` is held to the end of the run
     // so the downloaded copy isn't removed mid-benchmark.
     let local_dir = tempfile::Builder::new().prefix("funes-bench-local-").tempdir()?;
-    download_dataset(a.remote.trim(), local_dir.path())?;
+    download_dataset(a.remote.trim(), local_dir.path()).await?;
     let local = Store::Local {
         path: local_dir.path().to_path_buf(),
     };
@@ -186,12 +189,12 @@ async fn main() -> Result<()> {
     );
 
     if a.cold {
-        println!("\nnote: --cold gave the remote leg an empty (temp) Xet cache, so its cold call is a true");
-        println!("      download. The OS page cache isn't dropped, so the local cold figure is only as");
-        println!("      cold as the page cache already was.");
+        println!("\nnote: --cold gave the remote leg an empty (temp) hf-hub file cache, so its cold call");
+        println!("      is a true download. The OS page cache isn't dropped, so the local cold figure is");
+        println!("      only as cold as the page cache already was.");
     } else {
-        println!("\nnote: without --cold the remote leg used your existing Xet cache, so its 'cold' call may");
-        println!("      already be partly warm. Pass --cold for a true cold-download measurement.");
+        println!("\nnote: without --cold the remote leg used your existing hf-hub cache, so its 'cold' call");
+        println!("      may already be warm. Pass --cold for a true cold-download measurement.");
     }
     Ok(())
 }

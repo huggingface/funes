@@ -28,10 +28,10 @@ timings.
 For each store the harness reports a single **cold** call followed by the min / median / max of
 `--iters` **warm** calls:
 
-- **remote cold** — the Xet chunk cache is empty (`--cold` gives it a fresh temp cache), so the
-  IVF_PQ/FTS index and the touched Lance fragments are downloaded over `hf://`.
-- **remote warm** — Xet-cached data, but `recall()` still re-opens the dataset each call (manifest +
-  index-descriptor round-trips), which dominates the warm remote cost.
+- **remote cold** — the hf-hub file cache is empty (`--cold` gives it a fresh temp cache), so the
+  IVF_PQ/FTS index and the touched Lance fragments are downloaded over `hf://` on first read.
+- **remote warm** — every file the query touches is now in the local hf-hub cache, so the reads are
+  served from disk and warm remote lands at ≈ local.
 - **local** — the same dataset on disk; there's no real cold/warm gap (the OS page cache is already
   warm and the models are loaded), so `local` is the floor the remote legs are measured against.
 
@@ -43,9 +43,9 @@ Build in release (a debug build is far slower and not representative):
 cargo run --release --example bench_recall -- "<query>" --remote dacorvo/funes-bench --iters 5 --cold
 ```
 
-The bench downloads `--remote` (via the `hf` CLI, using your logged-in token for a private repo) to
-a temp dir and benchmarks that local copy against the same dataset over `hf://` — both legs run
-identical data, so the gap is the I/O path, not the corpus.
+The bench downloads `--remote` (through the hf-hub crate, using the token from your environment for a
+private repo) to a temp dir and benchmarks that local copy against the same dataset over `hf://` —
+both legs run identical data, so the gap is the I/O path, not the corpus.
 
 ### Options
 
@@ -54,42 +54,49 @@ identical data, so the gap is the I/O path, not the corpus.
 | `<query>` (positional) | `"how does recall rerank candidates"` | the text to recall |
 | `--remote <spec>` | `dacorvo/funes-bench` | dataset to benchmark (`org/repo` or `hf://…`), used for both legs |
 | `--iters <N>` | `5` | warm iterations timed per store (after the one cold call) |
-| `--cold` | off | give the remote leg a throwaway `HF_XET_CACHE` temp dir so its cold call is a true download (your real cache is left untouched) |
+| `--cold` | off | give the remote leg a throwaway `HF_HUB_CACHE` temp dir so its cold call is a true download (your real cache is left untouched) |
 | `--k <N>` | `8` | results returned |
 | `--candidates <N>` | `30` | fused candidates reranked |
 | `--neighbors <N>` | `1` | adjacent chunks attached per hit |
 
-> `--cold` only relocates the Xet **cache** (via `HF_XET_CACHE`) to a temp dir for the run — it does
-> not touch your real `~/.cache/huggingface/xet`, your HF token, or `HF_HOME`. With `--cold` the
-> dataset is fetched twice: once by `hf download` for the local copy, once over Xet for the remote
+> `--cold` only relocates the hf-hub file **cache** (via `HF_HUB_CACHE`) to a temp dir for the run —
+> it does not touch your real `~/.cache/huggingface/hub`, your HF token, or `HF_HOME`. The local-leg
+> download writes straight to a temp dir (it bypasses the cache), so it never pre-warms the remote
 > cold call.
 
 ## Reading the output
 
 ```
-dataset: dacorvo/funes-bench   query: "ray traced multiplayer shooter with bots"   k=8 candidates=30 neighbors=1   warm iters=5
+dataset: dacorvo/funes-bench   query: "how does recall rerank candidates"   k=8 candidates=30 neighbors=1   warm iters=5
 
 store     cold(ms)   warm_lo  warm_med   warm_hi  hits
-local        896.9     796.1     814.6    4486.6     8
-remote      9804.5    8257.2    8796.7    8900.6     8
+local       5455.9    5682.6    5956.0    6093.4     8
+remote     10663.1    6504.0    6589.1    6668.6     8
 
-remote vs local:  10.9× slower cold,  10.8× slower warm (median),  10.4× warm best-case
+remote vs local:  2.0× slower cold,  1.1× slower warm (median),  1.1× warm best-case
 ```
 
-Both legs index the same ≈21.6k-chunk dataset (`hits` matches, confirming equal work). The headline
-line reports the slowdown over the local floor: remote **cold** (~10–14 s across runs, depending on
-download bandwidth) pays the full Xet download of the index + touched Lance fragments; even **warm** it's
-~10× local. `warm best-case` (`warm_lo`) is the most stable factor — the `warm_hi` spikes are
-page-cache/GC noise at low `--iters`. Most of the warm-remote cost is `recall()` re-opening the
-dataset on every call, which a long-lived process (the MCP server) that opens once would avoid.
+_Captured on a Mac M2 (24 GB), release build._
+
+Both legs run the same ≈21.6k-chunk dataset (`hits` matches, confirming equal work). Remote **cold**
+pays a one-time download of the index + touched Lance fragments into the hf-hub file cache (the
+premium over warm). Every **warm** call is then served from that local cache, so warm remote lands at
+**≈ local** (1.1×) — the per-call `hf://` I/O is gone. `warm best-case` (`warm_lo`) is the most stable
+factor; `warm_hi` spikes are page-cache/GC noise at low `--iters`.
+
+**Absolute numbers are host-dependent — read the ratio, not the floor.** Recall is dominated by the
+cross-encoder rerank (`--candidates` query/passage pairs), identical work on both legs: the Mac M2
+above reranks ~5–6 s for 30 candidates on CPU, whereas a Linux box with a GPU does it in well under a
+second (local ≈ remote-warm ≈ ~1.9 s). The floor moves with the hardware; the remote-vs-local
+**ratio** — warm ≈ local, cold a one-time download — is what the benchmark measures.
 
 ## Caveats
 
 - It times **one query string**, repeated. Rerank load is fixed (always `--candidates`), but embed
   and ANN/FTS selectivity vary by query — run a few representative queries (short/long, common/rare
   terms) for a sturdier picture.
-- Needs the `hf` CLI for the download (unless `--local` is given) and, for a private dataset, a
-  logged-in HF token.
+- For a private dataset, a token must be available (`HF_TOKEN` or the cached login) — the same one
+  recall uses.
 
 ## Building a benchmark store
 
