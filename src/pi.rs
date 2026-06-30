@@ -16,9 +16,10 @@ use std::process::Command;
 const INDEX_TS: &str = include_str!("../integrations/pi/index.ts");
 const PACKAGE_JSON: &str = include_str!("../integrations/pi/package.json");
 
-/// The pi version funes' extension API (the `pi.extensions` manifest + `registerTool`
-/// + provided `typebox`) was validated against. Older pi may not load the extension.
-const MIN_PI: (u32, u32, u32) = (0, 73, 0);
+/// The pi version funes' extension API (`pi.extensions` manifest, `registerTool`, the
+/// provided `typebox`) was validated against — the `@earendil-works/pi-coding-agent` line
+/// (the older `@mariozechner` scope is deprecated). Older pi may not load the extension.
+const MIN_PI: (u32, u32, u32) = (0, 74, 2);
 
 /// Install the embedded pi extension so pi loads it. Project scope (the default)
 /// drops it into the project's `.pi/extensions/funes/`, which pi auto-discovers —
@@ -147,8 +148,8 @@ mod tests {
         assert_eq!(parse_semver(""), None);
 
         // the floor comparison the install warning hinges on
-        assert!(parse_semver("0.72.9").unwrap() < MIN_PI);
-        assert!(parse_semver("0.73.0").unwrap() >= MIN_PI);
+        assert!(parse_semver("0.74.1").unwrap() < MIN_PI);
+        assert!(parse_semver("0.74.2").unwrap() >= MIN_PI);
         assert!(parse_semver("1.0.0").unwrap() >= MIN_PI);
     }
 
