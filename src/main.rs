@@ -3,7 +3,7 @@
 //! `recall` reads the index (hybrid → rerank → recency); `index` builds/updates it
 //! from `~/.claude/projects/**/*.jsonl`. funes's home is `$FUNES_HOME` or `~/.funes`.
 
-use funes::{config, hub, index, mcp, pi, push, recall, scrub};
+use funes::{config, hermes, hub, index, mcp, opencode, pi, push, recall, scrub};
 
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand};
@@ -126,6 +126,17 @@ enum InstallAgent {
         #[arg(long)]
         force: bool,
     },
+    /// hermes: register funes as an MCP server via `hermes mcp add` (hermes has a native MCP
+    /// client). User-wide — hermes' `mcp add` has no project scope. Requires `hermes` on PATH.
+    Hermes,
+    /// opencode: register funes as a `local` MCP server in opencode.json (opencode merges a
+    /// project-level config from the cwd). Defaults to the current directory; `-g` writes the
+    /// user config (`~/.config/opencode/opencode.json`).
+    Opencode {
+        /// Write the user config (`~/.config/opencode`) instead of the current directory.
+        #[arg(short, long)]
+        global: bool,
+    },
 }
 
 /// Which store the read commands act on. Shared by `recall`/`list`/`get`/`status`.
@@ -220,6 +231,8 @@ async fn main() -> Result<()> {
         Cmd::Mcp => mcp::run().await,
         Cmd::Install { agent } => match agent {
             InstallAgent::Pi { global, dest, force } => pi::install(global, dest, force),
+            InstallAgent::Hermes => hermes::install(),
+            InstallAgent::Opencode { global } => opencode::install(global),
         },
     }
 }
