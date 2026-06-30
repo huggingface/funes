@@ -1,10 +1,8 @@
 //! Remote, shared memory tiers.
 //!
-//! A [`Store`] is either the local index or a remote Lance dataset on the HF Hub. Remote
-//! reads go over `hf://` and are lazy by construction: the IVF_PQ index bounds which
-//! fragments a query touches, and lance's HF object store fetches only those byte ranges.
-//! Caching across CLI runs is handled by the **Xet chunk cache** (`~/.cache/huggingface/xet`,
-//! on by default), so funes adds no cache layer of its own.
+//! A [`Store`] is either the local index or a remote Lance dataset on the HF Hub. A remote open pins
+//! reads to the head commit and installs a read wrapper over Lance's object store; the pin is
+//! re-resolved on every open, so a new push is picked up by the next command.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -16,6 +14,7 @@ use lance::dataset::Dataset;
 
 use crate::config;
 use crate::dataset;
+use crate::hf_dataset;
 use crate::index::{DIM, MODEL};
 
 /// A store to recall from: a local Lance directory or a remote dataset on the HF Hub.
@@ -26,6 +25,10 @@ pub enum Store {
     /// A remote Lance dataset on the HF Hub, e.g. `hf://datasets/<org>/<repo>`.
     Remote { uri: String },
 }
+
+/// The branch reads pin to and resolve the head commit of. It must be the branch writes target, so a
+/// read sees the commits a push produced.
+const READ_BRANCH: &str = "main";
 
 impl Store {
     /// The default local store (`$FUNES_HOME` / `~/.funes` → `…/store`).
@@ -82,11 +85,23 @@ impl Store {
                 dataset::open(&dataset::table_uri(&path.to_string_lossy()), HashMap::new()).await?
             }
             Store::Remote { uri } => {
+                let (owner, name, _) = parse_hf(uri)?;
+                let token = hf_token();
                 let mut opts = HashMap::new();
-                if let Some(token) = hf_token() {
-                    opts.insert("hf_token".to_string(), token);
+                if let Some(t) = &token {
+                    opts.insert("hf_token".to_string(), t.clone());
                 }
-                dataset::open(&dataset::table_uri(uri), opts).await?
+                let table = dataset::table_uri(uri);
+                // Pin reads to the head commit and install the read wrapper. The pin is re-resolved
+                // on every open, so a new push is picked up by the next command. If the head can't
+                // be resolved (offline/transient), degrade to a plain live open rather than fail.
+                match hf_dataset::fetch_wrapper(&owner, &name, token.as_deref(), READ_BRANCH).await {
+                    Ok((wrapper, sha)) => {
+                        opts.insert("hf_revision".to_string(), sha);
+                        dataset::open_wrapped(&table, opts, wrapper).await?
+                    }
+                    Err(_) => dataset::open(&table, opts).await?,
+                }
             }
         };
         check_compat(&ds)?;

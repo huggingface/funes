@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use arrow_array::RecordBatch;
@@ -16,6 +17,7 @@ use lance_index::scalar::InvertedIndexParams;
 use lance_index::vector::ivf::IvfBuildParams;
 use lance_index::vector::pq::PQBuildParams;
 use lance_index::IndexType;
+use lance_io::object_store::{ObjectStoreParams, WrappingObjectStore};
 use lance_linalg::distance::MetricType;
 
 /// The table (Lance dataset) name within a store.
@@ -36,18 +38,40 @@ pub fn local_store_dir() -> String {
     funes_dir().join("store").to_string_lossy().into_owned()
 }
 
-/// The `chunks` dataset URI under a store base (a local directory or an `hf://…` prefix).
+/// The `chunks` dataset URI under a store base (a local directory or a remote URI prefix).
 pub fn table_uri(base: &str) -> String {
     format!("{base}/{TABLE}.lance")
 }
 
-/// Open the `chunks` dataset at `uri`; `storage_options` carries the hf token/revision for a remote.
+/// Open the `chunks` dataset at `uri`; `storage_options` carries the backend credentials/revision a
+/// remote needs (empty for a local store).
 pub async fn open(uri: &str, storage_options: HashMap<String, String>) -> Result<Dataset> {
     DatasetBuilder::from_uri(uri)
         .with_storage_options(storage_options)
         .load()
         .await
         .context("opening the dataset")
+}
+
+/// Open the `chunks` dataset at `uri` with `wrapper` decorating its object store. It is installed
+/// before load, so it sees every read Lance issues, including those during load. `storage_options`
+/// carries the backend credentials/revision a remote needs; the caller supplies the wrapper.
+pub async fn open_wrapped(
+    uri: &str,
+    storage_options: HashMap<String, String>,
+    wrapper: Arc<dyn WrappingObjectStore>,
+) -> Result<Dataset> {
+    // Order matters: `with_store_params` replaces the params wholesale, so install the wrapper
+    // first, then layer the storage options on top (`with_storage_options` merges into them).
+    DatasetBuilder::from_uri(uri)
+        .with_store_params(ObjectStoreParams {
+            object_store_wrapper: Some(wrapper),
+            ..Default::default()
+        })
+        .with_storage_options(storage_options)
+        .load()
+        .await
+        .context("opening the wrapped dataset")
 }
 
 /// Project `columns` (empty = all columns; optionally filtered by a SQL predicate, optionally

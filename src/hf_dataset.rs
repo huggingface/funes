@@ -47,7 +47,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use hf_hub::progress::{Progress, ProgressEvent, ProgressHandler, UploadEvent};
 use hf_hub::repository::{CommitInfo, CommitOperation};
-use hf_hub::{HFError, HFRepository, RepoTypeDataset};
+use hf_hub::{HFClient, HFError, HFRepository, RepoTypeDataset};
 use lance::dataset::builder::DatasetBuilder;
 use lance::dataset::Dataset;
 use lance::index::DatasetIndexExt;
@@ -360,6 +360,26 @@ impl WrappingObjectStore for FetchWrapper {
     fn wrap(&self, _prefix: &str, original: Arc<dyn OSObjectStore>) -> Arc<dyn OSObjectStore> {
         Arc::new(FetchStore::new(original, self.fetcher.clone()))
     }
+}
+
+/// Resolve the head commit of `branch` for `owner/name` and build a [`FetchWrapper`] pinned to it,
+/// returning the wrapper and that SHA. The SHA is the read pin: the caller puts it in the dataset's
+/// `hf_revision` so Lance reads the exact commit the wrapper serves, and a commit SHA is what makes
+/// warm reads zero-network. A fresh repo handle is built from `token` and shared into the wrapper.
+pub(crate) async fn fetch_wrapper(
+    owner: &str,
+    name: &str,
+    token: Option<&str>,
+    branch: &str,
+) -> Result<(Arc<FetchWrapper>, String)> {
+    let mut builder = HFClient::builder();
+    if let Some(t) = token {
+        builder = builder.token(t.to_string());
+    }
+    let client = builder.build().context("building hf-hub client")?;
+    let repo = Arc::new(client.dataset(owner, name));
+    let sha = head_oid(&repo, branch).await?;
+    Ok((Arc::new(FetchWrapper::new(repo, sha.clone())), sha))
 }
 
 #[cfg(test)]
