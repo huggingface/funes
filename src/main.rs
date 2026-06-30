@@ -110,32 +110,23 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum InstallAgent {
-    /// pi: extract the bundled bridge extension and register it with pi (pi has no MCP client of
-    /// its own). Defaults to the current directory — drops it in `./.pi/extensions/`, which pi
-    /// auto-discovers, so funes is available to pi only when run from here. `-g` installs it
-    /// user-wide (every project).
+    /// pi: install funes as a pi extension (pi has no MCP client of its own).
     Pi {
-        /// Install user-wide (every project) instead of just the current directory.
+        /// Install user-wide instead of just the current directory.
         #[arg(short, long)]
         global: bool,
-        /// Extract to this dir and register it with `pi install`, instead of the current
-        /// directory's `.pi/extensions/`.
+        /// Extract the extension to this directory instead of the default.
         #[arg(long, value_name = "PATH")]
         dest: Option<PathBuf>,
-        /// Rewrite the bundled extension even when the on-disk copy already matches (a stale copy is refreshed automatically).
+        /// Reinstall even if the on-disk copy is already up to date.
         #[arg(long)]
         force: bool,
     },
-    /// hermes: register funes as an MCP server via `hermes mcp add` (hermes has a native MCP
-    /// client). User-wide — hermes' `mcp add` has no project scope. Requires `hermes` on PATH.
+    /// hermes: register funes as an MCP server (hermes has a native MCP client).
     Hermes,
-    /// opencode: register funes as a `local` MCP server in opencode's config (opencode merges
-    /// it in, reading the cwd's config on the way up to the git root). Defaults to the current
-    /// directory's `opencode.json`; `-g` writes the user config (`$OPENCODE_CONFIG`, else
-    /// `~/.config/opencode/opencode.json`).
+    /// opencode: register funes as an MCP server.
     Opencode {
-        /// Write the user config (`$OPENCODE_CONFIG`, else `~/.config/opencode`) instead of the
-        /// current directory.
+        /// Write the user config instead of the current directory.
         #[arg(short, long)]
         global: bool,
     },
