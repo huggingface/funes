@@ -66,7 +66,10 @@ async fn warm_recall_is_served_from_cache_without_downloading() {
     let cold = recall(MARKER).await;
     assert!(cold.contains(MARKER), "cold recall should surface the marker: {cold}");
     let after_cold = cache_footprint(cache.path());
-    assert!(after_cold.0 > 0, "cold recall must populate the cache, got {after_cold:?}");
+    assert!(
+        after_cold.0 > 0,
+        "cold recall must populate the cache, got {after_cold:?}"
+    );
 
     // Warm: same head commit ⇒ every file is already cached ⇒ nothing is downloaded.
     let warm = recall(MARKER).await;
