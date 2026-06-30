@@ -111,12 +111,15 @@ enum Cmd {
 #[derive(Subcommand)]
 enum InstallAgent {
     /// pi: extract the bundled bridge extension and register it with pi (pi has no MCP client of
-    /// its own). Defaults to this project (`.pi/settings.json`); `-g` installs it user-wide.
+    /// its own). Defaults to the current directory — drops it in `./.pi/extensions/`, which pi
+    /// auto-discovers, so funes is available to pi only when run from here. `-g` installs it
+    /// user-wide (every project).
     Pi {
-        /// Install user-wide (all projects) instead of just the current one.
+        /// Install user-wide (every project) instead of just the current directory.
         #[arg(short, long)]
         global: bool,
-        /// Extract the extension here instead of under funes's home.
+        /// Extract to this dir and register it with `pi install`, instead of the current
+        /// directory's `.pi/extensions/`.
         #[arg(long, value_name = "PATH")]
         dest: Option<PathBuf>,
         /// Rewrite the bundled extension even when the on-disk copy already matches (a stale copy is refreshed automatically).

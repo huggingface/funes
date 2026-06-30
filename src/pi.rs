@@ -1,10 +1,12 @@
-//! `funes install pi`: register funes recall as a first-class pi tool.
+//! `funes install pi`: install funes recall as a first-class pi tool.
 //!
 //! pi has no MCP client, so funes ships a small pi extension (a bridge that
 //! spawns `funes mcp` over stdio — see `integrations/pi/`). The extension is
 //! embedded in the binary here, so once `funes` is on PATH a single
-//! `funes install pi` extracts it and registers it with pi — no separate
-//! package to fetch, and it always matches this binary's MCP surface.
+//! `funes install pi` drops it where pi loads it — no separate package to fetch,
+//! and it always matches this binary's MCP surface. Project scope extracts into
+//! the project's `.pi/extensions/`, which pi auto-discovers; `--global`/`--dest`
+//! extract elsewhere and register the path with `pi install`.
 
 use crate::dataset;
 use anyhow::{Context, Result};
@@ -14,29 +16,37 @@ use std::process::Command;
 const INDEX_TS: &str = include_str!("../integrations/pi/index.ts");
 const PACKAGE_JSON: &str = include_str!("../integrations/pi/package.json");
 
-/// The pi version funes' extension API (the `pi.extensions` manifest + `registerTool`
-/// + provided `typebox`) was validated against. Older pi may not load the extension.
-const MIN_PI: (u32, u32, u32) = (0, 73, 0);
+/// The pi version funes' extension API (`pi.extensions` manifest, `registerTool`, the
+/// provided `typebox`) was validated against — the `@earendil-works/pi-coding-agent` line
+/// (the older `@mariozechner` scope is deprecated). Older pi may not load the extension.
+const MIN_PI: (u32, u32, u32) = (0, 74, 2);
 
-/// Extract the embedded pi extension and register it with pi. Defaults to the
-/// current project; `global` installs it user-wide. `dest` overrides where the
-/// extension is extracted (default: funes's home). A copy that differs from this
+/// Install the embedded pi extension so pi loads it. Project scope (the default)
+/// drops it into the project's `.pi/extensions/funes/`, which pi auto-discovers —
+/// no registration step. `global` installs it user-wide, and `dest` extracts to an
+/// explicit dir; both are registered with `pi install`. A copy that differs from this
 /// binary's embedded extension (e.g. after an upgrade) is refreshed automatically;
 /// `force` rewrites even when it already matches.
 pub fn install(global: bool, dest: Option<PathBuf>, force: bool) -> Result<()> {
-    let dir = dest.unwrap_or_else(|| dataset::funes_dir().join("integrations").join("pi"));
-    // Compare embedded bytes against the on-disk copy (not just existence) so an upgraded
-    // binary refreshes a stale extension; `force` rewrites even when they already match.
-    let current = !force
-        && file_matches(&dir.join("index.ts"), INDEX_TS)
-        && file_matches(&dir.join("package.json"), PACKAGE_JSON);
-    if current {
-        println!("funes pi extension already current at {}", dir.display());
-    } else {
-        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-        std::fs::write(dir.join("index.ts"), INDEX_TS).context("writing index.ts")?;
-        std::fs::write(dir.join("package.json"), PACKAGE_JSON).context("writing package.json")?;
+    // Project scope, no override: extract straight into pi's own discovery path.
+    // pi loads any `<cwd>/.pi/extensions/<name>/` on startup, so there's nothing to
+    // register — the extension is simply in place.
+    if !global && dest.is_none() {
+        let dir = std::env::current_dir()
+            .context("resolving the current directory")?
+            .join(".pi/extensions/funes");
+        extract(&dir, force)?;
+        println!(
+            "installed funes recall into pi (project scope) at {} — restart pi if it's running.",
+            dir.display()
+        );
+        return Ok(());
     }
+
+    // Global, or an explicit dest: extract somewhere persistent, then point pi at it
+    // with `pi install` (pi records the path).
+    let dir = dest.unwrap_or_else(|| dataset::funes_dir().join("integrations").join("pi"));
+    extract(&dir, force)?;
     let dir = dir.to_string_lossy().into_owned();
     let scope = if global { "user" } else { "project" };
 
@@ -87,9 +97,25 @@ pub fn install(global: bool, dest: Option<PathBuf>, force: bool) -> Result<()> {
     }
 }
 
-/// True if `path` exists and already holds exactly `want`, so re-extraction can be skipped.
+/// True if `path` exists and already holds exactly `want`.
 fn file_matches(path: &Path, want: &str) -> bool {
     std::fs::read_to_string(path).map(|got| got == want).unwrap_or(false)
+}
+
+/// Write the embedded extension (index.ts + package.json) into `dir`. A copy that drifts
+/// from this binary's embedded version is refreshed; `force` rewrites even when it matches.
+fn extract(dir: &Path, force: bool) -> Result<()> {
+    let current = !force
+        && file_matches(&dir.join("index.ts"), INDEX_TS)
+        && file_matches(&dir.join("package.json"), PACKAGE_JSON);
+    if current {
+        println!("funes pi extension already current at {}", dir.display());
+        return Ok(());
+    }
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    std::fs::write(dir.join("index.ts"), INDEX_TS).context("writing index.ts")?;
+    std::fs::write(dir.join("package.json"), PACKAGE_JSON).context("writing package.json")?;
+    Ok(())
 }
 
 /// Parse a leading `MAJOR.MINOR.PATCH` from pi's `--version` output (tolerates a `v`
@@ -122,8 +148,8 @@ mod tests {
         assert_eq!(parse_semver(""), None);
 
         // the floor comparison the install warning hinges on
-        assert!(parse_semver("0.72.9").unwrap() < MIN_PI);
-        assert!(parse_semver("0.73.0").unwrap() >= MIN_PI);
+        assert!(parse_semver("0.74.1").unwrap() < MIN_PI);
+        assert!(parse_semver("0.74.2").unwrap() >= MIN_PI);
         assert!(parse_semver("1.0.0").unwrap() >= MIN_PI);
     }
 
