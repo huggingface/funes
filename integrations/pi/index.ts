@@ -155,11 +155,14 @@ export default function (pi: any) {
     name: "recall",
     label: "Recall",
     description:
-      "Recall decisions, rationale, and context from the user's past AI-assistant sessions. " +
-      "Returns ranked passages with provenance (timestamp, session, block type); each hit " +
-      "carries a `→ get <session_id> <turn_uuid>` line you can pass to `get` to read the full " +
-      "surrounding turns. Use it when a question concerns something decided or discussed in an " +
-      "earlier session rather than the current files, or before asserting the history of anything.",
+      "Recall decisions, rationale, context, and subject-matter findings from the user's past " +
+      "AI-assistant sessions. Returns ranked passages with provenance (timestamp, session, block " +
+      "type); each hit carries a `→ get <session_id> <turn_uuid>` line you can pass to `get` to " +
+      "read the full surrounding turns. Use it when a question concerns something decided or " +
+      "discussed in an earlier session rather than the current files, or before asserting the " +
+      "history of anything. Recall subject-matter too, not only decisions: before re-deriving how " +
+      "an API or system behaves — or anything a past session (often a research subagent) " +
+      "investigated — query the topic itself; recall surfaces those findings.",
     parameters: Type.Object({
       query: Type.String({ description: "Natural-language search query" }),
       k: Type.Optional(Type.Number({ description: "Number of results (default 8)" })),
