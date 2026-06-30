@@ -3,7 +3,7 @@
 //! `recall` reads the index (hybrid → rerank → recency); `index` builds/updates it
 //! from `~/.claude/projects/**/*.jsonl`. funes's home is `$FUNES_HOME` or `~/.funes`.
 
-use funes::{config, hub, index, mcp, pi, push, recall, scrub};
+use funes::{config, hermes, hub, index, mcp, opencode, pi, push, recall, scrub};
 
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand};
@@ -110,21 +110,25 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum InstallAgent {
-    /// pi: extract the bundled bridge extension and register it with pi (pi has no MCP client of
-    /// its own). Defaults to the current directory — drops it in `./.pi/extensions/`, which pi
-    /// auto-discovers, so funes is available to pi only when run from here. `-g` installs it
-    /// user-wide (every project).
+    /// pi: install funes as a pi extension (pi has no MCP client of its own).
     Pi {
-        /// Install user-wide (every project) instead of just the current directory.
+        /// Install user-wide instead of just the current directory.
         #[arg(short, long)]
         global: bool,
-        /// Extract to this dir and register it with `pi install`, instead of the current
-        /// directory's `.pi/extensions/`.
+        /// Extract the extension to this directory instead of the default.
         #[arg(long, value_name = "PATH")]
         dest: Option<PathBuf>,
-        /// Rewrite the bundled extension even when the on-disk copy already matches (a stale copy is refreshed automatically).
+        /// Reinstall even if the on-disk copy is already up to date.
         #[arg(long)]
         force: bool,
+    },
+    /// hermes: register funes as an MCP server (hermes has a native MCP client).
+    Hermes,
+    /// opencode: register funes as an MCP server.
+    Opencode {
+        /// Write the user config instead of the current directory.
+        #[arg(short, long)]
+        global: bool,
     },
 }
 
@@ -220,6 +224,8 @@ async fn main() -> Result<()> {
         Cmd::Mcp => mcp::run().await,
         Cmd::Install { agent } => match agent {
             InstallAgent::Pi { global, dest, force } => pi::install(global, dest, force),
+            InstallAgent::Hermes => hermes::install(),
+            InstallAgent::Opencode { global } => opencode::install(global),
         },
     }
 }
