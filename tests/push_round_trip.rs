@@ -3,6 +3,10 @@
 //! (append → capture Lance's native append), recall both markers back from the remote, then delete the
 //! scratch path. No real data.
 //!
+//! Also covers the no-overlap confirmation gate against the live remote: declining a first publish
+//! (the local index shares nothing with the empty remote) must abort and upload nothing, while an
+//! append to a store that already shares chunks must not be prompted at all.
+//!
 //! Skipped unless `HF_FUNES_TEST_TOKEN` is set (it provides `HF_TOKEN` for `Store::open` / the
 //! hf-hub client) AND `trufflehog` is on PATH (push's pre-publish gate is fail-closed). Needs a
 //! bigger thread stack than the default — lance + fastembed recurse deeply — so set
@@ -13,9 +17,11 @@
 
 use std::io::Write;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use funes::hub::Store;
+use funes::push::Confirm;
 use hf_hub::HFClient;
 
 const OWNER: &str = "optimum-internal-testing";
@@ -49,6 +55,25 @@ async fn recall_remote(uri: &str, query: &str) -> String {
         .unwrap_or_else(|e| format!("<recall error: {e}>"))
 }
 
+/// Push confirmations, recorded so the test can assert whether — and with what pending-chunk count —
+/// the no-overlap gate consulted the prompt. Safe as process globals: this binary runs one test.
+static PROMPTS: AtomicUsize = AtomicUsize::new(0);
+static LAST_CHUNKS: AtomicUsize = AtomicUsize::new(0);
+
+/// A confirmation that records the call and declines.
+fn decline(_label: &str, chunks: usize) -> bool {
+    PROMPTS.fetch_add(1, Ordering::SeqCst);
+    LAST_CHUNKS.store(chunks, Ordering::SeqCst);
+    false
+}
+
+/// A confirmation that records the call and accepts.
+fn accept(_label: &str, chunks: usize) -> bool {
+    PROMPTS.fetch_add(1, Ordering::SeqCst);
+    LAST_CHUNKS.store(chunks, Ordering::SeqCst);
+    true
+}
+
 #[tokio::test]
 async fn push_round_trip_create_append_recall() {
     let token = std::env::var("HF_FUNES_TEST_TOKEN")
@@ -77,10 +102,15 @@ async fn push_round_trip_create_append_recall() {
     write_session(src.path(), &[("s1", "SYNCSMOKE parsing transcripts into turns")]);
     funes::index::run_index(src.path(), false, None).await.unwrap();
 
-    // create (first publish) → grow → append (data-only, no reindex) → recall both. The appended
-    // turn is left unindexed, so recalling it back exercises Lance's brute-force fallback. Then
-    // force a reindex and recall it again, now served by the index.
-    let create = funes::push::run_push(Store::parse(&uri), false, funes::push::Confirm::Yes).await;
+    // Gate: the local index shares nothing with the (empty) remote, so a first publish is prompted.
+    // Declining must abort and upload nothing — the "don't publish to the wrong store" promise.
+    let declined = funes::push::run_push(Store::parse(&uri), false, Confirm::Ask(decline)).await;
+    let after_decline = funes::push::store_ids(&Store::parse(&uri)).await;
+
+    // create (first publish): accept the same gate → grow → append (data-only, no reindex) → recall
+    // both. The appended turn is left unindexed, so recalling it back exercises Lance's brute-force
+    // fallback. Then force a reindex and recall it again, now served by the index.
+    let create = funes::push::run_push(Store::parse(&uri), false, Confirm::Ask(accept)).await;
     write_session(
         src.path(),
         &[
@@ -89,12 +119,16 @@ async fn push_round_trip_create_append_recall() {
         ],
     );
     funes::index::run_index(src.path(), false, None).await.unwrap();
-    let append = funes::push::run_push(Store::parse(&uri), false, funes::push::Confirm::Yes).await;
+    // append: the grown local store now shares chunks with the remote, so the gate must NOT fire —
+    // pass a prompt that would decline and assert it is never consulted.
+    let prompts_before_append = PROMPTS.load(Ordering::SeqCst);
+    let append = funes::push::run_push(Store::parse(&uri), false, Confirm::Ask(decline)).await;
+    let prompts_after_append = PROMPTS.load(Ordering::SeqCst);
     let recall_base = recall_remote(&uri, "SYNCSMOKE parsing").await;
     let recall_new = recall_remote(&uri, "SYNCSMOKE2 continuation").await;
     // Nothing new to push, so this is a pure forced reindex: fold the unindexed appended turn into
     // the index as its own commit (capture_reindex + a separate commit), then recall it again.
-    let reindex = funes::push::run_push(Store::parse(&uri), true, funes::push::Confirm::Yes).await;
+    let reindex = funes::push::run_push(Store::parse(&uri), true, Confirm::Yes).await;
     let recall_reindexed = recall_remote(&uri, "SYNCSMOKE2 continuation").await;
     // The model id must travel with the store (stamped in the schema metadata, uploaded by push).
     let remote_model = match Store::parse(&uri).open().await {
@@ -111,6 +145,33 @@ async fn push_round_trip_create_append_recall() {
         .commit_message("cleanup funes push round-trip test")
         .send()
         .await;
+
+    // Gate: declining a first publish aborts and leaves the remote empty (nothing was uploaded).
+    let declined = match declined {
+        Ok(p) => panic!(
+            "declining the no-overlap gate must abort, but push reported: {}",
+            p.report
+        ),
+        Err(e) => e,
+    };
+    assert!(
+        declined.to_string().contains("aborted"),
+        "a declined push should report an abort, got: {declined}"
+    );
+    assert!(
+        after_decline.is_empty(),
+        "a declined push must upload nothing, but the remote holds {} chunk(s)",
+        after_decline.len()
+    );
+    assert!(
+        LAST_CHUNKS.load(Ordering::SeqCst) > 0,
+        "the confirmation should be told how many chunks are pending"
+    );
+    // Gate: a store that already shares chunks with the local index is not prompted.
+    assert_eq!(
+        prompts_after_append, prompts_before_append,
+        "an append to a store you already share chunks with must not trigger the confirmation"
+    );
 
     let create = create.expect("create push").report;
     assert!(create.contains("pushed"), "create should publish: {create}");
