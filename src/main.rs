@@ -7,6 +7,7 @@ use funes::{config, hermes, hub, index, mcp, opencode, pi, push, recall, scrub};
 
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand};
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -87,9 +88,16 @@ enum Cmd {
         /// URI. Pass `local` to detach and go back to the local index.
         store: String,
     },
-    /// Publish the local index's new chunks to the active remote. `index` only writes locally, so
-    /// this is the one step that uploads.
+    /// Publish the local index's new chunks to a remote store on the HF Hub — the active remote by
+    /// default, or `[store]` to publish elsewhere. `index` only writes locally, so this is the one
+    /// step that uploads. A publish to a store your index shares no chunks with (a first push, a new
+    /// host, or the wrong store) asks for confirmation first; `--yes` skips it.
     Push {
+        /// Store to publish to: `<org>/<repo>` or a full `hf://…` URI. Defaults to the active remote.
+        store: Option<String>,
+        /// Skip the confirmation when the target shares no chunks with your local index.
+        #[arg(short, long)]
+        yes: bool,
         /// Refresh the remote index after pushing (retrying on conflict) even if the unindexed
         /// backlog is below the auto-reindex threshold. With nothing new to push, reindex only.
         #[arg(long)]
@@ -201,11 +209,23 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Use { store } => use_store(store).await,
-        Cmd::Push { force_reindex } => {
-            let remote = config::load()
-                .remote
-                .ok_or_else(|| anyhow!("no active remote — attach one with `funes use <org>/<repo>`"))?;
-            match push::run_push(hub::Store::parse(&remote), force_reindex).await {
+        Cmd::Push {
+            store,
+            yes,
+            force_reindex,
+        } => {
+            let target = match store {
+                Some(s) => s,
+                None => config::load().remote.ok_or_else(|| {
+                    anyhow!("no active remote — attach one with `funes use <org>/<repo>`, or name a store: `funes push <org>/<repo>`")
+                })?,
+            };
+            let confirm = if yes {
+                push::Confirm::Yes
+            } else {
+                push::Confirm::Ask(prompt_new_store)
+            };
+            match push::run_push(hub::Store::parse(&target), force_reindex, confirm).await {
                 Ok(pushed) => {
                     print!("{}", pushed.report);
                     // Secrets held back everything — surface a non-zero exit so automation can react.
@@ -215,7 +235,7 @@ async fn main() -> Result<()> {
                     Ok(())
                 }
                 Err(e) if push::is_read_only(&e) => Err(anyhow!(
-                    "{remote} is read-only for your token — recall can read it, but publishing needs write access (check your HF token)"
+                    "{target} is read-only for your token — recall can read it, but publishing needs write access (check your HF token)"
                 )),
                 Err(e) => Err(e),
             }
@@ -292,6 +312,29 @@ fn attach_hint(local: usize, remote: usize, unpushed: usize) -> String {
         // No shared chunks with a populated remote: a fresh host of yours, or a store you only read.
         format!("local index: {local} chunks, remote: {remote} — no shared chunks: a new host of yours, or a store you only read. `funes push` to contribute, skip if it's not yours.")
     }
+}
+
+/// The push confirmation for a store the local index shares no chunks with. Fails closed (returns
+/// false) off a terminal, so an unattended push can't silently publish to the wrong store — there it
+/// must be re-run with `--yes`.
+fn prompt_new_store(label: &str, chunks: usize) -> bool {
+    if !std::io::stdin().is_terminal() {
+        eprintln!(
+            "refusing to push {chunks} chunk(s) to {label}: your local index shares no chunks with it \
+             (a first push, a new host, or the wrong store) — re-run with `--yes` to confirm."
+        );
+        return false;
+    }
+    eprint!(
+        "{label}: your local index shares no chunks with it — a first push here, a new host of yours, \
+         or the wrong store. Publish {chunks} chunk(s) anyway? [y/N] "
+    );
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    if std::io::stdin().read_line(&mut answer).is_err() {
+        return false;
+    }
+    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
 #[cfg(test)]

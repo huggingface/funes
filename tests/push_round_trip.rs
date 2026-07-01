@@ -80,7 +80,7 @@ async fn push_round_trip_create_append_recall() {
     // create (first publish) → grow → append (data-only, no reindex) → recall both. The appended
     // turn is left unindexed, so recalling it back exercises Lance's brute-force fallback. Then
     // force a reindex and recall it again, now served by the index.
-    let create = funes::push::run_push(Store::parse(&uri), false).await;
+    let create = funes::push::run_push(Store::parse(&uri), false, funes::push::Confirm::Yes).await;
     write_session(
         src.path(),
         &[
@@ -89,12 +89,12 @@ async fn push_round_trip_create_append_recall() {
         ],
     );
     funes::index::run_index(src.path(), false, None).await.unwrap();
-    let append = funes::push::run_push(Store::parse(&uri), false).await;
+    let append = funes::push::run_push(Store::parse(&uri), false, funes::push::Confirm::Yes).await;
     let recall_base = recall_remote(&uri, "SYNCSMOKE parsing").await;
     let recall_new = recall_remote(&uri, "SYNCSMOKE2 continuation").await;
     // Nothing new to push, so this is a pure forced reindex: fold the unindexed appended turn into
     // the index as its own commit (capture_reindex + a separate commit), then recall it again.
-    let reindex = funes::push::run_push(Store::parse(&uri), true).await;
+    let reindex = funes::push::run_push(Store::parse(&uri), true, funes::push::Confirm::Yes).await;
     let recall_reindexed = recall_remote(&uri, "SYNCSMOKE2 continuation").await;
     // The model id must travel with the store (stamped in the schema metadata, uploaded by push).
     let remote_model = match Store::parse(&uri).open().await {

@@ -142,9 +142,11 @@ changing your default, pass `--remote`:
 funes recall "..." --remote other-org/subject-kb
 ```
 
-`push` publishes your local index's new chunks to the active remote; `index` only ever writes
-locally, so uploading is always an explicit step. You never need the Hub to use funes locally —
-it's a tier you opt into.
+`push` publishes your local index's new chunks to the active remote — or to a store you name
+(`funes push other-org/kb`); `index` only ever writes locally, so uploading is always an explicit
+step. If the target shares no chunks with your local index — a first push, a new machine, or the
+wrong store — `push` asks to confirm before uploading anything (`--yes` skips it; off a terminal it
+refuses rather than guess). You never need the Hub to use funes locally — it's a tier you opt into.
 
 ## Building from source
 
