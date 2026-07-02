@@ -5,7 +5,7 @@
 //! `$FUNES_HOME` or `~/.funes`.
 
 use funes::harness::Harness;
-use funes::{claude, config, hermes, hub, index, mcp, opencode, pi, push, recall, scrub, update};
+use funes::{claude, codex, config, hermes, hub, index, mcp, opencode, pi, push, recall, scrub, update};
 
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand};
@@ -140,6 +140,8 @@ enum AddAgent {
         #[arg(short, long)]
         global: bool,
     },
+    /// codex: register funes as an MCP server with Codex (native MCP client, user scope).
+    Codex,
     /// pi: install funes as a pi extension (pi has no MCP client of its own).
     Pi {
         /// Install user-wide instead of just the current directory.
@@ -299,6 +301,7 @@ async fn main() -> Result<()> {
         Cmd::Mcp => mcp::run().await,
         Cmd::Add { agent } => match agent {
             AddAgent::Claude { global } => claude::install(global),
+            AddAgent::Codex => codex::install(),
             AddAgent::Pi { global, dest, force } => pi::install(global, dest, force),
             AddAgent::Hermes => hermes::install(),
             AddAgent::Opencode { global } => opencode::install(global),

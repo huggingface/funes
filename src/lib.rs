@@ -15,6 +15,7 @@ pub mod capture_store;
 pub mod chunk;
 pub mod claude;
 pub mod claude_traces;
+pub mod codex;
 pub mod codex_traces;
 pub mod config;
 pub mod dataset;

@@ -73,7 +73,7 @@ funes add claude
 
 Your agent gets `recall` and `get` as tools, plus instructions on when to use them.
 
-funes can be added to: Claude, Pi, Hermes, OpenCode
+funes can be added to: Claude, Codex, Pi, Hermes, OpenCode
 
 **3. Ask your agent — and let it recall.**
 
