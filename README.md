@@ -82,6 +82,12 @@ anything. `funes status` tells you whether you're reading that built-in guide or
 
 To build it yourself instead, see [Building from source](#building-from-source).
 
+Once installed, `funes update` replaces the binary in place with the latest release for your
+platform (it downloads over itself atomically, so it's safe to run anywhere funes lives; pass
+`--force` to reinstall the current version). `funes status` warns when a newer release is out.
+Agents already running (Claude Code, Cursor, pi) keep using the old binary until you restart
+them or start a new session.
+
 ## Getting started
 
 > `funes` is a single Rust binary (`lance` + `fastembed-rs`, CPU). `index` writes; `recall`

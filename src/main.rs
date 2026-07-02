@@ -3,7 +3,7 @@
 //! `recall` reads the index (hybrid → rerank → recency); `index` builds/updates it
 //! from `~/.claude/projects/**/*.jsonl`. funes's home is `$FUNES_HOME` or `~/.funes`.
 
-use funes::{config, hermes, hub, index, mcp, opencode, pi, push, recall, scrub};
+use funes::{config, hermes, hub, index, mcp, opencode, pi, push, recall, scrub, update};
 
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand};
@@ -105,6 +105,13 @@ enum Cmd {
     /// flagged by an updated ruleset); needs no source transcript. Cleans the local store only: it
     /// does NOT scrub an already-published remote, which the push gate can only stop adding to.
     Scrub,
+    /// Update funes in place: download the latest release binary for this platform and replace the
+    /// running executable. Idempotent — `--force` reinstalls even when already up to date.
+    Update {
+        /// Reinstall the latest binary even if this build is already up to date.
+        #[arg(short, long)]
+        force: bool,
+    },
     /// Run as an MCP server over stdio (for Claude Code, Cursor, …).
     Mcp,
     /// Install funes into a coding agent.
@@ -204,6 +211,12 @@ async fn main() -> Result<()> {
         }
         Cmd::Status { store } => {
             print!("{}", recall::status(store.resolve()).await?);
+            // Show the status body before the (bounded, best-effort) update check, so a slow or
+            // offline Hub can't delay the useful output.
+            std::io::stdout().flush().ok();
+            if let Some(notice) = update::upgrade_notice().await {
+                print!("{notice}");
+            }
             Ok(())
         }
         Cmd::Use { store } => use_store(store).await,
@@ -239,6 +252,7 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Scrub => scrub::run().await,
+        Cmd::Update { force } => update::run(force).await,
         Cmd::Mcp => mcp::run().await,
         Cmd::Install { agent } => match agent {
             InstallAgent::Pi { global, dest, force } => pi::install(global, dest, force),
