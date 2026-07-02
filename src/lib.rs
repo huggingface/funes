@@ -29,6 +29,7 @@ pub mod jsonl;
 pub mod mcp;
 pub mod opencode;
 pub mod pi;
+pub mod pi_traces;
 pub mod push;
 pub mod recall;
 pub mod scan;

@@ -91,6 +91,28 @@ fn parse_real_codex_session() {
 }
 
 #[test]
+fn parse_real_pi_session() {
+    let p = fixture("pi_session.jsonl");
+    let turns = funes::pi_traces::turns_from_jsonl_file(&p, "sess", "proj").expect("parse pi");
+    assert!(!turns.is_empty());
+    for want in ["text", "thinking", "tool_use", "tool_result"] {
+        assert!(
+            block_kinds(&turns).contains(want),
+            "pi fixture missing {want}: {:?}",
+            block_kinds(&turns)
+        );
+    }
+    // Control lines (session/model_change/thinking_level_change) produce no turn; a result is `tool`.
+    assert!(roles(&turns).is_subset(&BTreeSet::from(["user", "assistant", "tool"])));
+    matched_results_are_named(&turns);
+    // Pi uses the native line `id` as `turn_uuid`; stable across a re-parse.
+    ids_are_stable(
+        &turns,
+        &funes::pi_traces::turns_from_jsonl_file(&p, "sess", "proj").unwrap(),
+    );
+}
+
+#[test]
 fn parse_real_claude_session() {
     let p = fixture("claude_session.jsonl");
     let turns = funes::claude_traces::turns_from_jsonl_file(&p, "sess", "proj").expect("parse claude");
