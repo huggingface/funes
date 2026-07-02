@@ -26,3 +26,4 @@ pub mod scan;
 pub mod scrub;
 pub mod source;
 pub mod trace;
+pub mod update;

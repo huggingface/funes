@@ -9,6 +9,7 @@
 //! extract elsewhere and register the path with `pi install`.
 
 use crate::dataset;
+use crate::update::parse_semver;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -116,21 +117,6 @@ fn extract(dir: &Path, force: bool) -> Result<()> {
     std::fs::write(dir.join("index.ts"), INDEX_TS).context("writing index.ts")?;
     std::fs::write(dir.join("package.json"), PACKAGE_JSON).context("writing package.json")?;
     Ok(())
-}
-
-/// Parse a leading `MAJOR.MINOR.PATCH` from pi's `--version` output (tolerates a `v`
-/// prefix, extra tokens, and a pre-release/build suffix on the patch).
-fn parse_semver(s: &str) -> Option<(u32, u32, u32)> {
-    let tok = s.trim().trim_start_matches('v').split_whitespace().next()?;
-    let mut parts = tok.split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next().unwrap_or("0").parse().ok()?;
-    let patch = parts
-        .next()
-        .map(|p| p.chars().take_while(|c| c.is_ascii_digit()).collect::<String>())
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(0);
-    Some((major, minor, patch))
 }
 
 #[cfg(test)]

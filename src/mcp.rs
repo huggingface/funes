@@ -97,6 +97,8 @@ impl Funes {
 
     #[tool(description = "Show funes index statistics (chunk count and store).")]
     async fn status(&self) -> String {
+        // No update check here: it needs the network, and the "update available" notice belongs
+        // on the human-facing CLI `funes status`, not on this hot, otherwise-local tool path.
         recall::status(Store::resolve(None))
             .await
             .unwrap_or_else(|e| format!("status error: {e}"))
