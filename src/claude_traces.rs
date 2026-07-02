@@ -2,28 +2,10 @@
 //! model. This is the Claude Code source parser; the model itself lives in `trace.rs`.
 
 use serde_json::Value;
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use walkdir::WalkDir;
+use std::path::Path;
 
+use crate::jsonl;
 use crate::trace::{Block, Turn};
-
-/// All `*.jsonl` under `root`, recursively, sorted by path.
-pub fn iter_jsonl_files(root: &Path) -> Vec<PathBuf> {
-    let mut files: Vec<PathBuf> = WalkDir::new(root)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .map(|e| e.into_path())
-        .filter(|p| p.extension().map(|x| x == "jsonl").unwrap_or(false))
-        .collect();
-    files.sort();
-    files
-}
-
-pub fn session_id_of(p: &Path) -> String {
-    p.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string()
-}
 
 /// The path segment right after a `projects` dir, else the parent dir name.
 pub fn project_of(p: &Path) -> String {
@@ -141,18 +123,7 @@ fn normalize_blocks(content: &Value) -> Vec<Block> {
 }
 
 pub fn turns_from_jsonl_file(p: &Path, session_id: &str, project: &str) -> std::io::Result<Vec<Turn>> {
-    let raw = std::fs::read(p)?;
-    let content = String::from_utf8_lossy(&raw);
-    let mut records: Vec<Value> = Vec::new();
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if let Ok(v) = serde_json::from_str::<Value>(line) {
-            records.push(v);
-        }
-    }
+    let records = jsonl::read_jsonl_records(p)?;
 
     let mut turns = Vec::new();
     let mut seq = 0i64; // index among RETAINED turns, file order
@@ -190,28 +161,7 @@ pub fn turns_from_jsonl_file(p: &Path, session_id: &str, project: &str) -> std::
         seq += 1;
     }
 
-    // tool_use_id -> tool_name correlation, scoped to this file (last write wins)
-    let mut tool_by_id: HashMap<String, Option<String>> = HashMap::new();
-    for t in &turns {
-        for b in &t.blocks {
-            if b.block_type == "tool_use" {
-                if let Some(id) = &b.tool_use_id {
-                    tool_by_id.insert(id.clone(), b.tool_name.clone());
-                }
-            }
-        }
-    }
-    for t in &mut turns {
-        for b in &mut t.blocks {
-            if b.block_type == "tool_result" && b.tool_name.is_none() {
-                if let Some(id) = &b.tool_use_id {
-                    if let Some(name) = tool_by_id.get(id) {
-                        b.tool_name = name.clone();
-                    }
-                }
-            }
-        }
-    }
+    jsonl::backfill_tool_names(&mut turns);
     Ok(turns)
 }
 
@@ -230,11 +180,6 @@ mod tests {
     fn project_of_falls_back_to_parent_dir() {
         let p = Path::new("/tmp/some-dir/abc.jsonl");
         assert_eq!(project_of(p), "some-dir");
-    }
-
-    #[test]
-    fn session_id_is_file_stem() {
-        assert_eq!(session_id_of(Path::new("/x/y/71626b12.jsonl")), "71626b12");
     }
 
     fn write_jsonl(lines: &[&str]) -> tempfile::NamedTempFile {

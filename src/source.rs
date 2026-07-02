@@ -9,6 +9,7 @@
 
 use crate::claude_traces;
 use crate::hf_traces;
+use crate::jsonl;
 use crate::trace::Turn;
 
 use anyhow::Result;
@@ -85,7 +86,7 @@ impl TraceSource for JsonlTree {
     }
 
     fn units(&self) -> Result<Vec<Unit>> {
-        let mut files = claude_traces::iter_jsonl_files(&self.root);
+        let mut files = jsonl::iter_jsonl_files(&self.root);
         if let Some(n) = self.limit {
             files.truncate(n);
         }
@@ -100,7 +101,7 @@ impl TraceSource for JsonlTree {
 
     fn read(&self, unit: &Unit) -> Result<Vec<Turn>> {
         let p = Path::new(&unit.key);
-        let sid = claude_traces::session_id_of(p);
+        let sid = jsonl::session_id_of(p);
         let project = claude_traces::project_of(p);
         Ok(claude_traces::turns_from_jsonl_file(p, &sid, &project)?)
     }
