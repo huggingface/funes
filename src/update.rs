@@ -99,9 +99,10 @@ pub async fn run(force: bool) -> Result<()> {
     Ok(())
 }
 
-/// Make the staged binary executable, run it once to confirm it executes on this platform, then
-/// atomically rename it over `exe`. Returns the version the new binary reports. A truncated,
-/// corrupt, or wrong-arch download fails the verify step and never lands on PATH.
+/// Make the staged binary runnable, run it once to confirm it executes on this platform, then
+/// atomically rename it over `exe` with the existing binary's permissions. Returns the version the
+/// new binary reports. A truncated, corrupt, or wrong-arch download fails the verify step and
+/// never lands on PATH.
 fn install_over(staged: &Path, exe: &Path) -> Result<String> {
     std::fs::set_permissions(staged, Permissions::from_mode(0o755)).context("making the new binary executable")?;
 
@@ -114,6 +115,13 @@ fn install_over(staged: &Path, exe: &Path) -> Result<String> {
         .trim_start_matches("funes")
         .trim()
         .to_string();
+
+    // Preserve the existing binary's mode so an update never broadens it (e.g. 0700 → 0755); fall
+    // back to 0755 when there's no existing binary to copy the mode from.
+    let mode = std::fs::metadata(exe)
+        .map(|m| m.permissions().mode() & 0o777)
+        .unwrap_or(0o755);
+    std::fs::set_permissions(staged, Permissions::from_mode(mode)).context("setting the new binary's permissions")?;
 
     // Same-filesystem rename (staged sits in a temp dir beside exe), so this is atomic. The live
     // process holds the old inode; replacing the path it launched from is safe.
@@ -223,23 +231,30 @@ mod tests {
 
     #[test]
     fn install_over_verifies_then_atomically_replaces() {
+        use std::fs::Permissions;
+        use std::os::unix::fs::PermissionsExt;
+
         // A stand-in "binary" that reports a version, like `funes --version` would.
         let dir = tempfile::tempdir().unwrap();
         let staged = dir.path().join("staged");
         std::fs::write(&staged, "#!/bin/sh\necho 'funes 9.9.9'\n").unwrap();
         let exe = dir.path().join("funes");
         std::fs::write(&exe, "old binary").unwrap();
+        // The existing binary is user-only (0700): the update must preserve this, not broaden it.
+        std::fs::set_permissions(&exe, Permissions::from_mode(0o700)).unwrap();
 
-        // install_over makes it executable, runs it to verify, and renames it over the target.
+        // install_over makes it runnable, runs it to verify, and renames it over the target.
         let installed = install_over(&staged, &exe).unwrap();
-        assert_eq!(installed, "9.9.9"); // the reported version, `funes` prefix stripped (verify ran it)
+        assert_eq!(installed, "9.9.9"); // reported version, `funes` prefix stripped (so verify ran it)
         assert!(!staged.exists()); // staged was moved, not copied
-                                   // the target now holds the staged binary (rename succeeded); compared by content rather
-                                   // than a second exec, which would reintroduce the fork/exec race under parallel tests
+
+        // Compared by content, not a second exec (which would reintroduce the fork/exec race under
+        // parallel tests): the target now holds the staged binary, with the preserved 0700 mode.
         assert_eq!(
             std::fs::read_to_string(&exe).unwrap(),
             "#!/bin/sh\necho 'funes 9.9.9'\n"
         );
+        assert_eq!(std::fs::metadata(&exe).unwrap().permissions().mode() & 0o777, 0o700);
     }
 
     #[test]
