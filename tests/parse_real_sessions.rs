@@ -64,6 +64,33 @@ fn ids_are_stable(turns: &[Turn], reparse: &[Turn]) {
 }
 
 #[test]
+fn parse_real_codex_session() {
+    let p = fixture("codex_session.jsonl");
+    let turns = funes::codex_traces::turns_from_jsonl_file(&p, "sess", "proj").expect("parse codex");
+    assert!(!turns.is_empty());
+    // The full block vocabulary is exercised on real records.
+    for want in ["text", "thinking", "tool_use", "tool_result"] {
+        assert!(
+            block_kinds(&turns).contains(want),
+            "codex fixture missing {want}: {:?}",
+            block_kinds(&turns)
+        );
+    }
+    // Codex tool results carry the `tool` role; the `session_meta` line produced no turn.
+    assert!(roles(&turns).is_subset(&BTreeSet::from(["user", "assistant", "tool", "developer"])));
+    assert!(roles(&turns).contains("tool"));
+    matched_results_are_named(&turns);
+    // Codex synthesizes stable ids as `session_id-seq`.
+    for (i, t) in turns.iter().enumerate() {
+        assert_eq!(t.turn_uuid, format!("sess-{i}"));
+    }
+    ids_are_stable(
+        &turns,
+        &funes::codex_traces::turns_from_jsonl_file(&p, "sess", "proj").unwrap(),
+    );
+}
+
+#[test]
 fn parse_real_claude_session() {
     let p = fixture("claude_session.jsonl");
     let turns = funes::claude_traces::turns_from_jsonl_file(&p, "sess", "proj").expect("parse claude");
