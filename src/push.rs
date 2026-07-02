@@ -103,11 +103,35 @@ impl From<String> for Pushed {
     }
 }
 
+/// How a push handles a target the local index shares no chunks with.
+pub enum Confirm {
+    /// Proceed without asking (`--yes`, or a caller that has already established intent, e.g. tests).
+    Yes,
+    /// Ask before publishing. Called with the target label and the number of chunks to be pushed.
+    Ask(fn(&str, usize) -> bool),
+}
+
+impl Confirm {
+    /// Whether the push may proceed to a share-nothing target.
+    fn proceed(self, label: &str, chunks: usize) -> bool {
+        match self {
+            Confirm::Yes => true,
+            Confirm::Ask(ask) => ask(label, chunks),
+        }
+    }
+}
+
+/// Whether a push must be confirmed first: there are rows to publish and the local index shares
+/// no chunk with the remote — a first publish, a new host of yours, or the wrong store.
+fn must_confirm(local: usize, to_push: usize) -> bool {
+    to_push > 0 && to_push == local
+}
+
 /// Publish the local store's new chunks to `target` (a remote store on the HF Hub). With
 /// `force_reindex`, refresh the remote index after the data commit (retrying until it lands) even
 /// if the unindexed backlog is below [`REINDEX_THRESHOLD`]; with no new chunks pending it's a pure
-/// index refresh.
-pub async fn run_push(target: Store, force_reindex: bool) -> Result<Pushed> {
+/// index refresh. `confirm` gates a publish to a store the local index shares no chunks with.
+pub async fn run_push(target: Store, force_reindex: bool, confirm: Confirm) -> Result<Pushed> {
     let uri = match &target {
         Store::Remote { uri } => uri.clone(),
         Store::Local { .. } => {
@@ -142,9 +166,16 @@ pub async fn run_push(target: Store, force_reindex: bool) -> Result<Pushed> {
         return Ok(format!("{}: already up to date ({} chunks)\n", target.label(), remote_ids.len()).into());
     }
 
-    // 2. HF repo handle (every write path below needs it).
+    // 2. HF repo handle. Resolve the target and token before the confirmation, so a bad URI or a
+    // missing token fails before we prompt for one.
     let (owner, name, prefix) = hub::parse_hf(&uri)?;
     let token = hub::hf_token().context("no HF token (set HF_TOKEN) — required to push")?;
+
+    // When required, ask for confirmation before publishing.
+    if must_confirm(local_ids.len(), to_push.len()) && !confirm.proceed(&target.label(), to_push.len()) {
+        bail!("push aborted");
+    }
+
     let client = HFClient::builder()
         .token(token.clone())
         .build()
@@ -394,6 +425,18 @@ async fn reindex_auto(
 mod tests {
     use super::*;
     use crate::index;
+
+    #[test]
+    fn must_confirm_only_when_overlap_is_empty_and_there_is_work() {
+        // First publish / fully disjoint (every local chunk is new to the remote) → confirm.
+        assert!(must_confirm(5, 5));
+        assert!(must_confirm(1, 1));
+        // Some overlap (fewer to push than the local total) → no prompt, it's a store you add to.
+        assert!(!must_confirm(5, 3));
+        // Nothing to push (up to date, or a reindex-only run) → never prompt, even with 0 overlap.
+        assert!(!must_confirm(5, 0));
+        assert!(!must_confirm(0, 0));
+    }
 
     #[test]
     fn is_read_only_matches_the_type_not_the_message() {
