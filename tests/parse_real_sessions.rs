@@ -66,7 +66,7 @@ fn ids_are_stable(turns: &[Turn], reparse: &[Turn]) {
 #[test]
 fn parse_real_codex_session() {
     let p = fixture("codex_session.jsonl");
-    let turns = funes::codex_traces::turns_from_jsonl_file(&p, "sess", "proj").expect("parse codex");
+    let turns = funes::codex_traces::turns_from_jsonl_file(&p, "proj").expect("parse codex");
     assert!(!turns.is_empty());
     // The full block vocabulary is exercised on real records.
     for want in ["text", "thinking", "tool_use", "tool_result"] {
@@ -80,14 +80,13 @@ fn parse_real_codex_session() {
     assert!(roles(&turns).is_subset(&BTreeSet::from(["user", "assistant", "tool", "developer"])));
     assert!(roles(&turns).contains("tool"));
     matched_results_are_named(&turns);
-    // Codex synthesizes stable ids as `session_id-seq`.
+    // Codex synthesizes `<session_id>-<seq>`; the session id (from the session_meta line) is
+    // constant across the file, so every turn_uuid shares one prefix and ends in its seq.
+    let (prefix, _) = turns[0].turn_uuid.rsplit_once('-').expect("turn_uuid is <id>-<seq>");
     for (i, t) in turns.iter().enumerate() {
-        assert_eq!(t.turn_uuid, format!("sess-{i}"));
+        assert_eq!(t.turn_uuid, format!("{prefix}-{i}"));
     }
-    ids_are_stable(
-        &turns,
-        &funes::codex_traces::turns_from_jsonl_file(&p, "sess", "proj").unwrap(),
-    );
+    ids_are_stable(&turns, &funes::codex_traces::turns_from_jsonl_file(&p, "proj").unwrap());
 }
 
 #[test]

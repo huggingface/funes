@@ -119,7 +119,7 @@ fn resolve_with(spec: Option<String>, active: Option<String>) -> Store {
 }
 
 /// `<org>/<repo>[/…]` with no scheme and not a path (`/` `.` `~`) → an HF dataset shorthand.
-fn is_remote_shorthand(spec: &str) -> bool {
+pub fn is_remote_shorthand(spec: &str) -> bool {
     !spec.starts_with(['/', '.', '~']) && spec.contains('/')
 }
 

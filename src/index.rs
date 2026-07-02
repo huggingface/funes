@@ -6,6 +6,7 @@
 //! and within a re-read unit add only chunks whose id is new — a grown session (the same memory)
 //! contributes just its new turns, nothing is re-embedded or deleted.
 
+use crate::harness::Harness;
 use crate::{chunk, dataset, scan, source, trace};
 use anyhow::{anyhow, Result};
 use arrow_array::types::Float32Type;
@@ -15,7 +16,7 @@ use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use lance::dataset::{Dataset, WriteParams};
 use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -257,10 +258,16 @@ impl Indexer<'_> {
     }
 }
 
-/// Build/update the local index from `path` (a JSONL tree, or another `TraceSource`). Writes only
-/// locally — publishing is the separate `push`. `max_sessions` caps how many sessions are indexed
-/// (`None` = all) — the CLI passes `None`; a benchmark passes a cap to bound build time.
-pub async fn run_index(path: &Path, no_thinking: bool, max_sessions: Option<usize>) -> Result<()> {
+/// Build/update the local index from one or more source roots — each `(path, harness override)`
+/// where `None` auto-detects. All roots share one store, embedder, and `state.json` (keyed by
+/// absolute file path, so cross-root incremental works). Writes only locally — publishing is the
+/// separate `push`. `max_sessions` caps sessions *per root* (`None` = all) — the CLI passes `None`;
+/// a benchmark passes a cap to bound build time.
+pub async fn run_index_roots(
+    roots: &[(PathBuf, Option<Harness>)],
+    no_thinking: bool,
+    max_sessions: Option<usize>,
+) -> Result<()> {
     let include_thinking = !no_thinking;
     let dir = dataset::funes_dir();
     std::fs::create_dir_all(&dir)?;
@@ -299,15 +306,6 @@ pub async fn run_index(path: &Path, no_thinking: bool, max_sessions: Option<usiz
     };
     let scanner = scanner.as_ref().map(|s| s as &dyn scan::SecretScanner);
 
-    let src = source::open(path, max_sessions);
-    let units = src.units()?;
-    let total = units.len();
-    let cached = units
-        .iter()
-        .filter(|u| u.signature.as_ref().is_some_and(|s| state.get(&u.key) == Some(s)))
-        .count();
-    eprintln!("{} — {} to index, {cached} cached", src.describe(), total - cached);
-
     let mut indexer = Indexer {
         uri: &uri,
         ds,
@@ -316,37 +314,48 @@ pub async fn run_index(path: &Path, no_thinking: bool, max_sessions: Option<usiz
         include_thinking,
     };
     let (mut n_sessions, mut n_skipped, mut n_chunks) = (0u64, 0u64, 0u64);
-    for (idx, unit) in units.iter().enumerate() {
-        // Skip a unit only if it carries a signature that still matches what's recorded; a
-        // signature-less (bulk) unit has none, so it's never skipped here — always re-read (its
-        // chunk-id dedup makes a re-run a no-op).
-        if let Some(sig) = &unit.signature {
-            if state.get(&unit.key) == Some(sig) {
-                n_skipped += 1;
-                continue;
-            }
-        }
-        let progress = format!("[{}/{}]", idx + 1, total);
-        let turns = match src.read(unit) {
-            Ok(t) => t,
-            // Best-effort sources retry a failed read next run (no state recorded); a fatal source
-            // aborts rather than silently dropping data.
-            Err(e) if !src.fatal_on_read_error() => {
-                eprintln!("{progress} {} — read failed, skipping: {e}", unit.key);
-                continue;
-            }
-            Err(e) => return Err(e),
-        };
-        let (sessions, added) = indexer.index_unit(&progress, &unit.key, turns).await?;
-        n_sessions += sessions;
-        n_chunks += added;
+    for (path, harness) in roots {
+        let src = source::open_with_harness(path, max_sessions, *harness);
+        let units = src.units()?;
+        let total = units.len();
+        let cached = units
+            .iter()
+            .filter(|u| u.signature.as_ref().is_some_and(|s| state.get(&u.key) == Some(s)))
+            .count();
+        eprintln!("{} — {} to index, {cached} cached", src.describe(), total - cached);
 
-        // Record state only for signed units, even when they produced no chunks ("remembered when
-        // empty"), and persist after each so an interrupted run is resumable. Signature-less (bulk)
-        // units are never recorded: a re-run re-reads and dedups to a no-op.
-        if let Some(sig) = &unit.signature {
-            state.insert(unit.key.clone(), sig.clone());
-            std::fs::write(&state_path, serde_json::to_string_pretty(&state)?)?;
+        for (idx, unit) in units.iter().enumerate() {
+            // Skip a unit only if it carries a signature that still matches what's recorded; a
+            // signature-less (bulk) unit has none, so it's never skipped here — always re-read (its
+            // chunk-id dedup makes a re-run a no-op).
+            if let Some(sig) = &unit.signature {
+                if state.get(&unit.key) == Some(sig) {
+                    n_skipped += 1;
+                    continue;
+                }
+            }
+            let progress = format!("[{}/{}]", idx + 1, total);
+            let turns = match src.read(unit) {
+                Ok(t) => t,
+                // Best-effort sources retry a failed read next run (no state recorded); a fatal
+                // source aborts rather than silently dropping data.
+                Err(e) if !src.fatal_on_read_error() => {
+                    eprintln!("{progress} {} — read failed, skipping: {e}", unit.key);
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            let (sessions, added) = indexer.index_unit(&progress, &unit.key, turns).await?;
+            n_sessions += sessions;
+            n_chunks += added;
+
+            // Record state only for signed units, even when they produced no chunks ("remembered
+            // when empty"), and persist after each so an interrupted run is resumable.
+            // Signature-less (bulk) units are never recorded: a re-run re-reads and dedups to a no-op.
+            if let Some(sig) = &unit.signature {
+                state.insert(unit.key.clone(), sig.clone());
+                std::fs::write(&state_path, serde_json::to_string_pretty(&state)?)?;
+            }
         }
     }
 
@@ -372,6 +381,12 @@ pub async fn run_index(path: &Path, no_thinking: bool, max_sessions: Option<usiz
     println!("indexed sessions={n_sessions} skipped={n_skipped} chunks={n_chunks}");
 
     Ok(())
+}
+
+/// Build/update the local index from a single source root, auto-detecting its harness — a thin
+/// convenience over [`run_index_roots`] for a single path (tests, benchmarks, one explicit path).
+pub async fn run_index(path: &Path, no_thinking: bool, max_sessions: Option<usize>) -> Result<()> {
+    run_index_roots(&[(path.to_path_buf(), None)], no_thinking, max_sessions).await
 }
 
 #[cfg(test)]

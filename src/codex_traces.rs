@@ -2,7 +2,8 @@
 //! [`crate::trace`] turn/block model. Codex writes the OpenAI Responses "rollout" format: one
 //! `{timestamp, type, payload}` envelope per line. Only `response_item` lines carry conversation
 //! (`session_meta`/`event_msg`/`turn_context` are session metadata and telemetry); each retained
-//! item becomes its own turn, keyed `session_id-seq` so re-reads of a grown log stay id-stable.
+//! item becomes its own turn, keyed `<session_id>-<seq>` (the id from the `session_meta` line) so
+//! re-reads of a grown log stay id-stable.
 
 use serde_json::{Map, Value};
 use std::path::Path;
@@ -10,8 +11,11 @@ use std::path::Path;
 use crate::jsonl;
 use crate::trace::{Block, Turn};
 
-pub fn turns_from_jsonl_file(p: &Path, session_id: &str, project: &str) -> std::io::Result<Vec<Turn>> {
+pub fn turns_from_jsonl_file(p: &Path, project: &str) -> std::io::Result<Vec<Turn>> {
     let records = jsonl::read_jsonl_records(p)?;
+    // Rollout filenames (`rollout-<ts>-<uuid>.jsonl`) aren't a clean session id; take it from the
+    // `session_meta` line in this same pass, else fall back to the file stem.
+    let session_id = session_meta_id(&records).unwrap_or_else(|| jsonl::session_id_of(p));
 
     let mut turns = Vec::new();
     let mut seq = 0i64; // index among RETAINED turns, file order
@@ -44,7 +48,7 @@ pub fn turns_from_jsonl_file(p: &Path, session_id: &str, project: &str) -> std::
             continue;
         }
         turns.push(Turn {
-            session_id: session_id.to_string(),
+            session_id: session_id.clone(),
             project: project.to_string(),
             turn_uuid: format!("{session_id}-{seq}"),
             parent_uuid: None,
@@ -59,6 +63,17 @@ pub fn turns_from_jsonl_file(p: &Path, session_id: &str, project: &str) -> std::
 
     jsonl::backfill_tool_names(&mut turns);
     Ok(turns)
+}
+
+/// The session id from the `session_meta` line's `payload.id`, if present.
+fn session_meta_id(records: &[Value]) -> Option<String> {
+    records.iter().find_map(|rec| {
+        if rec.get("type").and_then(Value::as_str) == Some("session_meta") {
+            rec.pointer("/payload/id").and_then(Value::as_str).map(str::to_string)
+        } else {
+            None
+        }
+    })
 }
 
 /// A non-blank text as a `text` block, else `None`.
@@ -199,7 +214,7 @@ mod tests {
             "",
             r#"{"type":"response_item","timestamp":"t3","payload":{"type":"function_call_output","call_id":"call_1","output":"file.txt"}}"#,
         ]);
-        let turns = turns_from_jsonl_file(f.path(), "sess", "proj").unwrap();
+        let turns = turns_from_jsonl_file(f.path(), "proj").unwrap();
         assert_eq!(turns.len(), 3);
 
         let think = &turns[0];
@@ -237,7 +252,7 @@ mod tests {
             r#"{"type":"response_item","timestamp":"t","payload":{"type":"custom_tool_call","name":"apply_patch","input":"*** Begin Patch","call_id":"c2"}}"#,
             r#"{"type":"response_item","timestamp":"t","payload":{"type":"custom_tool_call_output","call_id":"c2","output":"done"}}"#,
         ]);
-        let turns = turns_from_jsonl_file(f.path(), "s", "p").unwrap();
+        let turns = turns_from_jsonl_file(f.path(), "p").unwrap();
         assert_eq!(turns.len(), 2);
         // The raw `input` string is the tool_use text (no `arguments` field).
         assert_eq!(turns[0].blocks[0].block_type, "tool_use");
@@ -252,7 +267,7 @@ mod tests {
         let f = write_jsonl(&[
             r#"{"type":"response_item","timestamp":"t","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"},{"type":"input_text","text":"world"}]}}"#,
         ]);
-        let turns = turns_from_jsonl_file(f.path(), "s", "p").unwrap();
+        let turns = turns_from_jsonl_file(f.path(), "p").unwrap();
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].role, "user");
         let kinds: Vec<&str> = turns[0].blocks.iter().map(|b| b.block_type.as_str()).collect();
@@ -264,11 +279,12 @@ mod tests {
     #[test]
     fn blank_reasoning_and_empty_output_are_dropped_seq_does_not_advance() {
         let f = write_jsonl(&[
+            r#"{"type":"session_meta","timestamp":"t","payload":{"id":"s"}}"#,
             r#"{"type":"response_item","timestamp":"t","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"   "}]}}"#,
             r#"{"type":"response_item","timestamp":"t","payload":{"type":"function_call_output","call_id":"c","output":""}}"#,
             r#"{"type":"response_item","timestamp":"t","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"real"}]}}"#,
         ]);
-        let turns = turns_from_jsonl_file(f.path(), "s", "p").unwrap();
+        let turns = turns_from_jsonl_file(f.path(), "p").unwrap();
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].seq, 0);
         assert_eq!(turns[0].turn_uuid, "s-0");
@@ -283,7 +299,7 @@ mod tests {
             "this is not json{",
             r#"{"type":"response_item","timestamp":"t","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}}"#,
         ]);
-        let turns = turns_from_jsonl_file(f.path(), "s", "p").unwrap();
+        let turns = turns_from_jsonl_file(f.path(), "p").unwrap();
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].role, "assistant");
         assert_eq!(turns[0].blocks[0].text, "hi");
@@ -292,6 +308,6 @@ mod tests {
     #[test]
     fn missing_file_is_an_error_not_empty() {
         // A read failure must surface as Err so the indexer skips it without recording state.
-        assert!(turns_from_jsonl_file(Path::new("/no/such/file.jsonl"), "s", "p").is_err());
+        assert!(turns_from_jsonl_file(Path::new("/no/such/file.jsonl"), "p").is_err());
     }
 }

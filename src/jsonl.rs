@@ -4,6 +4,7 @@
 
 use serde_json::Value;
 use std::collections::HashMap;
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 use walkdir::WalkDir;
@@ -46,6 +47,24 @@ pub fn read_jsonl_records(p: &Path) -> std::io::Result<Vec<Value>> {
         }
     }
     Ok(records)
+}
+
+/// The first non-blank, parseable JSON record of a `*.jsonl` file — a cheap line-1 peek (for
+/// harness detection and Codex's session id) that stops reading after the first record rather than
+/// loading the whole file.
+pub fn first_record(p: &Path) -> Option<Value> {
+    let file = std::fs::File::open(p).ok()?;
+    for line in std::io::BufReader::new(file).lines() {
+        let line = line.ok()?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Ok(v) = serde_json::from_str::<Value>(line) {
+            return Some(v);
+        }
+    }
+    None
 }
 
 /// Fill each `tool_result` block's `tool_name` from the `tool_use` with the same `tool_use_id`,

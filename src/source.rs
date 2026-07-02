@@ -8,8 +8,11 @@
 //! commit). JSONL is one session per file; a parquet dataset is many sessions in one file.
 
 use crate::claude_traces;
+use crate::codex_traces;
+use crate::harness::Harness;
 use crate::hf_traces;
 use crate::jsonl;
+use crate::pi_traces;
 use crate::trace::Turn;
 
 use anyhow::Result;
@@ -46,9 +49,15 @@ pub trait TraceSource {
 }
 
 /// Pick the source for `path`: a `*.parquet` file is a parquet trace dataset; anything else is a
-/// tree of Claude Code JSONL transcripts. `limit` caps how many sessions are read (`None` = all) —
-/// used to bound a benchmark's build time.
+/// JSONL transcript tree whose harness is auto-detected. `limit` caps how many sessions are read
+/// (`None` = all) — used to bound a benchmark's build time.
 pub fn open(path: &Path, limit: Option<usize>) -> Box<dyn TraceSource> {
+    open_with_harness(path, limit, None)
+}
+
+/// Like [`open`], but a `Some` `harness` forces the JSONL tree's harness (the CLI's `--harness`)
+/// instead of detecting it. A `*.parquet` path is a parquet dataset regardless.
+pub fn open_with_harness(path: &Path, limit: Option<usize>, harness: Option<Harness>) -> Box<dyn TraceSource> {
     let is_parquet = path
         .extension()
         .and_then(|e| e.to_str())
@@ -59,11 +68,22 @@ pub fn open(path: &Path, limit: Option<usize>) -> Box<dyn TraceSource> {
             limit,
         })
     } else {
+        let harness = harness.unwrap_or_else(|| detect_harness(path));
         Box::new(JsonlTree {
             root: path.to_path_buf(),
             limit,
+            harness,
         })
     }
+}
+
+/// Detect a JSONL tree's harness: a known session dir wins, else sniff the first transcript's first
+/// record (see [`Harness::detect`]).
+fn detect_harness(root: &Path) -> Harness {
+    let first = jsonl::iter_jsonl_files(root)
+        .first()
+        .and_then(|p| jsonl::first_record(p));
+    Harness::detect(root, first.as_ref())
 }
 
 /// "size:mtime_secs" for a file's incremental change-stamp, or `None` if it can't be stat'd.
@@ -73,16 +93,21 @@ pub(crate) fn file_sig(p: &Path) -> Option<String> {
     Some(format!("{}:{}", md.len(), mtime))
 }
 
-/// A directory tree of Claude Code `*.jsonl` transcripts — one session per file, indexed
+/// A directory tree of `*.jsonl` transcripts for one `harness` — one session per file, indexed
 /// incrementally (each file skipped while unchanged). `limit` caps the number of files (sessions).
 struct JsonlTree {
     root: PathBuf,
     limit: Option<usize>,
+    harness: Harness,
 }
 
 impl TraceSource for JsonlTree {
     fn describe(&self) -> String {
-        format!("scanning transcripts under {}", self.root.display())
+        format!(
+            "scanning {} transcripts under {}",
+            self.harness.as_str(),
+            self.root.display()
+        )
     }
 
     fn units(&self) -> Result<Vec<Unit>> {
@@ -101,9 +126,13 @@ impl TraceSource for JsonlTree {
 
     fn read(&self, unit: &Unit) -> Result<Vec<Turn>> {
         let p = Path::new(&unit.key);
-        let sid = jsonl::session_id_of(p);
         let project = claude_traces::project_of(p);
-        Ok(claude_traces::turns_from_jsonl_file(p, &sid, &project)?)
+        let turns = match self.harness {
+            Harness::Claude => claude_traces::turns_from_jsonl_file(p, &jsonl::session_id_of(p), &project)?,
+            Harness::Codex => codex_traces::turns_from_jsonl_file(p, &project)?,
+            Harness::Pi => pi_traces::turns_from_jsonl_file(p, &jsonl::session_id_of(p), &project)?,
+        };
+        Ok(turns)
     }
 }
 
