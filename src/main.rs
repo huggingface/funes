@@ -5,7 +5,7 @@
 //! `$FUNES_HOME` or `~/.funes`.
 
 use funes::harness::Harness;
-use funes::{config, hermes, hub, index, mcp, opencode, pi, push, recall, scrub, update};
+use funes::{claude, config, hermes, hub, index, mcp, opencode, pi, push, recall, scrub, update};
 
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand};
@@ -133,6 +133,12 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum InstallAgent {
+    /// claude: register funes as an MCP server with Claude Code (native MCP client).
+    Claude {
+        /// Register at user scope (all projects) instead of just the current one.
+        #[arg(short, long)]
+        global: bool,
+    },
     /// pi: install funes as a pi extension (pi has no MCP client of its own).
     Pi {
         /// Install user-wide instead of just the current directory.
@@ -291,6 +297,7 @@ async fn main() -> Result<()> {
         Cmd::Update { force } => update::run(force).await,
         Cmd::Mcp => mcp::run().await,
         Cmd::Install { agent } => match agent {
+            InstallAgent::Claude { global } => claude::install(global),
             InstallAgent::Pi { global, dest, force } => pi::install(global, dest, force),
             InstallAgent::Hermes => hermes::install(),
             InstallAgent::Opencode { global } => opencode::install(global),
