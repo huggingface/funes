@@ -89,6 +89,8 @@ async fn push_round_trip_create_append_recall() {
         return;
     }
     std::env::set_var("HF_TOKEN", &token);
+    let client = HFClient::builder().token(token).build().unwrap();
+    let repo = client.dataset(OWNER, NAME);
 
     // Unique scratch path so concurrent/repeated runs don't collide.
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
@@ -105,7 +107,15 @@ async fn push_round_trip_create_append_recall() {
     // Gate: the local index shares nothing with the (empty) remote, so a first publish is prompted.
     // Declining must abort and upload nothing — the "don't publish to the wrong store" promise.
     let declined = funes::push::run_push(Store::parse(&uri), false, Confirm::Ask(decline)).await;
-    let after_decline = funes::push::store_ids(&Store::parse(&uri)).await;
+    // Verify via a *successful* Hub query that the declined push published nothing: get_paths_info
+    // returns the entries present under the path (Ok([]) when absent) and Err on a transport failure,
+    // so an unreachable remote fails the test loudly instead of masquerading as "nothing uploaded".
+    let after_decline = repo
+        .get_paths_info()
+        .paths(vec![prefix.clone()])
+        .send()
+        .await
+        .expect("querying the remote for the declined scratch path");
 
     // create (first publish): accept the same gate → grow → append (data-only, no reindex) → recall
     // both. The appended turn is left unindexed, so recalling it back exercises Lance's brute-force
@@ -137,11 +147,9 @@ async fn push_round_trip_create_append_recall() {
     };
 
     // Cleanup before asserting, so a failed assertion can't leave the scratch path behind.
-    let client = HFClient::builder().token(token).build().unwrap();
-    let _ = client
-        .dataset(OWNER, NAME)
+    let _ = repo
         .delete_folder()
-        .path_in_repo(prefix)
+        .path_in_repo(prefix.clone())
         .commit_message("cleanup funes push round-trip test")
         .send()
         .await;
@@ -160,7 +168,7 @@ async fn push_round_trip_create_append_recall() {
     );
     assert!(
         after_decline.is_empty(),
-        "a declined push must upload nothing, but the remote holds {} chunk(s)",
+        "a declined push must upload nothing, but the remote holds {} entry(ies) under {prefix}",
         after_decline.len()
     );
     assert!(

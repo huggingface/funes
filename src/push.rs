@@ -172,6 +172,12 @@ pub async fn run_push(target: Store, force_reindex: bool, confirm: Confirm) -> R
         return Ok(format!("{}: already up to date ({} chunks)\n", target.label(), remote_ids.len()).into());
     }
 
+    // 2. HF repo handle (every write path below needs it). Resolve the target and token *before* the
+    // confirmation below, so a bad URI or a missing token fails now — not after the user has answered
+    // a "publish anyway?" for a push that could never have proceeded.
+    let (owner, name, prefix) = hub::parse_hf(&uri)?;
+    let token = hub::hf_token().context("no HF token (set HF_TOKEN) — required to push")?;
+
     // Guard against publishing to a store this index shares nothing with — a first push here, a new
     // host of yours, or the wrong store. The overlap is already in hand (see [`must_confirm`]), so
     // this costs no extra round-trip. Only the real-upload paths reach here; the nothing-to-push
@@ -180,9 +186,6 @@ pub async fn run_push(target: Store, force_reindex: bool, confirm: Confirm) -> R
         bail!("push aborted");
     }
 
-    // 2. HF repo handle (every write path below needs it).
-    let (owner, name, prefix) = hub::parse_hf(&uri)?;
-    let token = hub::hf_token().context("no HF token (set HF_TOKEN) — required to push")?;
     let client = HFClient::builder()
         .token(token.clone())
         .build()
