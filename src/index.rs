@@ -356,6 +356,17 @@ pub async fn run_index(path: &Path, no_thinking: bool, max_sessions: Option<usiz
     // falls back to brute-force vector search.
     if let Some(d) = &mut indexer.ds {
         dataset::build_indexes(d, |phase| eprintln!("building {phase}…")).await;
+
+        // Reap superseded versions — best-effort; on failure the reap waits for next run.
+        match d.cleanup_old_versions(chrono::Duration::minutes(10), None, None).await {
+            Ok(stats) if stats.bytes_removed > 0 => eprintln!(
+                "reclaimed {:.1} MB from {} old version(s)",
+                stats.bytes_removed as f64 / 1e6,
+                stats.old_versions
+            ),
+            Ok(_) => {}
+            Err(e) => eprintln!("note: version cleanup skipped — {e}"),
+        }
     }
 
     println!("indexed sessions={n_sessions} skipped={n_skipped} chunks={n_chunks}");
