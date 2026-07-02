@@ -1,4 +1,4 @@
-//! `funes install hermes`: register funes recall as an MCP server with hermes.
+//! `funes add hermes`: register funes recall as an MCP server with hermes.
 //!
 //! hermes has a native MCP client, so funes is consumed as its stdio MCP server —
 //! `hermes mcp add funes --command funes --args mcp`. The command is `funes` from PATH

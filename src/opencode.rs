@@ -1,4 +1,4 @@
-//! `funes install opencode`: register funes recall as an MCP server with opencode.
+//! `funes add opencode`: register funes recall as an MCP server with opencode.
 //!
 //! opencode merges several config layers; funes targets the one matching the requested scope
 //! and adds itself as a `local` (stdio) MCP server (`funes mcp`), preserving any existing

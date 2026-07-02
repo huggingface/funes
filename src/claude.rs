@@ -1,4 +1,4 @@
-//! `funes install claude`: register funes recall as an MCP server with Claude Code.
+//! `funes add claude`: register funes recall as an MCP server with Claude Code.
 //!
 //! Claude Code has a native MCP client, so funes is consumed as its stdio MCP server —
 //! `claude mcp add funes -- funes mcp`. The command is `funes` from PATH (override with

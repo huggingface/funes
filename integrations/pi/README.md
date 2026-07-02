@@ -15,8 +15,8 @@ it with pi. It installs into the current project by default; add `-g` to make
 it available in every project:
 
 ```sh
-funes install pi        # this project (.pi/settings.json)
-funes install pi -g     # all projects (user-wide)
+funes add pi        # this project (.pi/settings.json)
+funes add pi -g     # all projects (user-wide)
 ```
 
 funes embeds the extension in its binary, so this always matches the installed

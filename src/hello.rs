@@ -48,7 +48,7 @@ pub const PASSAGES: &[(&str, &str)] = &[
     (
         "assistant",
         "Wire funes into your agent so it can recall on its own: register the MCP server with \
-         `funes install <agent>`. New sessions then get the `recall` and `get` tools plus \
+         `funes add <agent>`. New sessions then get the `recall` and `get` tools plus \
          instructions on when to use them, so the agent reaches for prior decisions and \
          rationale on its own — without you pasting context.",
     ),

@@ -7,7 +7,7 @@
 // (unlike shelling out to `funes recall`, which reloads both every time), and
 // it consumes the same `funes mcp` surface every other agent integration uses.
 //
-// Install:  funes install pi   — or, from a funes checkout, `pi install
+// Install:  funes add pi   — or, from a funes checkout, `pi install
 // ./integrations/pi`, or drop this dir under <cwd>/.pi/extensions/ for
 // zero-config discovery.
 //

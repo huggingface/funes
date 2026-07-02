@@ -124,15 +124,16 @@ enum Cmd {
     },
     /// Run as an MCP server over stdio (for Claude Code, Cursor, …).
     Mcp,
-    /// Install funes into a coding agent.
-    Install {
+    /// Add funes to a coding agent.
+    #[command(subcommand_value_name = "AGENT", subcommand_help_heading = "Agents")]
+    Add {
         #[command(subcommand)]
-        agent: InstallAgent,
+        agent: AddAgent,
     },
 }
 
 #[derive(Subcommand)]
-enum InstallAgent {
+enum AddAgent {
     /// claude: register funes as an MCP server with Claude Code (native MCP client).
     Claude {
         /// Register at user scope (all projects) instead of just the current one.
@@ -296,11 +297,11 @@ async fn main() -> Result<()> {
         Cmd::Scrub => scrub::run().await,
         Cmd::Update { force } => update::run(force).await,
         Cmd::Mcp => mcp::run().await,
-        Cmd::Install { agent } => match agent {
-            InstallAgent::Claude { global } => claude::install(global),
-            InstallAgent::Pi { global, dest, force } => pi::install(global, dest, force),
-            InstallAgent::Hermes => hermes::install(),
-            InstallAgent::Opencode { global } => opencode::install(global),
+        Cmd::Add { agent } => match agent {
+            AddAgent::Claude { global } => claude::install(global),
+            AddAgent::Pi { global, dest, force } => pi::install(global, dest, force),
+            AddAgent::Hermes => hermes::install(),
+            AddAgent::Opencode { global } => opencode::install(global),
         },
     }
 }

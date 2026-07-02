@@ -28,7 +28,7 @@ async fn recall_without_an_index_uses_the_builtin_guide() {
     .unwrap();
     assert_ne!(out, "no results", "fallback recall returned nothing: {out}");
     assert!(out.contains("funes/hello"), "expected a built-in hello hit: {out}");
-    assert!(out.contains("funes install"), "expected the funes install passage: {out}");
+    assert!(out.contains("funes add"), "expected the funes add passage: {out}");
     assert!(
         out.contains("→ get hello"),
         "hit should carry a resolvable get line: {out}"
@@ -38,7 +38,7 @@ async fn recall_without_an_index_uses_the_builtin_guide() {
     let got = funes::recall::get(Store::local(), "hello".into(), "hello-0005".into(), 3)
         .await
         .unwrap();
-    assert!(got.contains("funes install"), "get should expand a corpus turn: {got}");
+    assert!(got.contains("funes add"), "get should expand a corpus turn: {got}");
 
     // list: the synthetic session shows under the funes project.
     let list = funes::recall::list(Store::local(), None, 50).await.unwrap();
