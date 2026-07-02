@@ -262,6 +262,9 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_FUNES_RELEASE_TOKEN }}
         run: |
           TAG="${{ needs.compute.outputs.tag || github.ref_name }}"
+          # The version marker `funes update` / `funes status` read to detect a newer release.
+          # Written after the GitHub Release above so it isn't uploaded there as a stray asset.
+          printf '%s' "${TAG#v}" > ./artifacts/VERSION
           python3 -m venv "$RUNNER_TEMP/hfvenv"
           "$RUNNER_TEMP/hfvenv/bin/pip" install -q -U "huggingface_hub>=1.21"
           HF="$RUNNER_TEMP/hfvenv/bin/hf"
