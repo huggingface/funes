@@ -5,6 +5,12 @@
 //! The binary ([`main`]) is a thin CLI over these modules; integration tests drive
 //! them directly.
 
+// funes is unix-only (Linux/macOS): the release targets, install.sh, and the in-place
+// self-update all assume unix semantics. Fail with a clear message on other platforms rather
+// than a confusing missing-symbol error deep in a module.
+#[cfg(not(unix))]
+compile_error!("funes is unix-only (Linux/macOS)");
+
 pub mod capture_store;
 pub mod chunk;
 pub mod claude_traces;
