@@ -103,15 +103,11 @@ impl From<String> for Pushed {
     }
 }
 
-/// How a push handles a target the local index shares no chunks with — a first publish, a new host
-/// of yours, or (the case this guards) the wrong store. Consulted at most once, only when there are
-/// rows to publish and the overlap is empty, and always before anything is uploaded.
+/// How a push handles a target the local index shares no chunks with.
 pub enum Confirm {
     /// Proceed without asking (`--yes`, or a caller that has already established intent, e.g. tests).
     Yes,
-    /// Ask before publishing. Called with the target label and the number of chunks about to be
-    /// pushed; returns whether to proceed. The CLI wires this to a stdin y/N prompt that fails closed
-    /// off a terminal.
+    /// Ask before publishing. Called with the target label and the number of chunks to be pushed.
     Ask(fn(&str, usize) -> bool),
 }
 
@@ -125,10 +121,8 @@ impl Confirm {
     }
 }
 
-/// Whether a push must be confirmed first: there are rows to publish (`to_push > 0`) and the local
-/// index shares no chunk with the remote (`to_push == local` ⇔ `|local ∩ remote| = 0`) — a first
-/// publish, a new host of yours, or the wrong store. `to_push` is `local − remote`, so it can never
-/// exceed `local`; equality means every local chunk is new to the remote.
+/// Whether a push must be confirmed first: there are rows to publish and the local index shares
+/// no chunk with the remote — a first publish, a new host of yours, or the wrong store.
 fn must_confirm(local: usize, to_push: usize) -> bool {
     to_push > 0 && to_push == local
 }
@@ -172,16 +166,12 @@ pub async fn run_push(target: Store, force_reindex: bool, confirm: Confirm) -> R
         return Ok(format!("{}: already up to date ({} chunks)\n", target.label(), remote_ids.len()).into());
     }
 
-    // 2. HF repo handle (every write path below needs it). Resolve the target and token *before* the
-    // confirmation below, so a bad URI or a missing token fails now — not after the user has answered
-    // a "publish anyway?" for a push that could never have proceeded.
+    // 2. HF repo handle. Resolve the target and token before the confirmation, so a bad URI or a
+    // missing token fails before we prompt for one.
     let (owner, name, prefix) = hub::parse_hf(&uri)?;
     let token = hub::hf_token().context("no HF token (set HF_TOKEN) — required to push")?;
 
-    // Guard against publishing to a store this index shares nothing with — a first push here, a new
-    // host of yours, or the wrong store. The overlap is already in hand (see [`must_confirm`]), so
-    // this costs no extra round-trip. Only the real-upload paths reach here; the nothing-to-push
-    // paths returned above.
+    // When required, ask for confirmation before publishing.
     if must_confirm(local_ids.len(), to_push.len()) && !confirm.proceed(&target.label(), to_push.len()) {
         bail!("push aborted");
     }

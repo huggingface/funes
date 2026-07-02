@@ -89,9 +89,7 @@ enum Cmd {
         store: String,
     },
     /// Publish the local index's new chunks to a remote store on the HF Hub — the active remote by
-    /// default, or `[store]` to publish elsewhere. `index` only writes locally, so this is the one
-    /// step that uploads. A publish to a store your index shares no chunks with (a first push, a new
-    /// host, or the wrong store) asks for confirmation first; `--yes` skips it.
+    /// default, or `[store]` to publish elsewhere.
     Push {
         /// Store to publish to: `<org>/<repo>` or a full `hf://…` URI. Defaults to the active remote.
         store: Option<String>,
@@ -214,7 +212,7 @@ async fn main() -> Result<()> {
             yes,
             force_reindex,
         } => {
-            let target = match store {
+            let remote = match store {
                 Some(s) => s,
                 None => config::load().remote.ok_or_else(|| {
                     anyhow!("no active remote — attach one with `funes use <org>/<repo>`, or name a store: `funes push <org>/<repo>`")
@@ -225,7 +223,7 @@ async fn main() -> Result<()> {
             } else {
                 push::Confirm::Ask(prompt_new_store)
             };
-            match push::run_push(hub::Store::parse(&target), force_reindex, confirm).await {
+            match push::run_push(hub::Store::parse(&remote), force_reindex, confirm).await {
                 Ok(pushed) => {
                     print!("{}", pushed.report);
                     // Secrets held back everything — surface a non-zero exit so automation can react.
@@ -235,7 +233,7 @@ async fn main() -> Result<()> {
                     Ok(())
                 }
                 Err(e) if push::is_read_only(&e) => Err(anyhow!(
-                    "{target} is read-only for your token — recall can read it, but publishing needs write access (check your HF token)"
+                    "{remote} is read-only for your token — recall can read it, but publishing needs write access (check your HF token)"
                 )),
                 Err(e) => Err(e),
             }
