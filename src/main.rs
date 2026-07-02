@@ -44,6 +44,9 @@ enum Cmd {
         /// Restrict to a project (the path segment under `projects`).
         #[arg(long)]
         project: Option<String>,
+        /// Restrict to a harness: claude_code | codex | pi.
+        #[arg(long)]
+        harness: Option<String>,
         #[command(flatten)]
         store: StoreOpts,
     },
@@ -178,6 +181,7 @@ async fn main() -> Result<()> {
             neighbors,
             block_type,
             project,
+            harness,
             store,
         } => {
             print!(
@@ -190,7 +194,8 @@ async fn main() -> Result<()> {
                     half_life,
                     neighbors,
                     block_type,
-                    project
+                    project,
+                    harness,
                 )
                 .await?
             );

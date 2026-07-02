@@ -482,6 +482,7 @@ mod tests {
                 tool_use_id: None,
             }],
             source_path: "/x.jsonl".into(),
+            harness: "claude_code".into(),
         }
     }
 

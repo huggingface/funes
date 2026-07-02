@@ -20,7 +20,16 @@ use std::fmt::Write as _;
 use tokio::sync::{Mutex, OnceCell};
 
 /// Columns a [`Hit`] needs from a search scan.
-const HIT_COLS: &[&str] = &["text", "session_id", "project", "turn_uuid", "ts", "block_type", "seq"];
+const HIT_COLS: &[&str] = &[
+    "text",
+    "session_id",
+    "project",
+    "turn_uuid",
+    "ts",
+    "block_type",
+    "seq",
+    "harness",
+];
 
 /// Scanned row for neighbor expansion: (session_id, seq, turn_uuid, block_idx, split_idx, role, block_type, text).
 type NeighborRow = (String, i64, String, i64, i64, String, String, String);
@@ -45,6 +54,7 @@ struct Hit {
     seq: i64,
     ts: String,
     block_type: String,
+    harness: String,
     neighbors: Vec<Neighbor>,
 }
 
@@ -69,14 +79,17 @@ fn esc(s: &str) -> String {
     s.replace('\'', "''")
 }
 
-/// `block_type = '…' AND project = '…'` over whichever filters are set, else None.
-fn build_where(block_type: Option<&str>, project: Option<&str>) -> Option<String> {
+/// `block_type = '…' AND project = '…' AND harness = '…'` over whichever filters are set, else None.
+fn build_where(block_type: Option<&str>, project: Option<&str>, harness: Option<&str>) -> Option<String> {
     let mut clauses = Vec::new();
     if let Some(bt) = block_type {
         clauses.push(format!("block_type = '{}'", esc(bt)));
     }
     if let Some(p) = project {
         clauses.push(format!("project = '{}'", esc(p)));
+    }
+    if let Some(h) = harness {
+        clauses.push(format!("harness = '{}'", esc(h)));
     }
     if clauses.is_empty() {
         None
@@ -252,6 +265,7 @@ pub async fn recall(
     neighbors: i64,
     block_type: Option<String>,
     project: Option<String>,
+    harness: Option<String>,
 ) -> Result<String> {
     let mut guard = models().await?.lock().await;
     let Models { embedder, reranker } = &mut *guard;
@@ -265,7 +279,7 @@ pub async fn recall(
     let read = open_read(&store, Some(&mut *embedder)).await?;
     let note = read.note.clone().unwrap_or_default();
     let ds = &read.ds;
-    let where_clause = build_where(block_type.as_deref(), project.as_deref());
+    let where_clause = build_where(block_type.as_deref(), project.as_deref(), harness.as_deref());
 
     // Hybrid retrieval: a vector ANN scan and a BM25 scan, fused by reciprocal rank. The FTS index
     // can be absent (it's best-effort at index time), so the FTS leg is skipped when it errors —
@@ -308,8 +322,8 @@ pub async fn recall(
         let s8 = &h.session_id[..h.session_id.len().min(8)];
         let _ = writeln!(
             out,
-            "[{}] {}/{} {}  score={:.3}",
-            h.ts, h.project, s8, h.block_type, score
+            "[{}] {} {}/{} {}  score={:.3}",
+            h.ts, h.harness, h.project, s8, h.block_type, score
         );
         let _ = writeln!(out, "  → get {} {}", h.session_id, h.turn_uuid);
         let preview: String = h.text.chars().take(400).collect();
@@ -349,7 +363,7 @@ async fn vector_candidates(ds: &Dataset, qv: &[f32], limit: usize, filter: Optio
         scan.prefilter(true);
         scan.filter(f)?;
     }
-    scan.project(HIT_COLS)?;
+    scan.project(&hit_cols(ds))?;
     scan.with_row_id();
     collect_hits(scan).await
 }
@@ -363,10 +377,24 @@ async fn fts_candidates(ds: &Dataset, query: &str, limit: usize, filter: Option<
         scan.prefilter(true);
         scan.filter(f)?;
     }
-    scan.project(HIT_COLS)?;
+    scan.project(&hit_cols(ds))?;
     scan.with_row_id();
     scan.limit(Some(limit as i64), None)?;
     collect_hits(scan).await
+}
+
+/// `HIT_COLS`, minus `harness` on a store built before that column existed (an un-migrated store):
+/// projecting a column the dataset lacks errors, so drop it and let `collect_hits` default the field
+/// to "".
+fn hit_cols(ds: &Dataset) -> Vec<&'static str> {
+    let has_harness = arrow_schema::Schema::from(ds.schema())
+        .column_with_name("harness")
+        .is_some();
+    HIT_COLS
+        .iter()
+        .copied()
+        .filter(|&c| c != "harness" || has_harness)
+        .collect()
 }
 
 /// Drain a scan into `(rowid, Hit)` rows, preserving the scan's order (its rank).
@@ -386,6 +414,7 @@ async fn collect_hits(scan: lance::dataset::scanner::Scanner) -> Result<Vec<(u64
             scol(&batch, "block_type"),
         );
         let seq = icol(&batch, "seq");
+        let harness = scol(&batch, "harness");
         for i in 0..batch.num_rows() {
             let id = rowid.map(|c| c.value(i)).unwrap_or(0);
             out.push((
@@ -398,6 +427,7 @@ async fn collect_hits(scan: lance::dataset::scanner::Scanner) -> Result<Vec<(u64
                     seq: ival(seq, i),
                     ts: sval(ts, i),
                     block_type: sval(bt, i),
+                    harness: sval(harness, i),
                     neighbors: Vec::new(),
                 },
             ));
@@ -731,15 +761,28 @@ mod tests {
 
     #[test]
     fn build_where_combines_set_filters() {
-        assert_eq!(build_where(None, None), None);
-        assert_eq!(build_where(Some("text"), None).as_deref(), Some("block_type = 'text'"));
-        assert_eq!(build_where(None, Some("proj")).as_deref(), Some("project = 'proj'"));
+        assert_eq!(build_where(None, None, None), None);
         assert_eq!(
-            build_where(Some("tool_use"), Some("proj")).as_deref(),
-            Some("block_type = 'tool_use' AND project = 'proj'")
+            build_where(Some("text"), None, None).as_deref(),
+            Some("block_type = 'text'")
+        );
+        assert_eq!(
+            build_where(None, Some("proj"), None).as_deref(),
+            Some("project = 'proj'")
+        );
+        assert_eq!(
+            build_where(None, None, Some("codex")).as_deref(),
+            Some("harness = 'codex'")
+        );
+        assert_eq!(
+            build_where(Some("tool_use"), Some("proj"), Some("pi")).as_deref(),
+            Some("block_type = 'tool_use' AND project = 'proj' AND harness = 'pi'")
         );
         // values are escaped against filter-string injection.
-        assert_eq!(build_where(None, Some("a'b")).as_deref(), Some("project = 'a''b'"));
+        assert_eq!(
+            build_where(None, Some("a'b"), None).as_deref(),
+            Some("project = 'a''b'")
+        );
     }
 
     #[test]

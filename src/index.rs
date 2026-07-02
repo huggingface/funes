@@ -49,6 +49,9 @@ pub(crate) fn schema() -> Arc<Schema> {
                 DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), DIM),
                 true,
             ),
+            // Last, after `vector`: `add_columns` appends a migrated column at the end, so a
+            // freshly-built store must match that order (the tripwire test pins it).
+            utf8("harness"),
         ],
         HashMap::from([("embedding_model".to_string(), MODEL.to_string())]),
     ))
@@ -81,6 +84,7 @@ pub(crate) fn build_batch(chunks: &[chunk::Chunk], vectors: &[Vec<f32>]) -> Resu
             Arc::new(i(&|c| c.block_idx)),
             Arc::new(i(&|c| c.split_idx)),
             Arc::new(vector),
+            Arc::new(s(&|c| Some(c.harness.clone()))),
         ],
     )?)
 }
@@ -417,6 +421,7 @@ mod tests {
                 "block_idx",
                 "split_idx",
                 "vector",
+                "harness",
             ]
         );
     }
@@ -458,6 +463,7 @@ mod tests {
                 tool_use_id: None,
             }],
             source_path: String::new(),
+            harness: "claude_code".into(),
         }];
         redact_turns(&mut turns, &scanner).unwrap();
         assert_eq!(

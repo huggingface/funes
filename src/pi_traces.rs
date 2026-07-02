@@ -49,6 +49,7 @@ pub fn turns_from_jsonl_file(p: &Path, session_id: &str, project: &str) -> std::
             role: role.to_string(),
             blocks,
             source_path: p.to_string_lossy().into_owned(),
+            harness: "pi".into(),
         });
         seq += 1;
     }

@@ -97,6 +97,7 @@ pub async fn dataset(embedder: Option<&mut TextEmbedding>) -> Result<(TempDir, D
             source_path: "built-in".to_string(),
             block_idx: 0,
             split_idx: 0,
+            harness: "claude_code".to_string(),
         })
         .collect();
 

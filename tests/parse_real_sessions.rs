@@ -76,6 +76,10 @@ fn parse_real_codex_session() {
             block_kinds(&turns)
         );
     }
+    assert!(
+        turns.iter().all(|t| t.harness == "codex"),
+        "codex turns are tagged codex"
+    );
     // Codex tool results carry the `tool` role; the `session_meta` line produced no turn.
     assert!(roles(&turns).is_subset(&BTreeSet::from(["user", "assistant", "tool", "developer"])));
     assert!(roles(&turns).contains("tool"));
@@ -101,6 +105,7 @@ fn parse_real_pi_session() {
             block_kinds(&turns)
         );
     }
+    assert!(turns.iter().all(|t| t.harness == "pi"), "pi turns are tagged pi");
     // Control lines (session/model_change/thinking_level_change) produce no turn; a result is `tool`.
     assert!(roles(&turns).is_subset(&BTreeSet::from(["user", "assistant", "tool"])));
     matched_results_are_named(&turns);
@@ -125,6 +130,10 @@ fn parse_real_claude_session() {
             block_kinds(&turns)
         );
     }
+    assert!(
+        turns.iter().all(|t| t.harness == "claude_code"),
+        "claude turns are tagged claude_code"
+    );
     // Only user/assistant records become turns — the real `queue-operation` line is skipped.
     assert!(roles(&turns).is_subset(&BTreeSet::from(["user", "assistant"])));
     matched_results_are_named(&turns);

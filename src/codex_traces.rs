@@ -57,6 +57,7 @@ pub fn turns_from_jsonl_file(p: &Path, project: &str) -> std::io::Result<Vec<Tur
             role,
             blocks,
             source_path: p.to_string_lossy().into_owned(),
+            harness: "codex".into(),
         });
         seq += 1;
     }
