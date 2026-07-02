@@ -58,4 +58,24 @@ async fn recall_tolerates_a_store_without_the_harness_column() {
         out.contains(session),
         "recall should surface the session even without a harness column: {out}"
     );
+
+    // But a `--harness` filter needs the column: refuse with a clear message, not an opaque Lance
+    // schema error.
+    let err = funes::recall::recall(
+        funes::hub::Store::local(),
+        "parse transcripts into turns".into(),
+        5,
+        30,
+        30.0,
+        1,
+        None,
+        None,
+        Some("pi".into()),
+    )
+    .await
+    .expect_err("--harness on a column-less store should error");
+    assert!(
+        err.to_string().contains("predates the harness facet"),
+        "error should explain the store predates the harness facet: {err}"
+    );
 }

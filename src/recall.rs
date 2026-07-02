@@ -7,7 +7,7 @@ use crate::chunk;
 use crate::dataset;
 use crate::hello;
 use crate::hub::{self, Reachability, Store};
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use arrow_array::{Float32Array, Int64Array, RecordBatch, StringArray, UInt64Array};
 use chrono::{DateTime, Utc};
 use fastembed::{EmbeddingModel, InitOptions, RerankInitOptions, RerankerModel, TextEmbedding, TextRerank};
@@ -279,6 +279,13 @@ pub async fn recall(
     let read = open_read(&store, Some(&mut *embedder)).await?;
     let note = read.note.clone().unwrap_or_default();
     let ds = &read.ds;
+    // A `--harness` filter needs the column; on an un-migrated store it would fail deep inside Lance
+    // with an opaque schema error, so refuse with a clear message instead.
+    if harness.is_some() && !has_harness_col(ds) {
+        return Err(anyhow!(
+            "this store predates the harness facet — reindex it, or drop --harness"
+        ));
+    }
     let where_clause = build_where(block_type.as_deref(), project.as_deref(), harness.as_deref());
 
     // Hybrid retrieval: a vector ANN scan and a BM25 scan, fused by reciprocal rank. The FTS index
@@ -383,13 +390,18 @@ async fn fts_candidates(ds: &Dataset, query: &str, limit: usize, filter: Option<
     collect_hits(scan).await
 }
 
-/// `HIT_COLS`, minus `harness` on a store built before that column existed (an un-migrated store):
-/// projecting a column the dataset lacks errors, so drop it and let `collect_hits` default the field
-/// to "".
-fn hit_cols(ds: &Dataset) -> Vec<&'static str> {
-    let has_harness = arrow_schema::Schema::from(ds.schema())
+/// Whether the store carries the `harness` column — false for one built before the facet existed
+/// (an un-migrated store).
+fn has_harness_col(ds: &Dataset) -> bool {
+    arrow_schema::Schema::from(ds.schema())
         .column_with_name("harness")
-        .is_some();
+        .is_some()
+}
+
+/// `HIT_COLS`, minus `harness` on an un-migrated store: projecting a column the dataset lacks errors,
+/// so drop it and let `collect_hits` default the field to "".
+fn hit_cols(ds: &Dataset) -> Vec<&'static str> {
+    let has_harness = has_harness_col(ds);
     HIT_COLS
         .iter()
         .copied()

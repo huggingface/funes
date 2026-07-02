@@ -79,9 +79,12 @@ pub fn open_with_harness(path: &Path, limit: Option<usize>, harness: Option<Harn
     }
 }
 
-/// Detect a JSONL tree's harness: a known session dir wins, else sniff the first transcript's first
-/// record (see [`Harness::detect`]).
+/// Detect a JSONL tree's harness: a known session dir wins (a cheap tail match), else sniff the
+/// first transcript's first record — only then is the tree walked (see [`Harness::detect`]).
 fn detect_harness(root: &Path) -> Harness {
+    if let Some(h) = Harness::from_known_dir(root) {
+        return h;
+    }
     let first = jsonl::iter_jsonl_files(root)
         .first()
         .and_then(|p| jsonl::first_record(p));
@@ -191,17 +194,21 @@ struct RemoteParquetDataset {
     /// The convert-branch commit — every shard's incremental signature.
     revision: String,
     label: String,
-    limit: Option<usize>,
 }
 
 /// Resolve `<owner>/<name>`'s auto-converted parquet, download its shards whole-file into hf-hub's
 /// cache, and return a source over them. Async (resolve + download happen here) so `read` stays
-/// sync — the indexer never blocks a Tokio worker on a download.
-pub async fn open_remote(owner: &str, name: &str, limit: Option<usize>) -> Result<Box<dyn TraceSource>> {
+/// sync — the indexer never blocks a Tokio worker on a download. `max_shards` caps how many shards
+/// are downloaded and indexed (for the gated live test); all sessions within each are read.
+pub async fn open_remote(owner: &str, name: &str, max_shards: Option<usize>) -> Result<Box<dyn TraceSource>> {
     let token = hub::hf_token();
     let remote = hf_dataset::resolve_parquet(owner, name, token.as_deref()).await?;
-    let mut shards = Vec::with_capacity(remote.shards.len());
-    for shard in &remote.shards {
+    let mut paths = remote.shards;
+    if let Some(n) = max_shards {
+        paths.truncate(n);
+    }
+    let mut shards = Vec::with_capacity(paths.len());
+    for shard in &paths {
         let local = hf_dataset::download_shard(&remote.repo, shard, &remote.revision).await?;
         let project = Path::new(shard)
             .file_stem()
@@ -218,7 +225,6 @@ pub async fn open_remote(owner: &str, name: &str, limit: Option<usize>) -> Resul
         shards,
         revision: remote.revision,
         label: format!("{owner}/{name}"),
-        limit,
     }))
 }
 
@@ -233,18 +239,14 @@ impl TraceSource for RemoteParquetDataset {
     }
 
     fn units(&self) -> Result<Vec<Unit>> {
-        let mut units: Vec<Unit> = self
+        Ok(self
             .shards
             .iter()
             .map(|s| Unit {
                 key: s.key.clone(),
                 signature: Some(self.revision.clone()),
             })
-            .collect();
-        if let Some(n) = self.limit {
-            units.truncate(n);
-        }
-        Ok(units)
+            .collect())
     }
 
     fn read(&self, unit: &Unit) -> Result<Vec<Turn>> {
@@ -253,7 +255,7 @@ impl TraceSource for RemoteParquetDataset {
             .iter()
             .find(|s| s.key == unit.key)
             .context("unknown remote shard")?;
-        hf_traces::turns_from_parquet(&shard.local, &shard.project, self.limit)
+        hf_traces::turns_from_parquet(&shard.local, &shard.project, None)
     }
 
     fn fatal_on_read_error(&self) -> bool {
@@ -283,7 +285,6 @@ mod tests {
             ],
             revision: "abc123".into(),
             label: "o/n".into(),
-            limit: None,
         };
         let units = ds.units().unwrap();
         assert_eq!(units.len(), 2);
@@ -291,9 +292,6 @@ mod tests {
         assert!(units.iter().all(|u| u.signature.as_deref() == Some("abc123")));
         assert_eq!(units[0].key, "hf://datasets/o/n/default/train/0000.parquet");
         assert!(ds.fatal_on_read_error());
-        // `limit` truncates the shard list.
-        let capped = RemoteParquetDataset { limit: Some(1), ..ds };
-        assert_eq!(capped.units().unwrap().len(), 1);
     }
 
     #[test]

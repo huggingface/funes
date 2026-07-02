@@ -47,7 +47,7 @@ impl Harness {
     /// `type` — Codex opens with `session_meta`, Pi with `session`. Claude has no positive
     /// first-line marker (line 1 may be a `summary`), so it is the fallback — as is an empty tree.
     pub fn detect(root: &Path, first_line: Option<&Value>) -> Harness {
-        if let Some(h) = harness_for_known_dir(root) {
+        if let Some(h) = Self::from_known_dir(root) {
             return h;
         }
         match first_line.and_then(|v| v.get("type")).and_then(Value::as_str) {
@@ -56,14 +56,15 @@ impl Harness {
             _ => Harness::Claude,
         }
     }
-}
 
-/// The harness for a path ending in a known session-dir tail (e.g. `~/.codex/sessions`), else
-/// `None`.
-fn harness_for_known_dir(root: &Path) -> Option<Harness> {
-    let canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let s = canon.to_string_lossy();
-    KNOWN_DIRS.iter().find(|(tail, _)| s.ends_with(tail)).map(|(_, h)| *h)
+    /// The harness for a path ending in a known session-dir tail (e.g. `~/.codex/sessions`), else
+    /// `None`. A cheap tail match, so callers can skip walking the tree when the dir alone
+    /// identifies the harness.
+    pub fn from_known_dir(root: &Path) -> Option<Harness> {
+        let canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let s = canon.to_string_lossy();
+        KNOWN_DIRS.iter().find(|(tail, _)| s.ends_with(tail)).map(|(_, h)| *h)
+    }
 }
 
 /// The `(dir, harness)` pairs present under `$HOME` — drives a no-arg `funes index`.
