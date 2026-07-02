@@ -36,8 +36,18 @@ async fn recall_from_remote_fixture() {
     // End-to-end: the full recall pipeline (hybrid vector + BM25 → rerank → recency → format) over
     // the remote store surfaces the marker chunk — exercising both the remote IVF_PQ and inverted-
     // index reads (lazy, Xet-cached). recency off, no neighbors, to keep the assertion tight.
-    let out = funes::recall::recall(Store::parse(FIXTURE_URI), MARKER.to_string(), 5, 30, 0.0, 0, None, None)
-        .await
-        .expect("recall over remote fixture");
+    let out = funes::recall::recall(
+        Store::parse(FIXTURE_URI),
+        MARKER.to_string(),
+        5,
+        30,
+        0.0,
+        0,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("recall over remote fixture");
     assert!(out.contains(MARKER), "recall did not surface the marker chunk: {out}");
 }

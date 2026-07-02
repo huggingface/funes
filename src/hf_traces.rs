@@ -52,9 +52,11 @@ pub fn turns_from_parquet(path: &Path, project: &str, limit: Option<usize>) -> R
             }
             let ts = str_at(&batch, "sent_at", i).unwrap_or_default();
             let source = str_at(&batch, "file_path", i).unwrap_or_else(|| path.display().to_string());
+            // Per-row: a dataset can mix harnesses; a dataset without the column reads as "".
+            let harness = str_at(&batch, "harness", i).unwrap_or_default();
 
             let msgs = parse_message_list(&messages.value(i))?;
-            let turns = turns_from_messages(&msgs, &sid, project, &ts, &source);
+            let turns = turns_from_messages(&msgs, &sid, project, &ts, &source, &harness);
             if !turns.is_empty() {
                 out.extend(turns);
                 sessions += 1;
@@ -98,7 +100,14 @@ fn parse_message_list(elems: &dyn Array) -> Result<Vec<Value>> {
 
 /// Turn one session's chat messages into funes turns. `seq` counts only retained turns (those with
 /// at least one block), and `parent_uuid` chains them — mirroring the JSONL parser.
-fn turns_from_messages(msgs: &[Value], session_id: &str, project: &str, ts: &str, source: &str) -> Vec<Turn> {
+fn turns_from_messages(
+    msgs: &[Value],
+    session_id: &str,
+    project: &str,
+    ts: &str,
+    source: &str,
+    harness: &str,
+) -> Vec<Turn> {
     let mut turns = Vec::new();
     let mut seq = 0i64;
     let mut parent: Option<String> = None;
@@ -119,6 +128,7 @@ fn turns_from_messages(msgs: &[Value], session_id: &str, project: &str, ts: &str
             role,
             blocks,
             source_path: source.to_string(),
+            harness: harness.to_string(),
         });
         parent = Some(turn_uuid);
         seq += 1;
@@ -232,6 +242,8 @@ mod tests {
         assert_eq!(u.ts, "2026-06-19T00:00:02.000Z");
         assert_eq!(u.blocks.len(), 1);
         assert_eq!(u.blocks[0].block_type, "text");
+        // No `harness` column in this parquet → "" (a pre-migration store reads clean).
+        assert_eq!(u.harness, "");
 
         let a = &turns[1];
         assert_eq!(a.role, "assistant");
@@ -242,6 +254,54 @@ mod tests {
         let tool = a.blocks.iter().find(|b| b.block_type == "tool_use").unwrap();
         assert_eq!(tool.tool_name.as_deref(), Some("Bash"));
         assert_eq!(tool.text, r#"{"command":"cargo test"}"#);
+    }
+
+    #[test]
+    fn harness_column_is_read_per_row() {
+        // A dataset can mix harnesses; each session's turns carry that row's `harness` value.
+        let msg = r#"{"role":"user","content":"hi"}"#;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("session_id", DataType::Utf8, false),
+            Field::new(
+                "messages",
+                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                false,
+            ),
+            Field::new("harness", DataType::Utf8, true),
+        ]));
+        let mut sid = StringBuilder::new();
+        let mut msgs = ListBuilder::new(StringBuilder::new());
+        let mut hn = StringBuilder::new();
+        for (s, h) in [("s1", "codex"), ("s2", "claude_code")] {
+            sid.append_value(s);
+            msgs.values().append_value(msg);
+            msgs.append(true);
+            hn.append_value(h);
+        }
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(sid.finish()), Arc::new(msgs.finish()), Arc::new(hn.finish())],
+        )
+        .unwrap();
+        let f = tempfile::Builder::new().suffix(".parquet").tempfile().unwrap();
+        let mut w = ArrowWriter::try_new(f.reopen().unwrap(), schema, None).unwrap();
+        w.write(&batch).unwrap();
+        w.close().unwrap();
+
+        let turns = turns_from_parquet(f.path(), "mixed", None).unwrap();
+        let harness_for = |sess: &str| -> Vec<&str> {
+            turns
+                .iter()
+                .filter(|t| t.session_id == sess)
+                .map(|t| t.harness.as_str())
+                .collect()
+        };
+        assert!(harness_for("s1").iter().all(|h| *h == "codex"), "s1 rows are codex");
+        assert!(
+            harness_for("s2").iter().all(|h| *h == "claude_code"),
+            "s2 rows are claude_code"
+        );
+        assert!(!harness_for("s1").is_empty() && !harness_for("s2").is_empty());
     }
 
     #[test]

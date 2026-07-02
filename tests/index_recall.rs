@@ -53,6 +53,7 @@ async fn index_then_read_surface() {
         1,
         None,
         None,
+        None,
     )
     .await
     .unwrap();
@@ -71,6 +72,7 @@ async fn index_then_read_surface() {
         0.0,
         0,
         Some("tool_use".into()),
+        None,
         None,
     )
     .await

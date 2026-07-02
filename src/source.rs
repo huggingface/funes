@@ -8,10 +8,16 @@
 //! commit). JSONL is one session per file; a parquet dataset is many sessions in one file.
 
 use crate::claude_traces;
+use crate::codex_traces;
+use crate::harness::Harness;
+use crate::hf_dataset;
 use crate::hf_traces;
+use crate::hub;
+use crate::jsonl;
+use crate::pi_traces;
 use crate::trace::Turn;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -45,9 +51,15 @@ pub trait TraceSource {
 }
 
 /// Pick the source for `path`: a `*.parquet` file is a parquet trace dataset; anything else is a
-/// tree of Claude Code JSONL transcripts. `limit` caps how many sessions are read (`None` = all) —
-/// used to bound a benchmark's build time.
+/// JSONL transcript tree whose harness is auto-detected. `limit` caps how many sessions are read
+/// (`None` = all) — used to bound a benchmark's build time.
 pub fn open(path: &Path, limit: Option<usize>) -> Box<dyn TraceSource> {
+    open_with_harness(path, limit, None)
+}
+
+/// Like [`open`], but a `Some` `harness` forces the JSONL tree's harness (the CLI's `--harness`)
+/// instead of detecting it. A `*.parquet` path is a parquet dataset regardless.
+pub fn open_with_harness(path: &Path, limit: Option<usize>, harness: Option<Harness>) -> Box<dyn TraceSource> {
     let is_parquet = path
         .extension()
         .and_then(|e| e.to_str())
@@ -58,11 +70,25 @@ pub fn open(path: &Path, limit: Option<usize>) -> Box<dyn TraceSource> {
             limit,
         })
     } else {
+        let harness = harness.unwrap_or_else(|| detect_harness(path));
         Box::new(JsonlTree {
             root: path.to_path_buf(),
             limit,
+            harness,
         })
     }
+}
+
+/// Detect a JSONL tree's harness: a known session dir wins (a cheap tail match), else sniff the
+/// first transcript's first record — only then is the tree walked (see [`Harness::detect`]).
+fn detect_harness(root: &Path) -> Harness {
+    if let Some(h) = Harness::from_known_dir(root) {
+        return h;
+    }
+    let first = jsonl::iter_jsonl_files(root)
+        .first()
+        .and_then(|p| jsonl::first_record(p));
+    Harness::detect(root, first.as_ref())
 }
 
 /// "size:mtime_secs" for a file's incremental change-stamp, or `None` if it can't be stat'd.
@@ -72,20 +98,25 @@ pub(crate) fn file_sig(p: &Path) -> Option<String> {
     Some(format!("{}:{}", md.len(), mtime))
 }
 
-/// A directory tree of Claude Code `*.jsonl` transcripts — one session per file, indexed
+/// A directory tree of `*.jsonl` transcripts for one `harness` — one session per file, indexed
 /// incrementally (each file skipped while unchanged). `limit` caps the number of files (sessions).
 struct JsonlTree {
     root: PathBuf,
     limit: Option<usize>,
+    harness: Harness,
 }
 
 impl TraceSource for JsonlTree {
     fn describe(&self) -> String {
-        format!("scanning transcripts under {}", self.root.display())
+        format!(
+            "scanning {} transcripts under {}",
+            self.harness.as_str(),
+            self.root.display()
+        )
     }
 
     fn units(&self) -> Result<Vec<Unit>> {
-        let mut files = claude_traces::iter_jsonl_files(&self.root);
+        let mut files = jsonl::iter_jsonl_files(&self.root);
         if let Some(n) = self.limit {
             files.truncate(n);
         }
@@ -100,9 +131,13 @@ impl TraceSource for JsonlTree {
 
     fn read(&self, unit: &Unit) -> Result<Vec<Turn>> {
         let p = Path::new(&unit.key);
-        let sid = claude_traces::session_id_of(p);
         let project = claude_traces::project_of(p);
-        Ok(claude_traces::turns_from_jsonl_file(p, &sid, &project)?)
+        let turns = match self.harness {
+            Harness::Claude => claude_traces::turns_from_jsonl_file(p, &jsonl::session_id_of(p), &project)?,
+            Harness::Codex => codex_traces::turns_from_jsonl_file(p, &project)?,
+            Harness::Pi => pi_traces::turns_from_jsonl_file(p, &jsonl::session_id_of(p), &project)?,
+        };
+        Ok(turns)
     }
 }
 
@@ -139,10 +174,125 @@ impl TraceSource for ParquetDataset {
     }
 }
 
+/// One pre-downloaded parquet shard of a remote trace dataset.
+struct RemoteShard {
+    /// `state.json` key: `hf://datasets/<owner>/<name>/<shard>` — stable and disjoint from any
+    /// local path, so cross-source incremental never collides.
+    key: String,
+    /// The shard downloaded whole into hf-hub's cache.
+    local: PathBuf,
+    /// Project facet = the shard's file stem (parity with [`ParquetDataset`]).
+    project: String,
+}
+
+/// A Hub trace dataset's `refs/convert/parquet` shards, resolved and pre-downloaded by
+/// [`open_remote`]. Each shard is a unit signed with the convert-branch commit oid, so an unchanged
+/// repo is skipped without re-reading; a changed repo re-reads and chunk-id dedup keeps rows already
+/// stored a no-op.
+struct RemoteParquetDataset {
+    shards: Vec<RemoteShard>,
+    /// The convert-branch commit — every shard's incremental signature.
+    revision: String,
+    label: String,
+}
+
+/// Resolve `<owner>/<name>`'s auto-converted parquet, download its shards whole-file into hf-hub's
+/// cache, and return a source over them. Async (resolve + download happen here) so `read` stays
+/// sync — the indexer never blocks a Tokio worker on a download. `max_shards` caps how many shards
+/// are downloaded and indexed (for the gated live test); all sessions within each are read.
+pub async fn open_remote(owner: &str, name: &str, max_shards: Option<usize>) -> Result<Box<dyn TraceSource>> {
+    let token = hub::hf_token();
+    let remote = hf_dataset::resolve_parquet(owner, name, token.as_deref()).await?;
+    let mut paths = remote.shards;
+    if let Some(n) = max_shards {
+        paths.truncate(n);
+    }
+    let mut shards = Vec::with_capacity(paths.len());
+    for shard in &paths {
+        let local = hf_dataset::download_shard(&remote.repo, shard, &remote.revision).await?;
+        let project = Path::new(shard)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("parquet")
+            .to_string();
+        shards.push(RemoteShard {
+            key: format!("hf://datasets/{owner}/{name}/{shard}"),
+            local,
+            project,
+        });
+    }
+    Ok(Box::new(RemoteParquetDataset {
+        shards,
+        revision: remote.revision,
+        label: format!("{owner}/{name}"),
+    }))
+}
+
+impl TraceSource for RemoteParquetDataset {
+    fn describe(&self) -> String {
+        let oid8 = &self.revision[..self.revision.len().min(8)];
+        format!(
+            "indexing {} — {} parquet shard(s) @ refs/convert/parquet:{oid8}",
+            self.label,
+            self.shards.len()
+        )
+    }
+
+    fn units(&self) -> Result<Vec<Unit>> {
+        Ok(self
+            .shards
+            .iter()
+            .map(|s| Unit {
+                key: s.key.clone(),
+                signature: Some(self.revision.clone()),
+            })
+            .collect())
+    }
+
+    fn read(&self, unit: &Unit) -> Result<Vec<Turn>> {
+        let shard = self
+            .shards
+            .iter()
+            .find(|s| s.key == unit.key)
+            .context("unknown remote shard")?;
+        hf_traces::turns_from_parquet(&shard.local, &shard.project, None)
+    }
+
+    fn fatal_on_read_error(&self) -> bool {
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn remote_parquet_units_are_shards_signed_by_the_convert_oid() {
+        let ds = RemoteParquetDataset {
+            shards: vec![
+                RemoteShard {
+                    key: "hf://datasets/o/n/default/train/0000.parquet".into(),
+                    local: "/tmp/a".into(),
+                    project: "0000".into(),
+                },
+                RemoteShard {
+                    key: "hf://datasets/o/n/default/train/0001.parquet".into(),
+                    local: "/tmp/b".into(),
+                    project: "0001".into(),
+                },
+            ],
+            revision: "abc123".into(),
+            label: "o/n".into(),
+        };
+        let units = ds.units().unwrap();
+        assert_eq!(units.len(), 2);
+        // Every shard is signed by the convert-branch oid, so an unchanged repo skips.
+        assert!(units.iter().all(|u| u.signature.as_deref() == Some("abc123")));
+        assert_eq!(units[0].key, "hf://datasets/o/n/default/train/0000.parquet");
+        assert!(ds.fatal_on_read_error());
+    }
 
     #[test]
     fn file_sig_is_len_colon_mtime() {

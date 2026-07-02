@@ -50,7 +50,7 @@ fn tool_ok(bin: &str, arg: &str) -> bool {
 }
 
 async fn recall_remote(uri: &str, query: &str) -> String {
-    funes::recall::recall(Store::parse(uri), query.into(), 5, 30, 0.0, 0, None, None)
+    funes::recall::recall(Store::parse(uri), query.into(), 5, 30, 0.0, 0, None, None, None)
         .await
         .unwrap_or_else(|e| format!("<recall error: {e}>"))
 }

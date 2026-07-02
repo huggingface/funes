@@ -1,8 +1,10 @@
 //! funes — recall over your past AI Agent sessions.
 //!
-//! `recall` reads the index (hybrid → rerank → recency); `index` builds/updates it
-//! from `~/.claude/projects/**/*.jsonl`. funes's home is `$FUNES_HOME` or `~/.funes`.
+//! `recall` reads the index (hybrid → rerank → recency); `index` builds/updates it from the local
+//! harness session dirs (Claude Code, Codex, pi) or an explicit path/parquet/repo. funes's home is
+//! `$FUNES_HOME` or `~/.funes`.
 
+use funes::harness::Harness;
 use funes::{config, hermes, hub, index, mcp, opencode, pi, push, recall, scrub, update};
 
 use anyhow::{anyhow, Result};
@@ -42,6 +44,9 @@ enum Cmd {
         /// Restrict to a project (the path segment under `projects`).
         #[arg(long)]
         project: Option<String>,
+        /// Restrict to a harness: claude_code | codex | pi.
+        #[arg(long)]
+        harness: Option<String>,
         #[command(flatten)]
         store: StoreOpts,
     },
@@ -70,8 +75,13 @@ enum Cmd {
     },
     /// Build or update the index from session transcripts.
     Index {
-        /// Source directory of transcripts (default: ~/.claude/projects).
-        source: Option<PathBuf>,
+        /// A transcript tree or `.parquet` file, or a Hub trace repo `<org>/<repo>`. Omit to index
+        /// every known local harness dir present (~/.claude/projects, ~/.codex/sessions,
+        /// ~/.pi/agent/sessions).
+        path: Option<String>,
+        /// Override harness auto-detection for PATH: claude | codex | pi.
+        #[arg(long)]
+        harness: Option<String>,
         /// Exclude thinking blocks.
         #[arg(long)]
         no_thinking: bool,
@@ -171,6 +181,7 @@ async fn main() -> Result<()> {
             neighbors,
             block_type,
             project,
+            harness,
             store,
         } => {
             print!(
@@ -183,7 +194,8 @@ async fn main() -> Result<()> {
                     half_life,
                     neighbors,
                     block_type,
-                    project
+                    project,
+                    harness,
                 )
                 .await?
             );
@@ -202,12 +214,36 @@ async fn main() -> Result<()> {
             print!("{}", recall::get(store.resolve(), session_id, turn_uuid, window).await?);
             Ok(())
         }
-        Cmd::Index { source, no_thinking } => {
-            let dir = source.unwrap_or_else(|| {
-                let home = std::env::var("HOME").unwrap_or_default();
-                PathBuf::from(home).join(".claude").join("projects")
-            });
-            index::run_index(&dir, no_thinking, None).await
+        Cmd::Index {
+            path,
+            harness,
+            no_thinking,
+        } => {
+            let harness = harness.map(|h| Harness::parse(&h)).transpose()?;
+            let roots: Vec<(PathBuf, Option<Harness>)> = match path {
+                // An existing local path wins over reading the same string as a repo ref.
+                Some(p) if PathBuf::from(&p).exists() => vec![(PathBuf::from(p), harness)],
+                Some(p) if p.starts_with("hf://") || hub::is_remote_shorthand(&p) => {
+                    // A Hub trace dataset: resolve to `hf://datasets/<owner>/<name>` and index its
+                    // auto-converted parquet.
+                    let hub::Store::Remote { uri } = hub::Store::parse(&p) else {
+                        return Err(anyhow!("expected a Hub repo, got {p:?}"));
+                    };
+                    return index::run_index_remote(&uri, no_thinking).await;
+                }
+                Some(p) => return Err(anyhow!("no such path: {p}")),
+                None if harness.is_some() => return Err(anyhow!("--harness needs a PATH")),
+                None => funes::harness::known_harness_roots()
+                    .into_iter()
+                    .map(|(dir, h)| (dir, Some(h)))
+                    .collect(),
+            };
+            if roots.is_empty() {
+                return Err(anyhow!(
+                    "no local sessions found — looked in ~/.claude/projects, ~/.codex/sessions, ~/.pi/agent/sessions"
+                ));
+            }
+            index::run_index_roots(&roots, no_thinking, None).await
         }
         Cmd::Status { store } => {
             print!("{}", recall::status(store.resolve()).await?);

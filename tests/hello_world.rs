@@ -22,6 +22,7 @@ async fn recall_without_an_index_uses_the_builtin_guide() {
         1,
         None,
         None,
+        None,
     )
     .await
     .unwrap();

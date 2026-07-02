@@ -21,6 +21,8 @@ pub struct RecallRequest {
     pub block_type: Option<String>,
     #[schemars(description = "Restrict to a project (the directory segment under `projects`)")]
     pub project: Option<String>,
+    #[schemars(description = "Restrict to a harness: claude_code | codex | pi")]
+    pub harness: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -57,6 +59,7 @@ impl Funes {
             k,
             block_type,
             project,
+            harness,
         }): Parameters<RecallRequest>,
     ) -> String {
         match recall::recall(
@@ -68,6 +71,7 @@ impl Funes {
             1,
             block_type,
             project,
+            harness,
         )
         .await
         {

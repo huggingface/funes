@@ -27,6 +27,7 @@ pub struct Chunk {
     pub source_path: String,
     pub block_idx: i64,
     pub split_idx: i64,
+    pub harness: String,
 }
 
 /// A missing tool name renders as the literal "None".
@@ -188,6 +189,7 @@ pub(crate) fn chunks_from_batches(batches: &[RecordBatch]) -> Vec<Chunk> {
                 source_path: sv(b, "source_path", i),
                 block_idx: iv(b, "block_idx", i),
                 split_idx: iv(b, "split_idx", i),
+                harness: sv(b, "harness", i),
             });
         }
     }
@@ -251,6 +253,7 @@ pub fn chunks_from_turns(turns: &[Turn], include_thinking: bool) -> Vec<Chunk> {
                     source_path: turn.source_path.clone(),
                     block_idx: bi as i64,
                     split_idx: si as i64,
+                    harness: turn.harness.clone(),
                 });
             }
         }
@@ -283,6 +286,7 @@ mod tests {
             role: "assistant".into(),
             blocks,
             source_path: "/x.jsonl".into(),
+            harness: "claude_code".into(),
         }
     }
 
