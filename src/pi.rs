@@ -1,9 +1,9 @@
-//! `funes install pi`: install funes recall as a first-class pi tool.
+//! `funes add pi`: install funes recall as a first-class pi tool.
 //!
 //! pi has no MCP client, so funes ships a small pi extension (a bridge that
 //! spawns `funes mcp` over stdio — see `integrations/pi/`). The extension is
 //! embedded in the binary here, so once `funes` is on PATH a single
-//! `funes install pi` drops it where pi loads it — no separate package to fetch,
+//! `funes add pi` drops it where pi loads it — no separate package to fetch,
 //! and it always matches this binary's MCP surface. Project scope extracts into
 //! the project's `.pi/extensions/`, which pi auto-discovers; `--global`/`--dest`
 //! extract elsewhere and register the path with `pi install`.

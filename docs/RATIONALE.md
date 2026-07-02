@@ -1,8 +1,5 @@
 # Why funes
 
-> *"To think is to forget differences, generalize, make abstractions."*
-> — Jorge Luis Borges, *Funes the Memorious*
-
 This document explains the *why* behind funes — the design choices, and why it exists
 alongside (not instead of) the growing field of "agent memory" providers. For the *what*
 and the *how*, see the [README](../README.md).

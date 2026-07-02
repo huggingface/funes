@@ -1,69 +1,31 @@
 # funes
 
-> *"To think is to forget differences, generalize, make abstractions."*
-> — Jorge Luis Borges, *Funes the Memorious* (trans. James E. Irby)
+**Durable, local memory for your AI coding agent.** funes indexes your past sessions across Claude
+Code, Codex, and pi and lets the agent recall its own decisions, rationale, and findings mid-task —
+the exact passages, with provenance, using whatever model it's running. Everything stays on your
+machine; you can query the memories yourself from the CLI to check or debug a result.
 
-Ireneo Funes, after his fall, could forget nothing — every leaf of every tree, every
-instant of every day, kept in perfect and infinite detail. It was a **curse**: buried in
-particulars, he could no longer generalize, abstract, or think.
+## Features at a glance
 
-An LLM agent has the *opposite* affliction — the **goldfish problem**: the moment a session
-ends or the context window fills, everything is gone, and it meets your project as a
-stranger, again and again.
+- **Your agent recalls its own past work.** The model spontaneously uses funes to recall prior decisions, rationale, and findings mid-task.
+- **One memory across your agents.** Index Claude Code, Codex, and pi into a single store; recall
+  spans all of them, and every hit shows which agent it came from.
+- **Runs on your machine.** Indexing and recall are local; nothing is sent anywhere until you `push`.
+- **Share across machines or a team.** Publish your index to a Hugging Face dataset you own; a
+  teammate or another host recalls it.
+- **Secrets stay out.** Credentials are redacted at index time, and a fail-closed gate blocks them
+  from any push.
 
-**`funes` lives between the two.** It gives any model durable, mid-term memory of your past
-sessions — so it stops forgetting — but serves it through **selective, reranked recall**:
-you (or the agent) ask, and get back the few relevant passages with exact provenance, not
-Funes's drowning flood of detail. Memory that remembers *for* you, and forgets *on your
-behalf*.
+## Get funes
 
-## What it is (and isn't)
-
-- **Append-only event log, not a mutable knowledge base.** Every chunk is an immutable,
-  timestamped record of *what was said when*. Nothing is overwritten; obsolescence is
-  resolved at read time by recency + the reader, not by a reconciliation engine.
-- **No LLM in the ingest path.** Deterministic parse → chunk → embed. It returns
-  *passages*, not LLM-distilled "facts". Interpretation is deferred to read time (you, or an
-  orchestrator). This is the property that keeps it stable, debuggable, and private.
-- **Local + model-agnostic.** Local embeddings + reranker; the only state is a derived,
-  rebuildable index. The transcripts (local + your HF bucket) are the source of truth. Any
-  model can query it — switch models per task; nothing is trained into weights.
-
-For the *why* behind these choices — and how funes differs from, and complements, the crowd of memory providers — see [docs/RATIONALE.md](docs/RATIONALE.md).
-
-## Pipeline
-
-```
-~/.claude/projects/*.jsonl
-   │  parse        deterministic — turns (text / thinking / tool_use / tool_result)
-   │  chunk        one chunk per content block, tight provenance
-   │  embed        pinned local model (BAAI/bge-small-en-v1.5)
-   ▼  store        embedded vector store (vector + BM25)
-recall(query) ──>  vector + BM25  →  RRF  →  cross-encoder rerank  →  recency  →  neighbors
-```
-
-## Sources
-
-> **Two sources are supported today:** Claude Code session transcripts under
-> `~/.claude/projects/**/*.jsonl` (subagent sidechains included — the default), and agent-trace
-> **parquet** datasets (HF-style, one row per session) via `funes index path/to/traces.parquet`.
-
-Each source is a [`TraceSource`](src/source.rs) that reads its format into a generic turn/block
-shape; everything downstream — chunk → embed → store → recall — is source-agnostic and operates on
-that shape. Adding another framework means implementing one trait (and a branch in `source::open`),
-not touching the index or query path.
-
-## Install
-
-The [installer](scripts/install.sh) detects your platform, downloads the matching prebuilt
-binary, and puts it on your PATH (`~/.local/bin` by default):
+The [installer](scripts/install.sh) detects your platform, downloads the matching prebuilt binary,
+and puts it on your PATH (`~/.local/bin` by default):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/huggingface/funes/main/scripts/install.sh | sh
 ```
 
-Pass `-b <dir>` to change the install dir or `-v <tag>` to pin a release, after `sh -s --`.
-Or grab a [binary](https://huggingface.co/buckets/huggingface/funes) by hand:
+Alternatively, grab a [binary](https://huggingface.co/buckets/huggingface/funes) by hand:
 
 | Platform | Binary |
 | --- | --- |
@@ -76,91 +38,138 @@ curl -fsSL https://huggingface.co/buckets/huggingface/funes/resolve/funes-x86_64
 chmod +x funes && ./funes recall "how do I get started with funes"
 ```
 
-funes works the moment it lands: with no index yet, `recall` (and `get` / `list`) answer
-from a small **built-in guide to funes itself**, so you can feel recall before indexing
-anything. `funes status` tells you whether you're reading that built-in guide or your own index.
+funes works the moment it lands: with no index yet, `recall` (and `get` / `list`) answer from a
+small **built-in guide to funes itself**, so you can feel recall before indexing anything. `funes
+status` tells you whether you're reading that built-in guide or your own index.
+
+Already installed? **`funes update`** replaces the binary in place with the latest build for your
+platform (`--force` reinstalls the current one); `funes status` tells you when a newer release is
+out. Along with `push`, that update check is the only routine call funes makes off your machine.
 
 To build it yourself instead, see [Building from source](#building-from-source).
 
-Once installed, `funes update` replaces the binary in place with the latest release for your
-platform (it downloads over itself atomically, so it's safe to run anywhere funes lives; pass
-`--force` to reinstall the current version). `funes status` warns when a newer release is out.
-Agents already running (Claude Code, Cursor, pi) keep using the old binary until you restart
-them or start a new session.
+## The memory loop
 
-## Getting started
+funes fits into one loop: **index** your past sessions, **add** funes to your agent, then just
+**ask your agent** — and let it recall on its own.
 
-> `funes` is a single Rust binary (`lance` + `fastembed-rs`, CPU). `index` writes; `recall`
-> / `list` / `get` / `status` read.
-
-**1. Index your own history.**
+**1. Index — one store for every agent on the machine.**
 
 ```bash
-funes index                                       # parse → chunk → embed ~/.claude/projects → ~/.funes
+funes index      # sweeps ~/.claude/projects, ~/.codex/sessions, ~/.pi/agent/sessions into one store
 ```
 
-This replaces the built-in guide with recall over your real sessions. Re-run it to pick up
-new work — it's incremental (only new turns are embedded), so it's cheap to run often.
+Run with no arguments and funes indexes every supported agent's sessions it finds, into one store.
+It's incremental — only new turns are embedded — so it's cheap to re-run as you work. Point it at a
+path to index one place, or scope to a single agent with `--harness codex`.
 
-**2. Recall.**
+funes can index sessions from: Claude, Codex, Pi
+
+**2. Add funes to your agent.**
 
 ```bash
-funes recall "how do we parse transcripts"        # hybrid → rerank → recency → neighbors
-funes recall "the lance schema" --type tool_use --project <project>
-funes list --project <project>                    # browse indexed sessions
+funes add claude
+```
+
+Your agent gets `recall` and `get` as tools, plus instructions on when to use them.
+
+funes can be added to: Claude, Codex, Pi, Hermes, OpenCode
+
+**3. Ask your agent — and let it recall.**
+
+From here you just work. When something touches a past decision, its rationale, or an earlier
+finding, the agent reaches for `recall` itself — no pasting context back in. This holds even for
+small models: every model we tested — down to Gemma 4 E4B — invoked recall *spontaneously*, rather
+than needing to be told to. (The repo also ships an optional skill at [skills/funes/](skills/funes/)
+for richer recall-triggering and a `/funes` command.)
+
+That closes the loop: the work you just did becomes recallable the next time you index — [automate it](#automate-it)
+with a session end hook and it stays current on its own.
+
+## Works across your agents (and models)
+
+Your memory isn't tied to one tool. Because Claude Code, Codex, and pi all index into a single
+store, you can **switch agents without losing anything** — start a task in Claude Code, pick it up
+in Codex next week, and each one recalls the *entire* history, not just its own sessions (every hit
+shows which agent it came from). Any other agent joins the same store via a `.parquet` trace export.
+
+Models work the same way. funes runs no model of its own, so you reason with whatever your agent
+does — through **pi**, any local model or one served through the Hugging Face router. Switch models
+between sessions and the memory doesn't move.
+
+## Inspect it yourself
+
+Because everything's local, you can query the store yourself from the CLI — handy to check what's
+indexed or debug a result:
+
+```bash
+funes recall "why did we switch off lancedb"
+funes recall "the lance schema" --type tool_use --harness codex --project funes
+funes list --project funes                        # browse indexed sessions
 funes get <session_id> <turn_uuid>                # expand a hit into its full surrounding turns
-funes status
 ```
 
-`recall` narrows with `--type` (`text|thinking|tool_use|tool_result`) and `--project`, and
-each hit prints a `→ get <session_id> <turn_uuid>` line for drilling into the full
-surrounding turns.
+Each hit prints `[time] agent project/session type score`, a `→ get <session_id> <turn_uuid>` line,
+a preview, and a few neighboring chunks. Narrow with `--type` (`text|thinking|tool_use|tool_result`),
+`--project`, and `--harness` (`claude_code|codex|pi`); tune with `--k`, `--half-life` (recency
+decay), and `--neighbors`.
 
-**3. Let your agent recall on its own.** Register funes as an MCP server, so Claude Code (or
-Cursor, …) gets `recall` and `get` as tools:
+## Share across machines or a team
+
+Attach a Hugging Face dataset repo you own as your **active store**. `recall` then reads it, and
+`funes push` publishes your local index to it — no per-command flags:
 
 ```bash
-claude mcp add funes -- /path/to/funes mcp        # `funes mcp` runs the stdio server
+funes use acme/kb          # attach hf://datasets/acme/kb as the active store (persisted in funes.json)
+funes index                # build/update the local index
+funes push                 # publish the local index's new chunks to the active remote
+funes recall "..."         # reads the active remote
+funes use local            # detach — back to the local index
 ```
 
-New sessions then get the tools **plus** instructions on when to use them, so the agent
-reaches for prior decisions and rationale without you pasting context. (The repo also ships
-an optional skill at [skills/funes/](skills/funes/) for richer recall-triggering and a
-`/funes` command — optional, since the MCP server already carries when-to-use instructions.)
-
-**4. Share it across machines or a team (optional).** Attach a dataset repo you own on the
-Hugging Face Hub as your **active store**. `recall` then reads it, and `funes push` publishes
-your local index to it — no per-command flags:
-
-```bash
-funes use acme/kb        # attach hf://datasets/acme/kb as the active store (persisted in funes.json)
-funes index              # build/update the local index
-funes push               # publish the local index's new chunks to the active remote
-funes recall "..."       # reads the active remote
-funes use local          # detach — back to the local index
-```
-
-`funes use` is the one place you name a store; everything else just uses it. To **query a
-different remote for a single call** — say, someone's published memories on a topic — without
-changing your default, pass `--remote`:
+To query a **different remote for a single call** — say, someone's published memories on a topic —
+without changing your default, pass `--remote`:
 
 ```bash
 funes recall "..." --remote other-org/subject-kb
 ```
 
-`push` publishes your local index's new chunks to the active remote — or to a store you name
-(`funes push other-org/kb`); `index` only ever writes locally, so uploading is always an explicit
-step. If the target shares no chunks with your local index — a first push, a new machine, or the
-wrong store — `push` asks to confirm before uploading anything (`--yes` skips it; off a terminal it
-refuses rather than guess). You never need the Hub to use funes locally — it's a tier you opt into.
+The first push to a store your local index shares no chunks with (a first push, a new host, or the
+wrong store) asks to confirm before uploading; off a terminal it refuses rather than guess (`--yes`
+overrides). You never need the Hub to use funes locally — it's a tier you opt into.
 
-**5. Automate it (optional).** To index — and push — at the end of every agent session
-instead of by hand, wire up a `SessionEnd` hook: see [docs/automation.md](docs/automation.md).
+## Keeping secrets out
+
+funes redacts credentials from each session *before* it's stored. On publish, a separate,
+always-on gate withholds any chunk that still contains a secret and exits non-zero, rather than
+upload it — run `funes scrub` to clean older rows in place, then push again. This is what makes a
+shared store safe to push to.
+
+## Automate it
+
+`funes index` is incremental and cheap, but you still have to remember to run it. To index — and
+push — at the end of every agent session instead of by hand, wire up a hook: see
+[docs/automation.md](docs/automation.md).
+
+## How it works
+
+```
+~/.claude/projects, ~/.codex/sessions, ~/.pi/agent/sessions   (or a .parquet trace)
+   │  parse        deterministic — turns (text / thinking / tool_use / tool_result), tagged by agent
+   │  chunk        one chunk per content block, tight provenance
+   │  embed        pinned local model (BAAI/bge-small-en-v1.5)
+   ▼  store        embedded vector store (vector + BM25)
+recall(query) ──>  vector + BM25  →  RRF  →  cross-encoder rerank  →  recency  →  neighbors
+```
+
+Each source is a [`TraceSource`](src/source.rs) that reads its format into a generic turn/block
+shape; everything downstream — chunk → embed → store → recall — is source-agnostic. Adding another
+agent means implementing one trait, not touching the index or query path.
 
 ## Building from source
 
-Needs a Rust toolchain and **`protoc`** — `lance`'s build scripts compile protobuf at
-build time (the finished binary does not need it). Install it one of two ways:
+Needs a Rust toolchain and **`protoc`** — `lance`'s build scripts compile protobuf at build time
+(the finished binary does not need it). Install it one of two ways:
 
 ```bash
 # System-wide:
@@ -172,12 +181,21 @@ brew install protobuf                        # macOS
 export PROTOC="$PWD/.tools/protoc/bin/protoc"
 ```
 
-Then `cargo build --release` (binary at `target/release/funes`); `cargo test` runs the
-suite. The integration test downloads the embedder/reranker weights on first run.
+Then `cargo build --release` (binary at `target/release/funes`); `cargo test` runs the suite. The
+integration test downloads the embedder/reranker weights on first run.
 
 ## Notes
 
-- **Embedding model is pinned** and stamped into the index; querying with a different model
-  is refused. To change models, rebuild from the transcripts (the index is a disposable
-  derived artifact — the raw text is retained in every row).
+- **Embedding model is pinned** and stamped into the index; querying with a different embedding
+  model is refused. To change it, rebuild from the transcripts (the index is a disposable derived
+  artifact — the raw text is retained in every row). This is separate from the model you *reason*
+  with, which is free to change.
 - **Subagent transcripts** (`.../subagents/agent-*.jsonl`) are indexed too.
+
+## Why funes
+
+> *"To think is to forget differences, generalize, make abstractions."*
+> — Jorge Luis Borges, *Funes the Memorious*
+
+Why funes is built the way it is — and how it compares to other memory tools — is documented in
+[docs/RATIONALE.md](docs/RATIONALE.md).
