@@ -148,6 +148,9 @@ step. If the target shares no chunks with your local index — a first push, a n
 wrong store — `push` asks to confirm before uploading anything (`--yes` skips it; off a terminal it
 refuses rather than guess). You never need the Hub to use funes locally — it's a tier you opt into.
 
+**5. Automate it (optional).** To index — and push — at the end of every agent session
+instead of by hand, wire up a `SessionEnd` hook: see [docs/automation.md](docs/automation.md).
+
 ## Building from source
 
 Needs a Rust toolchain and **`protoc`** — `lance`'s build scripts compile protobuf at
