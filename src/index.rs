@@ -7,7 +7,7 @@
 //! contributes just its new turns, nothing is re-embedded or deleted.
 
 use crate::harness::Harness;
-use crate::{chunk, dataset, scan, source, trace};
+use crate::{chunk, dataset, hub, scan, source, trace};
 use anyhow::{anyhow, Result};
 use arrow_array::types::Float32Type;
 use arrow_array::{Array, FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator, StringArray};
@@ -272,6 +272,27 @@ pub async fn run_index_roots(
     no_thinking: bool,
     max_sessions: Option<usize>,
 ) -> Result<()> {
+    let sources = roots
+        .iter()
+        .map(|(path, harness)| source::open_with_harness(path, max_sessions, *harness))
+        .collect();
+    index_sources(sources, no_thinking).await
+}
+
+/// Index a Hub trace dataset (`funes index <org/repo>`): resolve its `refs/convert/parquet` shards,
+/// download them, and index — through the same pipeline as the local sources. `uri` is the
+/// `hf://datasets/<owner>/<name>` form (the CLI resolves a shorthand to it).
+pub async fn run_index_remote(uri: &str, no_thinking: bool) -> Result<()> {
+    let (owner, name, _prefix) = hub::parse_hf(uri)?;
+    let src = source::open_remote(&owner, &name, None).await?;
+    index_sources(vec![src], no_thinking).await
+}
+
+/// Index a set of already-opened sources into the local store, sharing one embedder, `state.json`,
+/// and dataset handle across them (state keyed by absolute path / `hf://…` shard, so incremental
+/// works cross-source). The wrappers above open the sources; this drives the
+/// units→skip→read→embed→write loop and builds the indexes once.
+async fn index_sources(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: bool) -> Result<()> {
     let include_thinking = !no_thinking;
     let dir = dataset::funes_dir();
     std::fs::create_dir_all(&dir)?;
@@ -318,8 +339,7 @@ pub async fn run_index_roots(
         include_thinking,
     };
     let (mut n_sessions, mut n_skipped, mut n_chunks) = (0u64, 0u64, 0u64);
-    for (path, harness) in roots {
-        let src = source::open_with_harness(path, max_sessions, *harness);
+    for src in &sources {
         let units = src.units()?;
         let total = units.len();
         let cached = units

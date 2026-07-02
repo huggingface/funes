@@ -224,9 +224,12 @@ async fn main() -> Result<()> {
                 // An existing local path wins over reading the same string as a repo ref.
                 Some(p) if PathBuf::from(&p).exists() => vec![(PathBuf::from(p), harness)],
                 Some(p) if p.starts_with("hf://") || hub::is_remote_shorthand(&p) => {
-                    return Err(anyhow!(
-                        "indexing a Hub trace repo (`funes index {p}`) lands in a later step"
-                    ));
+                    // A Hub trace dataset: resolve to `hf://datasets/<owner>/<name>` and index its
+                    // auto-converted parquet.
+                    let hub::Store::Remote { uri } = hub::Store::parse(&p) else {
+                        return Err(anyhow!("expected a Hub repo, got {p:?}"));
+                    };
+                    return index::run_index_remote(&uri, no_thinking).await;
                 }
                 Some(p) => return Err(anyhow!("no such path: {p}")),
                 None if harness.is_some() => return Err(anyhow!("--harness needs a PATH")),

@@ -10,12 +10,14 @@
 use crate::claude_traces;
 use crate::codex_traces;
 use crate::harness::Harness;
+use crate::hf_dataset;
 use crate::hf_traces;
+use crate::hub;
 use crate::jsonl;
 use crate::pi_traces;
 use crate::trace::Turn;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -169,10 +171,130 @@ impl TraceSource for ParquetDataset {
     }
 }
 
+/// One pre-downloaded parquet shard of a remote trace dataset.
+struct RemoteShard {
+    /// `state.json` key: `hf://datasets/<owner>/<name>/<shard>` — stable and disjoint from any
+    /// local path, so cross-source incremental never collides.
+    key: String,
+    /// The shard downloaded whole into hf-hub's cache.
+    local: PathBuf,
+    /// Project facet = the shard's file stem (parity with [`ParquetDataset`]).
+    project: String,
+}
+
+/// A Hub trace dataset's `refs/convert/parquet` shards, resolved and pre-downloaded by
+/// [`open_remote`]. Each shard is a unit signed with the convert-branch commit oid, so an unchanged
+/// repo is skipped without re-reading; a changed repo re-reads and chunk-id dedup keeps rows already
+/// stored a no-op.
+struct RemoteParquetDataset {
+    shards: Vec<RemoteShard>,
+    /// The convert-branch commit — every shard's incremental signature.
+    revision: String,
+    label: String,
+    limit: Option<usize>,
+}
+
+/// Resolve `<owner>/<name>`'s auto-converted parquet, download its shards whole-file into hf-hub's
+/// cache, and return a source over them. Async (resolve + download happen here) so `read` stays
+/// sync — the indexer never blocks a Tokio worker on a download.
+pub async fn open_remote(owner: &str, name: &str, limit: Option<usize>) -> Result<Box<dyn TraceSource>> {
+    let token = hub::hf_token();
+    let remote = hf_dataset::resolve_parquet(owner, name, token.as_deref()).await?;
+    let mut shards = Vec::with_capacity(remote.shards.len());
+    for shard in &remote.shards {
+        let local = hf_dataset::download_shard(&remote.repo, shard, &remote.revision).await?;
+        let project = Path::new(shard)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("parquet")
+            .to_string();
+        shards.push(RemoteShard {
+            key: format!("hf://datasets/{owner}/{name}/{shard}"),
+            local,
+            project,
+        });
+    }
+    Ok(Box::new(RemoteParquetDataset {
+        shards,
+        revision: remote.revision,
+        label: format!("{owner}/{name}"),
+        limit,
+    }))
+}
+
+impl TraceSource for RemoteParquetDataset {
+    fn describe(&self) -> String {
+        let oid8 = &self.revision[..self.revision.len().min(8)];
+        format!(
+            "indexing {} — {} parquet shard(s) @ refs/convert/parquet:{oid8}",
+            self.label,
+            self.shards.len()
+        )
+    }
+
+    fn units(&self) -> Result<Vec<Unit>> {
+        let mut units: Vec<Unit> = self
+            .shards
+            .iter()
+            .map(|s| Unit {
+                key: s.key.clone(),
+                signature: Some(self.revision.clone()),
+            })
+            .collect();
+        if let Some(n) = self.limit {
+            units.truncate(n);
+        }
+        Ok(units)
+    }
+
+    fn read(&self, unit: &Unit) -> Result<Vec<Turn>> {
+        let shard = self
+            .shards
+            .iter()
+            .find(|s| s.key == unit.key)
+            .context("unknown remote shard")?;
+        hf_traces::turns_from_parquet(&shard.local, &shard.project, self.limit)
+    }
+
+    fn fatal_on_read_error(&self) -> bool {
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn remote_parquet_units_are_shards_signed_by_the_convert_oid() {
+        let ds = RemoteParquetDataset {
+            shards: vec![
+                RemoteShard {
+                    key: "hf://datasets/o/n/default/train/0000.parquet".into(),
+                    local: "/tmp/a".into(),
+                    project: "0000".into(),
+                },
+                RemoteShard {
+                    key: "hf://datasets/o/n/default/train/0001.parquet".into(),
+                    local: "/tmp/b".into(),
+                    project: "0001".into(),
+                },
+            ],
+            revision: "abc123".into(),
+            label: "o/n".into(),
+            limit: None,
+        };
+        let units = ds.units().unwrap();
+        assert_eq!(units.len(), 2);
+        // Every shard is signed by the convert-branch oid, so an unchanged repo skips.
+        assert!(units.iter().all(|u| u.signature.as_deref() == Some("abc123")));
+        assert_eq!(units[0].key, "hf://datasets/o/n/default/train/0000.parquet");
+        assert!(ds.fatal_on_read_error());
+        // `limit` truncates the shard list.
+        let capped = RemoteParquetDataset { limit: Some(1), ..ds };
+        assert_eq!(capped.units().unwrap().len(), 1);
+    }
 
     #[test]
     fn file_sig_is_len_colon_mtime() {
