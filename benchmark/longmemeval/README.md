@@ -2,7 +2,8 @@
 
 Harness for evaluating funes on [LongMemEval](https://github.com/xiaowu0162/LongMemEval)
 (arXiv:2410.10813), a cross-session long-term-memory benchmark. This directory holds the ingest
-adapter and a retrieval smoke test.
+adapter, a retrieval smoke test, and the full evaluation harness (push-RAG and agentic
+funes-vs-naive-dense-baseline).
 
 ## Data
 
@@ -54,3 +55,34 @@ questions.
 - Recall runs with `--half-life 0`: LongMemEval dates are historical, so funes's wall-clock recency
   weighting does not apply.
 - Abstention questions (`question_id` ends in `_abs`) have no gold evidence.
+
+## Full harness
+
+Two evaluation modes, both comparing funes retrieval against a naive BGE-small dense baseline, with
+a fixed reader (local GLM-4.5-Air, OpenAI-compatible at `:8001`) and a GLM-5.2 judge (HF router).
+
+**Push-RAG** — the harness injects top-k passages into the reader prompt:
+- `sampler.py` — stratified question sample.
+- `index_pinned.py` — parallel funes indexing (CPU-affinity pinned, to avoid onnxruntime thrash).
+- `funes_recall_all.py`, `naive_rag.py` / `naive_precompute.py` — per-question top-k retrieval (funes vs dense).
+- `lme_run.py <read|judge|report> <workdir>` — build k-turn contexts, call the reader, judge, aggregate.
+- `retrieval_recall.py`, `measure_tokens.py`, `analyze_m.py` — retrieval recall@k, token accounting, retrieval→accuracy linkage.
+
+**Agentic** — the model drives its own retrieval tool via `pi`:
+- funes is exposed through `funes add pi` (`recall`/`get`); `naive-rag-ext/` is a pi extension exposing a `dense_search` tool backed by `naive_search.py`.
+- `gpu_naive.py` — GPU BGE-small doc-embedding precompute (transformers; needs a torch+CUDA venv).
+- `pi_run.sh <funes|naive> <qid>` — one agentic run (pi + GLM, `--no-builtin-tools`, `-e <ext>`).
+- `batch_agentic.sh` — full batch; `collect_judge_agentic.py <collect|report>` — judge + report accuracy and tool-use.
+
+## Environment
+
+Scripts read these (defaults in parentheses):
+- `LME_WORK` — working dir holding `work/<qid>/…` (cwd).
+- `WROOT` / `AROOT` — work-root / agentic-output-root (`$LME_WORK/work50`, `.../agentic`).
+- `FUNES_BIN` (`target/release/funes`), `FASTEMBED_CACHE_DIR` — funes binary + shared model cache.
+- pi: `~/.pi/agent/models.json` must define a `local` provider (`baseUrl` = the GLM server's `/v1`,
+  `contextWindow` = the server's *actual* size). Load extensions with `pi -e <index.ts>` —
+  auto-discovery of `.pi/extensions/` is unreliable on pi ≥ 0.80 (see repo issue on `funes add pi`).
+
+Paths were parametrized when moving out of a scratchpad; check them against your layout before running.
+Results for the GLM-4.5-Air study live in the `dacorvo/funes-longmemeval` HF dataset.

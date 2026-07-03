@@ -1,0 +1,12 @@
+{
+  "name": "naive-rag-pi",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "pi extension: naive BGE-small dense retrieval over the task's session corpus.",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
