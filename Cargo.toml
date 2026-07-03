@@ -3,6 +3,8 @@ name = "funes"
 version = "0.10.0+dev"
 edition = "2021"
 description = "Recall over your past AI agent sessions — the man who forgets nothing, with discrimination."
+license = "Apache-2.0"
+repository = "https://github.com/huggingface/funes"
 
 [dependencies]
 fastembed = "5"                  # local CPU embeddings + rerank (ONNX/ort)

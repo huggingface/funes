@@ -199,3 +199,7 @@ integration test downloads the embedder/reranker weights on first run.
 
 Why funes is built the way it is — and how it compares to other memory tools — is documented in
 [docs/RATIONALE.md](docs/RATIONALE.md).
+
+## License
+
+funes is licensed under the [Apache License 2.0](LICENSE).
