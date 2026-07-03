@@ -22,8 +22,11 @@ with no manual step.
 funes index          # parse → chunk → embed ~/.claude/projects → ~/.funes
 ```
 
-If you only want local recall, you're done with setup — skip to
-[the hook](#claude-code). The hook will run `funes index` and nothing else.
+Run this once, interactively — **the hook won't build the first index for you.** An
+automated (non-terminal) `funes index` refuses to build a from-scratch index (it can take
+a long time) and refuses to run with no target; it only does incremental, per-harness
+updates once a local index exists. So this manual first index is required on each machine.
+If you only want local recall, you're done — skip to [the hook](#claude-code).
 
 ### 2. Attach a shared store (optional)
 
@@ -137,8 +140,11 @@ worker() {
     printf '%s\n' "$$" >"$LOCK/pid" 2>/dev/null || true
     trap 'rm -rf "$LOCK" 2>/dev/null' EXIT
 
+    # Name the target explicitly: an automated (no-TTY) `funes index` refuses to run with no
+    # target, so this indexes only Claude sessions — Codex/pi are handled by their own hooks. It
+    # also refuses to build a *first* index unattended, hence the manual `funes index` in setup.
     log "index: start"
-    if "$funes" index >>"$LOG" 2>&1; then
+    if "$funes" index --harness claude >>"$LOG" 2>&1; then
         log "index: ok"
     else
         log "index: FAILED (exit $?)"
@@ -215,6 +221,9 @@ funes status                            # chunk count should grow across session
 
 - **Local-first, always safe.** `funes index` only ever writes `~/.funes`. If no
   remote is attached, the hook indexes and logs `push: skipped` — never an error.
+- **The first index is manual.** The hook only does incremental, per-harness updates;
+  it refuses to build a from-scratch index unattended, so a fresh machine does nothing
+  until you run `funes index` once by hand (setup step 1).
 - **Fresh the next session, not the current one.** The worker outlives the session
   that spawned it, but a session's *final* turns land as it tears down. They're
   swept up by the next session's run (or the current run if they were already
@@ -230,7 +239,7 @@ funes status                            # chunk count should grow across session
 
 The automation *pattern* is agent-agnostic: point an equivalent hook — or a
 cron/launchd/systemd timer, if your agent has no session hook — at a script like the
-one above. Only the *source path* is Claude-specific. `funes index` with no argument
-reads `~/.claude/projects`; to index another agent, pass its transcript location —
-`funes index <path>`, where `<path>` is a directory of session transcripts or a trace
-`.parquet`. Everything downstream — chunk, embed, store, push — is identical.
+one above. Only the *target* is Claude-specific, and an automated run must name one:
+`funes index --harness claude | codex | pi` indexes that agent's standard session dir,
+or pass an explicit path — `funes index <path>`, a directory of session transcripts or a
+trace `.parquet`. Everything downstream — chunk, embed, store, push — is identical.
