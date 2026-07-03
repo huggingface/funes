@@ -62,7 +62,8 @@ can query it — switch models per task; nothing is trained into weights.
 
 By default everything stays on the machine. **Optionally**, the index — a Lance dataset that
 still holds the raw passages — can be synced to the **HF Hub**, where `recall` reads it
-lazily over `hf://` (only the byte ranges a query touches, Xet-cached). That hub repo is
+over `hf://` — fetching the immutable Lance files a query touches into a local cache pinned to
+the dataset's commit, so a warm recall reads from disk with no network. That hub repo is
 *yours*: your org, gated by your token. It is plain object storage, not a service — embedding
 and reranking still happen locally; nothing on the hub processes, distills, or "learns" from
 your data.
