@@ -259,7 +259,7 @@ async fn main() -> Result<()> {
                         .into_iter()
                         .find(|(_, kh)| *kh == h)
                         .map(|(dir, _)| vec![(dir, Some(h))])
-                        .ok_or_else(|| anyhow!("no {} session dir found on this machine", h.as_str()))?
+                        .ok_or_else(|| anyhow!("no {} session dir found on this machine", h.cli_name()))?
                 }
                 // No target at all: index every known harness root — but only in a terminal. An
                 // automated run (no TTY) must name a target, so a session-end hook indexes just its

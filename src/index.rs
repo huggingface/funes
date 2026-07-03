@@ -354,17 +354,20 @@ async fn index_sources(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: 
         scanner,
         include_thinking,
     };
-    // Enumerate every source's units up front (cheap: stat, no parse) so a first-index estimate
-    // knows the total session count before any embedding starts.
-    let per_source: Vec<Vec<source::Unit>> = sources.iter().map(|s| s.units()).collect::<Result<_>>()?;
-    let total_units: usize = per_source.iter().map(|u| u.len()).sum();
-
     // First interactive index: after the first session lands, estimate the whole run from its time
     // and — if it looks long — ask whether to continue or bail and re-run with --limit.
     let mut probe_pending = first_index && !yes && interactive;
+    // Only that estimate needs the grand total up front (a cheap stat-only pass); an incremental run
+    // skips it and enumerates each source lazily in the loop, holding nothing for the whole run.
+    let total_units: usize = if probe_pending {
+        sources.iter().map(|s| s.units().map(|u| u.len()).unwrap_or(0)).sum()
+    } else {
+        0
+    };
 
     let (mut n_sessions, mut n_skipped, mut n_chunks) = (0u64, 0u64, 0u64);
-    'sources: for (src, units) in sources.iter().zip(&per_source) {
+    'sources: for src in &sources {
+        let units = src.units()?;
         let total = units.len();
         let cached = units
             .iter()
@@ -383,6 +386,8 @@ async fn index_sources(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: 
                 }
             }
             let progress = format!("[{}/{}]", idx + 1, total);
+            // Time from before the read so a first-index estimate covers parse + I/O, not just embedding.
+            let t_unit = Instant::now();
             let turns = match src.read(unit) {
                 Ok(t) => t,
                 // Best-effort sources retry a failed read next run (no state recorded); a fatal
@@ -393,7 +398,6 @@ async fn index_sources(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: 
                 }
                 Err(e) => return Err(e),
             };
-            let t_unit = Instant::now();
             let (sessions, added) = indexer.index_unit(&progress, &unit.key, turns).await?;
             n_sessions += sessions;
             n_chunks += added;
@@ -486,6 +490,20 @@ fn fmt_eta(d: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fmt_eta_uses_the_right_unit_at_each_boundary() {
+        // < 90s → whole seconds.
+        assert_eq!(fmt_eta(Duration::from_secs(45)), "45s");
+        assert_eq!(fmt_eta(Duration::from_secs(89)), "89s");
+        // The 90s cutoff crosses into minutes; below 90 min it stays there.
+        assert!(fmt_eta(Duration::from_secs(90)).contains("min"));
+        assert_eq!(fmt_eta(Duration::from_secs(120)), "2 min");
+        assert_eq!(fmt_eta(Duration::from_secs(5340)), "89 min");
+        // >= 90 min → hours with one decimal.
+        assert_eq!(fmt_eta(Duration::from_secs(5400)), "1.5 h");
+        assert_eq!(fmt_eta(Duration::from_secs(9000)), "2.5 h");
+    }
 
     #[test]
     fn schema_column_order_is_load_bearing() {

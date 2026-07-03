@@ -33,6 +33,16 @@ impl Harness {
         }
     }
 
+    /// The `--harness` spelling `index` accepts and shows in `--help` (`claude`/`codex`/`pi`).
+    /// Differs from [`Harness::as_str`], the stored facet, only for Claude (facet `claude_code`).
+    pub fn cli_name(&self) -> &'static str {
+        match self {
+            Harness::Claude => "claude",
+            Harness::Codex => "codex",
+            Harness::Pi => "pi",
+        }
+    }
+
     /// Parse a `--harness` override: `claude`/`claude_code`, `codex`, or `pi`.
     pub fn parse(s: &str) -> Result<Harness> {
         match s {
