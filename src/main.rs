@@ -75,9 +75,10 @@ enum Cmd {
     },
     /// Build or update the index from session transcripts.
     Index {
-        /// A transcript tree or `.parquet` file, or a Hub trace repo `<org>/<repo>`. Omit to index
-        /// every known local harness dir present (~/.claude/projects, ~/.codex/sessions,
-        /// ~/.pi/agent/sessions).
+        /// A transcript tree or `.parquet` file, or a Hub trace repo `<org>/<repo>`. Omit — in a
+        /// terminal — to index every known harness dir (~/.claude/projects, ~/.codex/sessions,
+        /// ~/.pi/agent/sessions); `--harness <name>` alone targets one. An automated (non-terminal)
+        /// run must name a target.
         path: Option<String>,
         /// Override harness auto-detection for PATH: claude | codex | pi.
         #[arg(long)]
@@ -250,11 +251,31 @@ async fn main() -> Result<()> {
                     return index::run_index_remote(&uri, no_thinking).await;
                 }
                 Some(p) => return Err(anyhow!("no such path: {p}")),
-                None if harness.is_some() => return Err(anyhow!("--harness needs a PATH")),
-                None => funes::harness::known_harness_roots()
-                    .into_iter()
-                    .map(|(dir, h)| (dir, Some(h)))
-                    .collect(),
+                // `--harness X` with no path targets that harness's known session dir — the
+                // per-target form a session-end hook uses (index only its own harness's sessions).
+                None if harness.is_some() => {
+                    let h = harness.unwrap();
+                    funes::harness::known_harness_roots()
+                        .into_iter()
+                        .find(|(_, kh)| *kh == h)
+                        .map(|(dir, _)| vec![(dir, Some(h))])
+                        .ok_or_else(|| anyhow!("no {} session dir found on this machine", h.as_str()))?
+                }
+                // No target at all: index every known harness root — but only in a terminal. An
+                // automated run (no TTY) must name a target, so a session-end hook indexes just its
+                // own harness — a Claude session-end shouldn't pull in Codex or pi sessions.
+                None => {
+                    if !std::io::stdin().is_terminal() {
+                        return Err(anyhow!(
+                            "automated `funes index` needs a target — pass a path or `--harness <claude|codex|pi>`; \
+                             refusing to index all harness roots unattended"
+                        ));
+                    }
+                    funes::harness::known_harness_roots()
+                        .into_iter()
+                        .map(|(dir, h)| (dir, Some(h)))
+                        .collect()
+                }
             };
             if roots.is_empty() {
                 return Err(anyhow!(
