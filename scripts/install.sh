@@ -1,7 +1,7 @@
 #!/bin/sh
 # Install the funes binary from the Hugging Face bucket (huggingface/funes).
 #
-#   curl -fsSL https://raw.githubusercontent.com/huggingface/funes/main/scripts/install.sh | sh
+#   curl -fsSL https://huggingface.co/buckets/huggingface/funes/resolve/install.sh | sh
 #
 # Detects the platform, downloads the matching prebuilt binary, and installs it
 # onto your PATH. Flags (pass after `sh -s --` when piping):
