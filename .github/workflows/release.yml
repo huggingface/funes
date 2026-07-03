@@ -253,11 +253,12 @@ jobs:
             --title "$TAG" \
             --generate-notes
 
-      # Publish the same binaries to the huggingface/funes storage bucket, which install.sh fetches
-      # from. The bucket root holds the latest binaries; each release also keeps a pinned copy under
-      # its tag, so `funes -v <tag>` resolves to it. Bucket support landed in huggingface_hub 1.21 —
-      # newer than the system package — so install it into a throwaway venv.
-      - name: Publish binaries to the Hugging Face bucket
+      # Publish the same binaries — plus install.sh itself — to the huggingface/funes storage bucket,
+      # so the one-liner and the binaries it fetches share one distribution channel. The bucket root
+      # holds the latest binaries; each release also keeps a pinned copy under its tag, so `funes -v
+      # <tag>` resolves to it. Bucket support landed in huggingface_hub 1.21 — newer than the system
+      # package — so install it into a throwaway venv.
+      - name: Publish binaries and installer to the Hugging Face bucket
         env:
           HF_TOKEN: ${{ secrets.HF_FUNES_RELEASE_TOKEN }}
         run: |
@@ -265,6 +266,9 @@ jobs:
           # The version marker `funes update` / `funes status` read to detect a newer release.
           # Written after the GitHub Release above so it isn't uploaded there as a stray asset.
           printf '%s' "${TAG#v}" > ./artifacts/VERSION
+          # The installer itself, so the one-liner resolves. Staged after the GitHub Release for the
+          # same reason as VERSION — otherwise it'd land as a stray release asset.
+          cp scripts/install.sh ./artifacts/install.sh
           python3 -m venv "$RUNNER_TEMP/hfvenv"
           "$RUNNER_TEMP/hfvenv/bin/pip" install -q -U "huggingface_hub>=1.21"
           HF="$RUNNER_TEMP/hfvenv/bin/hf"
