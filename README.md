@@ -22,7 +22,7 @@ The [installer](scripts/install.sh) detects your platform, downloads the matchin
 and puts it on your PATH (`~/.local/bin` by default):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/huggingface/funes/main/scripts/install.sh | sh
+curl -fsSL https://huggingface.co/buckets/huggingface/funes/resolve/install.sh | sh
 ```
 
 Alternatively, grab a [binary](https://huggingface.co/buckets/huggingface/funes) by hand:
@@ -199,3 +199,7 @@ integration test downloads the embedder/reranker weights on first run.
 
 Why funes is built the way it is — and how it compares to other memory tools — is documented in
 [docs/RATIONALE.md](docs/RATIONALE.md).
+
+## License
+
+funes is licensed under the [Apache License 2.0](LICENSE).
