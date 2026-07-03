@@ -4,9 +4,10 @@
 //! spawns `funes mcp` over stdio — see `integrations/pi/`). The extension is
 //! embedded in the binary here, so once `funes` is on PATH a single
 //! `funes add pi` drops it where pi loads it — no separate package to fetch,
-//! and it always matches this binary's MCP surface. Project scope extracts into
-//! the project's `.pi/extensions/`, which pi auto-discovers; `--global`/`--dest`
-//! extract elsewhere and register the path with `pi install`.
+//! and it always matches this binary's MCP surface. Every scope registers the
+//! path with `pi install` (`-l --approve` for project scope, user-wide for
+//! `--global`); pi >= 0.80 no longer auto-loads `.pi/extensions`, so bare file
+//! presence isn't enough.
 
 use crate::dataset;
 use crate::update::parse_semver;
@@ -22,31 +23,24 @@ const PACKAGE_JSON: &str = include_str!("../integrations/pi/package.json");
 /// (the older `@mariozechner` scope is deprecated). Older pi may not load the extension.
 const MIN_PI: (u32, u32, u32) = (0, 74, 2);
 
-/// Install the embedded pi extension so pi loads it. Project scope (the default)
-/// drops it into the project's `.pi/extensions/funes/`, which pi auto-discovers —
-/// no registration step. `global` installs it user-wide, and `dest` extracts to an
-/// explicit dir; both are registered with `pi install`. A copy that differs from this
-/// binary's embedded extension (e.g. after an upgrade) is refreshed automatically;
-/// `force` rewrites even when it already matches.
+/// Install the embedded pi extension and register it with pi. Project scope (the
+/// default) extracts into the project's `.pi/extensions/funes/` and registers it
+/// project-locally (`pi install -l --approve`); `global` installs user-wide and `dest`
+/// uses an explicit dir. (pi >= 0.80 no longer auto-loads `.pi/extensions`, so every
+/// scope must register.) A copy that differs from this binary's embedded extension (e.g.
+/// after an upgrade) is refreshed automatically; `force` rewrites even when it matches.
 pub fn install(global: bool, dest: Option<PathBuf>, force: bool) -> Result<()> {
-    // Project scope, no override: extract straight into pi's own discovery path.
-    // pi loads any `<cwd>/.pi/extensions/<name>/` on startup, so there's nothing to
-    // register — the extension is simply in place.
-    if !global && dest.is_none() {
-        let dir = std::env::current_dir()
+    // Where the extension lands. Project scope (the default) keeps it in the project's own
+    // `.pi/extensions/funes/` so it travels with the cwd; `--global` uses funes' home;
+    // `--dest` goes wherever asked. pi records the install path by reference, so wherever it
+    // lands must outlive the sessions that use it.
+    let dir = match dest {
+        Some(d) => d,
+        None if global => dataset::funes_dir().join("integrations").join("pi"),
+        None => std::env::current_dir()
             .context("resolving the current directory")?
-            .join(".pi/extensions/funes");
-        extract(&dir, force)?;
-        println!(
-            "installed funes recall into pi (project scope) at {} — restart pi if it's running.",
-            dir.display()
-        );
-        return Ok(());
-    }
-
-    // Global, or an explicit dest: extract somewhere persistent, then point pi at it
-    // with `pi install` (pi records the path).
-    let dir = dest.unwrap_or_else(|| dataset::funes_dir().join("integrations").join("pi"));
+            .join(".pi/extensions/funes"),
+    };
     extract(&dir, force)?;
     let dir = dir.to_string_lossy().into_owned();
     let scope = if global { "user" } else { "project" };
@@ -71,12 +65,12 @@ pub fn install(global: bool, dest: Option<PathBuf>, force: bool) -> Result<()> {
         );
     }
 
-    // Let pi resolve its own settings location. pi records the package as a path
-    // reference, so the extracted dir must persist — funes's home does.
     let mut cmd = Command::new("pi");
     cmd.arg("install");
     if !global {
-        cmd.arg("-l");
+        // Project-local (`.pi/settings.json`), and trust our own bundled files up front so
+        // recall loads without an approval prompt (pi >= 0.80 gates untrusted local code).
+        cmd.arg("-l").arg("--approve");
     }
     cmd.arg(&dir);
 
@@ -87,7 +81,13 @@ pub fn install(global: bool, dest: Option<PathBuf>, force: bool) -> Result<()> {
             } else {
                 format!(" {version}")
             };
-            println!("installed funes recall into pi{v} ({scope} scope) — `recall`/`get` are now available (restart pi if it's running).");
+            if global {
+                println!("installed funes recall into pi{v} ({scope} scope) — `recall`/`get` are now available (restart pi if it's running).");
+            } else {
+                // pi >= 0.80 loads project-local packages only from a trusted folder; the user
+                // approves that once, interactively, on pi's next run in this directory.
+                println!("installed funes recall into pi{v} ({scope} scope) — approve pi's folder-trust prompt on its next run here, then `recall`/`get` load.");
+            }
             Ok(())
         }
         Ok(s) => anyhow::bail!(
