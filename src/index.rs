@@ -15,10 +15,10 @@ use arrow_schema::{DataType, Field, Schema};
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use lance::dataset::{Dataset, WriteParams};
 use std::collections::{HashMap, HashSet};
-use std::io::Write as _;
+use std::io::{IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub const MODEL: &str = "BAAI/bge-small-en-v1.5";
 pub const DIM: i32 = 384;
@@ -265,18 +265,19 @@ impl Indexer<'_> {
 /// Build/update the local index from one or more source roots — each `(path, harness override)`
 /// where `None` auto-detects. All roots share one store, embedder, and `state.json` (keyed by
 /// absolute file path, so cross-root incremental works). Writes only locally — publishing is the
-/// separate `push`. `max_sessions` caps sessions *per root* (`None` = all) — the CLI passes `None`;
-/// a benchmark passes a cap to bound build time.
+/// separate `push`. `max_sessions` caps sessions *per root* to the most recent N (`None` = all).
+/// `yes` skips the first-index confirmation and the automated-first-index guard (`--yes`).
 pub async fn run_index_roots(
     roots: &[(PathBuf, Option<Harness>)],
     no_thinking: bool,
     max_sessions: Option<usize>,
+    yes: bool,
 ) -> Result<()> {
     let sources = roots
         .iter()
         .map(|(path, harness)| source::open_with_harness(path, max_sessions, *harness))
         .collect();
-    index_sources(sources, no_thinking).await
+    index_sources(sources, no_thinking, yes).await
 }
 
 /// Index a Hub trace dataset (`funes index <org/repo>`): resolve its `refs/convert/parquet` shards,
@@ -285,14 +286,15 @@ pub async fn run_index_roots(
 pub async fn run_index_remote(uri: &str, no_thinking: bool) -> Result<()> {
     let (owner, name, _prefix) = hub::parse_hf(uri)?;
     let src = source::open_remote(&owner, &name, None).await?;
-    index_sources(vec![src], no_thinking).await
+    // A Hub import is an explicit, deliberate command — bypass the first-index confirmation/guard.
+    index_sources(vec![src], no_thinking, true).await
 }
 
 /// Index a set of already-opened sources into the local store, sharing one embedder, `state.json`,
 /// and dataset handle across them (state keyed by absolute path / `hf://…` shard, so incremental
 /// works cross-source). The wrappers above open the sources; this drives the
 /// units→skip→read→embed→write loop and builds the indexes once.
-async fn index_sources(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: bool) -> Result<()> {
+async fn index_sources(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: bool, yes: bool) -> Result<()> {
     let include_thinking = !no_thinking;
     let dir = dataset::funes_dir();
     std::fs::create_dir_all(&dir)?;
@@ -310,6 +312,20 @@ async fn index_sources(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: 
                 return Err(anyhow!("index built with model {em:?}, refusing to mix with {MODEL:?}"));
             }
         }
+    }
+
+    let first_index = ds.is_none();
+    let interactive = std::io::stdin().is_terminal();
+
+    // A first index can take a long time; never let an automated run (no TTY — a hook, cron) trigger
+    // it. Fail closed like push's new-store guard: require a manual `funes index` first, or --yes to
+    // force. Exit 0 so a session-end hook isn't treated as failed.
+    if first_index && !yes && !interactive {
+        eprintln!(
+            "funes: no index yet — run `funes index` in a terminal first to build the initial index \
+             (one-time; it can take a while), or pass --yes to force it here. Skipping."
+        );
+        return Ok(());
     }
 
     // Incremental state: path -> "size:mtime".
@@ -338,9 +354,17 @@ async fn index_sources(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: 
         scanner,
         include_thinking,
     };
+    // Enumerate every source's units up front (cheap: stat, no parse) so a first-index estimate
+    // knows the total session count before any embedding starts.
+    let per_source: Vec<Vec<source::Unit>> = sources.iter().map(|s| s.units()).collect::<Result<_>>()?;
+    let total_units: usize = per_source.iter().map(|u| u.len()).sum();
+
+    // First interactive index: after the first session lands, estimate the whole run from its time
+    // and — if it looks long — ask whether to continue or bail and re-run with --limit.
+    let mut probe_pending = first_index && !yes && interactive;
+
     let (mut n_sessions, mut n_skipped, mut n_chunks) = (0u64, 0u64, 0u64);
-    for src in &sources {
-        let units = src.units()?;
+    'sources: for (src, units) in sources.iter().zip(&per_source) {
         let total = units.len();
         let cached = units
             .iter()
@@ -369,6 +393,7 @@ async fn index_sources(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: 
                 }
                 Err(e) => return Err(e),
             };
+            let t_unit = Instant::now();
             let (sessions, added) = indexer.index_unit(&progress, &unit.key, turns).await?;
             n_sessions += sessions;
             n_chunks += added;
@@ -379,6 +404,19 @@ async fn index_sources(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: 
             if let Some(sig) = &unit.signature {
                 state.insert(unit.key.clone(), sig.clone());
                 std::fs::write(&state_path, serde_json::to_string_pretty(&state)?)?;
+            }
+
+            // Estimate off the first session that actually embedded, and ask before a long haul.
+            if probe_pending && added > 0 {
+                probe_pending = false;
+                let est = t_unit.elapsed().mul_f64(total_units as f64);
+                if est >= Duration::from_secs(FIRST_INDEX_PROMPT_SECS) && !confirm_full_index(total_units, est) {
+                    eprintln!(
+                        "stopped after 1 session (kept — the index is resumable). Re-run \
+                         `funes index --limit M` for the most recent M, or `funes index` to do all."
+                    );
+                    break 'sources;
+                }
             }
         }
     }
@@ -409,8 +447,40 @@ async fn index_sources(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: 
 
 /// Build/update the local index from a single source root, auto-detecting its harness — a thin
 /// convenience over [`run_index_roots`] for a single path (tests, benchmarks, one explicit path).
+/// Passes `yes = true`: these callers are non-interactive and must not gate on the first-index prompt.
 pub async fn run_index(path: &Path, no_thinking: bool, max_sessions: Option<usize>) -> Result<()> {
-    run_index_roots(&[(path.to_path_buf(), None)], no_thinking, max_sessions).await
+    run_index_roots(&[(path.to_path_buf(), None)], no_thinking, max_sessions, true).await
+}
+
+/// A first interactive index estimated at ≥ this many seconds prompts before continuing.
+const FIRST_INDEX_PROMPT_SECS: u64 = 120;
+
+/// Prompt before a long first index (interactive only): continue all, or bail and re-run with a
+/// `--limit`. Returns whether to proceed.
+fn confirm_full_index(total: usize, est: Duration) -> bool {
+    eprint!(
+        "indexing all {total} sessions is estimated at ~{} (rough, from one session). Continue? [y/N]  \
+         (or re-run with `--limit M` for the most recent M) ",
+        fmt_eta(est)
+    );
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    if std::io::stdin().read_line(&mut answer).is_err() {
+        return false;
+    }
+    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+/// Rough human ETA: "45s", "12 min", "2.3 h".
+fn fmt_eta(d: Duration) -> String {
+    let s = d.as_secs_f64();
+    if s < 90.0 {
+        format!("{s:.0}s")
+    } else if s < 5400.0 {
+        format!("{:.0} min", s / 60.0)
+    } else {
+        format!("{:.1} h", s / 3600.0)
+    }
 }
 
 #[cfg(test)]

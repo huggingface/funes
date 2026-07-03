@@ -99,7 +99,8 @@ pub(crate) fn file_sig(p: &Path) -> Option<String> {
 }
 
 /// A directory tree of `*.jsonl` transcripts for one `harness` — one session per file, indexed
-/// incrementally (each file skipped while unchanged). `limit` caps the number of files (sessions).
+/// incrementally (each file skipped while unchanged). `limit` keeps the most recent N files
+/// (sessions) by mtime.
 struct JsonlTree {
     root: PathBuf,
     limit: Option<usize>,
@@ -118,6 +119,11 @@ impl TraceSource for JsonlTree {
     fn units(&self) -> Result<Vec<Unit>> {
         let mut files = jsonl::iter_jsonl_files(&self.root);
         if let Some(n) = self.limit {
+            // Keep the most recent `n` by mtime: recall values recency, and the default order is by
+            // filename (≈ random for UUID-named sessions), so a plain truncate would drop recent work.
+            files.sort_by_cached_key(|p| {
+                std::cmp::Reverse(std::fs::metadata(p).and_then(|m| m.modified()).unwrap_or(UNIX_EPOCH))
+            });
             files.truncate(n);
         }
         Ok(files

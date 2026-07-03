@@ -85,6 +85,13 @@ enum Cmd {
         /// Exclude thinking blocks.
         #[arg(long)]
         no_thinking: bool,
+        /// Index only the most recent N sessions per source. Omit to index all.
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Skip the first-index size confirmation, and allow a first index from a non-interactive
+        /// run (a hook/cron) — which is otherwise refused so the long initial build stays manual.
+        #[arg(long)]
+        yes: bool,
     },
     /// Show index statistics.
     Status {
@@ -227,6 +234,8 @@ async fn main() -> Result<()> {
             path,
             harness,
             no_thinking,
+            limit,
+            yes,
         } => {
             let harness = harness.map(|h| Harness::parse(&h)).transpose()?;
             let roots: Vec<(PathBuf, Option<Harness>)> = match path {
@@ -252,7 +261,7 @@ async fn main() -> Result<()> {
                     "no local sessions found — looked in ~/.claude/projects, ~/.codex/sessions, ~/.pi/agent/sessions"
                 ));
             }
-            index::run_index_roots(&roots, no_thinking, None).await
+            index::run_index_roots(&roots, no_thinking, limit, yes).await
         }
         Cmd::Status { store } => {
             print!("{}", recall::status(store.resolve()).await?);
