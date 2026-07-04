@@ -40,7 +40,7 @@ For each store the harness reports a single **cold** call followed by the min / 
 Build in release (a debug build is far slower and not representative):
 
 ```sh
-cargo run --release --example bench_recall -- "<query>" --remote dacorvo/funes-Glint-research-Fable-5 --iters 5 --cold
+cargo run --release --example bench_recall -- "<query>" --remote dacorvo/funes-Glint-Research-Fable-5 --iters 5 --cold
 ```
 
 The bench downloads `--remote` (through the hf-hub crate, using the token from your environment for a
@@ -52,7 +52,7 @@ both legs run identical data, so the gap is the I/O path, not the corpus.
 | flag | default | meaning |
 |------|---------|---------|
 | `<query>` (positional) | `"how does recall rerank candidates"` | the text to recall |
-| `--remote <spec>` | `dacorvo/funes-Glint-research-Fable-5` | dataset to benchmark (`org/repo` or `hf://…`), used for both legs |
+| `--remote <spec>` | `dacorvo/funes-Glint-Research-Fable-5` | dataset to benchmark (`org/repo` or `hf://…`), used for both legs |
 | `--iters <N>` | `5` | warm iterations timed per store (after the one cold call) |
 | `--cold` | off | give the remote leg a throwaway `HF_HUB_CACHE` temp dir so its cold call is a true download (your real cache is left untouched) |
 | `--k <N>` | `8` | results returned |
@@ -67,7 +67,7 @@ both legs run identical data, so the gap is the I/O path, not the corpus.
 ## Reading the output
 
 ```
-dataset: dacorvo/funes-Glint-research-Fable-5   query: "how does recall rerank candidates"   k=8 candidates=30 neighbors=1   warm iters=5
+dataset: dacorvo/funes-Glint-Research-Fable-5   query: "how does recall rerank candidates"   k=8 candidates=30 neighbors=1   warm iters=5
 
 store     cold(ms)   warm_lo  warm_med   warm_hi  hits
 local       5455.9    5682.6    5956.0    6093.4     8
