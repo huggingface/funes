@@ -63,7 +63,9 @@ pub fn install(force: bool) -> Result<()> {
             } else {
                 format!(" {version}")
             };
-            println!("installed funes recall into pi{v} — `recall`/`get` are now available (restart pi if it's running).");
+            println!(
+                "installed funes recall into pi{v} — `recall`/`get` are now available (restart pi if it's running)."
+            );
             Ok(())
         }
         Ok(s) => anyhow::bail!(
