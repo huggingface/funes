@@ -5,6 +5,10 @@ Code, Codex, and pi and lets the agent recall its own decisions, rationale, and 
 the exact passages, with provenance, using whatever model it's running. Everything stays on your
 machine; you can query the memories yourself from the CLI to check or debug a result.
 
+![Choosing an embedding model in Claude Code, then Codex recalling that decision in a separate session](docs/img/cross-agents.gif)
+
+*Different agents, one memory: Claude picks an embedding model; a session-end hook indexes it on its own; Codex — a separate agent — uses funes to recall the decision.*
+
 ## Features at a glance
 
 - **Your agent recalls your past work.** The model spontaneously uses funes to recall prior decisions, rationale, and findings mid-task.
@@ -25,6 +29,12 @@ and puts it on your PATH (`~/.local/bin` by default):
 curl -fsSL https://huggingface.co/buckets/huggingface/funes/resolve/install.sh | sh
 ```
 
+Then try it:
+
+```bash
+funes recall "how do I get started with funes"
+```
+
 Alternatively, grab a [binary](https://huggingface.co/buckets/huggingface/funes) by hand:
 
 | Platform | Binary |
@@ -35,7 +45,7 @@ Alternatively, grab a [binary](https://huggingface.co/buckets/huggingface/funes)
 
 ```bash
 curl -fsSL https://huggingface.co/buckets/huggingface/funes/resolve/funes-x86_64-linux -o funes
-chmod +x funes && ./funes recall "how do I get started with funes"
+chmod +x funes
 ```
 
 funes works the moment it lands: with no index yet, `recall` (and `get` / `list`) answer from a
@@ -133,6 +143,10 @@ without changing your default, pass `--remote`:
 funes recall "..." --remote other-org/subject-kb
 ```
 
+![Attaching a shared Hugging Face dataset with funes use, then pi recalling a decision from a project this machine never worked on](docs/img/hub-store.gif)
+
+*A project this machine never worked on: one `funes use dacorvo/funes-Glint-Research-Fable-5` attaches ~21.6k chunks straight from the Hub, and pi recalls a past decision from that shared store.*
+
 The first push to a store your local index shares no chunks with (a first push, a new host, or the
 wrong store) asks to confirm before uploading; off a terminal it refuses rather than guess (`--yes`
 overrides). You never need the Hub to use funes locally — it's a tier you opt into.
@@ -143,6 +157,16 @@ funes redacts credentials from each session *before* it's stored. On publish, a 
 always-on gate withholds any chunk that still contains a secret and exits non-zero, rather than
 upload it — run `funes scrub` to clean older rows in place, then push again. This is what makes a
 shared store safe to push to.
+
+For example, when the gate holds back every dirty row, nothing ships and the push exits non-zero:
+
+```console
+$ funes push
+scanning 512 chunk(s) for secrets…
+hf://datasets/acme/kb: nothing published — held back 3 row(s) with secrets (AWS×2, PrivateKey×1); run `funes scrub`, then push again
+$ echo $?
+2
+```
 
 ## Automate it
 
