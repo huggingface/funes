@@ -29,7 +29,7 @@ Set Theme "Catppuccin Mocha"
 Set TypingSpeed 40ms
 
 # Hidden setup: full PATH/env, a TERM the TUI will render under, a throwaway
-# FUNES_HOME so nothing lands in the real ~/.funes, a clean prompt and cwd.
+# FUNES_HOME so the demo store lands here, off your real ~/.funes; a clean prompt and cwd.
 Hide
 Type "source ~/.zshrc"
 Enter

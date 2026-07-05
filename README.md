@@ -45,7 +45,7 @@ Alternatively, grab a [binary](https://huggingface.co/buckets/huggingface/funes)
 
 ```bash
 curl -fsSL https://huggingface.co/buckets/huggingface/funes/resolve/funes-x86_64-linux -o funes
-chmod +x funes
+chmod +x funes && ./funes recall "how do I get started with funes"
 ```
 
 funes works the moment it lands: with no index yet, `recall` (and `get` / `list`) answer from a
