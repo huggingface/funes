@@ -80,8 +80,7 @@ funes can be added to: Claude, Codex, Pi, Hermes, OpenCode
 From here you just work. When something touches a past decision, its rationale, or an earlier
 finding, the agent reaches for `recall` itself — no pasting context back in. This holds even for
 small models: every model we tested — down to Gemma 4 E4B — invoked recall *spontaneously*, rather
-than needing to be told to. (The repo also ships an optional skill at [skills/funes/](skills/funes/)
-for richer recall-triggering and a `/funes` command.)
+than needing to be told to.
 
 That closes the loop: the work you just did becomes recallable the next time you index — [automate it](#automate-it)
 with a session end hook and it stays current on its own.
