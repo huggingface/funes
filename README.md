@@ -7,12 +7,12 @@ machine; you can query the memories yourself from the CLI to check or debug a re
 
 ## Features at a glance
 
-- **Your agent recalls its own past work.** The model spontaneously uses funes to recall prior decisions, rationale, and findings mid-task.
+- **Your agent recalls your past work.** The model spontaneously uses funes to recall prior decisions, rationale, and findings mid-task.
 - **One memory across your agents.** Index Claude Code, Codex, and pi into a single store; recall
   spans all of them, and every hit shows which agent it came from.
-- **Runs on your machine.** Indexing and recall are local; nothing is sent anywhere until you `push`.
 - **Share across machines or a team.** Publish your index to a Hugging Face dataset you own; a
   teammate or another host recalls it.
+- **Runs on your machine.** Indexing and recall are local; nothing is sent anywhere until you `push`.
 - **Secrets stay out.** Credentials are redacted at index time, and a fail-closed gate blocks them
   from any push.
 
