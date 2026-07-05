@@ -150,14 +150,8 @@ enum AddAgent {
     },
     /// codex: register funes as an MCP server with Codex (native MCP client, user scope).
     Codex,
-    /// pi: install funes as a pi extension (pi has no MCP client of its own).
+    /// pi: install funes as a pi extension user-wide (pi has no MCP client of its own).
     Pi {
-        /// Install user-wide instead of just the current directory.
-        #[arg(short, long)]
-        global: bool,
-        /// Extract the extension to this directory instead of the default.
-        #[arg(long, value_name = "PATH")]
-        dest: Option<PathBuf>,
         /// Reinstall even if the on-disk copy is already up to date.
         #[arg(long)]
         force: bool,
@@ -332,7 +326,7 @@ async fn main() -> Result<()> {
         Cmd::Add { agent } => match agent {
             AddAgent::Claude { global } => claude::install(global),
             AddAgent::Codex => codex::install(),
-            AddAgent::Pi { global, dest, force } => pi::install(global, dest, force),
+            AddAgent::Pi { force } => pi::install(force),
             AddAgent::Hermes => hermes::install(),
             AddAgent::Opencode { global } => opencode::install(global),
         },
