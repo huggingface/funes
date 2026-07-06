@@ -8,8 +8,7 @@
 // it consumes the same `funes mcp` surface every other agent integration uses.
 //
 // Install:  funes add pi   — or, from a funes checkout, `pi install
-// ./integrations/pi`, or drop this dir under <cwd>/.pi/extensions/ for
-// zero-config discovery.
+// ./integrations/pi`, or `pi -e ./integrations/pi` for a single run.
 //
 // `funes` is taken from PATH; set FUNES_BIN to override — e.g. inside an
 // agentcap sandbox, --tool-dir puts the bundle's `funes` wrapper on PATH (which
