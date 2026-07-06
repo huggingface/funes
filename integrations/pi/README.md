@@ -36,6 +36,7 @@ zero-config discovery, or load it for a single run with `pi -e ./integrations/pi
 - `funes` on `PATH` (set `FUNES_BIN` to override the binary path).
 - A funes store the binary can read — local, or a live `hf://` remote configured
   via `FUNES_HOME`/`funes.json` (needs network + an HF token for a private remote).
+  Set `FUNES_STORE` to pin one explicitly — forwarded as `funes mcp --store <spec>`.
 
 `typebox` and the pi SDK are provided by pi's loader, so the extension declares
 no dependencies.

@@ -14,11 +14,13 @@
 // `funes` is taken from PATH; set FUNES_BIN to override — e.g. inside an
 // agentcap sandbox, --tool-dir puts the bundle's `funes` wrapper on PATH (which
 // also points FASTEMBED_CACHE_DIR at the prewarmed cache and FUNES_HOME at the
-// live-remote config).
+// live-remote config). FUNES_STORE, if set, is forwarded as `funes mcp --store
+// <spec>` — pinning the server to that store instead of the active one.
 import { Type } from "typebox";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
 const FUNES_BIN = process.env.FUNES_BIN || "funes";
+const FUNES_ARGS = process.env.FUNES_STORE ? ["mcp", "--store", process.env.FUNES_STORE] : ["mcp"];
 const PROTOCOL_VERSION = "2024-11-05"; // matches funes' rmcp server
 const CALL_TIMEOUT_MS = 120_000;
 
@@ -35,7 +37,7 @@ class FunesMcp {
 
   private ensureStarted(): Promise<void> {
     if (this.child && this.ready) return this.ready;
-    const child = spawn(FUNES_BIN, ["mcp"], { stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(FUNES_BIN, FUNES_ARGS, { stdio: ["pipe", "pipe", "pipe"] });
     this.child = child;
     // The server is kept warm for the whole session, so unref it (and its pipes)
     // — an in-flight call's timer keeps the loop alive, but once the agent's turn
@@ -162,13 +164,20 @@ export default function (pi: any) {
       "discussed in an earlier session rather than the current files, or before asserting the " +
       "history of anything. Recall subject-matter too, not only decisions: before re-deriving how " +
       "an API or system behaves — or anything a past session (often a research subagent) " +
-      "investigated — query the topic itself; recall surfaces those findings.",
+      "investigated — query the topic itself; recall surfaces those findings. To recall from a " +
+      "different store than the server's default, pass `store`.",
     parameters: Type.Object({
       query: Type.String({ description: "Natural-language search query" }),
       k: Type.Optional(Type.Number({ description: "Number of results (default 8)" })),
+      store: Type.Optional(
+        Type.String({
+          description:
+            "Store to read for this call — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Defaults to the server's store.",
+        }),
+      ),
     }),
-    execute: (_id: string, params: { query: string; k?: number }) =>
-      call("recall", { query: params.query, k: params.k }),
+    execute: (_id: string, params: { query: string; k?: number; store?: string }) =>
+      call("recall", { query: params.query, k: params.k, store: params.store }),
   });
 
   pi.registerTool({
@@ -176,13 +185,22 @@ export default function (pi: any) {
     label: "Recall: get",
     description:
       "Drill down on a recall hit: fetch the named turn plus the turns around it, reassembled " +
-      "into readable text. Pass the `session_id` and `turn_uuid` from a recall hit's `→ get` line.",
+      "into readable text. Pass the `session_id` and `turn_uuid` from a recall hit's `→ get` line — " +
+      "and if the hit came from an explicit `store`, the same `store`.",
     parameters: Type.Object({
       session_id: Type.String({ description: "Session id from a recall hit's `→ get` line" }),
       turn_uuid: Type.String({ description: "Turn uuid from a recall hit's `→ get` line" }),
       window: Type.Optional(Type.Number({ description: "Turns within this window are included (default 3)" })),
+      store: Type.Optional(
+        Type.String({ description: "Store to read for this call — the one the recall hit came from" }),
+      ),
     }),
-    execute: (_id: string, params: { session_id: string; turn_uuid: string; window?: number }) =>
-      call("get", { session_id: params.session_id, turn_uuid: params.turn_uuid, window: params.window }),
+    execute: (_id: string, params: { session_id: string; turn_uuid: string; window?: number; store?: string }) =>
+      call("get", {
+        session_id: params.session_id,
+        turn_uuid: params.turn_uuid,
+        window: params.window,
+        store: params.store,
+      }),
   });
 }
