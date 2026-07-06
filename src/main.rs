@@ -82,6 +82,21 @@ enum Cmd {
         /// Output format. Default: human in a terminal, agent when piped.
         #[arg(long, value_enum)]
         format: Option<OutputFormat>,
+        /// Highlight this text in the human rendering (matched whitespace-insensitively).
+        #[arg(long)]
+        highlight: Option<String>,
+        #[command(flatten)]
+        store: StoreOpts,
+    },
+    /// Browse a session's turns in fzf — the hit picker's drill-down.
+    #[command(hide = true)]
+    Turns {
+        session_id: String,
+        /// The turn to mark in the list (the recall hit).
+        turn_uuid: String,
+        /// The matched chunk, highlighted in previews and pages.
+        #[arg(long)]
+        highlight: Option<String>,
         #[command(flatten)]
         store: StoreOpts,
     },
@@ -294,6 +309,7 @@ async fn main() -> Result<()> {
             turn_uuid,
             window,
             format,
+            highlight,
             store,
         } => {
             let format = OutputFormat::resolve(format);
@@ -304,12 +320,21 @@ async fn main() -> Result<()> {
                 println!("turn {turn_uuid} not found in session {session_id}");
             } else if matches!(format, OutputFormat::Human) {
                 let (color, width) = human_io();
-                print!("{}", render::get_human(&note, &turns, color, width));
+                print!(
+                    "{}",
+                    render::get_human(&note, &turns, color, width, highlight.as_deref())
+                );
             } else {
                 print!("{}", render::get_agent(&note, &turns));
             }
             Ok(())
         }
+        Cmd::Turns {
+            session_id,
+            turn_uuid,
+            highlight,
+            store,
+        } => select_turns_fzf(store.resolve(), session_id, turn_uuid, highlight).await,
         Cmd::Index {
             path,
             harness,
@@ -456,7 +481,9 @@ async fn select_hits(store: &hub::Store, hits: &[(Hit, f64)], color: bool, width
                         println!("turn {} not found in session {}", h.turn_uuid, h.session_id);
                     }
                     Ok((note, turns)) => {
-                        print!("{}", render::get_human(&note, &turns, color, width));
+                        // Mark the matched chunk so it stands out of the surrounding turns.
+                        let mark: String = h.text.split_whitespace().collect::<Vec<_>>().join(" ");
+                        print!("{}", render::get_human(&note, &turns, color, width, Some(&mark)));
                         println!(
                             "{}",
                             render::dim(
@@ -483,21 +510,23 @@ async fn select_hits(store: &hub::Store, hits: &[(Hit, f64)], color: bool, width
 }
 
 /// fzf-driven hit selector, the human default when fzf is installed: the list pane holds one row
-/// per hit, the preview pane runs `get` on the highlighted one, enter opens that expansion in the
-/// pager and leaving it returns to the picker — the walk-back; Esc quits. Each row carries hidden
-/// tab columns — session id and turn uuid for the `get` command, plus a searchable blob so a
-/// query matches content beyond the visible scent.
+/// per hit, the preview pane shows the matched chunk, enter drills into the session's turn
+/// browser and leaving it returns here — the walk-back; Esc quits. Each row carries hidden tab
+/// columns — session id and turn uuid for the drill-down, plus the matched chunk, which doubles
+/// as search text (a query matches content beyond the visible scent) and as the preview.
 fn select_hits_fzf(store: &hub::Store, hits: &[(Hit, f64)], color: bool, width: usize) -> Result<()> {
     let rows = render::recall_rows(hits, color, width, chrono::Utc::now());
     let mut lines = String::new();
     for ((h, _), row) in hits.iter().zip(&rows) {
+        // Field 4 is the matched chunk, whitespace-collapsed: fzf searches it (a query matches
+        // content beyond the visible scent) and the preview leads with it.
         let blob: String = h
             .text
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ")
             .chars()
-            .take(500)
+            .take(2000)
             .collect();
         lines.push_str(&format!(
             "{}\t{}\t{}\t{}\n",
@@ -508,11 +537,6 @@ fn select_hits_fzf(store: &hub::Store, hits: &[(Hit, f64)], color: bool, width: 
         ));
     }
     let exe = std::env::current_exe()?;
-    let get_cmd = format!(
-        "'{}' get {{2}} {{3}} --format human --store '{}'",
-        exe.display(),
-        store.label()
-    );
     let mut fzf = std::process::Command::new("fzf")
         .args([
             "--ansi",
@@ -523,19 +547,107 @@ fn select_hits_fzf(store: &hub::Store, hits: &[(Hit, f64)], color: bool, width: 
             "--with-nth",
             "1",
             "--preview",
-            &get_cmd,
+            // The matched chunk, nothing else — the turn browser behind enter owns the context.
+            // Rendering the turn here too would show the match's text twice in different shapes
+            // (or, for a tool hit, not at all: the turn view compresses tool blocks).
+            "echo {4} | fold -s -w $FZF_PREVIEW_COLUMNS",
             "--preview-window",
             "right:60%:wrap",
             "--bind",
-            &format!("enter:execute:{get_cmd} | ${{PAGER:-less}}"),
+            // fzf shell-escapes {4} (the matched chunk) itself.
+            &format!(
+                "enter:execute:'{}' turns {{2}} {{3}} --store '{}' --highlight {{4}}",
+                exe.display(),
+                store.label()
+            ),
         ])
         .stdin(std::process::Stdio::piped())
         .spawn()?;
     fzf.stdin.take().expect("stdin is piped").write_all(lines.as_bytes())?;
-    // Enter never terminates fzf (it pages the expansion and comes back); the picker ends on
-    // Esc or Ctrl-C, so any exit status just means "done browsing".
+    // Enter never terminates fzf (it drills into the turn browser and comes back); the picker
+    // ends on Esc or Ctrl-C, so any exit status just means "done browsing".
     fzf.wait()?;
     Ok(())
+}
+
+/// The turn browser behind enter in the hit picker: one fzf row per turn of the session, oldest
+/// first, the recall hit's turn marked `▶`; the highlighted turn shows whole in the preview pane
+/// — the matched chunk reverse-videoed within it — and enter pages it. Esc walks back to the hit
+/// picker.
+async fn select_turns_fzf(
+    store: hub::Store,
+    session_id: String,
+    center: String,
+    highlight: Option<String>,
+) -> Result<()> {
+    let (note, turns) = recall::get_turns(store.clone(), session_id.clone(), center.clone(), i64::MAX).await?;
+    if turns.is_empty() {
+        print!("{note}");
+        println!("turn {center} not found in session {session_id}");
+        return Ok(());
+    }
+    let (color, width) = human_io();
+    let rows = render::turn_rows(&turns, color, width);
+    let mut lines = String::new();
+    for (t, row) in turns.iter().zip(&rows) {
+        let marker = if t.turn_uuid == center { "▶ " } else { "  " };
+        lines.push_str(&format!(
+            "{marker}{}\t{}\t{}\n",
+            row.replace('\t', " "),
+            session_id,
+            t.turn_uuid
+        ));
+    }
+    let exe = std::env::current_exe()?;
+    let mut turn_cmd = format!(
+        "'{}' get {{2}} {{3}} --format human --window 0 --store '{}'",
+        exe.display(),
+        store.label()
+    );
+    if let Some(h) = &highlight {
+        turn_cmd.push_str(&format!(" --highlight {}", sh_quote(h)));
+    }
+    let mut cmd = std::process::Command::new("fzf");
+    cmd.args([
+        "--ansi",
+        "--layout=reverse",
+        "--no-sort",
+        "--delimiter",
+        "\t",
+        "--with-nth",
+        "1",
+        "--preview",
+        &turn_cmd,
+        "--preview-window",
+        "right:60%:wrap",
+        "--bind",
+        // `less -R` passes the highlight's ANSI marks through.
+        &format!("enter:execute:{turn_cmd} | ${{PAGER:-less -R}}"),
+    ]);
+    // Land on the hit's turn rather than the top of a possibly huge session. `pos` needs
+    // fzf 0.36; older ones still get the `▶` marker to search for.
+    if let Some(idx) = turns.iter().position(|t| t.turn_uuid == center) {
+        if fzf_version().is_some_and(|v| v >= (0, 36)) {
+            cmd.args(["--bind", &format!("load:pos({})", idx + 1)]);
+        }
+    }
+    let mut fzf = cmd.stdin(std::process::Stdio::piped()).spawn()?;
+    fzf.stdin.take().expect("stdin is piped").write_all(lines.as_bytes())?;
+    fzf.wait()?;
+    Ok(())
+}
+
+/// `s` single-quoted for a shell command line.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// The installed fzf's (major, minor), or None when it can't be read.
+fn fzf_version() -> Option<(u32, u32)> {
+    let out = std::process::Command::new("fzf").arg("--version").output().ok()?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    let mut parts = s.split_whitespace().next()?.split('.');
+    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
 }
 
 /// True when fzf is on PATH and `FUNES_NO_FZF` is unset (presence opts out, like `NO_COLOR`).

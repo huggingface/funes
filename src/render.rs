@@ -91,6 +91,34 @@ fn hit_rows(hits: &[(Hit, f64)], color: bool, width: usize, now: DateTime<Utc>, 
         .collect()
 }
 
+/// One row per turn — dim `stamp  role` columns, then a scent of the first block. For a picker's
+/// list pane over a session's turns.
+pub fn turn_rows(turns: &[Turn], color: bool, width: usize) -> Vec<String> {
+    let rw = turns.iter().map(|t| t.role.chars().count()).max().unwrap_or(0);
+    turns
+        .iter()
+        .map(|t| {
+            let stamp: String = t.ts.chars().take(16).collect::<String>().replace('T', " ");
+            let meta = format!("{stamp}  {:<rw$}", t.role);
+            let budget = width.saturating_sub(meta.chars().count() + 4).max(20);
+            let first = t.blocks.first().map(String::as_str).unwrap_or("");
+            let line = ellipsize(&block_scent(first), budget);
+            format!("{}  {}", dim(&meta, color), line)
+        })
+        .collect()
+}
+
+/// Scent for a reassembled block: its type is recovered from the chunk label prefix.
+fn block_scent(b: &str) -> String {
+    if b.starts_with("[tool_use") {
+        scent("tool_use", b)
+    } else if b.starts_with("[tool_result") {
+        scent("tool_result", b)
+    } else {
+        scent("text", b)
+    }
+}
+
 /// The agent `get` format: `[ts] role seqN turn=…` headers over reassembled blocks. Byte-stable.
 pub fn get_agent(note: &str, turns: &[Turn]) -> String {
     let mut out = note.to_string();
@@ -104,8 +132,10 @@ pub fn get_agent(note: &str, turns: &[Turn]) -> String {
 
 /// The human `get` view: a dim `── time · role ──` header per turn, prose blocks wrapped in full,
 /// tool blocks compressed to a one-liner plus the payload head (an Edit's `new_string`, a Write's
-/// `content`, a Bash command).
-pub fn get_human(note: &str, turns: &[Turn], color: bool, width: usize) -> String {
+/// `content`, a Bash command). A `mark` (a matched chunk, whitespace-collapsed) is located in the
+/// prose whitespace-insensitively and reverse-videoed — marks render regardless of `color`, since
+/// highlighting is their whole point.
+pub fn get_human(note: &str, turns: &[Turn], color: bool, width: usize, mark: Option<&str>) -> String {
     let mut out = note.to_string();
     for t in turns {
         let stamp: String = t.ts.chars().take(16).collect::<String>().replace('T', " ");
@@ -132,6 +162,8 @@ pub fn get_human(note: &str, turns: &[Turn], color: bool, width: usize) -> Strin
             } else if b.starts_with("[tool_result") {
                 let line = scent("tool_result", b);
                 let _ = writeln!(out, "  {}", dim(&ellipsize(&line, width.saturating_sub(2)), color));
+            } else if let Some(span) = mark.and_then(|m| word_span(b, m)) {
+                write_wrapped_marked(&mut out, b, width, span);
             } else {
                 for l in b.lines() {
                     write_wrapped(&mut out, l, width, "");
@@ -141,6 +173,67 @@ pub fn get_human(note: &str, turns: &[Turn], color: bool, width: usize) -> Strin
         }
     }
     out
+}
+
+/// The global word-index range where `mark`'s word sequence occurs in `text`, matched
+/// whitespace-insensitively. A chunk can be cut mid-word at its start, so the first mark word is
+/// also tried dropped; the match anchors on the next 6 words and extends as far as the sequences
+/// agree. None when nothing anchors — the mark belongs to some other turn.
+fn word_span(text: &str, mark: &str) -> Option<std::ops::Range<usize>> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let mark_words: Vec<&str> = mark.split_whitespace().collect();
+    for skip in 0..=1usize.min(mark_words.len()) {
+        let needle = &mark_words[skip..];
+        if needle.len() < 6 {
+            break;
+        }
+        if let Some(i) = words.windows(6).position(|w| w == &needle[..6]) {
+            let mut n = 6;
+            while n < needle.len() && i + n < words.len() && words[i + n] == needle[n] {
+                n += 1;
+            }
+            return Some(i..i + n);
+        }
+    }
+    None
+}
+
+/// Word-wrap a whole block to `width`, reverse-videoing the words whose global index falls in
+/// `mark`. Blank lines survive; unlike [`write_wrapped`], every line is re-flowed (word indices
+/// must line up with [`word_span`]'s counting).
+fn write_wrapped_marked(out: &mut String, text: &str, width: usize, mark: std::ops::Range<usize>) {
+    let width = width.max(20);
+    let mut wi = 0usize;
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            out.push('\n');
+            continue;
+        }
+        let mut cur = String::new();
+        let mut cur_len = 0usize;
+        for word in line.split_whitespace() {
+            let wlen = word.chars().count();
+            if cur_len > 0 && cur_len + 1 + wlen > width {
+                let _ = writeln!(out, "{cur}");
+                cur.clear();
+                cur_len = 0;
+            }
+            if cur_len > 0 {
+                cur.push(' ');
+                cur_len += 1;
+            }
+            if mark.contains(&wi) {
+                let _ = write!(cur, "\x1b[7m{word}\x1b[0m");
+            } else {
+                cur.push_str(word);
+            }
+            cur_len += wlen;
+            wi += 1;
+        }
+        if !cur.is_empty() {
+            let _ = writeln!(out, "{cur}");
+        }
+    }
 }
 
 /// `s` dimmed with ANSI escapes when `color` is set, verbatim otherwise.
@@ -436,6 +529,59 @@ mod tests {
     }
 
     #[test]
+    fn get_human_marks_the_matched_chunk() {
+        let turn = |block: &str| Turn {
+            seq: 1,
+            turn_uuid: "t".to_string(),
+            ts: "2026-06-19T01:29:59.000Z".to_string(),
+            role: "assistant".to_string(),
+            blocks: vec![block.to_string()],
+        };
+        let block = "The scores are computed first. The test checks that no future positions \
+                     are selected, so the implementation must mask out future keys. Then we go on.";
+        // A real chunk is cut mid-word at its start ("st" from "test") — the first mark word is
+        // dropped and the rest anchors.
+        let mark = "st checks that no future positions are selected, so the implementation";
+        let out = get_human("", &[turn(block)], false, 100, Some(mark));
+        assert!(out.contains("\u{1b}[7mchecks\u{1b}[0m"), "got: {out}");
+        assert!(out.contains("\u{1b}[7mimplementation\u{1b}[0m"));
+        assert!(out.contains("The scores are computed"));
+        // A mark that anchors nowhere renders the turn plain.
+        let plain = get_human(
+            "",
+            &[turn(block)],
+            false,
+            100,
+            Some("entirely unrelated words that never anchor anywhere at all"),
+        );
+        assert!(!plain.contains("\u{1b}[7m"));
+    }
+
+    #[test]
+    fn turn_rows_are_one_line_each() {
+        let turns = vec![
+            Turn {
+                seq: 1,
+                turn_uuid: "t1".to_string(),
+                ts: "2026-06-19T01:29:59.000Z".to_string(),
+                role: "assistant".to_string(),
+                blocks: vec!["some reasoning about the mask".to_string()],
+            },
+            Turn {
+                seq: 2,
+                turn_uuid: "t2".to_string(),
+                ts: "2026-06-19T01:30:10.000Z".to_string(),
+                role: "user".to_string(),
+                blocks: vec!["[tool_result Edit] file updated".to_string()],
+            },
+        ];
+        let rows = turn_rows(&turns, false, 100);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], "2026-06-19 01:29  assistant  some reasoning about the mask");
+        assert_eq!(rows[1], "2026-06-19 01:30  user       Edit ⇒ file updated");
+    }
+
+    #[test]
     fn get_agent_is_byte_stable() {
         let t = Turn {
             seq: 3,
@@ -579,7 +725,7 @@ mod tests {
                 "[tool_result Edit] The file was updated".to_string(),
             ],
         };
-        let out = get_human("", &[t], false, 100);
+        let out = get_human("", &[t], false, 100, None);
         assert!(out.contains("── 2026-06-19 01:29 · assistant ──"));
         assert!(out.contains("plain reasoning text"));
         // Headline plus payload lines, not raw JSON.
@@ -602,7 +748,7 @@ mod tests {
                 r#"[tool_use Write] {{"file_path":"/a.rs","content":"{payload}"}}"#
             )],
         };
-        let out = get_human("", &[t], false, 100);
+        let out = get_human("", &[t], false, 100, None);
         assert!(out.contains("l6"));
         assert!(!out.contains("l7"));
         assert!(out.contains('…'));
