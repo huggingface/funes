@@ -121,6 +121,9 @@ struct Read {
     /// A degradation note to prepend to the command's output (e.g. the remote was unreachable);
     /// `None` when the requested store opened normally.
     note: Option<String>,
+    /// Label of the store the dataset actually came from (the requested one, or the local store
+    /// after an offline degrade); `None` for the built-in guide.
+    store_label: Option<String>,
 }
 
 /// The outcome of resolving a store for reading. The embedder-backed fallbacks (`Offline` → the
@@ -198,6 +201,7 @@ async fn open_read(store: &Store, embedder: Option<&mut TextEmbedding>) -> Resul
             _hello: None,
             ds,
             note: None,
+            store_label: Some(store.label()),
         }),
         ReadOutcome::Offline => degrade_offline(&store.label(), embedder).await,
         ReadOutcome::NoIndex => {
@@ -206,6 +210,7 @@ async fn open_read(store: &Store, embedder: Option<&mut TextEmbedding>) -> Resul
                 _hello: Some(dir),
                 ds,
                 note: None,
+                store_label: None,
             })
         }
     }
@@ -219,6 +224,7 @@ async fn degrade_offline(uri: &str, embedder: Option<&mut TextEmbedding>) -> Res
             _hello: None,
             ds,
             note: Some(format!("remote {uri} unreachable — recalling from your local store\n")),
+            store_label: Some(Store::local().label()),
         }),
         _ => {
             let (dir, ds) = hello::dataset(embedder).await?;
@@ -228,8 +234,18 @@ async fn degrade_offline(uri: &str, embedder: Option<&mut TextEmbedding>) -> Res
                 note: Some(format!(
                     "remote {uri} unreachable and no local store yet — showing the built-in guide\n"
                 )),
+                store_label: None,
             })
         }
+    }
+}
+
+/// The store suffix for a hit's `→ get` hint: every hit names the store it was read from, so the
+/// hint drills into that store from any context. The built-in guide has no store to name.
+fn store_hint(read: Option<&str>) -> String {
+    match read {
+        Some(label) => format!(" --store {label}"),
+        None => String::new(),
     }
 }
 
@@ -333,6 +349,7 @@ pub async fn recall(
         attach_neighbors(ds, &mut refs, neighbors).await?;
     }
 
+    let store_arg = store_hint(read.store_label.as_deref());
     let mut out = note;
     for (h, score) in &top {
         let s8 = &h.session_id[..h.session_id.len().min(8)];
@@ -341,7 +358,7 @@ pub async fn recall(
             "[{}] {} {}/{} {}  score={:.3}",
             h.ts, h.harness, h.project, s8, h.block_type, score
         );
-        let _ = writeln!(out, "  → get {} {}", h.session_id, h.turn_uuid);
+        let _ = writeln!(out, "  → get {} {}{}", h.session_id, h.turn_uuid, store_arg);
         let preview: String = h.text.chars().take(400).collect();
         let _ = writeln!(out, "{preview}");
         for n in &h.neighbors {
@@ -778,6 +795,16 @@ mod tests {
     fn esc_doubles_single_quotes() {
         assert_eq!(esc("o'brien"), "o''brien");
         assert_eq!(esc("plain"), "plain");
+    }
+
+    #[test]
+    fn store_hint_names_the_read_store() {
+        assert_eq!(
+            store_hint(Some("hf://datasets/acme/kb")),
+            " --store hf://datasets/acme/kb"
+        );
+        // The built-in guide has no store to name.
+        assert_eq!(store_hint(None), "");
     }
 
     #[test]

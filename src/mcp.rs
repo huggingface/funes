@@ -38,7 +38,7 @@ pub struct GetRequest {
     #[schemars(description = "Turns within this seq window of the target are included (default 3)")]
     pub window: Option<i64>,
     #[schemars(
-        description = "Store to read for this call — pass the same `store` the recall hit came from. Defaults to the server's store."
+        description = "Store to read for this call — the one the recall hit's `→ get` line names. Defaults to the server's store."
     )]
     pub store: Option<String>,
 }
@@ -109,7 +109,7 @@ impl Funes {
     }
 
     #[tool(
-        description = "Drill down on a recall hit: fetch the named turn plus the turns within `window` of it, each reassembled into readable text. Pass the `session_id` and `turn_uuid` from a recall hit's `→ get` line — and if the hit came from an explicit `store`, the same `store`."
+        description = "Drill down on a recall hit: fetch the named turn plus the turns within `window` of it, each reassembled into readable text. Pass the `session_id` and `turn_uuid` from a recall hit's `→ get` line — and the `store` it names."
     )]
     async fn get(
         &self,

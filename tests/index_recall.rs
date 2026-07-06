@@ -84,4 +84,44 @@ async fn index_then_read_surface() {
         .await
         .unwrap();
     assert!(got.contains("typed blocks"), "get should return the turn text: {got}");
+
+    // Every hit names the store it was read from — the default store and an explicit one alike.
+    let default_hint = format!("--store {}", db_dir.path().join("store").display());
+    assert!(
+        out.contains(&default_hint),
+        "hits should carry the read store `{default_hint}`: {out}"
+    );
+    let store2 = db_dir.path().join("store2");
+    copy_dir(&db_dir.path().join("store"), &store2);
+    let out2 = funes::recall::recall(
+        funes::hub::Store::parse(&store2.to_string_lossy()),
+        "parse transcripts into turns".into(),
+        5,
+        30,
+        30.0,
+        1,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let hint = format!("--store {}", store2.display());
+    assert!(
+        out2.contains(&hint),
+        "explicit-store hits should carry `{hint}`: {out2}"
+    );
+}
+
+fn copy_dir(src: &std::path::Path, dst: &std::path::Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for e in std::fs::read_dir(src).unwrap() {
+        let e = e.unwrap();
+        let to = dst.join(e.file_name());
+        if e.file_type().unwrap().is_dir() {
+            copy_dir(&e.path(), &to);
+        } else {
+            std::fs::copy(e.path(), &to).unwrap();
+        }
+    }
 }

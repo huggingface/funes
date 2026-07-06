@@ -186,7 +186,7 @@ export default function (pi: any) {
     description:
       "Drill down on a recall hit: fetch the named turn plus the turns around it, reassembled " +
       "into readable text. Pass the `session_id` and `turn_uuid` from a recall hit's `→ get` line — " +
-      "and if the hit came from an explicit `store`, the same `store`.",
+      "and the `store` it names.",
     parameters: Type.Object({
       session_id: Type.String({ description: "Session id from a recall hit's `→ get` line" }),
       turn_uuid: Type.String({ description: "Turn uuid from a recall hit's `→ get` line" }),
