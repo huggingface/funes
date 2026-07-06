@@ -174,7 +174,7 @@ However, when `recall` is called within a terminal, it switches to a leaner, int
 useful to inspect a store:
 
 ```bash
-funes recall "why did we switch off lancedb"
+funes recall "why must sparse attention mask future keys before top-k selection" --store dacorvo/funes-Glint-Research-Fable-5
 ```
 
 Browse the hits and expand any of them into its full surrounding turns.
