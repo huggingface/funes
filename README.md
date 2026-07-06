@@ -44,7 +44,7 @@ chmod +x funes && ./funes guide
 ```
 
 funes works the moment it lands: **`funes guide`** walks you through it before you've indexed
-anything, and `funes status` tells you whether recall is reading your own index yet.
+anything, and `funes status` tells you whether recall is reading your own store yet.
 
 Already installed? **`funes update`** replaces the binary in place with the latest build for your
 platform (`--force` reinstalls the current one); `funes status` tells you when a newer release is

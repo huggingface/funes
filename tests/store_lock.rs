@@ -1,4 +1,4 @@
-//! The in-binary store lock serializes local-store mutations, failing loudly on contention. Own test
+//! The in-binary store lock serializes local-store mutations, failing loudly on contention. Its own test
 //! binary so its `$FUNES_HOME` can't race another integration test's. `flock` treats independent
 //! `open()`s of the same file as contending — even within one process (flock(2)) — so a single
 //! process can hold the lock and then observe the contention paths without spawning `funes`

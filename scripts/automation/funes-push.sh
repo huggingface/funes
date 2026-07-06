@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# Publish the local funes index to the active remote.
+# Publish the local funes store to the active remote store.
 #
 # Fired by SessionEnd (publish what this session produced) AND SessionStart (catch up
 # anything a previous session left unpublished — its SessionEnd may never have fired
 # because the host was disconnected, the window closed, or the conversation was
 # switched away). Codex has no session-end event, so there it runs on SessionStart only.
-# The Stop hook (funes-index.sh) keeps the LOCAL index fresh per turn; this is the only
+# The Stop hook (funes-index.sh) keeps the LOCAL store fresh per turn; this is the only
 # step that touches the network, so it runs at session boundaries, not per turn.
 #
-# Harness-agnostic: `funes push` publishes the whole local index, whatever produced it,
+# Harness-agnostic: `funes push` publishes the whole local store, whatever produced it,
 # so this script takes no harness argument — one copy serves every agent.
 #
 # `funes push` is incremental and commit-guarded (it retries against a moved remote
 # head), so overlapping publishes — and a publish that overlaps an index — are safe;
 # no lock is needed. It has a fail-closed secret gate: a chunk holding a credential is
-# withheld (exit 2) rather than published. A first push to a store the local index
+# withheld (exit 2) rather than published. A first push to a store your local store
 # shares no chunks with is refused off a terminal — clear it once by hand (see setup).
 #
 # Runs detached so it never blocks session start/teardown or trips the hook timeout.

@@ -181,7 +181,7 @@ it**, no Codex-specific copies needed:
   can safely run at once: `funes` serializes local-store writes in the binary, so no
   coordination between the scripts is needed.
 - **`SessionStart` → `funes-push.sh`** — publish on the way in. The push script is
-  **harness-agnostic** — `funes push` publishes the whole local index, whatever produced
+  **harness-agnostic** — `funes push` publishes the whole local store, whatever produced
   it — so it needs no `codex` argument and is reused verbatim.
 
 The one structural difference from Claude: **Codex has no session-end event.** So the
@@ -323,7 +323,5 @@ If an agent has no hooks, drive `funes-index.sh <harness>` — or the `funes` bi
 directly — from a cron/launchd/systemd timer instead. Either is safe: `funes` serializes
 local-store writes in the binary, so a timer firing while a hook run is in flight just
 fails loudly and re-sweeps on its next tick. An automated run must always name a target:
-`funes index --harness claude | codex
-| pi` indexes that agent's standard session dir, or pass an explicit path — `funes index
-<path>`, a directory of transcripts or a trace `.parquet`. Everything downstream — chunk,
-embed, store, push — is identical.
+`funes index --harness claude|codex|pi` indexes that agent's standard session dir, or pass an explicit path — `funes index <path>`, a directory of transcripts or a trace `.parquet`.
+Everything downstream — chunk, embed, store, push — is identical.

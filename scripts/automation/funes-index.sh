@@ -5,7 +5,7 @@
 # to `claude`. One script serves every agent — Claude's Stop hook calls it with `claude`,
 # Codex's with `codex` — so there's a single implementation to maintain.
 #
-# Fired per turn (Claude's Stop hook, Codex's Stop hook), so the local index stays fresh
+# Fired per turn (Claude's Stop hook, Codex's Stop hook), so the local store stays fresh
 # as you work. `funes index` is incremental and idempotent — it re-embeds nothing already
 # stored — and indexing per turn yields the same chunks as indexing once per session,
 # since chunk ids derive from (session, turn, block, split). Publishing to the remote

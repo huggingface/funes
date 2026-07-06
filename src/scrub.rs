@@ -23,7 +23,7 @@ pub async fn run() -> Result<()> {
     let _lock = lock::StoreLock::acquire()?;
     let uri = dataset::table_uri(&dataset::local_store_dir());
     let Ok(ds) = dataset::open(&uri, HashMap::new()).await else {
-        println!("no local index to scrub");
+        println!("no local store to scrub");
         return Ok(());
     };
     let scanner = scan::Trufflehog::find()?;
