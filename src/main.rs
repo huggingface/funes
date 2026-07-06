@@ -5,7 +5,7 @@
 //! `$FUNES_HOME` or `~/.funes`.
 
 use funes::harness::Harness;
-use funes::{claude, codex, config, hermes, hub, index, mcp, opencode, pi, push, recall, scrub, update};
+use funes::{claude, codex, config, hello, hermes, hub, index, mcp, opencode, pi, push, recall, scrub, update};
 
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand};
@@ -21,6 +21,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Print a short, human-readable guide to funes — the friendly first run (no index needed).
+    Guide,
     /// Recall passages from past sessions (hybrid → rerank → recency → neighbors).
     Recall {
         /// What to recall (free text).
@@ -176,6 +178,10 @@ impl StoreOpts {
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().cmd {
+        Cmd::Guide => {
+            print!("{}", hello::guide());
+            Ok(())
+        }
         Cmd::Recall {
             query,
             k,

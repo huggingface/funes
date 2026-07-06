@@ -21,15 +21,16 @@ pub const PASSAGES: &[(&str, &str)] = &[
     ("user", "What is funes and how do I get started?"),
     (
         "assistant",
-        "funes gives an AI agent durable, mid-term memory of your past Claude Code sessions. It \
+        "funes gives an AI agent durable, mid-term memory of your past coding-agent sessions. It \
          indexes your transcripts locally and serves selective, reranked recall: you ask in \
          natural language and get back the few relevant passages with exact provenance — not a \
          flood of detail, and never an LLM-rewritten summary.",
     ),
     (
         "assistant",
-        "Build the index first: run `funes index`. It walks ~/.claude/projects, parses each \
-         session, and embeds the turns into a local store at ~/.funes. It's incremental — \
+        "Build the index first: run `funes index`. It walks ~/.claude/projects, \
+         ~/.codex/sessions, and ~/.pi/agent/sessions, parses each session, and embeds the turns \
+         into a local store at ~/.funes. It's incremental — \
          re-running it only adds new turns — so it's cheap to run often.",
     ),
     (
@@ -56,7 +57,7 @@ pub const PASSAGES: &[(&str, &str)] = &[
         "assistant",
         "Keep recall fresh. The index only updates when `funes index` runs, so the latest turns of \
          the current session aren't searchable until you re-run it. Re-run it periodically, or add \
-         a Claude Code Stop hook that runs `funes index` after each session.",
+         a session-end hook that runs `funes index` after each session (see docs/automation.md).",
     ),
     (
         "assistant",
@@ -74,6 +75,48 @@ pub const PASSAGES: &[(&str, &str)] = &[
          always rebuild from your transcripts. The transcripts are the source of truth.",
     ),
 ];
+
+/// A short, human-readable welcome shown by `funes guide`. It is the friendly counterpart to
+/// `recall`'s ranked, provenance-tagged output: that format is built for an agent to parse, and on
+/// a fresh install it makes a person work to read a scrambled list. A first-time human runs this
+/// instead. Kept separate from `PASSAGES` (which feeds the agent-facing recall fallback) so each
+/// can speak to its own audience.
+pub fn guide() -> String {
+    "\
+funes — durable, local memory for your AI coding agent
+
+funes indexes your past AI agent sessions and lets your agent recall its own decisions,
+rationale, and findings mid-task — the exact passages, with provenance, all on your machine.
+
+Getting started
+
+  1. Index your sessions       funes index
+     Sweeps ~/.claude/projects, ~/.codex/sessions, and ~/.pi/agent/sessions into one local
+     store. It's incremental, so it's cheap to re-run as you work.
+
+  2. Add funes to your agent    funes add <agent>
+     Works with claude, codex, pi, hermes, and opencode. Your agent gains `recall` and
+     `get` as tools and reaches for them on its own — no pasting context back in.
+
+  3. Just work.
+     When something touches a past decision, its rationale, or an earlier finding, your
+     agent recalls it for you — no re-pasting context.
+
+Once indexed, you can query the store yourself:
+
+  funes recall \"why did we switch off lancedb\"    ask in natural language
+  funes list                                       browse indexed sessions
+  funes status                                     what's indexed, and which store you're on
+
+Share across machines or a team (optional)
+
+  funes use <org>/<repo>    attach a Hugging Face dataset you own as your store
+  funes push                publish your local index to it
+
+Nothing leaves your machine until you run `funes push`.
+"
+    .to_string()
+}
 
 /// Build the corpus as an ephemeral lance dataset; the returned temp dir backs it (keep alive
 /// while reading). With an `embedder`, passages get real vectors for search; without, zeros.

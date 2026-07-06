@@ -32,7 +32,7 @@ curl -fsSL https://huggingface.co/buckets/huggingface/funes/resolve/install.sh |
 Then try it:
 
 ```bash
-funes recall "how do I get started with funes"
+funes guide
 ```
 
 Alternatively, grab a [binary](https://huggingface.co/buckets/huggingface/funes) by hand:
@@ -45,12 +45,11 @@ Alternatively, grab a [binary](https://huggingface.co/buckets/huggingface/funes)
 
 ```bash
 curl -fsSL https://huggingface.co/buckets/huggingface/funes/resolve/funes-x86_64-linux -o funes
-chmod +x funes && ./funes recall "how do I get started with funes"
+chmod +x funes && ./funes guide
 ```
 
-funes works the moment it lands: with no index yet, `recall` (and `get` / `list`) answer from a
-small **built-in guide to funes itself**, so you can feel recall before indexing anything. `funes
-status` tells you whether you're reading that built-in guide or your own index.
+funes works the moment it lands: **`funes guide`** walks you through it before you've indexed
+anything, and `funes status` tells you whether recall is reading your own index yet.
 
 Already installed? **`funes update`** replaces the binary in place with the latest build for your
 platform (`--force` reinstalls the current one); `funes status` tells you when a newer release is
