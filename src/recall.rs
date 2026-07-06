@@ -252,7 +252,7 @@ async fn degrade_offline(uri: &str, embedder: Option<&mut TextEmbedding>) -> Res
 
 /// The store suffix for a hit's `→ get` hint: every hit names the store it was read from, so the
 /// hint drills into that store from any context. The built-in guide has no store to name.
-fn store_hint(read: Option<&str>) -> String {
+pub fn store_hint(read: Option<&str>) -> String {
     match read {
         Some(label) => format!(" --store {label}"),
         None => String::new(),

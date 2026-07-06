@@ -267,8 +267,10 @@ fn collapse(s: &str) -> String {
     out
 }
 
+/// Prose scent: whitespace-collapsed head. A split fragment of a tool chunk carries JSON-escaped
+/// whitespace as literal `\n`/`\t` — treat those as separators too.
 fn prose_head(s: &str) -> String {
-    collapse(s)
+    collapse(&s.replace("\\n", " ").replace("\\t", " "))
 }
 
 /// Truncate to `max` chars, backing up to a word boundary when one lands past the midpoint,
@@ -466,6 +468,13 @@ mod tests {
         // split_idx > 0 chunks carry no [tool_use …] label.
         let s = scent("tool_use", "  continuation   of a\nsplit blob  ");
         assert_eq!(s, "continuation of a split blob");
+    }
+
+    #[test]
+    fn scent_flattens_escaped_whitespace_in_fragments() {
+        // A fragment cut from inside a JSON string carries \n as two literal characters.
+        let s = scent("tool_use", r"ormed input.\n\n**Callers:** `Block.forward`");
+        assert_eq!(s, "ormed input. **Callers:** `Block.forward`");
     }
 
     #[test]

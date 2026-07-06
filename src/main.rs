@@ -5,12 +5,16 @@
 //! `$FUNES_HOME` or `~/.funes`.
 
 use funes::harness::Harness;
-use funes::{claude, codex, config, hello, hermes, hub, index, mcp, opencode, pi, push, recall, scrub, update};
+use funes::recall::Hit;
+use funes::{claude, codex, config, hello, hermes, hub, index, mcp, opencode, pi, push, recall, render, scrub, update};
 
 use anyhow::{anyhow, Result};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
+
+/// Turns around a `get` target when no window is given — shared by the CLI flag and the hit selector.
+const DEFAULT_WINDOW: i64 = 3;
 
 #[derive(Parser)]
 #[command(name = "funes", version, about = "Recall over your past AI agent sessions.")]
@@ -49,6 +53,9 @@ enum Cmd {
         /// Restrict to a harness: claude | codex | pi.
         #[arg(long)]
         harness: Option<String>,
+        /// Output format. Default: human in a terminal, agent when piped.
+        #[arg(long, value_enum)]
+        format: Option<OutputFormat>,
         #[command(flatten)]
         store: StoreOpts,
     },
@@ -70,8 +77,11 @@ enum Cmd {
         /// Turn uuid (from a recall hit's `→ get` line).
         turn_uuid: String,
         /// Turns within this seq window of the target are included.
-        #[arg(long, default_value_t = 3)]
+        #[arg(long, default_value_t = DEFAULT_WINDOW)]
         window: i64,
+        /// Output format. Default: human in a terminal, agent when piped.
+        #[arg(long, value_enum)]
+        format: Option<OutputFormat>,
         #[command(flatten)]
         store: StoreOpts,
     },
@@ -178,6 +188,39 @@ impl StoreOpts {
     }
 }
 
+/// The two output layouts for the read commands.
+#[derive(Clone, Copy, ValueEnum)]
+enum OutputFormat {
+    /// A numbered list with a hit selector.
+    Human,
+    /// The stable machine layout.
+    Agent,
+}
+
+impl OutputFormat {
+    /// Resolve the effective format: an explicit flag wins; otherwise human when both stdin and
+    /// stdout are terminals (the hit selector needs both), agent when piped or scripted.
+    fn human(flag: Option<OutputFormat>) -> bool {
+        match flag {
+            Some(OutputFormat::Human) => true,
+            Some(OutputFormat::Agent) => false,
+            None => std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
+        }
+    }
+}
+
+/// Color and width for the human renderings: color needs a terminal and no `NO_COLOR`; width
+/// follows `$COLUMNS` when exported, else 100.
+fn human_io() -> (bool, usize) {
+    let color = std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+    let width = std::env::var("COLUMNS")
+        .ok()
+        .and_then(|c| c.parse::<usize>().ok())
+        .map(|c| c.clamp(40, 120))
+        .unwrap_or(100);
+    (color, width)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().cmd {
@@ -194,24 +237,40 @@ async fn main() -> Result<()> {
             block_type,
             project,
             harness,
+            format,
             store,
         } => {
-            print!(
-                "{}",
-                recall::recall(
-                    store.resolve(),
-                    query.join(" "),
-                    k,
-                    candidates,
-                    half_life,
-                    neighbors,
-                    block_type,
-                    project,
-                    harness,
-                )
-                .await?
-            );
-            Ok(())
+            let store = store.resolve();
+            let (note, store_label, hits) = recall::recall_hits(
+                store.clone(),
+                query.join(" "),
+                k,
+                candidates,
+                half_life,
+                neighbors,
+                block_type,
+                project,
+                harness,
+            )
+            .await?;
+            if !OutputFormat::human(format) {
+                if hits.is_empty() {
+                    print!("{note}no results");
+                } else {
+                    print!(
+                        "{}",
+                        render::recall_agent(&note, &recall::store_hint(store_label.as_deref()), &hits)
+                    );
+                }
+                return Ok(());
+            }
+            if hits.is_empty() {
+                println!("{note}no results");
+                return Ok(());
+            }
+            let (color, width) = human_io();
+            print!("{note}");
+            select_hits(&store, &hits, color, width).await
         }
         Cmd::List { project, limit, store } => {
             print!("{}", recall::list(store.resolve(), project, limit).await?);
@@ -221,9 +280,20 @@ async fn main() -> Result<()> {
             session_id,
             turn_uuid,
             window,
+            format,
             store,
         } => {
-            print!("{}", recall::get(store.resolve(), session_id, turn_uuid, window).await?);
+            let (note, turns) =
+                recall::get_turns(store.resolve(), session_id.clone(), turn_uuid.clone(), window).await?;
+            if turns.is_empty() {
+                print!("{note}");
+                println!("turn {turn_uuid} not found in session {session_id}");
+            } else if OutputFormat::human(format) {
+                let (color, width) = human_io();
+                print!("{}", render::get_human(&note, &turns, color, width));
+            } else {
+                print!("{}", render::get_agent(&note, &turns));
+            }
             Ok(())
         }
         Cmd::Index {
@@ -336,6 +406,98 @@ async fn main() -> Result<()> {
     }
 }
 
+/// The hit selector after a human recall: prints the numbered menu, then a typed number expands
+/// that hit via `get` (`3 10` widens the window) and the menu reprints — the walk-back. An empty
+/// line, `q`, or end-of-input quits.
+async fn select_hits(store: &hub::Store, hits: &[(Hit, f64)], color: bool, width: usize) -> Result<()> {
+    let menu = render::recall_human("", hits, color, width, chrono::Utc::now());
+    let hint = render::dim(
+        "type a number to expand a hit (`3 10` widens the context) — enter or q quits",
+        color,
+    );
+    print!("{menu}");
+    println!("{hint}");
+    let mut line = String::new();
+    loop {
+        print!("› ");
+        std::io::stdout().flush().ok();
+        line.clear();
+        if std::io::stdin().read_line(&mut line)? == 0 {
+            println!();
+            return Ok(());
+        }
+        match parse_selection(line.trim(), hits.len()) {
+            Selection::Quit => return Ok(()),
+            Selection::Help => {
+                println!(
+                    "1–{} expands a hit (`3 10` widens the context); enter or q quits",
+                    hits.len()
+                )
+            }
+            Selection::Expand { ordinal, window } => {
+                let h = &hits[ordinal - 1].0;
+                match recall::get_turns(store.clone(), h.session_id.clone(), h.turn_uuid.clone(), window).await {
+                    Ok((note, turns)) if turns.is_empty() => {
+                        print!("{note}");
+                        println!("turn {} not found in session {}", h.turn_uuid, h.session_id);
+                    }
+                    Ok((note, turns)) => {
+                        print!("{}", render::get_human(&note, &turns, color, width));
+                        println!(
+                            "{}",
+                            render::dim(
+                                &format!(
+                                    "funes get {} {} --window {window} --store {}",
+                                    h.session_id,
+                                    h.turn_uuid,
+                                    store.label()
+                                ),
+                                color
+                            )
+                        );
+                    }
+                    // A transient failure (say, the remote dropped) shouldn't kill the session.
+                    Err(e) => println!("get failed: {e:#}"),
+                }
+                // Back to the picker: the expansion pushed the menu out of view.
+                println!();
+                print!("{menu}");
+                println!("{hint}");
+            }
+        }
+    }
+}
+
+/// One parsed selection.
+enum Selection {
+    Quit,
+    Help,
+    Expand { ordinal: usize, window: i64 },
+}
+
+/// `""`/`q`/`quit` quit; `N` expands hit N with the default window; `N W` widens it to W.
+fn parse_selection(line: &str, hits: usize) -> Selection {
+    if line.is_empty() || line.eq_ignore_ascii_case("q") || line.eq_ignore_ascii_case("quit") {
+        return Selection::Quit;
+    }
+    let mut parts = line.split_whitespace();
+    let ordinal = match parts.next().and_then(|t| t.parse::<usize>().ok()) {
+        Some(o) if (1..=hits).contains(&o) => o,
+        _ => return Selection::Help,
+    };
+    let window = match parts.next() {
+        None => DEFAULT_WINDOW,
+        Some(t) => match t.parse::<i64>() {
+            Ok(w) if w >= 0 => w,
+            _ => return Selection::Help,
+        },
+    };
+    if parts.next().is_some() {
+        return Selection::Help;
+    }
+    Selection::Expand { ordinal, window }
+}
+
 /// `funes use <store>`: attach a remote (or `local` to detach) and report the next step.
 async fn use_store(spec: String) -> Result<()> {
     let mut cfg = config::load();
@@ -425,7 +587,28 @@ fn prompt_new_store(label: &str, chunks: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::attach_hint;
+    use super::{attach_hint, parse_selection, Selection};
+
+    #[test]
+    fn parse_selection_grammar() {
+        assert!(matches!(parse_selection("", 8), Selection::Quit));
+        assert!(matches!(parse_selection("q", 8), Selection::Quit));
+        assert!(matches!(parse_selection("QUIT", 8), Selection::Quit));
+        assert!(matches!(
+            parse_selection("3", 8),
+            Selection::Expand { ordinal: 3, window: 3 }
+        ));
+        assert!(matches!(
+            parse_selection("3 10", 8),
+            Selection::Expand { ordinal: 3, window: 10 }
+        ));
+        // Out of range, not a number, negative window, trailing junk.
+        assert!(matches!(parse_selection("9", 8), Selection::Help));
+        assert!(matches!(parse_selection("0", 8), Selection::Help));
+        assert!(matches!(parse_selection("x", 8), Selection::Help));
+        assert!(matches!(parse_selection("3 -1", 8), Selection::Help));
+        assert!(matches!(parse_selection("3 10 zzz", 8), Selection::Help));
+    }
 
     #[test]
     fn attach_hint_covers_each_state() {
