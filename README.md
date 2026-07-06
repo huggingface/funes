@@ -114,10 +114,10 @@ funes use local            # detach — back to your local store
 ```
 
 To query a **different remote for a single call** — say, someone's published memories on a topic —
-without changing your default, pass `--remote`:
+without changing your default, pass `--store`:
 
 ```bash
-funes recall "..." --remote other-org/subject-kb
+funes recall "..." --store other-org/subject-kb
 ```
 
 ![Attaching a shared Hugging Face dataset with funes use, then pi recalling a decision from a project this machine never worked on](docs/img/hub-store.gif)

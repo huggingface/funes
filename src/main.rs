@@ -133,7 +133,10 @@ enum Cmd {
         force: bool,
     },
     /// Run as an MCP server over stdio (for Claude Code, Cursor, …).
-    Mcp,
+    Mcp {
+        #[command(flatten)]
+        store: StoreOpts,
+    },
     /// Add funes to a coding agent.
     #[command(subcommand_value_name = "AGENT", subcommand_help_heading = "Agents")]
     Add {
@@ -160,18 +163,18 @@ enum AddAgent {
     Opencode,
 }
 
-/// Which store the read commands act on. Shared by `recall`/`list`/`get`/`status`.
+/// Which store the read commands act on. Shared by `recall`/`list`/`get`/`status` and `mcp`.
 #[derive(Args)]
 struct StoreOpts {
-    /// A remote to read for this call — an `<org>/<repo>` shorthand or `hf://…` URI — overriding
-    /// the active store. Defaults to the active store, else your local store.
+    /// The store to read — an `<org>/<repo>` shorthand, an `hf://…` URI, a local path, or `local`
+    /// — overriding the active store. Defaults to the active store, else your local store.
     #[arg(long)]
-    remote: Option<String>,
+    store: Option<String>,
 }
 
 impl StoreOpts {
     fn resolve(self) -> hub::Store {
-        hub::Store::resolve(self.remote)
+        hub::Store::resolve(self.store)
     }
 }
 
@@ -320,7 +323,9 @@ async fn main() -> Result<()> {
         }
         Cmd::Scrub => scrub::run().await,
         Cmd::Update { force } => update::run(force).await,
-        Cmd::Mcp => mcp::run().await,
+        Cmd::Mcp {
+            store: StoreOpts { store },
+        } => mcp::run(store).await,
         Cmd::Add { agent } => match agent {
             AddAgent::Claude => claude::install(),
             AddAgent::Codex => codex::install(),

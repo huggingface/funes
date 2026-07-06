@@ -56,7 +56,7 @@ impl Store {
         }
     }
 
-    /// Resolve the store the read commands should use: an explicit `spec` (a CLI `--remote`) wins,
+    /// Resolve the store the read commands should use: an explicit `spec` (a CLI `--store`) wins,
     /// else the persisted active store (`funes use`), else the local index.
     pub fn resolve(spec: Option<String>) -> Self {
         resolve_with(spec, config::load().remote)
