@@ -7,7 +7,7 @@
 //! contributes just its new turns, nothing is re-embedded or deleted.
 
 use crate::harness::Harness;
-use crate::{chunk, dataset, hub, scan, source, trace};
+use crate::{chunk, dataset, hub, lock, scan, source, trace};
 use anyhow::{anyhow, Result};
 use arrow_array::types::Float32Type;
 use arrow_array::{Array, FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator, StringArray};
@@ -298,6 +298,9 @@ async fn index_sources(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: 
     let include_thinking = !no_thinking;
     let dir = dataset::funes_dir();
     std::fs::create_dir_all(&dir)?;
+
+    // Held for the whole run so the stored-id read and the appends below see one stable version.
+    let _lock = lock::StoreLock::acquire()?;
 
     let uri = dataset::table_uri(&dataset::local_store_dir());
     let ds = dataset::open(&uri, HashMap::new()).await.ok();
