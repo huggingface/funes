@@ -491,7 +491,7 @@ async fn select_hits(store: &hub::Store, hits: &[(Hit, f64)], color: bool, width
                                     "funes get {} {} --window {window} --store {}",
                                     h.session_id,
                                     h.turn_uuid,
-                                    store.label()
+                                    sh_word(&store.label())
                                 ),
                                 color
                             )
@@ -556,9 +556,9 @@ fn select_hits_fzf(store: &hub::Store, hits: &[(Hit, f64)], color: bool, width: 
             "--bind",
             // fzf shell-escapes {4} (the matched chunk) itself.
             &format!(
-                "enter:execute:'{}' turns {{2}} {{3}} --store '{}' --highlight {{4}}",
-                exe.display(),
-                store.label()
+                "enter:execute:{} turns {{2}} {{3}} --store {} --highlight {{4}}",
+                sh_quote(&exe.display().to_string()),
+                sh_quote(&store.label())
             ),
         ])
         .stdin(std::process::Stdio::piped())
@@ -600,9 +600,9 @@ async fn select_turns_fzf(
     }
     let exe = std::env::current_exe()?;
     let mut turn_cmd = format!(
-        "'{}' get {{2}} {{3}} --format human --window 0 --store '{}'",
-        exe.display(),
-        store.label()
+        "{} get {{2}} {{3}} --format human --window 0 --store {}",
+        sh_quote(&exe.display().to_string()),
+        sh_quote(&store.label())
     );
     if let Some(h) = &highlight {
         turn_cmd.push_str(&format!(" --highlight {}", sh_quote(h)));
@@ -640,6 +640,17 @@ async fn select_turns_fzf(
 /// `s` single-quoted for a shell command line.
 fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// `s` quoted only when a shell would mangle it bare — for commands shown to be copy-pasted,
+/// where quoting the common clean label is just noise.
+fn sh_word(s: &str) -> String {
+    let clean = |c: char| c.is_ascii_alphanumeric() || "/:.@_+=%,~-".contains(c);
+    if !s.is_empty() && s.chars().all(clean) {
+        s.to_string()
+    } else {
+        sh_quote(s)
+    }
 }
 
 /// The installed fzf's (major, minor), or None when it can't be read.
