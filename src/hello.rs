@@ -113,7 +113,7 @@ Share across machines or a team (optional)
   funes use <org>/<repo>    attach a Hugging Face dataset you own as your store
   funes push                publish your local index to it
 
-Nothing leaves your machine until you run `funes push`.
+Your indexed sessions stay on your machine until you `funes push`.
 "
     .to_string()
 }

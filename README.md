@@ -1,9 +1,7 @@
 # funes
 
-**Durable, local memory for your AI coding agent.** funes indexes your past sessions across Claude
-Code, Codex, and pi and lets the agent recall its own decisions, rationale, and findings mid-task —
-the exact passages, with provenance, using whatever model it's running. Everything stays on your
-machine; you can query the memories yourself from the CLI to check or debug a result.
+**Durable memory for your AI coding agents.** funes indexes your past sessions across Claude
+Code, Codex, and pi and lets any agent recall the past decisions, rationale, and findings.
 
 ![Choosing an embedding model in Claude Code, then Codex recalling that decision in a separate session](docs/img/cross-agents.gif)
 
@@ -16,9 +14,6 @@ machine; you can query the memories yourself from the CLI to check or debug a re
   spans all of them, and every hit shows which agent it came from.
 - **Share across machines or a team.** Publish your index to a Hugging Face dataset you own; a
   teammate or another host recalls it.
-- **Runs on your machine.** Indexing and recall are local; nothing is sent anywhere until you `push`.
-- **Secrets stay out.** Credentials are redacted at index time, and a fail-closed gate blocks them
-  from any push.
 
 ## Get funes
 
@@ -53,7 +48,7 @@ anything, and `funes status` tells you whether recall is reading your own index 
 
 Already installed? **`funes update`** replaces the binary in place with the latest build for your
 platform (`--force` reinstalls the current one); `funes status` tells you when a newer release is
-out. Along with `push`, that update check is the only routine call funes makes off your machine.
+out.
 
 To build it yourself instead, see [Building from source](#building-from-source).
 
@@ -69,7 +64,7 @@ funes index      # sweeps ~/.claude/projects, ~/.codex/sessions, ~/.pi/agent/ses
 ```
 
 Run with no arguments and funes indexes every supported agent's sessions it finds, into one store.
-It's incremental — only new turns are embedded — so it's cheap to re-run as you work. Point it at a
+It's incremental — only new turns are embedded — so it's cheap to re-run as you work — a store runs ~2.3 KB/chunk and grows ~6 MB on a heavy day ([storage growth](docs/storage.md)). Point it at a
 path to index one place, or scope to a single agent with `--harness codex`.
 
 funes can index sessions from: Claude, Codex, Pi
@@ -105,23 +100,6 @@ Models work the same way. funes runs no model of its own, so you reason with wha
 does — through **pi**, any local model or one served through the Hugging Face router. Switch models
 between sessions and the memory doesn't move.
 
-## Inspect it yourself
-
-Because everything's local, you can query the store yourself from the CLI — handy to check what's
-indexed or debug a result:
-
-```bash
-funes recall "why did we switch off lancedb"
-funes recall "the lance schema" --type tool_use --harness codex --project funes
-funes list --project funes                        # browse indexed sessions
-funes get <session_id> <turn_uuid>                # expand a hit into its full surrounding turns
-```
-
-Each hit prints `[time] agent project/session type score`, a `→ get <session_id> <turn_uuid>` line,
-a preview, and a few neighboring chunks. Narrow with `--type` (`text|thinking|tool_use|tool_result`),
-`--project`, and `--harness` (`claude|codex|pi`); tune with `--k`, `--half-life` (recency
-decay), and `--neighbors`.
-
 ## Share across machines or a team
 
 Attach a Hugging Face dataset repo you own as your **active store**. `recall` then reads it, and
@@ -148,7 +126,7 @@ funes recall "..." --remote other-org/subject-kb
 
 The first push to a store your local index shares no chunks with (a first push, a new host, or the
 wrong store) asks to confirm before uploading; off a terminal it refuses rather than guess (`--yes`
-overrides). You never need the Hub to use funes locally — it's a tier you opt into.
+overrides). You never need the Hub to use funes locally — it's a tier you opt into. Recall over a remote caches whole files to local disk, so warm calls run at local speed ([how caching works](docs/hub-caching.md)).
 
 ## Keeping secrets out
 
@@ -187,6 +165,22 @@ recall(query) ──>  vector + BM25  →  RRF  →  cross-encoder rerank  →  
 Each source is a [`TraceSource`](src/source.rs) that reads its format into a generic turn/block
 shape; everything downstream — chunk → embed → store → recall — is source-agnostic. Adding another
 agent means implementing one trait, not touching the index or query path.
+
+### Inspect it yourself
+
+You can query the store yourself from the CLI — handy to check what's indexed or debug a result:
+
+```bash
+funes recall "why did we switch off lancedb"
+funes recall "the lance schema" --type tool_use --harness codex --project funes
+funes list --project funes                        # browse indexed sessions
+funes get <session_id> <turn_uuid>                # expand a hit into its full surrounding turns
+```
+
+Each hit prints `[time] agent project/session type score`, a `→ get <session_id> <turn_uuid>` line,
+a preview, and a few neighboring chunks. Narrow with `--type` (`text|thinking|tool_use|tool_result`),
+`--project`, and `--harness` (`claude|codex|pi`); tune with `--k`, `--half-life` (recency
+decay), and `--neighbors`.
 
 ## Building from source
 
