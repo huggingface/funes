@@ -1,20 +1,18 @@
 //! `funes add opencode`: register funes recall as an MCP server with opencode.
 //!
-//! opencode merges several config layers; funes targets the one matching the requested scope
-//! and adds itself as a `local` (stdio) MCP server (`funes mcp`), preserving any existing
-//! settings. Project scope (default) writes the cwd's config — opencode reads it walking up
-//! from the cwd to the git root, so the cwd is always in scope. `global` writes the user
-//! config (`$OPENCODE_CONFIG` if set, else `~/.config/opencode/opencode.json`). Both `.json`
-//! and `.jsonc` are honored; a config with comments is never rewritten (serde can't round-trip
-//! comments, so we print the block to add by hand rather than dropping them). The command is
-//! `funes` from PATH (override with `FUNES_BIN`).
+//! opencode merges several config layers; funes writes the user config (`$OPENCODE_CONFIG` if
+//! set, else `~/.config/opencode/opencode.json`) and adds itself as a `local` (stdio) MCP
+//! server (`funes mcp`), preserving any existing settings. Both `.json` and `.jsonc` are
+//! honored; a config with comments is never rewritten (serde can't round-trip comments, so we
+//! print the block to add by hand rather than dropping them). The command is `funes` from PATH
+//! (override with `FUNES_BIN`).
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
-pub fn install(global: bool) -> Result<()> {
-    let path = target_path(global)?;
+pub fn install() -> Result<()> {
+    let path = target_path()?;
     let funes = std::env::var("FUNES_BIN").unwrap_or_else(|_| "funes".to_string());
     let server = json!({ "type": "local", "command": [funes, "mcp"], "enabled": true });
 
@@ -44,27 +42,21 @@ pub fn install(global: bool) -> Result<()> {
     std::fs::write(&path, format!("{}\n", serde_json::to_string_pretty(&cfg)?))
         .with_context(|| format!("writing {}", path.display()))?;
 
-    let scope = if global { "user" } else { "project" };
     println!(
-        "installed funes recall into opencode ({scope} scope) at {} — `funes_recall`/`funes_get` are now available (restart opencode if it's running).",
+        "installed funes recall into opencode (user scope) at {} — `funes_recall`/`funes_get` are now available (restart opencode if it's running).",
         path.display()
     );
     Ok(())
 }
 
-/// The config file to edit for the requested scope. Global scope is `$OPENCODE_CONFIG` if set,
-/// else the user config dir; project scope is the cwd. In a directory an existing
-/// `opencode.json` wins over an existing `opencode.jsonc`, which wins over creating a fresh
-/// `opencode.json`.
-fn target_path(global: bool) -> Result<PathBuf> {
-    if global {
-        if let Some(p) = std::env::var_os("OPENCODE_CONFIG") {
-            return Ok(PathBuf::from(p));
-        }
-        return Ok(choose(&config_home().join("opencode")));
+/// The user config file to edit: `$OPENCODE_CONFIG` if set, else the user config dir. In that
+/// dir an existing `opencode.json` wins over an existing `opencode.jsonc`, which wins over
+/// creating a fresh `opencode.json`.
+fn target_path() -> Result<PathBuf> {
+    if let Some(p) = std::env::var_os("OPENCODE_CONFIG") {
+        return Ok(PathBuf::from(p));
     }
-    let cwd = std::env::current_dir().context("resolving the current directory")?;
-    Ok(choose(&cwd))
+    Ok(choose(&config_home().join("opencode")))
 }
 
 /// Pick the config file in `dir`: an existing `opencode.json`, else an existing

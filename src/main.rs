@@ -142,34 +142,20 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum AddAgent {
-    /// claude: register funes as an MCP server with Claude Code (native MCP client).
-    Claude {
-        /// Register at user scope (all projects) instead of just the current one.
-        #[arg(short, long)]
-        global: bool,
-    },
+    /// claude: register funes as an MCP server with Claude Code (native MCP client, user scope).
+    Claude,
     /// codex: register funes as an MCP server with Codex (native MCP client, user scope).
     Codex,
-    /// pi: install funes as a pi extension (pi has no MCP client of its own).
+    /// pi: install funes as a pi extension user-wide (pi has no MCP client of its own).
     Pi {
-        /// Install user-wide instead of just the current directory.
-        #[arg(short, long)]
-        global: bool,
-        /// Extract the extension to this directory instead of the default.
-        #[arg(long, value_name = "PATH")]
-        dest: Option<PathBuf>,
         /// Reinstall even if the on-disk copy is already up to date.
         #[arg(long)]
         force: bool,
     },
     /// hermes: register funes as an MCP server (hermes has a native MCP client).
     Hermes,
-    /// opencode: register funes as an MCP server.
-    Opencode {
-        /// Write the user config instead of the current directory.
-        #[arg(short, long)]
-        global: bool,
-    },
+    /// opencode: register funes as an MCP server (user scope).
+    Opencode,
 }
 
 /// Which store the read commands act on. Shared by `recall`/`list`/`get`/`status`.
@@ -330,11 +316,11 @@ async fn main() -> Result<()> {
         Cmd::Update { force } => update::run(force).await,
         Cmd::Mcp => mcp::run().await,
         Cmd::Add { agent } => match agent {
-            AddAgent::Claude { global } => claude::install(global),
+            AddAgent::Claude => claude::install(),
             AddAgent::Codex => codex::install(),
-            AddAgent::Pi { global, dest, force } => pi::install(global, dest, force),
+            AddAgent::Pi { force } => pi::install(force),
             AddAgent::Hermes => hermes::install(),
-            AddAgent::Opencode { global } => opencode::install(global),
+            AddAgent::Opencode => opencode::install(),
         },
     }
 }

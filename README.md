@@ -5,14 +5,18 @@ Code, Codex, and pi and lets the agent recall its own decisions, rationale, and 
 the exact passages, with provenance, using whatever model it's running. Everything stays on your
 machine; you can query the memories yourself from the CLI to check or debug a result.
 
+![Choosing an embedding model in Claude Code, then Codex recalling that decision in a separate session](docs/img/cross-agents.gif)
+
+*Different agents, one memory: Claude picks an embedding model; a session-end hook indexes it on its own; Codex — a separate agent — uses funes to recall the decision.*
+
 ## Features at a glance
 
-- **Your agent recalls its own past work.** The model spontaneously uses funes to recall prior decisions, rationale, and findings mid-task.
+- **Your agent recalls your past work.** The model spontaneously uses funes to recall prior decisions, rationale, and findings mid-task.
 - **One memory across your agents.** Index Claude Code, Codex, and pi into a single store; recall
   spans all of them, and every hit shows which agent it came from.
-- **Runs on your machine.** Indexing and recall are local; nothing is sent anywhere until you `push`.
 - **Share across machines or a team.** Publish your index to a Hugging Face dataset you own; a
   teammate or another host recalls it.
+- **Runs on your machine.** Indexing and recall are local; nothing is sent anywhere until you `push`.
 - **Secrets stay out.** Credentials are redacted at index time, and a fail-closed gate blocks them
   from any push.
 
@@ -23,6 +27,12 @@ and puts it on your PATH (`~/.local/bin` by default):
 
 ```bash
 curl -fsSL https://huggingface.co/buckets/huggingface/funes/resolve/install.sh | sh
+```
+
+Then try it:
+
+```bash
+funes recall "how do I get started with funes"
 ```
 
 Alternatively, grab a [binary](https://huggingface.co/buckets/huggingface/funes) by hand:
@@ -80,8 +90,7 @@ funes can be added to: Claude, Codex, Pi, Hermes, OpenCode
 From here you just work. When something touches a past decision, its rationale, or an earlier
 finding, the agent reaches for `recall` itself — no pasting context back in. This holds even for
 small models: every model we tested — down to Gemma 4 E4B — invoked recall *spontaneously*, rather
-than needing to be told to. (The repo also ships an optional skill at [skills/funes/](skills/funes/)
-for richer recall-triggering and a `/funes` command.)
+than needing to be told to.
 
 That closes the loop: the work you just did becomes recallable the next time you index — [automate it](#automate-it)
 with a session end hook and it stays current on its own.
@@ -134,6 +143,10 @@ without changing your default, pass `--remote`:
 funes recall "..." --remote other-org/subject-kb
 ```
 
+![Attaching a shared Hugging Face dataset with funes use, then pi recalling a decision from a project this machine never worked on](docs/img/hub-store.gif)
+
+*A project this machine never worked on: one `funes use dacorvo/funes-Glint-Research-Fable-5` attaches ~21.6k chunks straight from the Hub, and pi recalls a past decision from that shared store.*
+
 The first push to a store your local index shares no chunks with (a first push, a new host, or the
 wrong store) asks to confirm before uploading; off a terminal it refuses rather than guess (`--yes`
 overrides). You never need the Hub to use funes locally — it's a tier you opt into.
@@ -144,6 +157,16 @@ funes redacts credentials from each session *before* it's stored. On publish, a 
 always-on gate withholds any chunk that still contains a secret and exits non-zero, rather than
 upload it — run `funes scrub` to clean older rows in place, then push again. This is what makes a
 shared store safe to push to.
+
+For example, when the gate holds back every dirty row, nothing ships and the push exits non-zero:
+
+```console
+$ funes push
+scanning 512 chunk(s) for secrets…
+hf://datasets/acme/kb: nothing published — held back 3 row(s) with secrets (AWS×2, PrivateKey×1); run `funes scrub`, then push again
+$ echo $?
+2
+```
 
 ## Automate it
 
