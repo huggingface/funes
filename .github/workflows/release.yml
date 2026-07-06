@@ -1,7 +1,8 @@
 name: Release
 
 on:
-  # main builds (no publish) so the release cache is seeded on main for PRs to restore.
+  # main/PR builds validate with the fast `release` profile (and seed its cache for PRs to
+  # restore); the optimized `dist` profile (fat LTO) runs only for published builds — see PROFILE.
   push:
     branches: [main]
     tags: ["v*"]
@@ -106,6 +107,11 @@ jobs:
     # glibc 2.38+ __isoc23_* symbols, so linking fails on 22.04.
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    # Published builds (a dispatch release or a tag push) get the optimized `dist` profile; PR/main
+    # validation builds use the fast `release` profile. Dispatch is the primary release path — it
+    # builds before `publish` creates the tag — so gating on tags alone would ship unoptimized.
+    env:
+      PROFILE: ${{ (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')) && 'dist' || 'release' }}
     strategy:
       fail-fast: false
       matrix:
@@ -124,7 +130,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: release-${{ matrix.target }}
+          # Keyed by profile: fat-LTO deps have different fingerprints than the fast profile's, so a
+          # shared key would make each profile's build restore the other's artifacts and recompile.
+          key: release-${{ matrix.target }}-${{ env.PROFILE }}
 
       # Faster, lower-memory linker — keeps the heavy lance/onnxruntime link in budget.
       - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
@@ -153,12 +161,12 @@ jobs:
         run: perl -i -pe 'if (!$d && s/^version = ".*"/version = "${{ needs.compute.outputs.version }}"/) { $d = 1 }' Cargo.toml
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }} ${{ matrix.features }}
+        run: cargo build --profile ${{ env.PROFILE }} --target ${{ matrix.target }} ${{ matrix.features }}
 
       - name: Package
         run: |
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/funes" "dist/funes-${{ matrix.arch }}-linux"
+          cp "target/${{ matrix.target }}/${{ env.PROFILE }}/funes" "dist/funes-${{ matrix.arch }}-linux"
           chmod +x dist/*
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -174,7 +182,10 @@ jobs:
       (startsWith(github.ref, 'refs/tags/') || needs.compute.result == 'success'
         || github.event_name == 'pull_request' || github.ref == 'refs/heads/main')
     runs-on: macos-14
-    timeout-minutes: 45
+    timeout-minutes: 60
+    # See build-linux: the optimized `dist` profile for published builds, fast `release` otherwise.
+    env:
+      PROFILE: ${{ (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')) && 'dist' || 'release' }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -184,7 +195,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: release-aarch64-apple-darwin
+          key: release-aarch64-apple-darwin-${{ env.PROFILE }}
 
       - name: Install protoc
         run: brew install protobuf
@@ -194,12 +205,12 @@ jobs:
         run: perl -i -pe 'if (!$d && s/^version = ".*"/version = "${{ needs.compute.outputs.version }}"/) { $d = 1 }' Cargo.toml
 
       - name: Build
-        run: cargo build --release --target aarch64-apple-darwin
+        run: cargo build --profile ${{ env.PROFILE }} --target aarch64-apple-darwin
 
       - name: Package
         run: |
           mkdir -p dist
-          cp target/aarch64-apple-darwin/release/funes dist/funes-arm64-apple-darwin
+          cp target/aarch64-apple-darwin/${{ env.PROFILE }}/funes dist/funes-arm64-apple-darwin
           chmod +x dist/*
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

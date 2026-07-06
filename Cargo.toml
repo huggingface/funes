@@ -54,6 +54,17 @@ path = "benchmark/bench_index.rs"
 [profile.release]
 opt-level = 3
 
+# Distribution profile — what the release workflow publishes. fat LTO + a single codegen unit
+# give cross-crate dead-code elimination (funes links the full lance/DataFusion, arrow and ONNX
+# Runtime stacks but exercises a narrow slice of each), and strip drops the symbol table; together
+# ~222 MiB -> ~119 MiB. The final whole-program link is slow (~20 min) and uncacheable, so it runs
+# only for published builds — everyday `cargo build --release` keeps the fast profile above.
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+
 # CI build profile. Keeps line numbers for our own code so test backtraces stay useful, but strips debuginfo
 # from dependencies so linking doesn't exhaust the runner's disk.
 # Workspace keeps debug-assertions (inherited from dev); only deps drop them.
