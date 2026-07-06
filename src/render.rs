@@ -44,6 +44,23 @@ pub fn recall_agent(note: &str, store_arg: &str, hits: &[(Hit, f64)]) -> String 
 /// `width`. Metadata dims when `color` is set; `now` anchors the date labels (years show only
 /// when some hit is from another year).
 pub fn recall_human(note: &str, hits: &[(Hit, f64)], color: bool, width: usize, now: DateTime<Utc>) -> String {
+    let mut out = note.to_string();
+    // 4 = the ordinal prefix each line carries below.
+    for (i, row) in hit_rows(hits, color, width, now, 4).iter().enumerate() {
+        let _ = writeln!(out, "{:>2}  {}", i + 1, row);
+    }
+    out
+}
+
+/// The human list rows without ordinals — one per hit, for a picker whose pointer does the
+/// numbering.
+pub fn recall_rows(hits: &[(Hit, f64)], color: bool, width: usize, now: DateTime<Utc>) -> Vec<String> {
+    hit_rows(hits, color, width, now, 0)
+}
+
+/// One aligned row per hit — dim `date  agent  project` columns, then the scent, fitted to
+/// `width` minus `indent` (the caller's own per-line prefix).
+fn hit_rows(hits: &[(Hit, f64)], color: bool, width: usize, now: DateTime<Utc>, indent: usize) -> Vec<String> {
     let with_year = hits.iter().any(|(h, _)| {
         DateTime::parse_from_rfc3339(&h.ts)
             .map(|t| t.year() != now.year())
@@ -63,14 +80,15 @@ pub fn recall_human(note: &str, hits: &[(Hit, f64)], color: bool, width: usize, 
     let hw = rows.iter().map(|r| r.1.chars().count()).max().unwrap_or(0);
     let pw = rows.iter().map(|r| r.2.chars().count()).max().unwrap_or(0);
 
-    let mut out = note.to_string();
-    for (i, ((h, _), (date, har, proj))) in hits.iter().zip(&rows).enumerate() {
-        let meta = format!("{date:<dw$}  {har:<hw$}  {proj:<pw$}");
-        let budget = width.saturating_sub(4 + meta.chars().count() + 2).max(20);
-        let line = ellipsize(&scent(&h.block_type, &h.text), budget);
-        let _ = writeln!(out, "{:>2}  {}  {}", i + 1, dim(&meta, color), line);
-    }
-    out
+    hits.iter()
+        .zip(&rows)
+        .map(|((h, _), (date, har, proj))| {
+            let meta = format!("{date:<dw$}  {har:<hw$}  {proj:<pw$}");
+            let budget = width.saturating_sub(indent + meta.chars().count() + 2).max(20);
+            let line = ellipsize(&scent(&h.block_type, &h.text), budget);
+            format!("{}  {}", dim(&meta, color), line)
+        })
+        .collect()
 }
 
 /// The agent `get` format: `[ts] role seqN turn=…` headers over reassembled blocks. Byte-stable.

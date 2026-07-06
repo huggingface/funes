@@ -193,19 +193,21 @@ impl StoreOpts {
 enum OutputFormat {
     /// A numbered list with a hit selector.
     Human,
-    /// The stable machine layout.
+    /// The stable agent layout: multi-line hits with provenance, previews, and neighbors.
     Agent,
 }
 
 impl OutputFormat {
     /// Resolve the effective format: an explicit flag wins; otherwise human when both stdin and
     /// stdout are terminals (the hit selector needs both), agent when piped or scripted.
-    fn human(flag: Option<OutputFormat>) -> bool {
-        match flag {
-            Some(OutputFormat::Human) => true,
-            Some(OutputFormat::Agent) => false,
-            None => std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
-        }
+    fn resolve(flag: Option<OutputFormat>) -> OutputFormat {
+        flag.unwrap_or_else(|| {
+            if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+                OutputFormat::Human
+            } else {
+                OutputFormat::Agent
+            }
+        })
     }
 }
 
@@ -253,24 +255,35 @@ async fn main() -> Result<()> {
                 harness,
             )
             .await?;
-            if !OutputFormat::human(format) {
-                if hits.is_empty() {
-                    print!("{note}no results");
-                } else {
-                    print!(
-                        "{}",
-                        render::recall_agent(&note, &recall::store_hint(store_label.as_deref()), &hits)
-                    );
+            match OutputFormat::resolve(format) {
+                OutputFormat::Agent => {
+                    if hits.is_empty() {
+                        print!("{note}no results");
+                    } else {
+                        print!(
+                            "{}",
+                            render::recall_agent(&note, &recall::store_hint(store_label.as_deref()), &hits)
+                        );
+                    }
+                    Ok(())
                 }
-                return Ok(());
+                OutputFormat::Human => {
+                    if hits.is_empty() {
+                        println!("{note}no results");
+                        return Ok(());
+                    }
+                    let (color, width) = human_io();
+                    print!("{note}");
+                    // fzf owns the whole terminal, so it needs a real one; a forced human format
+                    // without TTYs (or without fzf installed) keeps the line selector.
+                    let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+                    if interactive && use_fzf() {
+                        select_hits_fzf(&store, &hits, color, width)
+                    } else {
+                        select_hits(&store, &hits, color, width).await
+                    }
+                }
             }
-            if hits.is_empty() {
-                println!("{note}no results");
-                return Ok(());
-            }
-            let (color, width) = human_io();
-            print!("{note}");
-            select_hits(&store, &hits, color, width).await
         }
         Cmd::List { project, limit, store } => {
             print!("{}", recall::list(store.resolve(), project, limit).await?);
@@ -283,12 +296,13 @@ async fn main() -> Result<()> {
             format,
             store,
         } => {
+            let format = OutputFormat::resolve(format);
             let (note, turns) =
                 recall::get_turns(store.resolve(), session_id.clone(), turn_uuid.clone(), window).await?;
             if turns.is_empty() {
                 print!("{note}");
                 println!("turn {turn_uuid} not found in session {session_id}");
-            } else if OutputFormat::human(format) {
+            } else if matches!(format, OutputFormat::Human) {
                 let (color, width) = human_io();
                 print!("{}", render::get_human(&note, &turns, color, width));
             } else {
@@ -466,6 +480,70 @@ async fn select_hits(store: &hub::Store, hits: &[(Hit, f64)], color: bool, width
             }
         }
     }
+}
+
+/// fzf-driven hit selector, the human default when fzf is installed: the list pane holds one row
+/// per hit, the preview pane runs `get` on the highlighted one, enter opens that expansion in the
+/// pager and leaving it returns to the picker — the walk-back; Esc quits. Each row carries hidden
+/// tab columns — session id and turn uuid for the `get` command, plus a searchable blob so a
+/// query matches content beyond the visible scent.
+fn select_hits_fzf(store: &hub::Store, hits: &[(Hit, f64)], color: bool, width: usize) -> Result<()> {
+    let rows = render::recall_rows(hits, color, width, chrono::Utc::now());
+    let mut lines = String::new();
+    for ((h, _), row) in hits.iter().zip(&rows) {
+        let blob: String = h
+            .text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(500)
+            .collect();
+        lines.push_str(&format!(
+            "{}\t{}\t{}\t{}\n",
+            row.replace('\t', " "),
+            h.session_id,
+            h.turn_uuid,
+            blob
+        ));
+    }
+    let exe = std::env::current_exe()?;
+    let get_cmd = format!(
+        "'{}' get {{2}} {{3}} --format human --store '{}'",
+        exe.display(),
+        store.label()
+    );
+    let mut fzf = std::process::Command::new("fzf")
+        .args([
+            "--ansi",
+            "--layout=reverse",
+            "--no-sort",
+            "--delimiter",
+            "\t",
+            "--with-nth",
+            "1",
+            "--preview",
+            &get_cmd,
+            "--preview-window",
+            "right:60%:wrap",
+            "--bind",
+            &format!("enter:execute:{get_cmd} | ${{PAGER:-less}}"),
+        ])
+        .stdin(std::process::Stdio::piped())
+        .spawn()?;
+    fzf.stdin.take().expect("stdin is piped").write_all(lines.as_bytes())?;
+    // Enter never terminates fzf (it pages the expansion and comes back); the picker ends on
+    // Esc or Ctrl-C, so any exit status just means "done browsing".
+    fzf.wait()?;
+    Ok(())
+}
+
+/// True when fzf is on PATH and `FUNES_NO_FZF` is unset (presence opts out, like `NO_COLOR`).
+fn use_fzf() -> bool {
+    std::env::var_os("FUNES_NO_FZF").is_none()
+        && std::env::var_os("PATH")
+            .map(|p| std::env::split_paths(&p).any(|d| d.join("fzf").is_file()))
+            .unwrap_or(false)
 }
 
 /// One parsed selection.
