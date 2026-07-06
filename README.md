@@ -168,26 +168,17 @@ agent means implementing one trait, not touching the indexing or query path.
 
 ### Inspect it yourself
 
-You can query the store yourself from the CLI — handy to check what's indexed or debug a result:
+`funes` is meant to be used by agents, so its outputs are not human-friendly by default.
+
+However, when `recall` is called within a terminal, it switches to a leaner, interactive mode
+useful to inspect a store:
 
 ```bash
 funes recall "why did we switch off lancedb"
-funes recall "the lance schema" --type tool_use --harness codex --project funes
-funes list --project funes                        # browse indexed sessions
-funes get <session_id> <turn_uuid>                # expand a hit into its full surrounding turns
 ```
 
-In a terminal, `recall` opens an [fzf](https://github.com/junegunn/fzf) picker over the hits when
-fzf is installed: fuzzy-search them (matching reaches past the visible line into each chunk's
-content), read the highlighted hit's surrounding turns live in the preview pane, press enter to
-page through that expansion in full (leaving the pager returns to the picker), and Esc to quit.
-Without fzf — or with `FUNES_NO_FZF` set — it prints a numbered one-line list instead: type a
-number to expand a hit (`3 10` widens the context) and the list reprints after it; enter or `q`
-quits. Piped or scripted, it prints the agent format instead — `[time] agent project/session type
-score`, a `→ get <session_id> <turn_uuid>` line, a preview, and a few neighboring chunks
-(`--format human|agent` overrides the detection). Narrow with `--type`
-(`text|thinking|tool_use|tool_result`), `--project`, and `--harness` (`claude|codex|pi`); tune
-with `--k`, `--half-life` (recency decay), and `--neighbors`.
+Browse the hits and expand any of them into its full surrounding turns.
+Install [fzf](https://github.com/junegunn/fzf) for a richer interface.
 
 ## Building from source
 
