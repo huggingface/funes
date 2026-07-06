@@ -180,6 +180,8 @@ funes recall "why did we switch off lancedb"
 Browse the hits and expand any of them into its full surrounding turns.
 Install [fzf](https://github.com/junegunn/fzf) for a richer interface.
 
+The full interface — output formats, flags, defaults — is specified in [AGENTS.md](AGENTS.md).
+
 ## Building from source
 
 Needs a Rust toolchain and **`protoc`** — `lance`'s build scripts compile protobuf at build time
