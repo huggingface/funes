@@ -119,7 +119,7 @@ funes get <session_id> <turn_uuid>                # expand a hit into its full s
 
 Each hit prints `[time] agent project/session type score`, a `→ get <session_id> <turn_uuid>` line,
 a preview, and a few neighboring chunks. Narrow with `--type` (`text|thinking|tool_use|tool_result`),
-`--project`, and `--harness` (`claude_code|codex|pi`); tune with `--k`, `--half-life` (recency
+`--project`, and `--harness` (`claude|codex|pi`); tune with `--k`, `--half-life` (recency
 decay), and `--neighbors`.
 
 ## Share across machines or a team

@@ -46,7 +46,7 @@ enum Cmd {
         /// Restrict to a project (the path segment under `projects`).
         #[arg(long)]
         project: Option<String>,
-        /// Restrict to a harness: claude_code | codex | pi.
+        /// Restrict to a harness: claude | codex | pi.
         #[arg(long)]
         harness: Option<String>,
         #[command(flatten)]

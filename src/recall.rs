@@ -5,6 +5,7 @@
 
 use crate::chunk;
 use crate::dataset;
+use crate::harness::Harness;
 use crate::hello;
 use crate::hub::{self, Reachability, Store};
 use anyhow::{anyhow, Context, Result};
@@ -267,6 +268,14 @@ pub async fn recall(
     project: Option<String>,
     harness: Option<String>,
 ) -> Result<String> {
+    // `--harness` accepts the same spellings as `index`/`add` (claude|codex|pi); normalize to the
+    // stored facet (Claude's is `claude_code`) so `--harness claude` filters instead of silently
+    // matching nothing, and an unknown value errors here rather than returning zero hits.
+    let harness = harness
+        .map(|h| Harness::parse(&h))
+        .transpose()?
+        .map(|h| h.as_str().to_string());
+
     let mut guard = models().await?.lock().await;
     let Models { embedder, reranker } = &mut *guard;
 
