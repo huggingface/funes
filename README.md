@@ -168,19 +168,19 @@ agent means implementing one trait, not touching the indexing or query path.
 
 ### Inspect it yourself
 
-You can query the store yourself from the CLI — handy to check what's indexed or debug a result:
+`funes` is meant to be used by agents, so its outputs are not human-friendly by default.
+
+However, when `recall` is called within a terminal, it switches to a leaner, interactive mode
+useful to inspect a store:
 
 ```bash
 funes recall "why did we switch off lancedb"
-funes recall "the lance schema" --type tool_use --harness codex --project funes
-funes list --project funes                        # browse indexed sessions
-funes get <session_id> <turn_uuid>                # expand a hit into its full surrounding turns
 ```
 
-Each hit prints `[time] agent project/session type score`, a `→ get <session_id> <turn_uuid>` line,
-a preview, and a few neighboring chunks. Narrow with `--type` (`text|thinking|tool_use|tool_result`),
-`--project`, and `--harness` (`claude|codex|pi`); tune with `--k`, `--half-life` (recency
-decay), and `--neighbors`.
+Browse the hits and expand any of them into its full surrounding turns.
+Install [fzf](https://github.com/junegunn/fzf) for a richer interface.
+
+The full interface — output formats, flags, defaults — is specified in [AGENTS.md](AGENTS.md).
 
 ## Building from source
 

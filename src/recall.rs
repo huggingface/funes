@@ -1,7 +1,8 @@
 //! The read surface: `recall`, `list`, `get`, `status` over the existing index.
 //! Recall pipeline: hybrid (vector + BM25, fused by reciprocal rank) → cross-encoder rerank →
-//! recency reweight → neighbor expansion. Every command returns a `String` so the CLI
-//! prints it and the MCP server returns it verbatim.
+//! recency reweight → neighbor expansion. `recall`/`get` return results rendered in the agent
+//! format; `recall_hits`/`get_turns` return the structured results for other renderings
+//! (see `render`).
 
 use crate::chunk;
 use crate::dataset;
@@ -39,24 +40,33 @@ type NeighborRow = (String, i64, String, i64, i64, String, String, String);
 type TurnRow = (i64, String, String, String, i64, i64, String);
 
 /// One adjacent chunk pulled in to give a hit some surrounding context.
-struct Neighbor {
-    seq: i64,
-    role: String,
-    block_type: String,
-    text: String,
+pub struct Neighbor {
+    pub seq: i64,
+    pub role: String,
+    pub block_type: String,
+    pub text: String,
 }
 
 /// One candidate row carried from retrieval through rerank to display.
-struct Hit {
-    text: String,
-    session_id: String,
-    project: String,
-    turn_uuid: String,
-    seq: i64,
-    ts: String,
-    block_type: String,
-    harness: String,
-    neighbors: Vec<Neighbor>,
+pub struct Hit {
+    pub text: String,
+    pub session_id: String,
+    pub project: String,
+    pub turn_uuid: String,
+    pub seq: i64,
+    pub ts: String,
+    pub block_type: String,
+    pub harness: String,
+    pub neighbors: Vec<Neighbor>,
+}
+
+/// One reassembled turn from `get`: its blocks in order, splits stitched back together.
+pub struct Turn {
+    pub seq: i64,
+    pub turn_uuid: String,
+    pub ts: String,
+    pub role: String,
+    pub blocks: Vec<String>,
 }
 
 fn scol<'a>(b: &'a RecordBatch, name: &str) -> Option<&'a StringArray> {
@@ -242,7 +252,7 @@ async fn degrade_offline(uri: &str, embedder: Option<&mut TextEmbedding>) -> Res
 
 /// The store suffix for a hit's `→ get` hint: every hit names the store it was read from, so the
 /// hint drills into that store from any context. The built-in guide has no store to name.
-fn store_hint(read: Option<&str>) -> String {
+pub fn store_hint(read: Option<&str>) -> String {
     match read {
         Some(label) => format!(" --store {label}"),
         None => String::new(),
@@ -271,7 +281,7 @@ async fn models() -> Result<&'static Mutex<Models>> {
         .await
 }
 
-/// Run the recall pipeline over one store and return the formatted results as text.
+/// Run the recall pipeline over one store and return the results rendered in the agent format.
 #[allow(clippy::too_many_arguments)]
 pub async fn recall(
     store: Store,
@@ -284,6 +294,36 @@ pub async fn recall(
     project: Option<String>,
     harness: Option<String>,
 ) -> Result<String> {
+    let (note, store_label, hits) = recall_hits(
+        store, query, k, candidates, half_life, neighbors, block_type, project, harness,
+    )
+    .await?;
+    if hits.is_empty() {
+        return Ok(format!("{note}no results"));
+    }
+    Ok(crate::render::recall_agent(
+        &note,
+        &store_hint(store_label.as_deref()),
+        &hits,
+    ))
+}
+
+/// Run the recall pipeline over one store: hybrid retrieval → rerank → recency reweight →
+/// neighbor expansion. Returns the degradation note (empty when the store opened normally), the
+/// label of the store actually read (`None` for the built-in guide), and the scored hits, best
+/// first — rendering is the caller's choice.
+#[allow(clippy::too_many_arguments)]
+pub async fn recall_hits(
+    store: Store,
+    query: String,
+    k: usize,
+    candidates: usize,
+    half_life: f64,
+    neighbors: i64,
+    block_type: Option<String>,
+    project: Option<String>,
+    harness: Option<String>,
+) -> Result<(String, Option<String>, Vec<(Hit, f64)>)> {
     // `--harness` accepts the same spellings as `index`/`add` (claude|codex|pi); normalize to the
     // stored facet (Claude's is `claude_code`) so `--harness claude` filters instead of silently
     // matching nothing, and an unknown value errors here rather than returning zero hits.
@@ -318,7 +358,7 @@ pub async fn recall(
     // recall then falls back to vector-only.
     let hits = hybrid_candidates(ds, &qv, &query, candidates, where_clause.as_deref()).await?;
     if hits.is_empty() {
-        return Ok(format!("{note}no results"));
+        return Ok((note, read.store_label.clone(), Vec::new()));
     }
 
     let docs: Vec<&str> = hits.iter().map(|h| h.text.as_str()).collect();
@@ -349,25 +389,7 @@ pub async fn recall(
         attach_neighbors(ds, &mut refs, neighbors).await?;
     }
 
-    let store_arg = store_hint(read.store_label.as_deref());
-    let mut out = note;
-    for (h, score) in &top {
-        let s8 = &h.session_id[..h.session_id.len().min(8)];
-        let _ = writeln!(
-            out,
-            "[{}] {} {}/{} {}  score={:.3}",
-            h.ts, h.harness, h.project, s8, h.block_type, score
-        );
-        let _ = writeln!(out, "  → get {} {}{}", h.session_id, h.turn_uuid, store_arg);
-        let preview: String = h.text.chars().take(400).collect();
-        let _ = writeln!(out, "{preview}");
-        for n in &h.neighbors {
-            let np: String = n.text.chars().take(160).collect();
-            let _ = writeln!(out, "  ~ [{} {} seq{}] {}", n.role, n.block_type, n.seq, np);
-        }
-        let _ = writeln!(out, "---");
-    }
-    Ok(out)
+    Ok((note, read.store_label.clone(), top))
 }
 
 /// Vector ANN + BM25 candidates fused by reciprocal rank, top `candidates`. The FTS leg is
@@ -644,9 +666,25 @@ pub async fn list(store: Store, project: Option<String>, limit: usize) -> Result
     Ok(format!("{note}{out}"))
 }
 
-/// Drill down on a recall hit: the named turn plus the turns within `window` of it, each
-/// reassembled (blocks in order, splits de-overlapped) into one readable passage.
+/// Drill down on a recall hit: the named turn plus the turns within `window` of it, rendered in
+/// the agent format.
 pub async fn get(store: Store, session_id: String, turn_uuid: String, window: i64) -> Result<String> {
+    let (note, turns) = get_turns(store, session_id.clone(), turn_uuid.clone(), window).await?;
+    if turns.is_empty() {
+        return Ok(format!("{note}turn {turn_uuid} not found in session {session_id}\n"));
+    }
+    Ok(crate::render::get_agent(&note, &turns))
+}
+
+/// The turns behind `get`: the named one plus those within `window` of it, each reassembled
+/// (blocks in order, splits de-overlapped). Returns the degradation note and the turns — empty
+/// when the turn isn't in the session; rendering is the caller's choice.
+pub async fn get_turns(
+    store: Store,
+    session_id: String,
+    turn_uuid: String,
+    window: i64,
+) -> Result<(String, Vec<Turn>)> {
     let read = open_read(&store, None).await?;
     let note = read.note.clone().unwrap_or_default();
     let ds = &read.ds;
@@ -684,7 +722,7 @@ pub async fn get(store: Store, session_id: String, turn_uuid: String, window: i6
 
     let center = match rows.iter().find(|r| r.1 == turn_uuid) {
         Some(r) => r.0,
-        None => return Ok(format!("{note}turn {turn_uuid} not found in session {session_id}\n")),
+        None => return Ok((note, Vec::new())),
     };
 
     // Group selected rows by (seq, turn_uuid).
@@ -693,7 +731,7 @@ pub async fn get(store: Store, session_id: String, turn_uuid: String, window: i6
         groups.entry((r.0, r.1.clone())).or_default().push(r);
     }
 
-    let mut out = String::new();
+    let mut turns = Vec::new();
     for ((seq, turn), mut chunks) in groups {
         chunks.sort_by_key(|r| (r.4, r.5)); // block_idx, split_idx
         let head = chunks[0];
@@ -718,11 +756,15 @@ pub async fn get(store: Store, session_id: String, turn_uuid: String, window: i6
         if !cur.is_empty() {
             blocks.push(cur);
         }
-        let _ = writeln!(out, "[{}] {} seq{} turn={}", head.2, head.3, seq, turn);
-        let _ = writeln!(out, "{}", blocks.join("\n\n"));
-        let _ = writeln!(out, "---");
+        turns.push(Turn {
+            seq,
+            turn_uuid: turn,
+            ts: head.2.clone(),
+            role: head.3.clone(),
+            blocks,
+        });
     }
-    Ok(format!("{note}{out}"))
+    Ok((note, turns))
 }
 
 pub async fn status(store: Store) -> Result<String> {

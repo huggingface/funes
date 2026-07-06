@@ -5,12 +5,16 @@
 //! `$FUNES_HOME` or `~/.funes`.
 
 use funes::harness::Harness;
-use funes::{claude, codex, config, hello, hermes, hub, index, mcp, opencode, pi, push, recall, scrub, update};
+use funes::recall::Hit;
+use funes::{claude, codex, config, hello, hermes, hub, index, mcp, opencode, pi, push, recall, render, scrub, update};
 
 use anyhow::{anyhow, Result};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
+
+/// Turns around a `get` target when no window is given — shared by the CLI flag and the hit selector.
+const DEFAULT_WINDOW: i64 = 3;
 
 #[derive(Parser)]
 #[command(name = "funes", version, about = "Recall over your past AI agent sessions.")]
@@ -49,6 +53,9 @@ enum Cmd {
         /// Restrict to a harness: claude | codex | pi.
         #[arg(long)]
         harness: Option<String>,
+        /// Output format. Default: human in a terminal, agent when piped.
+        #[arg(long, value_enum)]
+        format: Option<OutputFormat>,
         #[command(flatten)]
         store: StoreOpts,
     },
@@ -70,8 +77,26 @@ enum Cmd {
         /// Turn uuid (from a recall hit's `→ get` line).
         turn_uuid: String,
         /// Turns within this seq window of the target are included.
-        #[arg(long, default_value_t = 3)]
+        #[arg(long, default_value_t = DEFAULT_WINDOW)]
         window: i64,
+        /// Output format. Default: human in a terminal, agent when piped.
+        #[arg(long, value_enum)]
+        format: Option<OutputFormat>,
+        /// Highlight this text in the human rendering (matched whitespace-insensitively).
+        #[arg(long)]
+        highlight: Option<String>,
+        #[command(flatten)]
+        store: StoreOpts,
+    },
+    /// Browse a session's turns in fzf — the hit picker's drill-down.
+    #[command(hide = true)]
+    Turns {
+        session_id: String,
+        /// The turn to mark in the list (the recall hit).
+        turn_uuid: String,
+        /// The matched chunk, highlighted in previews and pages.
+        #[arg(long)]
+        highlight: Option<String>,
         #[command(flatten)]
         store: StoreOpts,
     },
@@ -178,6 +203,41 @@ impl StoreOpts {
     }
 }
 
+/// The two output layouts for the read commands.
+#[derive(Clone, Copy, ValueEnum)]
+enum OutputFormat {
+    /// A numbered list with a hit selector.
+    Human,
+    /// The stable agent layout: multi-line hits with provenance, previews, and neighbors.
+    Agent,
+}
+
+impl OutputFormat {
+    /// Resolve the effective format: an explicit flag wins; otherwise human when both stdin and
+    /// stdout are terminals (the hit selector needs both), agent when piped or scripted.
+    fn resolve(flag: Option<OutputFormat>) -> OutputFormat {
+        flag.unwrap_or_else(|| {
+            if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+                OutputFormat::Human
+            } else {
+                OutputFormat::Agent
+            }
+        })
+    }
+}
+
+/// Color and width for the human renderings: color needs a terminal and no `NO_COLOR`; width
+/// follows `$COLUMNS` when exported, else 100.
+fn human_io() -> (bool, usize) {
+    let color = std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+    let width = std::env::var("COLUMNS")
+        .ok()
+        .and_then(|c| c.parse::<usize>().ok())
+        .map(|c| c.clamp(40, 120))
+        .unwrap_or(100);
+    (color, width)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().cmd {
@@ -194,24 +254,51 @@ async fn main() -> Result<()> {
             block_type,
             project,
             harness,
+            format,
             store,
         } => {
-            print!(
-                "{}",
-                recall::recall(
-                    store.resolve(),
-                    query.join(" "),
-                    k,
-                    candidates,
-                    half_life,
-                    neighbors,
-                    block_type,
-                    project,
-                    harness,
-                )
-                .await?
-            );
-            Ok(())
+            let store = store.resolve();
+            let (note, store_label, hits) = recall::recall_hits(
+                store.clone(),
+                query.join(" "),
+                k,
+                candidates,
+                half_life,
+                neighbors,
+                block_type,
+                project,
+                harness,
+            )
+            .await?;
+            match OutputFormat::resolve(format) {
+                OutputFormat::Agent => {
+                    if hits.is_empty() {
+                        print!("{note}no results");
+                    } else {
+                        print!(
+                            "{}",
+                            render::recall_agent(&note, &recall::store_hint(store_label.as_deref()), &hits)
+                        );
+                    }
+                    Ok(())
+                }
+                OutputFormat::Human => {
+                    if hits.is_empty() {
+                        println!("{note}no results");
+                        return Ok(());
+                    }
+                    let (color, width) = human_io();
+                    print!("{note}");
+                    // fzf owns the whole terminal, so it needs a real one; a forced human format
+                    // without TTYs (or without fzf installed) keeps the line selector.
+                    let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+                    if interactive && use_fzf() {
+                        select_hits_fzf(&store, &hits, color, width)
+                    } else {
+                        select_hits(&store, &hits, color, width).await
+                    }
+                }
+            }
         }
         Cmd::List { project, limit, store } => {
             print!("{}", recall::list(store.resolve(), project, limit).await?);
@@ -221,11 +308,33 @@ async fn main() -> Result<()> {
             session_id,
             turn_uuid,
             window,
+            format,
+            highlight,
             store,
         } => {
-            print!("{}", recall::get(store.resolve(), session_id, turn_uuid, window).await?);
+            let format = OutputFormat::resolve(format);
+            let (note, turns) =
+                recall::get_turns(store.resolve(), session_id.clone(), turn_uuid.clone(), window).await?;
+            if turns.is_empty() {
+                print!("{note}");
+                println!("turn {turn_uuid} not found in session {session_id}");
+            } else if matches!(format, OutputFormat::Human) {
+                let (color, width) = human_io();
+                print!(
+                    "{}",
+                    render::get_human(&note, &turns, color, width, highlight.as_deref())
+                );
+            } else {
+                print!("{}", render::get_agent(&note, &turns));
+            }
             Ok(())
         }
+        Cmd::Turns {
+            session_id,
+            turn_uuid,
+            highlight,
+            store,
+        } => select_turns_fzf(store.resolve(), session_id, turn_uuid, highlight).await,
         Cmd::Index {
             path,
             harness,
@@ -336,6 +445,260 @@ async fn main() -> Result<()> {
     }
 }
 
+/// The hit selector after a human recall: prints the numbered menu, then a typed number expands
+/// that hit via `get` (`3 10` widens the window) and the menu reprints — the walk-back. An empty
+/// line, `q`, or end-of-input quits.
+async fn select_hits(store: &hub::Store, hits: &[(Hit, f64)], color: bool, width: usize) -> Result<()> {
+    let menu = render::recall_human("", hits, color, width, chrono::Utc::now());
+    let hint = render::dim(
+        "type a number to expand a hit (`3 10` widens the context) — enter or q quits",
+        color,
+    );
+    print!("{menu}");
+    println!("{hint}");
+    let mut line = String::new();
+    loop {
+        print!("› ");
+        std::io::stdout().flush().ok();
+        line.clear();
+        if std::io::stdin().read_line(&mut line)? == 0 {
+            println!();
+            return Ok(());
+        }
+        match parse_selection(line.trim(), hits.len()) {
+            Selection::Quit => return Ok(()),
+            Selection::Help => {
+                println!(
+                    "1–{} expands a hit (`3 10` widens the context); enter or q quits",
+                    hits.len()
+                )
+            }
+            Selection::Expand { ordinal, window } => {
+                let h = &hits[ordinal - 1].0;
+                match recall::get_turns(store.clone(), h.session_id.clone(), h.turn_uuid.clone(), window).await {
+                    Ok((note, turns)) if turns.is_empty() => {
+                        print!("{note}");
+                        println!("turn {} not found in session {}", h.turn_uuid, h.session_id);
+                    }
+                    Ok((note, turns)) => {
+                        // Mark the matched chunk so it stands out of the surrounding turns.
+                        let mark: String = h.text.split_whitespace().collect::<Vec<_>>().join(" ");
+                        print!("{}", render::get_human(&note, &turns, color, width, Some(&mark)));
+                        println!(
+                            "{}",
+                            render::dim(
+                                &format!(
+                                    "funes get {} {} --window {window} --store {}",
+                                    h.session_id,
+                                    h.turn_uuid,
+                                    sh_word(&store.label())
+                                ),
+                                color
+                            )
+                        );
+                    }
+                    // A transient failure (say, the remote dropped) shouldn't kill the session.
+                    Err(e) => println!("get failed: {e:#}"),
+                }
+                // Back to the picker: the expansion pushed the menu out of view.
+                println!();
+                print!("{menu}");
+                println!("{hint}");
+            }
+        }
+    }
+}
+
+/// fzf-driven hit selector, the human default when fzf is installed: the list pane holds one row
+/// per hit, the preview pane shows the matched chunk, enter drills into the session's turn
+/// browser and leaving it returns here — the walk-back; Esc quits. Each row carries hidden tab
+/// columns — session id and turn uuid for the drill-down, plus the matched chunk, which doubles
+/// as search text (a query matches content beyond the visible scent) and as the preview.
+fn select_hits_fzf(store: &hub::Store, hits: &[(Hit, f64)], color: bool, width: usize) -> Result<()> {
+    let rows = render::recall_rows(hits, color, width, chrono::Utc::now());
+    let mut lines = String::new();
+    for ((h, _), row) in hits.iter().zip(&rows) {
+        // Field 4 is the matched chunk, whitespace-collapsed: fzf searches it (a query matches
+        // content beyond the visible scent) and the preview leads with it.
+        let blob: String = h
+            .text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(2000)
+            .collect();
+        lines.push_str(&format!(
+            "{}\t{}\t{}\t{}\n",
+            row.replace('\t', " "),
+            h.session_id,
+            h.turn_uuid,
+            blob
+        ));
+    }
+    let exe = std::env::current_exe()?;
+    let mut fzf = std::process::Command::new("fzf")
+        .args([
+            "--ansi",
+            "--layout=reverse",
+            "--no-sort",
+            "--delimiter",
+            "\t",
+            "--with-nth",
+            "1",
+            "--preview",
+            // The matched chunk, nothing else — the turn browser behind enter owns the context.
+            // Rendering the turn here too would show the match's text twice in different shapes
+            // (or, for a tool hit, not at all: the turn view compresses tool blocks).
+            "echo {4} | fold -s -w $FZF_PREVIEW_COLUMNS",
+            "--preview-window",
+            "right:60%:wrap",
+            "--bind",
+            // fzf shell-escapes {4} (the matched chunk) itself.
+            &format!(
+                "enter:execute:{} turns {{2}} {{3}} --store {} --highlight {{4}}",
+                sh_quote(&exe.display().to_string()),
+                sh_quote(&store.label())
+            ),
+        ])
+        .stdin(std::process::Stdio::piped())
+        .spawn()?;
+    fzf.stdin.take().expect("stdin is piped").write_all(lines.as_bytes())?;
+    // Enter never terminates fzf (it drills into the turn browser and comes back); the picker
+    // ends on Esc or Ctrl-C, so any exit status just means "done browsing".
+    fzf.wait()?;
+    Ok(())
+}
+
+/// The turn browser behind enter in the hit picker: one fzf row per turn of the session, oldest
+/// first, the recall hit's turn marked `▶`; the highlighted turn shows whole in the preview pane
+/// — the matched chunk reverse-videoed within it — and enter pages it. Esc walks back to the hit
+/// picker.
+async fn select_turns_fzf(
+    store: hub::Store,
+    session_id: String,
+    center: String,
+    highlight: Option<String>,
+) -> Result<()> {
+    let (note, turns) = recall::get_turns(store.clone(), session_id.clone(), center.clone(), i64::MAX).await?;
+    if turns.is_empty() {
+        print!("{note}");
+        println!("turn {center} not found in session {session_id}");
+        return Ok(());
+    }
+    let (color, width) = human_io();
+    let rows = render::turn_rows(&turns, color, width);
+    let mut lines = String::new();
+    for (t, row) in turns.iter().zip(&rows) {
+        let marker = if t.turn_uuid == center { "▶ " } else { "  " };
+        lines.push_str(&format!(
+            "{marker}{}\t{}\t{}\n",
+            row.replace('\t', " "),
+            session_id,
+            t.turn_uuid
+        ));
+    }
+    let exe = std::env::current_exe()?;
+    let mut turn_cmd = format!(
+        "{} get {{2}} {{3}} --format human --window 0 --store {}",
+        sh_quote(&exe.display().to_string()),
+        sh_quote(&store.label())
+    );
+    if let Some(h) = &highlight {
+        turn_cmd.push_str(&format!(" --highlight {}", sh_quote(h)));
+    }
+    let mut cmd = std::process::Command::new("fzf");
+    cmd.args([
+        "--ansi",
+        "--layout=reverse",
+        "--no-sort",
+        "--delimiter",
+        "\t",
+        "--with-nth",
+        "1",
+        "--preview",
+        &turn_cmd,
+        "--preview-window",
+        "right:60%:wrap",
+        "--bind",
+        // `less -R` passes the highlight's ANSI marks through.
+        &format!("enter:execute:{turn_cmd} | ${{PAGER:-less -R}}"),
+    ]);
+    // Land on the hit's turn rather than the top of a possibly huge session. `pos` needs
+    // fzf 0.36; older ones still get the `▶` marker to search for.
+    if let Some(idx) = turns.iter().position(|t| t.turn_uuid == center) {
+        if fzf_version().is_some_and(|v| v >= (0, 36)) {
+            cmd.args(["--bind", &format!("load:pos({})", idx + 1)]);
+        }
+    }
+    let mut fzf = cmd.stdin(std::process::Stdio::piped()).spawn()?;
+    fzf.stdin.take().expect("stdin is piped").write_all(lines.as_bytes())?;
+    fzf.wait()?;
+    Ok(())
+}
+
+/// `s` single-quoted for a shell command line.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// `s` quoted only when a shell would mangle it bare — for commands shown to be copy-pasted,
+/// where quoting the common clean label is just noise.
+fn sh_word(s: &str) -> String {
+    let clean = |c: char| c.is_ascii_alphanumeric() || "/:.@_+=%,~-".contains(c);
+    if !s.is_empty() && s.chars().all(clean) {
+        s.to_string()
+    } else {
+        sh_quote(s)
+    }
+}
+
+/// The installed fzf's (major, minor), or None when it can't be read.
+fn fzf_version() -> Option<(u32, u32)> {
+    let out = std::process::Command::new("fzf").arg("--version").output().ok()?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    let mut parts = s.split_whitespace().next()?.split('.');
+    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+}
+
+/// True when fzf is on PATH and `FUNES_NO_FZF` is unset (presence opts out, like `NO_COLOR`).
+fn use_fzf() -> bool {
+    std::env::var_os("FUNES_NO_FZF").is_none()
+        && std::env::var_os("PATH")
+            .map(|p| std::env::split_paths(&p).any(|d| d.join("fzf").is_file()))
+            .unwrap_or(false)
+}
+
+/// One parsed selection.
+enum Selection {
+    Quit,
+    Help,
+    Expand { ordinal: usize, window: i64 },
+}
+
+/// `""`/`q`/`quit` quit; `N` expands hit N with the default window; `N W` widens it to W.
+fn parse_selection(line: &str, hits: usize) -> Selection {
+    if line.is_empty() || line.eq_ignore_ascii_case("q") || line.eq_ignore_ascii_case("quit") {
+        return Selection::Quit;
+    }
+    let mut parts = line.split_whitespace();
+    let ordinal = match parts.next().and_then(|t| t.parse::<usize>().ok()) {
+        Some(o) if (1..=hits).contains(&o) => o,
+        _ => return Selection::Help,
+    };
+    let window = match parts.next() {
+        None => DEFAULT_WINDOW,
+        Some(t) => match t.parse::<i64>() {
+            Ok(w) if w >= 0 => w,
+            _ => return Selection::Help,
+        },
+    };
+    if parts.next().is_some() {
+        return Selection::Help;
+    }
+    Selection::Expand { ordinal, window }
+}
+
 /// `funes use <store>`: attach a remote (or `local` to detach) and report the next step.
 async fn use_store(spec: String) -> Result<()> {
     let mut cfg = config::load();
@@ -425,7 +788,28 @@ fn prompt_new_store(label: &str, chunks: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::attach_hint;
+    use super::{attach_hint, parse_selection, Selection};
+
+    #[test]
+    fn parse_selection_grammar() {
+        assert!(matches!(parse_selection("", 8), Selection::Quit));
+        assert!(matches!(parse_selection("q", 8), Selection::Quit));
+        assert!(matches!(parse_selection("QUIT", 8), Selection::Quit));
+        assert!(matches!(
+            parse_selection("3", 8),
+            Selection::Expand { ordinal: 3, window: 3 }
+        ));
+        assert!(matches!(
+            parse_selection("3 10", 8),
+            Selection::Expand { ordinal: 3, window: 10 }
+        ));
+        // Out of range, not a number, negative window, trailing junk.
+        assert!(matches!(parse_selection("9", 8), Selection::Help));
+        assert!(matches!(parse_selection("0", 8), Selection::Help));
+        assert!(matches!(parse_selection("x", 8), Selection::Help));
+        assert!(matches!(parse_selection("3 -1", 8), Selection::Help));
+        assert!(matches!(parse_selection("3 10 zzz", 8), Selection::Help));
+    }
 
     #[test]
     fn attach_hint_covers_each_state() {
