@@ -90,184 +90,35 @@ at the end: a chunk's id derives from `(session, turn, block, split)`, so a comp
 turn's chunks are identical no matter when they're indexed, and `funes index`
 re-embeds nothing already stored.
 
-### `~/.claude/hooks/funes-index.sh`
+### Install the two scripts
 
-Save this and `chmod +x` it:
-
-```bash
-#!/usr/bin/env bash
-# Index new Claude Code turns into funes — local only, no network.
-#
-# Fired by the Stop hook (after every turn), so the local store stays fresh as you
-# work. `funes index` is incremental and idempotent — it re-embeds nothing already
-# stored — and indexing per turn yields the same chunks as indexing once per session,
-# since chunk ids derive from (session, turn, block, split). Publishing to the remote
-# is a separate step (funes-push.sh, on session boundaries), so this per-turn run
-# stays cheap and never touches the network.
-#
-# The work runs detached so it never blocks the turn or trips the hook timeout: the
-# foreground half drains the hook payload, re-execs as a background worker, and
-# returns. Detach and locking use only portable idioms (nohup + a mkdir lock) — stock
-# macOS ships neither setsid nor flock, and this runs on macOS and Linux.
-
-set -uo pipefail
-
-LOG="$HOME/.claude/hooks/funes-sync.log"
-LOCK="$HOME/.claude/hooks/.funes-index.lock"   # serialize concurrent index runs
-STALE_LOCK_SECS=1800                           # take over a lock a hard-killed run left behind
-
-log() { printf '%s %s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" "$*" >>"$LOG"; }
-
-# Resolve a binary by name, falling back to common install dirs — hooks can run with a
-# minimal PATH (e.g. launched from the IDE).
-find_bin() {
-    command -v "$1" 2>/dev/null && return 0
-    for d in "$HOME/.local/bin" /opt/homebrew/bin /usr/local/bin "$HOME/go/bin" /usr/bin /bin; do
-        [ -x "$d/$1" ] && { printf '%s\n' "$d/$1"; return 0; }
-    done
-    return 1
-}
-
-# mtime in epoch seconds — GNU `stat -c` first, BSD `stat -f` second.
-lock_mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
-
-worker() {
-    local funes holder mtime now stolen
-    funes="$(find_bin funes || true)"
-    if [ -z "$funes" ] || [ ! -x "$funes" ]; then
-        log "index ABORT: funes not found; skipping."
-        return
-    fi
-
-    # Serialize concurrent turns/sessions. mkdir is atomic; steal an existing lock only
-    # when its holder is truly gone (PID liveness, not wall-clock age — a long or
-    # laptop-slept run must not have its lock stolen while it is still working).
-    if ! mkdir "$LOCK" 2>/dev/null; then
-        holder="$(cat "$LOCK/pid" 2>/dev/null || true)"
-        if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
-            log "index: another run (pid $holder) in progress; skipping."
-            return
-        fi
-        if [ -z "$holder" ]; then
-            mtime="$(lock_mtime "$LOCK")"; now="$(date +%s)"
-            if [ "$mtime" -gt 0 ] && [ "$((now - mtime))" -le "$STALE_LOCK_SECS" ]; then
-                log "index: lock being acquired by another worker; skipping."
-                return
-            fi
-        fi
-        stolen="$LOCK.stale.$$"
-        if mv "$LOCK" "$stolen" 2>/dev/null; then
-            rm -rf "$stolen" 2>/dev/null
-            log "index: reclaimed abandoned lock (holder=${holder:-unknown})"
-        fi
-        mkdir "$LOCK" 2>/dev/null || { log "index: another worker grabbed the lock; skipping."; return; }
-    fi
-    printf '%s\n' "$$" >"$LOCK/pid" 2>/dev/null || true
-    trap 'rm -rf "$LOCK" 2>/dev/null' EXIT
-
-    # Name the target explicitly: an automated (no-TTY) `funes index` refuses to run with
-    # no target, so this indexes only Claude sessions — other agents get their own hook.
-    log "index: start"
-    if "$funes" index --harness claude >>"$LOG" 2>&1; then
-        log "index: ok"
-    else
-        log "index: FAILED (exit $?)"
-    fi
-}
-
-# Worker mode (re-exec): do the real work, already detached from the turn.
-if [ "${1:-}" = "--worker" ]; then
-    worker
-    exit 0
-fi
-
-# Foreground: drain the Stop payload on stdin, hand off to a detached worker, return.
-cat >/dev/null
-nohup bash "$0" --worker >/dev/null 2>&1 </dev/null &
-disown 2>/dev/null || true
-exit 0
-```
-
-### `~/.claude/hooks/funes-push.sh`
-
-Save this and `chmod +x` it:
+Both live in this repo under [`scripts/automation/`](../scripts/automation):
+**`funes-index.sh`** (the per-turn local index) and **`funes-push.sh`** (the network
+publish). Neither is Claude-specific — `funes-index.sh` takes the harness as its first
+argument and `funes-push.sh` publishes the whole store — so Claude and Codex point at one
+copy. Install them where the hooks below expect them:
 
 ```bash
-#!/usr/bin/env bash
-# Publish the local funes index to the active remote.
-#
-# Fired by SessionEnd (publish what this session produced) AND SessionStart (catch up
-# anything a previous session left unpublished — its SessionEnd may never have fired
-# because the host was disconnected, the window closed, or the conversation was
-# switched away). The Stop hook (funes-index.sh) keeps the LOCAL index fresh per turn;
-# this is the only step that touches the network, so it runs at session boundaries,
-# not per turn.
-#
-# `funes push` is incremental and commit-guarded (it retries against a moved remote
-# head), so overlapping publishes — and a publish that overlaps an index — are safe;
-# no lock is needed. It has a fail-closed secret gate: a chunk holding a credential is
-# withheld (exit 2) rather than published. A first push to a store your local one
-# shares no chunks with is refused off a terminal — clear it once by hand (see setup).
-#
-# Runs detached so it never blocks session start/teardown or trips the hook timeout.
-
-set -uo pipefail
-
-LOG="$HOME/.claude/hooks/funes-sync.log"
-FUNES_HOME="${FUNES_HOME:-$HOME/.funes}"
-FUNES_JSON="$FUNES_HOME/funes.json"
-
-log() { printf '%s %s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" "$*" >>"$LOG"; }
-
-# Resolve a binary by name, falling back to common install dirs — hooks can run with a
-# minimal PATH (e.g. launched from the IDE).
-find_bin() {
-    command -v "$1" 2>/dev/null && return 0
-    for d in "$HOME/.local/bin" /opt/homebrew/bin /usr/local/bin "$HOME/go/bin" /usr/bin /bin; do
-        [ -x "$d/$1" ] && { printf '%s\n' "$d/$1"; return 0; }
-    done
-    return 1
-}
-
-worker() {
-    local funes rc remote
-    funes="$(find_bin funes || true)"
-    if [ -z "$funes" ] || [ ! -x "$funes" ]; then
-        log "push ABORT: funes not found; skipping."
-        return
-    fi
-
-    # Push only when a remote is attached, naming it explicitly so the target is
-    # unambiguous in the log and immune to the active store changing mid-run. A first
-    # push to a store this index shares no chunks with is refused here (the overlap
-    # guard fails closed off a terminal) — clear it once by hand: `funes push <repo>`.
-    remote="$(sed -n 's/.*"remote"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$FUNES_JSON" 2>/dev/null)"
-    if [ -z "$remote" ]; then
-        log "push: skipped (no remote attached — 'funes use <org>/<repo>' to enable)"
-        return
-    fi
-    log "push: start ($remote)"
-    "$funes" push "$remote" >>"$LOG" 2>&1
-    rc=$?
-    case "$rc" in
-        0) log "push: ok" ;;
-        2) log "push: WARN — secrets held back; run 'funes scrub', then it publishes next run" ;;
-        *) log "push: FAILED (exit $rc)" ;;
-    esac
-}
-
-# Worker mode (re-exec): do the real work, already detached from the session.
-if [ "${1:-}" = "--worker" ]; then
-    worker
-    exit 0
-fi
-
-# Foreground: drain the hook payload on stdin, hand off to a detached worker, return.
-cat >/dev/null
-nohup bash "$0" --worker >/dev/null 2>&1 </dev/null &
-disown 2>/dev/null || true
-exit 0
+mkdir -p ~/.claude/hooks
+cp scripts/automation/funes-index.sh scripts/automation/funes-push.sh ~/.claude/hooks/
+chmod +x ~/.claude/hooks/funes-index.sh ~/.claude/hooks/funes-push.sh
 ```
+
+Read them before installing — they run on every turn and session boundary. Both are
+built the same way: the foreground half drains the hook payload on stdin and re-execs a
+**detached worker**, so the hook returns in well under a second and never blocks the turn
+or trips the timeout. The worker then:
+
+- **`funes-index.sh`** — runs `funes index --harness <arg>`. Local only, no network. No
+  locking in the script: `funes` serializes local-store writes itself (an advisory lock
+  in the binary). If another store operation holds the lock, the run exits non-zero
+  (logged) and the next turn re-sweeps the same content — indexing is idempotent.
+- **`funes-push.sh`** — reads the attached remote from `~/.funes/funes.json` and runs
+  `funes push`. Logs a warning, not a failure, if the fail-closed secret gate held
+  chunks back (exit 2 → run `funes scrub`).
+
+Everything downstream is identical for every agent; only the harness argument and which
+lifecycle events fire the scripts differ.
 
 ### Register all three hooks in `~/.claude/settings.json`
 
@@ -279,7 +130,7 @@ exit 0
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"$HOME/.claude/hooks/funes-index.sh\"",
+            "command": "bash \"$HOME/.claude/hooks/funes-index.sh\" claude",
             "timeout": 15,
             "statusMessage": "Indexing turn into funes memory"
           }
@@ -318,14 +169,116 @@ exit 0
 and the network push run in the detached worker, not in the hook Claude Code is
 waiting on.
 
+## Codex
+
+Codex's [hooks](https://developers.openai.com/codex/hooks) give the same two triggers
+Claude's do — a per-turn `Stop` and a `SessionStart` — so **the same two scripts drive
+it**, no Codex-specific copies needed:
+
+- **`Stop` → `funes-index.sh codex`** — index the turn's new content locally, exactly
+  as Claude's `Stop` does. The harness argument is the only difference; the script and
+  its log are shared — one implementation, one timeline. A Codex index and a Claude one
+  can safely run at once: `funes` serializes local-store writes in the binary, so no
+  coordination between the scripts is needed.
+- **`SessionStart` → `funes-push.sh`** — publish on the way in. The push script is
+  **harness-agnostic** — `funes push` publishes the whole local index, whatever produced
+  it — so it needs no `codex` argument and is reused verbatim.
+
+The one structural difference from Claude: **Codex has no session-end event.** So the
+`SessionEnd` publish has no equivalent here; publishing happens only on the way in at the
+next `SessionStart`. See [the gap](#the-codex-gap) below.
+
+### Register the hooks in `~/.codex/config.toml`
+
+Codex discovers hooks either as inline `[hooks]` tables in `config.toml` or in a
+separate `~/.codex/hooks.json`. The TOML form, alongside your other Codex config:
+
+```toml
+[[hooks.Stop]]
+[[hooks.Stop.hooks]]
+type = "command"
+command = 'bash "$HOME/.claude/hooks/funes-index.sh" codex'
+timeout = 15
+statusMessage = "Indexing turn into funes memory"
+
+[[hooks.SessionStart]]
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = 'bash "$HOME/.claude/hooks/funes-push.sh"'
+timeout = 15
+statusMessage = "Publishing funes memory"
+```
+
+Or the equivalent `~/.codex/hooks.json`:
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HOME/.claude/hooks/funes-index.sh\" codex",
+            "timeout": 15,
+            "statusMessage": "Indexing turn into funes memory"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HOME/.claude/hooks/funes-push.sh\"",
+            "timeout": 15,
+            "statusMessage": "Publishing funes memory"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The commands point at the scripts you installed under `~/.claude/hooks/` for the Claude
+setup — that path is not Claude-specific, and pointing both agents at one copy keeps a
+single implementation to maintain. If you run Codex without Claude, install the two
+scripts wherever you like (e.g. `~/.codex/hooks/`) and adjust the paths.
+
+> **Older Codex without the hooks system?** Use the legacy `notify` program for the
+> per-turn index — it fires on `agent-turn-complete`, the same moment as `Stop`:
+> `notify = ["bash", "/home/you/.claude/hooks/funes-index.sh", "codex"]` (a root key, so
+> it must sit above any `[table]` header). `notify` is exec'd directly, not through a
+> shell, so use a literal absolute path — `$HOME`/`~` won't expand. It appends its JSON
+> payload as a trailing argument, which the script ignores. But `notify` has no
+> `SessionStart` equivalent, so you get local indexing only — publish on a timer (see
+> [Other agents](#other-agents)) or by hand.
+
+<h3 id="the-codex-gap">The Codex publish gap</h3>
+
+With no session-end event, a Codex session's last turns publish no sooner than the
+**next** Codex `SessionStart`; a machine retired without starting another Codex session
+keeps them local until you run `funes push <repo>` by hand. Two things narrow this:
+
+- **`SessionStart` fires on `resume`, `clear`, and `compact`**, not just fresh startup,
+  so long-lived work publishes at each of those points, not only when you next launch.
+- **If you also run Claude on the same machine**, its `SessionEnd`/`SessionStart` pushes
+  publish the Codex-indexed turns too — `funes push` is whole-store — so any agent's
+  push boundary flushes every agent's freshly indexed turns.
+
 ## Verify it
 
 Take a couple of turns in one session, then start a fresh session and:
 
 ```bash
-tail ~/.claude/hooks/funes-sync.log   # index: ok (per turn) · push: ok (per boundary)
+tail ~/.claude/hooks/funes-sync.log   # index[<harness>]: ok (per turn) · push: ok (per boundary)
 funes status                          # chunk count grows across turns; publishes at start/end
 ```
+
+Both agents log to the same `funes-sync.log`, tagged by harness (`index[claude]`,
+`index[codex]`), so it's one timeline for everything.
 
 ## How it behaves
 
@@ -339,15 +292,21 @@ funes status                          # chunk count grows across turns; publishe
 - **Fresh every turn.** `Stop` re-indexes after each turn, so the local store tracks
   the session as it grows; a session killed mid-flight is already indexed up to its
   last completed turn. Because `funes index` is incremental, that re-sweep is cheap.
-- **Published at both boundaries.** `SessionEnd` publishes what the session produced;
-  `SessionStart` republishes anything a prior session left unpushed — the recovery
-  path for a `SessionEnd` that never fired (host disconnect, closed window, a
-  switched-away conversation).
-- **Serialized where it matters.** Concurrent `funes index` runs would race on the
-  store, so `funes-index.sh` holds a lock and a contended run just skips — its turns
-  are swept by the next turn's run. `funes push` needs no lock: it is commit-guarded
-  on the remote and retries on conflict, so overlapping publishes (and a publish that
-  overlaps an index) are safe.
+- **Published at the boundaries you have.** On Claude, `SessionEnd` publishes what the
+  session produced and `SessionStart` republishes anything a prior session left unpushed
+  — the recovery path for a `SessionEnd` that never fired (host disconnect, closed
+  window, a switched-away conversation). Codex has no session-end event, so it publishes
+  only at `SessionStart`; see [the Codex gap](#the-codex-gap).
+- **Serialized in the binary.** `funes` holds an advisory lock while it mutates the local
+  store, so only one writer touches it at a time — no matter what launched them (a hook, a
+  manual `funes index`, `funes scrub`, a cron timer). A run that hits the lock fails loudly
+  rather than waiting or skipping: a per-turn index just re-sweeps next turn (indexing is
+  idempotent), and a manual `funes index`/`funes scrub` prints "another funes store
+  operation is in progress" so you retry. This is what makes concurrent automation safe, and
+  it lives in the binary because the "one writer at a time" rule is a property of the store,
+  not of any one script. Reads (recall/get/status) take no lock — they read a consistent
+  snapshot. `funes push` targets the remote and is commit-guarded there, so overlapping
+  publishes (and a publish that overlaps an index) are safe.
 - **The remaining gap.** A session's very last turn is published no later than the
   next session's start; a machine retired without ever starting another session keeps
   its last unpushed turns local. If that matters, run `funes push <repo>` by hand
@@ -355,9 +314,16 @@ funes status                          # chunk count grows across turns; publishe
 
 ## Other agents
 
-The automation *pattern* is agent-agnostic: point equivalent hooks — or a
-cron/launchd/systemd timer, if your agent has no session hook — at scripts like the
-ones above. Only the *target* is Claude-specific, and an automated run must name one:
-`funes index --harness claude | codex | pi` indexes that agent's standard session dir,
-or pass an explicit path — `funes index <path>`, a directory of session transcripts or a
-trace `.parquet`. Everything downstream — chunk, embed, store, push — is identical.
+The two scripts above are already agent-agnostic — `funes-index.sh` takes the harness as
+its argument and `funes-push.sh` publishes the whole store — so extending to a third
+agent (pi, …) is just wiring, not new code. Point that agent's per-turn and per-session
+hooks at `funes-index.sh <harness>` and `funes-push.sh`, exactly as Claude and Codex do.
+
+If an agent has no hooks, drive `funes-index.sh <harness>` — or the `funes` binary
+directly — from a cron/launchd/systemd timer instead. Either is safe: `funes` serializes
+local-store writes in the binary, so a timer firing while a hook run is in flight just
+fails loudly and re-sweeps on its next tick. An automated run must always name a target:
+`funes index --harness claude | codex
+| pi` indexes that agent's standard session dir, or pass an explicit path — `funes index
+<path>`, a directory of transcripts or a trace `.parquet`. Everything downstream — chunk,
+embed, store, push — is identical.
