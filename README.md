@@ -132,8 +132,8 @@ overrides). You never need the Hub to use funes locally — it's a tier you opt 
 
 funes redacts credentials from each session *before* it's stored. On publish, a separate,
 always-on gate withholds any chunk that still contains a secret and exits non-zero, rather than
-upload it — run `funes scrub` to clean older rows in place, then push again. This is what makes a
-shared store safe to push to.
+upload it — run `funes scrub` to clean older rows in place, then push again. It removes credentials
+only; the rest is published as-is.
 
 For example, when the gate holds back every dirty row, nothing ships and the push exits non-zero:
 
