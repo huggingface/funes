@@ -120,9 +120,9 @@ without changing your default, pass `--store`:
 funes recall "..." --store other-org/subject-kb
 ```
 
-![Attaching a shared Hugging Face dataset with funes use, then pi recalling a decision from a project this machine never worked on](docs/img/hub-store.gif)
+![pi recalling a past decision from a shared Hugging Face dataset named in the prompt — a project this machine never worked on](docs/img/hub-store.gif)
 
-*A project this machine never worked on: one `funes use dacorvo/funes-Glint-Research-Fable-5` attaches ~21.6k chunks straight from the Hub, and pi recalls a past decision from that shared store.*
+*A project this machine never worked on: the prompt names `dacorvo/funes-Glint-Research-Fable-5` — ~21.6k chunks on the Hub — and pi recalls the past decision straight from it, one `store` argument on the recall call. Nothing attached, no local index.*
 
 The first push to a store that shares no chunks with your local one (a first push, a new host, or the
 wrong store) asks to confirm before uploading; off a terminal it refuses rather than guess (`--yes`
