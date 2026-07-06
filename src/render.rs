@@ -45,9 +45,10 @@ pub fn recall_agent(note: &str, store_arg: &str, hits: &[(Hit, f64)]) -> String 
 /// when some hit is from another year).
 pub fn recall_human(note: &str, hits: &[(Hit, f64)], color: bool, width: usize, now: DateTime<Utc>) -> String {
     let mut out = note.to_string();
-    // 4 = the ordinal prefix each line carries below.
-    for (i, row) in hit_rows(hits, color, width, now, 4).iter().enumerate() {
-        let _ = writeln!(out, "{:>2}  {}", i + 1, row);
+    // The ordinal column grows with the hit count; hit_rows budgets around it.
+    let ow = hits.len().to_string().len().max(2);
+    for (i, row) in hit_rows(hits, color, width, now, ow + 2).iter().enumerate() {
+        let _ = writeln!(out, "{:>ow$}  {}", i + 1, row);
     }
     out
 }
@@ -720,7 +721,10 @@ mod tests {
     fn human_fits_width() {
         let now = Utc.with_ymd_and_hms(2026, 7, 6, 0, 0, 0).unwrap();
         let long = "word ".repeat(100);
-        let hits = vec![(hit("2026-06-19T01:29:59.000Z", "text", &long), 0.5)];
+        // 105 hits: the 3-digit ordinals must widen the budget, not overflow it.
+        let hits: Vec<(Hit, f64)> = (0..105)
+            .map(|_| (hit("2026-06-19T01:29:59.000Z", "text", &long), 0.5))
+            .collect();
         for line in recall_human("", &hits, false, 80, now).lines() {
             assert!(line.chars().count() <= 80, "overlong: {line}");
         }
