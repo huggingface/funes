@@ -176,19 +176,21 @@ pub fn get_human(note: &str, turns: &[Turn], color: bool, width: usize, mark: Op
 }
 
 /// The global word-index range where `mark`'s word sequence occurs in `text`, matched
-/// whitespace-insensitively. A chunk can be cut mid-word at its start, so the first mark word is
-/// also tried dropped; the match anchors on the next 6 words and extends as far as the sequences
-/// agree. None when nothing anchors — the mark belongs to some other turn.
+/// whitespace-insensitively. The match anchors on the first 6 words — or the whole mark when
+/// shorter — and extends as far as the sequences agree. A chunk can be cut mid-word at its start,
+/// so a long mark is also tried with its first word dropped; a short explicit mark must match
+/// whole. None when nothing anchors — the mark belongs to some other turn.
 fn word_span(text: &str, mark: &str) -> Option<std::ops::Range<usize>> {
     let words: Vec<&str> = text.split_whitespace().collect();
     let mark_words: Vec<&str> = mark.split_whitespace().collect();
     for skip in 0..=1usize.min(mark_words.len()) {
         let needle = &mark_words[skip..];
-        if needle.len() < 6 {
+        if needle.is_empty() || (skip > 0 && needle.len() < 6) {
             break;
         }
-        if let Some(i) = words.windows(6).position(|w| w == &needle[..6]) {
-            let mut n = 6;
+        let anchor = needle.len().min(6);
+        if let Some(i) = words.windows(anchor).position(|w| w == &needle[..anchor]) {
+            let mut n = anchor;
             while n < needle.len() && i + n < words.len() && words[i + n] == needle[n] {
                 n += 1;
             }
@@ -555,6 +557,18 @@ mod tests {
             Some("entirely unrelated words that never anchor anywhere at all"),
         );
         assert!(!plain.contains("\u{1b}[7m"));
+    }
+
+    #[test]
+    fn word_span_anchors_short_and_cut_marks() {
+        let text = "alpha beta gamma delta epsilon zeta eta theta";
+        // Shorter than the 6-word anchor: the whole mark must match.
+        assert_eq!(word_span(text, "gamma delta"), Some(2..4));
+        assert_eq!(word_span(text, "theta"), Some(7..8));
+        // A short mark is not retried with its first word dropped.
+        assert_eq!(word_span(text, "nope delta"), None);
+        // A long mark cut mid-word at its start still anchors via the skip.
+        assert_eq!(word_span(text, "pha beta gamma delta epsilon zeta eta"), Some(1..7));
     }
 
     #[test]
