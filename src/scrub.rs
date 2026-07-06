@@ -3,7 +3,7 @@
 //! re-indexing cannot. Operates only on the local store; it does not touch a published remote.
 
 use crate::index::{build_batch, embed_batched, schema};
-use crate::{chunk, dataset, scan};
+use crate::{chunk, dataset, lock, scan};
 use anyhow::Result;
 use arrow_array::{BooleanArray, RecordBatch, RecordBatchIterator};
 use arrow_select::filter::filter_record_batch;
@@ -19,9 +19,11 @@ use std::time::Instant;
 /// (e.g. a key stored with escaped `\n`) — drop the block whole. Fail-closed on the scanner:
 /// scrubbing is the whole point.
 pub async fn run() -> Result<()> {
+    // scrub rewrites the whole table, so hold the store lock to be the sole writer.
+    let _lock = lock::StoreLock::acquire()?;
     let uri = dataset::table_uri(&dataset::local_store_dir());
     let Ok(ds) = dataset::open(&uri, HashMap::new()).await else {
-        println!("no local index to scrub");
+        println!("no local store to scrub");
         return Ok(());
     };
     let scanner = scan::Trufflehog::find()?;

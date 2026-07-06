@@ -28,6 +28,7 @@ pub mod hf_traces;
 pub mod hub;
 pub mod index;
 pub mod jsonl;
+pub mod lock;
 pub mod mcp;
 pub mod opencode;
 pub mod pi;

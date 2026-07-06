@@ -5,7 +5,7 @@
 //! `$FUNES_HOME` or `~/.funes`.
 
 use funes::harness::Harness;
-use funes::{claude, codex, config, hermes, hub, index, mcp, opencode, pi, push, recall, scrub, update};
+use funes::{claude, codex, config, hello, hermes, hub, index, mcp, opencode, pi, push, recall, scrub, update};
 
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand};
@@ -21,6 +21,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Print a short, human-readable guide to funes — the friendly first run (no index needed).
+    Guide,
     /// Recall passages from past sessions (hybrid → rerank → recency → neighbors).
     Recall {
         /// What to recall (free text).
@@ -44,7 +46,7 @@ enum Cmd {
         /// Restrict to a project (the path segment under `projects`).
         #[arg(long)]
         project: Option<String>,
-        /// Restrict to a harness: claude_code | codex | pi.
+        /// Restrict to a harness: claude | codex | pi.
         #[arg(long)]
         harness: Option<String>,
         #[command(flatten)]
@@ -73,7 +75,7 @@ enum Cmd {
         #[command(flatten)]
         store: StoreOpts,
     },
-    /// Build or update the index from session transcripts.
+    /// Build or update your local store from session transcripts.
     Index {
         /// A transcript tree or `.parquet` file, or a Hub trace repo `<org>/<repo>`. Omit — in a
         /// terminal — to index every known harness dir (~/.claude/projects, ~/.codex/sessions,
@@ -103,15 +105,15 @@ enum Cmd {
     /// funes.json; honored by recall/push and the MCP server).
     Use {
         /// Remote to attach: `<org>/<repo>` (→ `hf://datasets/<org>/<repo>`) or a full `hf://…`
-        /// URI. Pass `local` to detach and go back to the local index.
+        /// URI. Pass `local` to detach and go back to your local store.
         store: String,
     },
-    /// Publish the local index's new chunks to a remote store on the HF Hub — the active remote by
+    /// Publish your local store's new chunks to a remote store on the HF Hub — the active store by
     /// default, or `[store]` to publish elsewhere.
     Push {
-        /// Store to publish to: `<org>/<repo>` or a full `hf://…` URI. Defaults to the active remote.
+        /// Store to publish to: `<org>/<repo>` or a full `hf://…` URI. Defaults to the active store.
         store: Option<String>,
-        /// Skip the confirmation when the target shares no chunks with your local index.
+        /// Skip the confirmation when the target shares no chunks with your local store.
         #[arg(short, long)]
         yes: bool,
         /// Refresh the remote index after pushing (retrying on conflict) even if the unindexed
@@ -119,7 +121,7 @@ enum Cmd {
         #[arg(long)]
         force_reindex: bool,
     },
-    /// Redact secrets from the local index in place — for rows indexed before redaction existed (or
+    /// Redact secrets from your local store in place — for rows indexed before redaction existed (or
     /// flagged by an updated ruleset); needs no source transcript. Cleans the local store only: it
     /// does NOT scrub an already-published remote, which the push gate can only stop adding to.
     Scrub,
@@ -162,7 +164,7 @@ enum AddAgent {
 #[derive(Args)]
 struct StoreOpts {
     /// A remote to read for this call — an `<org>/<repo>` shorthand or `hf://…` URI — overriding
-    /// the active store. Defaults to the active store, else the local index.
+    /// the active store. Defaults to the active store, else your local store.
     #[arg(long)]
     remote: Option<String>,
 }
@@ -176,6 +178,10 @@ impl StoreOpts {
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().cmd {
+        Cmd::Guide => {
+            print!("{}", hello::guide());
+            Ok(())
+        }
         Cmd::Recall {
             query,
             k,
@@ -289,7 +295,7 @@ async fn main() -> Result<()> {
             let remote = match store {
                 Some(s) => s,
                 None => config::load().remote.ok_or_else(|| {
-                    anyhow!("no active remote — attach one with `funes use <org>/<repo>`, or name a store: `funes push <org>/<repo>`")
+                    anyhow!("no active store — attach one with `funes use <org>/<repo>`, or name a store: `funes push <org>/<repo>`")
                 })?,
             };
             let confirm = if yes {
@@ -331,7 +337,7 @@ async fn use_store(spec: String) -> Result<()> {
     if spec == "local" {
         cfg.remote = None;
         config::save(&cfg)?;
-        println!("active store: local index");
+        println!("active store: local store");
         return Ok(());
     }
     let uri = match hub::Store::parse(&spec) {
@@ -339,7 +345,7 @@ async fn use_store(spec: String) -> Result<()> {
         hub::Store::Local { .. } => {
             return Err(anyhow!(
                 "`funes use` takes a remote (e.g. `acme/kb` or `hf://datasets/<org>/<repo>`); for the \
-                 local index use `funes use local`, or relocate funes's home with $FUNES_HOME"
+                 local store use `funes use local`, or relocate funes's home with $FUNES_HOME"
             ))
         }
     };
@@ -352,7 +358,7 @@ async fn use_store(spec: String) -> Result<()> {
     // heuristic and say what's wrong — caught here at attach time rather than at the next push.
     match hub::remote_reachability(&uri).await {
         hub::Reachability::Offline => {
-            println!("remote currently unreachable — recall will use your local index until it's back");
+            println!("remote currently unreachable — recall will use your local store until it's back");
             return Ok(());
         }
         hub::Reachability::Missing => {
@@ -372,20 +378,20 @@ async fn use_store(spec: String) -> Result<()> {
 /// The next-step hint for `funes use`.
 fn attach_hint(local: usize, remote: usize, unpushed: usize) -> String {
     if local == 0 && remote == 0 {
-        "no memories indexed yet — run `funes index` to build your local index, then `funes push` to publish it here."
+        "no memories indexed yet — run `funes index` to build your local store, then `funes push` to publish it here."
             .to_string()
     } else if local == 0 {
         format!("the remote holds {remote} chunks — recall reads them now. if you own this remote store, run `funes index` then `funes push` to add this machine's sessions.")
     } else if unpushed == 0 {
-        format!("local index: {local} chunks, all present on the remote.")
+        format!("local store: {local} chunks, all present on the remote.")
     } else if remote == 0 {
-        format!("local index: {local} chunks, none on the remote yet — run `funes push`.")
+        format!("local store: {local} chunks, none on the remote yet — run `funes push`.")
     } else if local > unpushed {
         // Shares chunks with the remote → it's yours to add to; publish the extras.
-        format!("local index: {local} chunks, {unpushed} not yet on the remote — run `funes push`.")
+        format!("local store: {local} chunks, {unpushed} not yet on the remote — run `funes push`.")
     } else {
         // No shared chunks with a populated remote: a fresh host of yours, or a store you only read.
-        format!("local index: {local} chunks, remote: {remote} — no shared chunks: a new host of yours, or a store you only read. `funes push` to contribute, skip if it's not yours.")
+        format!("local store: {local} chunks, remote: {remote} — no shared chunks: a new host of yours, or a store you only read. `funes push` to contribute, skip if it's not yours.")
     }
 }
 
@@ -395,13 +401,13 @@ fn attach_hint(local: usize, remote: usize, unpushed: usize) -> String {
 fn prompt_new_store(label: &str, chunks: usize) -> bool {
     if !std::io::stdin().is_terminal() {
         eprintln!(
-            "refusing to push {chunks} chunk(s) to {label}: your local index shares no chunks with it \
+            "refusing to push {chunks} chunk(s) to {label}: your local store shares no chunks with it \
              (a first push, a new host, or the wrong store) — re-run with `--yes` to confirm."
         );
         return false;
     }
     eprint!(
-        "{label}: your local index shares no chunks with it — a first push here, a new host of yours, \
+        "{label}: your local store shares no chunks with it — a first push here, a new host of yours, \
          or the wrong store. Publish {chunks} chunk(s) anyway? [y/N] "
     );
     let _ = std::io::stderr().flush();

@@ -102,7 +102,7 @@ sustained heavy daily use, or several years of moderate use.
 
 Re-indexing commits a new version rather than overwriting, so superseded index
 generations — and, after row-rewriting ops like `scrub`, orphaned data
-fragments — would otherwise accumulate. funes reaps them after each local index
+fragments — would otherwise accumulate. funes reaps them after each local re-index
 (past a short grace window, so a concurrent read isn't cut off), keeping on-disk
 size at the figures above. The remote push path optimizes indexes incrementally
 but does not yet reap, so a published store runs somewhat above these figures.

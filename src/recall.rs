@@ -5,6 +5,7 @@
 
 use crate::chunk;
 use crate::dataset;
+use crate::harness::Harness;
 use crate::hello;
 use crate::hub::{self, Reachability, Store};
 use anyhow::{anyhow, Context, Result};
@@ -217,7 +218,7 @@ async fn degrade_offline(uri: &str, embedder: Option<&mut TextEmbedding>) -> Res
         Ok(ReadOutcome::Ready(ds)) => Ok(Read {
             _hello: None,
             ds,
-            note: Some(format!("remote {uri} unreachable — recalling from your local index\n")),
+            note: Some(format!("remote {uri} unreachable — recalling from your local store\n")),
         }),
         _ => {
             let (dir, ds) = hello::dataset(embedder).await?;
@@ -225,7 +226,7 @@ async fn degrade_offline(uri: &str, embedder: Option<&mut TextEmbedding>) -> Res
                 _hello: Some(dir),
                 ds,
                 note: Some(format!(
-                    "remote {uri} unreachable and no local index yet — showing the built-in guide\n"
+                    "remote {uri} unreachable and no local store yet — showing the built-in guide\n"
                 )),
             })
         }
@@ -267,6 +268,14 @@ pub async fn recall(
     project: Option<String>,
     harness: Option<String>,
 ) -> Result<String> {
+    // `--harness` accepts the same spellings as `index`/`add` (claude|codex|pi); normalize to the
+    // stored facet (Claude's is `claude_code`) so `--harness claude` filters instead of silently
+    // matching nothing, and an unknown value errors here rather than returning zero hits.
+    let harness = harness
+        .map(|h| Harness::parse(&h))
+        .transpose()?
+        .map(|h| h.as_str().to_string());
+
     let mut guard = models().await?.lock().await;
     let Models { embedder, reranker } = &mut *guard;
 
@@ -713,14 +722,14 @@ pub async fn status(store: Store) -> Result<String> {
         ReadOutcome::Offline => {
             let body = Box::pin(status(Store::local())).await?;
             Ok(format!(
-                "remote {} unreachable — showing the local index instead\n{body}",
+                "remote {} unreachable — showing your local store instead\n{body}",
                 store.label()
             ))
         }
         // No personal index yet: point at `funes index` instead of erroring. (recall/get/list
         // quietly serve the built-in guide in the same situation.)
         ReadOutcome::NoIndex => Ok(format!(
-            "store: {}\nno personal index yet — showing the built-in guide ({} passages).\nrun `funes index` to index ~/.claude/projects, then recall your own history.\n",
+            "store: {}\nno personal store yet — showing the built-in guide ({} passages).\nrun `funes index` to index ~/.claude/projects, then recall your own history.\n",
             store.label(),
             hello::PASSAGES.len()
         )),
