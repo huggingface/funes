@@ -65,7 +65,7 @@ pub const PASSAGES: &[(&str, &str)] = &[
          Hub. `funes use <org>/<repo>` attaches a dataset repo you own as your active store — \
          recall then reads it, and `funes push` publishes your local store to it; `funes use \
          local` detaches. To query a different store for one call without changing your default, \
-         pass `recall --remote <org>/<repo>`. You never need the Hub to use funes locally — it's \
+         pass `recall --store <org>/<repo>`. You never need the Hub to use funes locally — it's \
          a tier you opt into.",
     ),
     (

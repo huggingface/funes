@@ -163,15 +163,15 @@ enum AddAgent {
 /// Which store the read commands act on. Shared by `recall`/`list`/`get`/`status`.
 #[derive(Args)]
 struct StoreOpts {
-    /// A remote to read for this call — an `<org>/<repo>` shorthand or `hf://…` URI — overriding
-    /// the active store. Defaults to the active store, else your local store.
+    /// The store to read — an `<org>/<repo>` shorthand, an `hf://…` URI, a local path, or `local`
+    /// — overriding the active store. Defaults to the active store, else your local store.
     #[arg(long)]
-    remote: Option<String>,
+    store: Option<String>,
 }
 
 impl StoreOpts {
     fn resolve(self) -> hub::Store {
-        hub::Store::resolve(self.remote)
+        hub::Store::resolve(self.store)
     }
 }
 
