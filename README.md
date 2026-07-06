@@ -12,7 +12,7 @@ Code, Codex, and pi and lets any agent recall the past decisions, rationale, and
 - **Your agent recalls your past work.** The model spontaneously uses funes to recall prior decisions, rationale, and findings mid-task.
 - **One memory across your agents.** Index Claude Code, Codex, and pi into a single store; recall
   spans all of them, and every hit shows which agent it came from.
-- **Share across machines or a team.** Publish your index to a Hugging Face dataset you own; a
+- **Share across machines or a team.** Publish your store to a Hugging Face dataset you own; a
   teammate or another host recalls it.
 
 ## Get funes
@@ -102,15 +102,15 @@ between sessions and the memory doesn't move.
 
 ## Share across machines or a team
 
-Attach a Hugging Face dataset repo you own as your **active store**. `recall` then reads it, and
-`funes push` publishes your local index to it — no per-command flags:
+Your local store is a dataset — link a Hugging Face **dataset** repo you own as your **active store** to
+share it. `recall` then reads it, and `funes push` publishes your local store to it — no per-command flags:
 
 ```bash
 funes use acme/kb          # attach hf://datasets/acme/kb as the active store (persisted in funes.json)
-funes index                # build/update the local index
-funes push                 # publish the local index's new chunks to the active remote
-funes recall "..."         # reads the active remote
-funes use local            # detach — back to the local index
+funes index                # build/update your local store
+funes push                 # publish your local store's new chunks to the active store
+funes recall "..."         # reads the active store
+funes use local            # detach — back to your local store
 ```
 
 To query a **different remote for a single call** — say, someone's published memories on a topic —
@@ -124,7 +124,7 @@ funes recall "..." --remote other-org/subject-kb
 
 *A project this machine never worked on: one `funes use dacorvo/funes-Glint-Research-Fable-5` attaches ~21.6k chunks straight from the Hub, and pi recalls a past decision from that shared store.*
 
-The first push to a store your local index shares no chunks with (a first push, a new host, or the
+The first push to a store that shares no chunks with your local one (a first push, a new host, or the
 wrong store) asks to confirm before uploading; off a terminal it refuses rather than guess (`--yes`
 overrides). You never need the Hub to use funes locally — it's a tier you opt into. Recall over a remote caches whole files to local disk, so warm calls run at local speed ([how caching works](docs/hub-caching.md)).
 
@@ -158,13 +158,13 @@ push — at the end of every agent session instead of by hand, wire up a hook: s
    │  parse        deterministic — turns (text / thinking / tool_use / tool_result), tagged by agent
    │  chunk        one chunk per content block, tight provenance
    │  embed        pinned local model (BAAI/bge-small-en-v1.5)
-   ▼  store        embedded vector store (vector + BM25)
+   ▼  store        a local Lance dataset (vector + BM25)
 recall(query) ──>  vector + BM25  →  RRF  →  cross-encoder rerank  →  recency  →  neighbors
 ```
 
 Each source is a [`TraceSource`](src/source.rs) that reads its format into a generic turn/block
 shape; everything downstream — chunk → embed → store → recall — is source-agnostic. Adding another
-agent means implementing one trait, not touching the index or query path.
+agent means implementing one trait, not touching the indexing or query path.
 
 ### Inspect it yourself
 
@@ -202,8 +202,8 @@ integration test downloads the embedder/reranker weights on first run.
 
 ## Notes
 
-- **Embedding model is pinned** and stamped into the index; querying with a different embedding
-  model is refused. To change it, rebuild from the transcripts (the index is a disposable derived
+- **Embedding model is pinned** and stamped into the store; querying with a different embedding
+  model is refused. To change it, rebuild from the transcripts (the store is a disposable derived
   artifact — the raw text is retained in every row). This is separate from the model you *reason*
   with, which is free to change.
 - **Subagent transcripts** (`.../subagents/agent-*.jsonl`) are indexed too.

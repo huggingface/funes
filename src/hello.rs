@@ -28,7 +28,7 @@ pub const PASSAGES: &[(&str, &str)] = &[
     ),
     (
         "assistant",
-        "Build the index first: run `funes index`. It walks ~/.claude/projects, \
+        "Build your store first: run `funes index`. It walks ~/.claude/projects, \
          ~/.codex/sessions, and ~/.pi/agent/sessions, parses each session, and embeds the turns \
          into a local store at ~/.funes. It's incremental — \
          re-running it only adds new turns — so it's cheap to run often.",
@@ -55,7 +55,7 @@ pub const PASSAGES: &[(&str, &str)] = &[
     ),
     (
         "assistant",
-        "Keep recall fresh. The index only updates when `funes index` runs, so the latest turns of \
+        "Keep recall fresh. Your store only updates when `funes index` runs, so the latest turns of \
          the current session aren't searchable until you re-run it. Re-run it periodically, or add \
          a session-end hook that runs `funes index` after each session (see docs/automation.md).",
     ),
@@ -63,7 +63,7 @@ pub const PASSAGES: &[(&str, &str)] = &[
         "assistant",
         "Optional, and later: share your memory across machines or a team via the Hugging Face \
          Hub. `funes use <org>/<repo>` attaches a dataset repo you own as your active store — \
-         recall then reads it, and `funes push` publishes your local index to it; `funes use \
+         recall then reads it, and `funes push` publishes your local store to it; `funes use \
          local` detaches. To query a different store for one call without changing your default, \
          pass `recall --remote <org>/<repo>`. You never need the Hub to use funes locally — it's \
          a tier you opt into.",
@@ -71,7 +71,7 @@ pub const PASSAGES: &[(&str, &str)] = &[
     (
         "assistant",
         "funes is local-first and deterministic: no LLM in the ingest path, the embedding model is \
-         pinned (BAAI/bge-small-en-v1.5), and the index is a disposable derived artifact you can \
+         pinned (BAAI/bge-small-en-v1.5), and the store is a disposable derived artifact you can \
          always rebuild from your transcripts. The transcripts are the source of truth.",
     ),
 ];
@@ -111,7 +111,7 @@ Once indexed, you can query the store yourself:
 Share across machines or a team (optional)
 
   funes use <org>/<repo>    attach a Hugging Face dataset you own as your store
-  funes push                publish your local index to it
+  funes push                publish your local store to it
 
 Your indexed sessions stay on your machine until you `funes push`.
 "

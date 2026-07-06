@@ -16,16 +16,16 @@ manual step.
 
 ## One-time setup
 
-### 1. Build the local index
+### 1. Build your local store
 
 ```bash
 funes index          # parse → chunk → embed ~/.claude/projects → ~/.funes
 ```
 
-Run this once, interactively — **the hook won't build the first index for you.** An
-automated (non-terminal) `funes index` refuses to build a from-scratch index (it can take
+Run this once, interactively — **the hook won't build your store the first time.** An
+automated (non-terminal) `funes index` refuses to build a store from scratch (it can take
 a long time) and refuses to run with no target; it only does incremental, per-harness
-updates once a local index exists. So this manual first index is required on each machine.
+updates once a local store exists. So this manual first build is required on each machine.
 If you only want local recall, you're done — skip to [the hooks](#claude-code).
 
 ### 2. Attach a shared store (optional)
@@ -43,19 +43,19 @@ funes push <org>/<repo>    # name the store explicitly
 ```
 
 Why this can't be skipped: `funes push` **refuses, off a terminal, to publish to a
-store your local index shares no chunks with.** That guard exists so an unattended
+store your local store shares no chunks with.** That guard exists so an unattended
 push can never silently dump your sessions into the wrong repo. A brand-new store —
-or an established shared store seen from **a new machine** whose index is all its
+or an established shared store seen from **a new machine** whose store is all its
 own sessions — shares nothing yet, so a *non-interactive* push (like the one a hook
 makes) aborts with:
 
 ```
-refusing to push N chunk(s) to <store>: your local index shares no chunks with it
+refusing to push N chunk(s) to <store>: your local store shares no chunks with it
 (a first push, a new host, or the wrong store) — re-run with `--yes` to confirm.
 ```
 
 Doing the first push interactively (or with `--yes`) clears it: afterwards your
-local index and the remote share chunks, so every later push — including the
+local store and the remote share chunks, so every later push — including the
 hook's — has overlap and goes through without prompting. **Run this one-time push
 on each machine you set up.**
 
@@ -77,7 +77,7 @@ Two scripts split the work along the two operations funes performs — a local i
 update and a network publish — and wire each to the hook that fits it:
 
 - **`Stop` → `funes-index.sh`** — index the session's new turns **locally, no
-  network**. `Stop` fires after every turn, so the local index tracks the session as
+  network**. `Stop` fires after every turn, so the local store tracks the session as
   it grows; a session killed mid-flight (host disconnect, closed window, a
   switched-away conversation) is already indexed up to its last completed turn.
 - **`SessionEnd` → `funes-push.sh`** — **publish** what the session produced.
@@ -98,7 +98,7 @@ Save this and `chmod +x` it:
 #!/usr/bin/env bash
 # Index new Claude Code turns into funes — local only, no network.
 #
-# Fired by the Stop hook (after every turn), so the local index stays fresh as you
+# Fired by the Stop hook (after every turn), so the local store stays fresh as you
 # work. `funes index` is incremental and idempotent — it re-embeds nothing already
 # stored — and indexing per turn yields the same chunks as indexing once per session,
 # since chunk ids derive from (session, turn, block, split). Publishing to the remote
@@ -206,7 +206,7 @@ Save this and `chmod +x` it:
 # `funes push` is incremental and commit-guarded (it retries against a moved remote
 # head), so overlapping publishes — and a publish that overlaps an index — are safe;
 # no lock is needed. It has a fail-closed secret gate: a chunk holding a credential is
-# withheld (exit 2) rather than published. A first push to a store the local index
+# withheld (exit 2) rather than published. A first push to a store your local one
 # shares no chunks with is refused off a terminal — clear it once by hand (see setup).
 #
 # Runs detached so it never blocks session start/teardown or trips the hook timeout.
@@ -336,7 +336,7 @@ funes status                          # chunk count grows across turns; publishe
   per-harness updates; the push hook's first publish to a store it shares no chunks
   with is refused off a terminal. So a fresh machine does nothing until you run
   `funes index` and `funes push <repo>` once by hand (setup steps 1 and 3).
-- **Fresh every turn.** `Stop` re-indexes after each turn, so the local index tracks
+- **Fresh every turn.** `Stop` re-indexes after each turn, so the local store tracks
   the session as it grows; a session killed mid-flight is already indexed up to its
   last completed turn. Because `funes index` is incremental, that re-sweep is cheap.
 - **Published at both boundaries.** `SessionEnd` publishes what the session produced;

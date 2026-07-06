@@ -218,7 +218,7 @@ async fn degrade_offline(uri: &str, embedder: Option<&mut TextEmbedding>) -> Res
         Ok(ReadOutcome::Ready(ds)) => Ok(Read {
             _hello: None,
             ds,
-            note: Some(format!("remote {uri} unreachable — recalling from your local index\n")),
+            note: Some(format!("remote {uri} unreachable — recalling from your local store\n")),
         }),
         _ => {
             let (dir, ds) = hello::dataset(embedder).await?;
@@ -226,7 +226,7 @@ async fn degrade_offline(uri: &str, embedder: Option<&mut TextEmbedding>) -> Res
                 _hello: Some(dir),
                 ds,
                 note: Some(format!(
-                    "remote {uri} unreachable and no local index yet — showing the built-in guide\n"
+                    "remote {uri} unreachable and no local store yet — showing the built-in guide\n"
                 )),
             })
         }
@@ -722,14 +722,14 @@ pub async fn status(store: Store) -> Result<String> {
         ReadOutcome::Offline => {
             let body = Box::pin(status(Store::local())).await?;
             Ok(format!(
-                "remote {} unreachable — showing the local index instead\n{body}",
+                "remote {} unreachable — showing your local store instead\n{body}",
                 store.label()
             ))
         }
         // No personal index yet: point at `funes index` instead of erroring. (recall/get/list
         // quietly serve the built-in guide in the same situation.)
         ReadOutcome::NoIndex => Ok(format!(
-            "store: {}\nno personal index yet — showing the built-in guide ({} passages).\nrun `funes index` to index ~/.claude/projects, then recall your own history.\n",
+            "store: {}\nno personal store yet — showing the built-in guide ({} passages).\nrun `funes index` to index ~/.claude/projects, then recall your own history.\n",
             store.label(),
             hello::PASSAGES.len()
         )),

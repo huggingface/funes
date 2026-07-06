@@ -57,10 +57,10 @@ decay relative to it.
 ### 3. Local-first, model-agnostic, on storage you own
 
 Local embeddings (`BAAI/bge-small-en-v1.5`) and a local cross-encoder reranker. The only
-state is a derived, rebuildable index; the transcripts are the source of truth. Any model
+state is a derived, rebuildable store; the transcripts are the source of truth. Any model
 can query it — switch models per task; nothing is trained into weights.
 
-By default everything stays on the machine. **Optionally**, the index — a Lance dataset that
+By default everything stays on the machine. **Optionally**, the store — a Lance dataset that
 still holds the raw passages — can be synced to the **HF Hub**, where `recall` reads it
 over `hf://` — fetching the immutable Lance files a query touches into a local cache pinned to
 the dataset's commit, so a warm recall reads from disk with no network. That hub repo is
