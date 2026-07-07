@@ -1,12 +1,12 @@
-# Demo: tapping a large shared store on the Hub. `funes use <org>/<repo>` points
-# this machine's recall at a public HF dataset — here dacorvo/funes-Glint-Research-Fable-5,
+# Demo: tapping a large shared store on the Hub with no funes command at all.
+# The prompt names a public HF dataset — dacorvo/funes-Glint-Research-Fable-5,
 # ~21.6k chunks of Fable-5 traces from the "Glint Research" project (a tiny
-# terminal coding agent). No local indexing: the store lives on the Hub, and one
-# command attaches to it. Then pi — with funes added at user scope — recalls a past
-# decision from that corpus, a project this machine never worked on.
+# terminal coding agent) — and pi, with funes added at user scope, passes it as
+# the store on its recall call: a past decision recalled from a project this
+# machine never worked on. No local indexing, nothing attached first.
 #
-# The single visible funes command IS the point: memory you don't have to build,
-# just point at. Everything else (PATH, TERM, throwaway home) is hidden.
+# Zero visible funes commands IS the point: memory you don't have to build or
+# attach, just name. Everything else (PATH, TERM, throwaway home) is hidden.
 #
 # Prerequisites on the render box:
 #   - pi installed, authenticated to a model, and funes added at USER scope.
@@ -29,7 +29,7 @@ Set Theme "Catppuccin Mocha"
 Set TypingSpeed 40ms
 
 # Hidden setup: full PATH/env, a TERM the TUI will render under, a throwaway
-# FUNES_HOME so the demo store lands here, off your real ~/.funes; a clean prompt and cwd.
+# FUNES_HOME so recall stays off your real ~/.funes; a clean prompt and cwd.
 Hide
 Type "source ~/.zshrc"
 Enter
@@ -47,20 +47,13 @@ Type "clear"
 Enter
 Show
 
-# 1) Attach to the shared store. Prints the chunk count — this is a big corpus,
-#    and recall reads it straight from the Hub with no local index.
-Type "funes use dacorvo/funes-Glint-Research-Fable-5"
-Enter
-Sleep 4s
-
-# 2) A fresh agent, on a project this machine never touched. pi decides on its own
-#    that the answer lives in prior-session memory and reaches for recall.
 Type "pi"
 Enter
 Sleep 3s
-Type "I'm picking up the Glint Research project — the tiny terminal coding agent. Before I touch the status bar: we reworked the tokens-per-second counter for accuracy at some point. What window does it average over now, and why did we move off the old one?"
+Type "I'm picking up the Glint Research project — the tiny terminal coding agent, whose memories are in dacorvo/funes-Glint-Research-Fable-5. "
+Type "We reworked the tokens-per-second counter at some point — what window does it average over now?"
 Enter
-Sleep 45s
+Sleep 30s
 Ctrl+C
 Sleep 500ms
 Ctrl+C

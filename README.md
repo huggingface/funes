@@ -1,6 +1,6 @@
 # funes
 
-**Durable memory for your AI coding agents.** funes indexes your past sessions across Claude
+**Durable memory for your AI coding agents.** `funes` indexes your past sessions across Claude
 Code, Codex, and pi and lets any agent recall the past decisions, rationale, and findings.
 
 ![Choosing an embedding model in Claude Code, then Codex recalling that decision in a separate session](docs/img/cross-agents.gif)
@@ -9,7 +9,7 @@ Code, Codex, and pi and lets any agent recall the past decisions, rationale, and
 
 ## Features at a glance
 
-- **Your agent recalls your past work.** The model spontaneously uses funes to recall prior decisions, rationale, and findings mid-task.
+- **Your agent recalls your past work.** The model spontaneously uses `funes` to recall prior decisions, rationale, and findings mid-task.
 - **One memory across your agents.** Index Claude Code, Codex, and pi into a single store; recall
   spans all of them, and every hit shows which agent it came from.
 - **Share across machines or a team.** Publish your store to a Hugging Face dataset you own; a
@@ -43,7 +43,7 @@ curl -fsSL https://huggingface.co/buckets/huggingface/funes/resolve/funes-x86_64
 chmod +x funes && ./funes guide
 ```
 
-funes works the moment it lands: **`funes guide`** walks you through it before you've indexed
+`funes` works the moment it lands: **`funes guide`** walks you through it before you've indexed
 anything, and `funes status` tells you whether recall is reading your own store yet.
 
 Already installed? **`funes update`** replaces the binary in place with the latest build for your
@@ -54,7 +54,7 @@ To build it yourself instead, see [Building from source](#building-from-source).
 
 ## The memory loop
 
-funes fits into one loop: **index** your past sessions, **add** funes to your agent, then just
+`funes` fits into one loop: **index** your past sessions, **add** `funes` to your agent, then just
 **ask your agent** — and let it recall on its own.
 
 **1. Index — one store for every agent on the machine.**
@@ -63,11 +63,11 @@ funes fits into one loop: **index** your past sessions, **add** funes to your ag
 funes index      # sweeps ~/.claude/projects, ~/.codex/sessions, ~/.pi/agent/sessions into one store
 ```
 
-Run with no arguments and funes indexes every supported agent's sessions it finds, into one store.
+Run with no arguments and `funes` indexes every supported agent's sessions it finds, into one store.
 It's incremental — only new turns are embedded — so it's cheap to re-run as you work — a store runs ~2.3 KB/chunk and grows ~6 MB on a heavy day ([storage growth](docs/storage.md)). Point it at a
 path to index one place, or scope to a single agent with `--harness codex`.
 
-funes can index sessions from: Claude, Codex, Pi
+`funes` can index sessions from: Claude, Codex, Pi
 
 **2. Add funes to your agent.**
 
@@ -77,7 +77,7 @@ funes add claude
 
 Your agent gets `recall` and `get` as tools, plus instructions on when to use them.
 
-funes can be added to: Claude, Codex, Pi, Hermes, OpenCode
+`funes` can be added to: Claude, Codex, Pi, Hermes, OpenCode
 
 **3. Ask your agent — and let it recall.**
 
@@ -120,17 +120,17 @@ without changing your default, pass `--store`:
 funes recall "..." --store other-org/subject-kb
 ```
 
-![Attaching a shared Hugging Face dataset with funes use, then pi recalling a decision from a project this machine never worked on](docs/img/hub-store.gif)
+![pi recalling a past decision from a shared Hugging Face dataset named in the prompt — a project this machine never worked on](docs/img/hub-store.gif)
 
-*A project this machine never worked on: one `funes use dacorvo/funes-Glint-Research-Fable-5` attaches ~21.6k chunks straight from the Hub, and pi recalls a past decision from that shared store.*
+*A project this machine never worked on: the prompt names `dacorvo/funes-Glint-Research-Fable-5` — ~21.6k chunks on the Hub — and pi recalls the past decision straight from it, one `store` argument on the recall call. Nothing attached, no local index.*
 
 The first push to a store that shares no chunks with your local one (a first push, a new host, or the
 wrong store) asks to confirm before uploading; off a terminal it refuses rather than guess (`--yes`
-overrides). You never need the Hub to use funes locally — it's a tier you opt into. Recall over a remote caches whole files to local disk, so warm calls run at local speed ([how caching works](docs/hub-caching.md)).
+overrides). You never need the Hub to use `funes` locally — it's a tier you opt into. Recall over a remote caches whole files to local disk, so warm calls run at local speed ([how caching works](docs/hub-caching.md)).
 
 ## Keeping secrets out
 
-funes redacts credentials from each session *before* it's stored. On publish, a separate,
+`funes` redacts credentials from each session *before* it's stored. On publish, a separate,
 always-on gate withholds any chunk that still contains a secret and exits non-zero, rather than
 upload it — run `funes scrub` to clean older rows in place, then push again. It removes credentials
 only; the rest is published as-is.
@@ -168,13 +168,12 @@ agent means implementing one trait, not touching the indexing or query path.
 
 ### Inspect it yourself
 
-`funes` is meant to be used by agents, so its outputs are not human-friendly by default.
+`funes` shapes its output for agents, not people.
 
-However, when `recall` is called within a terminal, it switches to a leaner, interactive mode
-useful to inspect a store:
+Run recall in a terminal, though, and it notices — and switches to an interactive mode for inspecting a store by hand:
 
 ```bash
-funes recall "why did we switch off lancedb"
+funes recall "why must sparse attention mask future keys before top-k selection" --store dacorvo/funes-Glint-Research-Fable-5
 ```
 
 Browse the hits and expand any of them into its full surrounding turns.
@@ -213,9 +212,9 @@ integration test downloads the embedder/reranker weights on first run.
 > *"To think is to forget differences, generalize, make abstractions."*
 > — Jorge Luis Borges, *Funes the Memorious*
 
-Why funes is built the way it is — and how it compares to other memory tools — is documented in
+Why `funes` is built the way it is — and how it compares to other memory tools — is documented in
 [docs/RATIONALE.md](docs/RATIONALE.md).
 
 ## License
 
-funes is licensed under the [Apache License 2.0](LICENSE).
+`funes` is licensed under the [Apache License 2.0](LICENSE).
