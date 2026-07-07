@@ -24,14 +24,14 @@ Every chunk is an immutable, timestamped record of *what was said when*. Nothing
 overwritten or "updated". When a fact changes, the old passage stays; the new one is simply
 more recent.
 
-**Why:** the alternative — a mutable store that reconciles new information against old — is
-an *unsolved problem*. The [STALE benchmark](https://arxiv.org/abs/2605.06527) shows the best model reaching only
-**55.2%** at recognizing and acting on outdated memories; agents systematically fail to
-detect implicit conflicts and propagate state changes. A reconciliation engine that is wrong
-half the time doesn't lose information loudly — it loses it *silently*, by overwriting the
-right answer with a confident wrong one. funes refuses to make that bet. Obsolescence is
-resolved at **read time**, by recency weighting and by the reader (you, or an orchestrator),
-who can see both the old and the new passage and judge.
+**Why:** this is a problem funes chooses not to *have*, rather than one it solves. A mutable
+store must decide at write time what each new piece of information supersedes — and every
+wrong call loses information *silently*, by overwriting the right answer with a confident
+wrong one. funes makes no write-time decisions at all. Every passage stays, and obsolescence
+is resolved at **read time**: recency weighting, plus a reader (you, or the model) who can
+see both the old and the new passage and judge. A log also keeps what a knowledge base
+throws away — the superseded passage is often the answer itself: *what did we try before,
+and why did we move off it?*
 
 ### 2. No LLM in the ingest path
 
@@ -100,8 +100,7 @@ typically run as a managed service.** The consequences are structural, not incid
 - **No provenance.** Because the original passage is distilled into a "fact", there is no
   link back to the verbatim turn it came from — you can't cite or audit the source.
 - **Silent loss on reconcile.** A mutable store has to decide when new information supersedes
-  old, and that decision is [unsolved](https://arxiv.org/abs/2605.06527) — when it's wrong, it overwrites the right
-  answer instead of keeping both.
+  old — when that call is wrong, it overwrites the right answer instead of keeping both.
 - **Always on, never asked.** Recalled snippets are injected into every turn and a memory
   block sits resident in the prompt — the model never chooses when to consult it. The
   relevance call is made by a heuristic, not by the reader.
@@ -117,7 +116,8 @@ one.
 
 funes optimizes for the opposite: **verbatim, auditable, local-first recall with exact
 provenance, no LLM in the loop, pulled on demand rather than injected, and no dependency on
-infrastructure you don't own** (sharing, when you want it, is to a hub repo you control). It is a different contract with your data —
+infrastructure you don't own** (sharing, when you want it, is to a hub repo you control).
+It is a different contract with your data —
 note that the *retrieval* machinery (hybrid vector + lexical search, fused and reranked) is
 common to mature memory systems; funes does not differentiate on search. The difference is
 entirely *upstream*: deterministic no-LLM ingest, immutable passages, and provenance.
