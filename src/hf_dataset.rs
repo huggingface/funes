@@ -113,7 +113,7 @@ pub(crate) async fn append(
             oid: info.commit_oid.unwrap_or_else(|| "?".to_string()),
             unindexed,
         }),
-        Err(HFError::Conflict { .. }) => Ok(Appended::Conflict),
+        Err(e) if head_moved(&e) => Ok(Appended::Conflict),
         Err(e) => Err(anyhow::Error::new(e).context("data commit failed")),
     }
 }
@@ -143,7 +143,7 @@ pub(crate) async fn reindex(
     let (ops, _dir) = write_ops(&files)?;
     match send_commit(repo, ops, parent, rev, message).await {
         Ok(info) => Ok(Reindexed::Committed(info.commit_oid.unwrap_or_else(|| "?".to_string()))),
-        Err(HFError::Conflict { .. }) => Ok(Reindexed::Conflict),
+        Err(e) if head_moved(&e) => Ok(Reindexed::Conflict),
         Err(e) => Err(anyhow::Error::new(e).context("reindex commit failed")),
     }
 }
@@ -237,6 +237,17 @@ async fn send_commit(
         .progress(upload_progress())
         .send()
         .await
+}
+
+/// Whether a [`send_commit`] failure is the Hub rejecting a stale `parent_commit`: the commit API
+/// answers a moved head with 412 Precondition Failed, which hf-hub leaves as a generic
+/// [`HFError::Http`] (only 409 is typed as [`HFError::Conflict`]).
+fn head_moved(e: &HFError) -> bool {
+    match e {
+        HFError::Conflict { .. } => true,
+        HFError::Http { context } => context.status.as_u16() == 412,
+        _ => false,
+    }
 }
 
 /// A live stderr byte-bar for an upload `create_commit`, redrawn in place (`\r`) as xet streams the
