@@ -2,8 +2,8 @@
 
 Harness for evaluating funes on [LongMemEval](https://github.com/xiaowu0162/LongMemEval)
 (arXiv:2410.10813), a cross-session long-term-memory benchmark. This directory holds the ingest
-adapter, a retrieval smoke test, and the full evaluation harness (push-RAG and agentic
-funes-vs-naive-dense-baseline).
+adapter, a corpus-wide store builder, a retrieval smoke test, and the full evaluation harness
+(push-RAG and agentic funes-vs-naive-dense-baseline).
 
 ## Data
 
@@ -34,6 +34,28 @@ Writes `work/<question_id>/`:
   turn. Session id is the file stem; turn uuid is `<session_id>::t<turn_index>`. So a recall hit's
   `→ get <session_id> <turn_uuid>` line maps back onto the benchmark's session/turn ids.
 - `gold.json` — question, answer, `gold_session_ids`, `gold_turn_uuids`, and metadata.
+
+## build_corpus.py
+
+Builds one **corpus-wide** store (the adapter above builds one store *per question*): a parquet in
+the trace schema `funes index <file>.parquet` ingests (`session_id` / `sent_at` / `messages`),
+plus a `.qrels.json` sidecar (per question: gold session ids, and `answer_turns` whose `seq`
+matches the `<session_id>-<seq>` turn uuids funes assigns on parquet ingest — blank-content turns
+are dropped there and don't advance seq).
+
+Session ids repeat across questions with identical content; only the dates differ, because each
+question re-stamps its haystack to build its own timeline. The corpus keeps one copy per id with
+the earliest date, so recency ordering stays coherent within the store. Cleaned `_s` yields
+19,195 unique sessions (199,509 messages).
+
+```sh
+pip install pyarrow
+python3 build_corpus.py longmemeval_s_cleaned.json corpus/
+FUNES_HOME=<store-home> funes index corpus/longmemeval_s_cleaned.parquet --yes
+```
+
+`FUNES_HOME` keeps the store isolated from your real memory; the parquet file stem becomes the
+store's project facet (`longmemeval_s_cleaned`).
 
 ## smoke_test.py
 
