@@ -31,8 +31,9 @@ use std::sync::Arc;
 
 /// Reindex the remote once this many appended rows are sitting unindexed (answered by a
 /// brute-force scan until folded in). Bounds per-query cost, not push count, and is stateless —
-/// [`hf_dataset::append`] reads it straight from Lance's index stats.
-const REINDEX_THRESHOLD: u64 = 2_000;
+/// [`hf_dataset::append`] reads it straight from Lance's index stats. Nonzero so tiny per-push
+/// deltas don't pile up between compactions.
+const REINDEX_THRESHOLD: u64 = 500;
 
 /// Cap on CAS-conflict retries (the data append, and a forced reindex) when the branch head keeps
 /// moving under us, so a busy remote can't spin forever.
