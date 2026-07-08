@@ -118,11 +118,16 @@ pub(crate) async fn append(
     }
 }
 
+/// Merge all delta sub-indexes back into one once any index has piled up this many. Queries fan
+/// out across every delta (and per-segment BM25 stats drift), so the pile must stay bounded; the
+/// merge re-reads the whole index over the network, so it must stay rare.
+const COMPACT_DELTAS: usize = 8;
+
 /// Refresh the remote dataset's indexes and land the delta in one `create_commit` on branch `rev`,
 /// guarded by the current head. The backlog is appended as a delta sub-index — merging it into the
-/// existing index would re-read the whole index over the network. [`Reindexed::AlreadyCurrent`] if
-/// there was nothing to optimize, [`Reindexed::Conflict`] if the head moved first (retry against
-/// the new head).
+/// existing index would re-read the whole index over the network — until [`COMPACT_DELTAS`] pile
+/// up and are folded back into one. [`Reindexed::AlreadyCurrent`] if there was nothing to
+/// optimize, [`Reindexed::Conflict`] if the head moved first (retry against the new head).
 pub(crate) async fn reindex(
     repo: &HFRepository<RepoTypeDataset>,
     dataset_uri: &str,
@@ -133,7 +138,14 @@ pub(crate) async fn reindex(
     let parent = head_oid(repo, rev).await?;
     let (mut ds, wrapper) = open_capturing(dataset_uri, storage_options).await?;
 
-    ds.optimize_indices(&OptimizeOptions::append())
+    let deltas = max_delta_indexes(&ds).await;
+    let opts = if deltas >= COMPACT_DELTAS {
+        eprintln!("  compacting the remote index ({deltas} sub-indexes)…");
+        OptimizeOptions::merge(usize::MAX)
+    } else {
+        OptimizeOptions::append()
+    };
+    ds.optimize_indices(&opts)
         .await
         .context("optimizing the remote index")?;
 
@@ -196,6 +208,20 @@ async fn max_unindexed_rows(ds: &Dataset) -> u64 {
         }
     }
     max
+}
+
+/// The largest delta-sub-index count across the dataset's indexes, counted from the index
+/// metadata (deltas share their index's name) — not `index_statistics`, which can write a stats
+/// migration through the capture wrapper. Best-effort: 0 when the indexes can't be read.
+async fn max_delta_indexes(ds: &Dataset) -> usize {
+    let Ok(indices) = ds.load_indices().await else {
+        return 0;
+    };
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for idx in indices.iter() {
+        *counts.entry(idx.name.as_str()).or_default() += 1;
+    }
+    counts.into_values().max().unwrap_or(0)
 }
 
 /// Read the commit at the tip of branch `rev` — the parent-commit guard for the next commit.
@@ -473,6 +499,45 @@ pub(crate) async fn download_shard(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow_array::StringArray;
+    use arrow_schema::{DataType, Field, Schema};
+    use lance_index::scalar::InvertedIndexParams;
+    use lance_index::IndexType;
+
+    /// Pins the Lance behavior [`reindex`] relies on: `append()` adds one delta sub-index per
+    /// backlog, `merge(usize::MAX)` folds them back into one.
+    #[tokio::test]
+    async fn append_optimize_stacks_deltas_and_merge_compacts() {
+        let batch = |texts: &[&str]| {
+            let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
+            let rows = RecordBatch::try_new(schema.clone(), vec![Arc::new(StringArray::from(texts.to_vec()))]);
+            RecordBatchIterator::new([rows], schema)
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let uri = dir.path().join("t.lance");
+        let mut ds = Dataset::write(batch(&["alpha bravo"]), uri.to_str().unwrap(), None)
+            .await
+            .unwrap();
+        ds.create_index(
+            &["text"],
+            IndexType::Inverted,
+            None,
+            &InvertedIndexParams::default(),
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(max_delta_indexes(&ds).await, 1);
+
+        for i in 0..3 {
+            ds.append(batch(&[&format!("charlie delta {i}")]), None).await.unwrap();
+            ds.optimize_indices(&OptimizeOptions::append()).await.unwrap();
+        }
+        assert_eq!(max_delta_indexes(&ds).await, 4);
+
+        ds.optimize_indices(&OptimizeOptions::merge(usize::MAX)).await.unwrap();
+        assert_eq!(max_delta_indexes(&ds).await, 1);
+    }
 
     #[test]
     fn pick_convert_oid_finds_the_parquet_convert() {
