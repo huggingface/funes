@@ -139,10 +139,12 @@ pub(crate) async fn reindex(
     let parent = head_oid(repo, rev).await?;
     let (mut ds, wrapper) = open_capturing(dataset_uri, storage_options).await?;
 
-    for (name, count) in delta_counts(&ds).await {
-        let opts = if count >= COMPACT_DELTAS {
-            eprintln!("  compacting {name} ({count} sub-indexes)…");
-            OptimizeOptions::merge(count - 1)
+    for (name, subs) in sub_index_counts(&ds).await? {
+        // subs = base + deltas; merge(deltas) folds every delta into one, sparing the base.
+        let deltas = subs - 1;
+        let opts = if deltas >= COMPACT_DELTAS {
+            eprintln!("  compacting {name} ({deltas} delta sub-indexes)…");
+            OptimizeOptions::merge(deltas)
         } else {
             OptimizeOptions::append()
         };
@@ -212,18 +214,16 @@ async fn max_unindexed_rows(ds: &Dataset) -> u64 {
     max
 }
 
-/// Delta-sub-index count per index name, from the index metadata (deltas share their index's
-/// name) — not `index_statistics`, which can write a stats migration through the capture wrapper.
-/// Best-effort: empty when the indexes can't be read.
-async fn delta_counts(ds: &Dataset) -> Vec<(String, usize)> {
-    let Ok(indices) = ds.load_indices().await else {
-        return Vec::new();
-    };
+/// Sub-index count per index name (the base plus its deltas, which share the index's name), from
+/// the index metadata — not `index_statistics`, which can write a stats migration through the
+/// capture wrapper.
+async fn sub_index_counts(ds: &Dataset) -> Result<Vec<(String, usize)>> {
+    let indices = ds.load_indices().await.context("listing the remote indexes")?;
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for idx in indices.iter() {
         *counts.entry(idx.name.clone()).or_default() += 1;
     }
-    counts.into_iter().collect()
+    Ok(counts.into_iter().collect())
 }
 
 /// Read the commit at the tip of branch `rev` — the parent-commit guard for the next commit.
@@ -507,7 +507,7 @@ mod tests {
     use lance_index::IndexType;
 
     /// Pins the Lance behavior [`reindex`] relies on: `append()` adds one delta sub-index per
-    /// backlog, and `merge(count - 1)` folds the deltas back into one without touching the base.
+    /// backlog, and `merge(deltas)` folds the deltas back into one without touching the base.
     #[tokio::test]
     async fn append_optimize_stacks_deltas_and_merge_spares_the_base() {
         let batch = |texts: &[&str]| {
@@ -529,17 +529,17 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(delta_counts(&ds).await, vec![("text_idx".to_string(), 1)]);
+        assert_eq!(sub_index_counts(&ds).await.unwrap(), vec![("text_idx".to_string(), 1)]);
         let base_uuid = ds.load_indices().await.unwrap()[0].uuid;
 
         for i in 0..3 {
             ds.append(batch(&[&format!("charlie delta {i}")]), None).await.unwrap();
             ds.optimize_indices(&OptimizeOptions::append()).await.unwrap();
         }
-        assert_eq!(delta_counts(&ds).await, vec![("text_idx".to_string(), 4)]);
+        assert_eq!(sub_index_counts(&ds).await.unwrap(), vec![("text_idx".to_string(), 4)]);
 
         ds.optimize_indices(&OptimizeOptions::merge(3)).await.unwrap();
-        assert_eq!(delta_counts(&ds).await, vec![("text_idx".to_string(), 2)]);
+        assert_eq!(sub_index_counts(&ds).await.unwrap(), vec![("text_idx".to_string(), 2)]);
         let after = ds.load_indices().await.unwrap();
         assert!(
             after.iter().any(|i| i.uuid == base_uuid),
