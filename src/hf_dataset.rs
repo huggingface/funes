@@ -118,8 +118,9 @@ pub(crate) async fn append(
     }
 }
 
-/// Refresh the remote dataset's indexes (`optimize_indices`) and land the delta in one
-/// `create_commit` on branch `rev`, guarded by the current head. [`Reindexed::AlreadyCurrent`] if
+/// Refresh the remote dataset's indexes and land the delta in one `create_commit` on branch `rev`,
+/// guarded by the current head. The backlog is appended as a delta sub-index — merging it into the
+/// existing index would re-read the whole index over the network. [`Reindexed::AlreadyCurrent`] if
 /// there was nothing to optimize, [`Reindexed::Conflict`] if the head moved first (retry against
 /// the new head).
 pub(crate) async fn reindex(
@@ -132,7 +133,7 @@ pub(crate) async fn reindex(
     let parent = head_oid(repo, rev).await?;
     let (mut ds, wrapper) = open_capturing(dataset_uri, storage_options).await?;
 
-    ds.optimize_indices(&OptimizeOptions::default())
+    ds.optimize_indices(&OptimizeOptions::append())
         .await
         .context("optimizing the remote index")?;
 
