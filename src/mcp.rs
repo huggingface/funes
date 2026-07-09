@@ -127,7 +127,9 @@ impl Funes {
         }
     }
 
-    #[tool(description = "Show funes index statistics (chunk count and store).")]
+    #[tool(
+        description = "Show funes store status: chunk and session counts, when it was last indexed, and — for a remote store — the last push."
+    )]
     async fn status(&self, Parameters(StatusRequest { store }): Parameters<StatusRequest>) -> String {
         // No update check here: it needs the network, and the "update available" notice belongs
         // on the human-facing CLI `funes status`, not on this hot, otherwise-local tool path.
