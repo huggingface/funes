@@ -38,9 +38,16 @@ hf-hub = { version = "1.0.0-rc.1", features = ["rustls-tls"] }  # native create_
 # The `vendored-openssl` feature builds OpenSSL from source so the aarch64-linux cross-build
 # needs no target sysroot. Off by default — native and macOS builds keep their system TLS.
 openssl-sys = { version = "0.9", optional = true }
+# The `blas` backend (feature below): a from-scratch forward that loads safetensors weights
+# and tokenizes itself, as an alternative to fastembed/ort. macOS runs it on Accelerate.
+tokenizers = { version = "0.22", optional = true }  # already in the tree via fastembed
+safetensors = { version = "0.8", optional = true }  # already in the tree; unify (no duplicate)
 
 [features]
 vendored-openssl = ["openssl-sys/vendored"]
+# BLAS inference backend (src/blas.rs). macOS wires it to Accelerate (see build.rs);
+# Linux is a marked TODO. Off by default — funes uses the ONNX backend unless this is enabled.
+blas = ["dep:tokenizers", "dep:safetensors"]
 
 # Benchmarks live under benchmark/ alongside their README; run via `cargo run --example <name>`.
 [[example]]

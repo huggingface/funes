@@ -7,7 +7,7 @@
 //! contributes just its new turns, nothing is re-embedded or deleted.
 
 use crate::harness::Harness;
-use crate::inference::{Embedder, OnnxEmbedder};
+use crate::inference::{self, Embedder};
 use crate::{chunk, dataset, hub, lock, scan, source, trace};
 use anyhow::{anyhow, Result};
 use arrow_array::types::Float32Type;
@@ -338,7 +338,7 @@ async fn index_sources(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: 
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
 
-    let embedder: Box<dyn Embedder> = Box::new(OnnxEmbedder::new()?);
+    let embedder: Box<dyn Embedder> = inference::embedder()?;
     // Best-effort secret redaction: if the scanner isn't installed, indexing continues unredacted —
     // the push gate still scans, fail-closed, before any upload, so a secret can't reach the Hub.
     let scanner = match scan::Trufflehog::find() {

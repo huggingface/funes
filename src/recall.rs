@@ -9,7 +9,7 @@ use crate::dataset;
 use crate::harness::Harness;
 use crate::hello;
 use crate::hub::{self, Reachability, Store};
-use crate::inference::{Embedder, OnnxEmbedder, OnnxReranker, Reranker};
+use crate::inference::{self, Embedder, Reranker};
 use anyhow::{anyhow, Context, Result};
 use arrow_array::{Float32Array, Int64Array, RecordBatch, StringArray, UInt64Array};
 use chrono::{DateTime, Utc};
@@ -274,8 +274,8 @@ static MODELS: OnceCell<Mutex<Models>> = OnceCell::const_new();
 async fn models() -> Result<&'static Mutex<Models>> {
     MODELS
         .get_or_try_init(|| async {
-            let embedder: Box<dyn Embedder> = Box::new(OnnxEmbedder::new()?);
-            let reranker: Box<dyn Reranker> = Box::new(OnnxReranker::new()?);
+            let embedder = inference::embedder()?;
+            let reranker = inference::reranker()?;
             Ok::<_, anyhow::Error>(Mutex::new(Models { embedder, reranker }))
         })
         .await

@@ -3,7 +3,7 @@
 //! re-indexing cannot. Operates only on the local store; it does not touch a published remote.
 
 use crate::index::{build_batch, embed_batched, schema};
-use crate::inference::{Embedder, OnnxEmbedder};
+use crate::inference::{self, Embedder};
 use crate::{chunk, dataset, lock, scan};
 use anyhow::Result;
 use arrow_array::{BooleanArray, RecordBatch, RecordBatchIterator};
@@ -81,7 +81,7 @@ pub async fn run() -> Result<()> {
     let replacement_batch = if replacements.is_empty() {
         None
     } else {
-        let mut embedder: Box<dyn Embedder> = Box::new(OnnxEmbedder::new()?);
+        let mut embedder: Box<dyn Embedder> = inference::embedder()?;
         let rtexts: Vec<&str> = replacements.iter().map(|c| c.text.as_str()).collect();
         let n = rtexts.len();
         eprintln!("re-embedding {n} redacted chunk(s)…");
