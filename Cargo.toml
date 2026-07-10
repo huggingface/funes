@@ -58,6 +58,12 @@ path = "benchmark/bench_recall.rs"
 name = "bench_index"
 path = "benchmark/bench_index.rs"
 
+# A/B the inference backends (ONNX vs BLAS). Run with the backend feature:
+#   cargo run --release --features blas --example bench_backends
+[[example]]
+name = "bench_backends"
+path = "benchmark/bench_backends.rs"
+
 [profile.release]
 opt-level = 3
 
