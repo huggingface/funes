@@ -7,12 +7,12 @@
 //! contributes just its new turns, nothing is re-embedded or deleted.
 
 use crate::harness::Harness;
+use crate::inference::{Embedder, OnnxEmbedder};
 use crate::{chunk, dataset, hub, lock, scan, source, trace};
 use anyhow::{anyhow, Result};
 use arrow_array::types::Float32Type;
 use arrow_array::{Array, FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator, StringArray};
 use arrow_schema::{DataType, Field, Schema};
-use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use lance::dataset::{Dataset, WriteParams};
 use std::collections::{HashMap, HashSet};
 use std::io::{IsTerminal, Write as _};
@@ -92,13 +92,13 @@ pub(crate) fn build_batch(chunks: &[chunk::Chunk], vectors: &[Vec<f32>]) -> Resu
 /// Embed `texts` in batches of [`EMBED_BATCH`], calling `on_batch(embedded_so_far)` after each so a
 /// caller can report progress (or pass a no-op).
 pub(crate) fn embed_batched(
-    embedder: &mut TextEmbedding,
+    embedder: &mut dyn Embedder,
     texts: &[&str],
     mut on_batch: impl FnMut(usize),
 ) -> Result<Vec<Vec<f32>>> {
     let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
     for group in texts.chunks(EMBED_BATCH) {
-        vectors.extend(embedder.embed(group, None)?);
+        vectors.extend(embedder.embed(group)?);
         on_batch(vectors.len());
     }
     Ok(vectors)
@@ -189,7 +189,7 @@ fn unit_summary(turns: &[trace::Turn], key: &str) -> (u64, String) {
 struct Indexer<'a> {
     uri: &'a str,
     ds: Option<Dataset>,
-    embedder: TextEmbedding,
+    embedder: Box<dyn Embedder>,
     scanner: Option<&'a dyn scan::SecretScanner>,
     include_thinking: bool,
 }
@@ -237,7 +237,7 @@ impl Indexer<'_> {
         let n = new_chunks.len();
         let texts: Vec<&str> = new_chunks.iter().map(|c| c.text.as_str()).collect();
         let t0 = Instant::now();
-        let vectors = embed_batched(&mut self.embedder, &texts, |done| {
+        let vectors = embed_batched(self.embedder.as_mut(), &texts, |done| {
             let secs = t0.elapsed().as_secs_f64().max(0.001);
             eprint!("\r    embedded {done}/{n}  ({:.0}/s)   ", done as f64 / secs);
             let _ = std::io::stderr().flush();
@@ -338,7 +338,7 @@ async fn index_sources(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: 
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
 
-    let embedder = TextEmbedding::try_new(InitOptions::new(EmbeddingModel::BGESmallENV15))?;
+    let embedder: Box<dyn Embedder> = Box::new(OnnxEmbedder::new()?);
     // Best-effort secret redaction: if the scanner isn't installed, indexing continues unredacted —
     // the push gate still scans, fail-closed, before any upload, so a secret can't reach the Hub.
     let scanner = match scan::Trufflehog::find() {

@@ -9,10 +9,10 @@ use crate::dataset;
 use crate::harness::Harness;
 use crate::hello;
 use crate::hub::{self, Reachability, Store};
+use crate::inference::{Embedder, OnnxEmbedder, OnnxReranker, Reranker};
 use anyhow::{anyhow, Context, Result};
 use arrow_array::{Float32Array, Int64Array, RecordBatch, StringArray, UInt64Array};
 use chrono::{DateTime, Utc};
-use fastembed::{EmbeddingModel, InitOptions, RerankInitOptions, RerankerModel, TextEmbedding, TextRerank};
 use futures::TryStreamExt;
 use lance::dataset::{Dataset, ROW_ID};
 use lance::Error as LanceError;
@@ -205,7 +205,7 @@ fn is_auth_error(e: &anyhow::Error) -> bool {
 /// absent local index serves the guide — so recall keeps working offline and on a fresh install. A
 /// missing or empty remote surfaces as an error from the helper. Passing `embedder` gives the
 /// built-in corpus real vectors for search (recall); `None` suits `get`/`list`.
-async fn open_read(store: &Store, embedder: Option<&mut TextEmbedding>) -> Result<Read> {
+async fn open_read(store: &Store, embedder: Option<&mut dyn Embedder>) -> Result<Read> {
     match open_for_read(store).await? {
         ReadOutcome::Ready(ds) => Ok(Read {
             _hello: None,
@@ -228,7 +228,7 @@ async fn open_read(store: &Store, embedder: Option<&mut TextEmbedding>) -> Resul
 
 /// An unreachable remote degrades to the local index, or to the built-in guide if there's no local
 /// index either, carrying a note that explains what happened.
-async fn degrade_offline(uri: &str, embedder: Option<&mut TextEmbedding>) -> Result<Read> {
+async fn degrade_offline(uri: &str, embedder: Option<&mut dyn Embedder>) -> Result<Read> {
     match open_for_read(&Store::local()).await {
         Ok(ReadOutcome::Ready(ds)) => Ok(Read {
             _hello: None,
@@ -264,8 +264,8 @@ pub fn store_hint(read: Option<&str>) -> String {
 /// after. The `Mutex` serializes recalls (both models run with `&mut`), which is fine: the work is
 /// CPU-bound and the server's calls are serial anyway.
 struct Models {
-    embedder: TextEmbedding,
-    reranker: TextRerank,
+    embedder: Box<dyn Embedder>,
+    reranker: Box<dyn Reranker>,
 }
 
 static MODELS: OnceCell<Mutex<Models>> = OnceCell::const_new();
@@ -274,8 +274,8 @@ static MODELS: OnceCell<Mutex<Models>> = OnceCell::const_new();
 async fn models() -> Result<&'static Mutex<Models>> {
     MODELS
         .get_or_try_init(|| async {
-            let embedder = TextEmbedding::try_new(InitOptions::new(EmbeddingModel::BGESmallENV15))?;
-            let reranker = TextRerank::try_new(RerankInitOptions::new(RerankerModel::BGERerankerBase))?;
+            let embedder: Box<dyn Embedder> = Box::new(OnnxEmbedder::new()?);
+            let reranker: Box<dyn Reranker> = Box::new(OnnxReranker::new()?);
             Ok::<_, anyhow::Error>(Mutex::new(Models { embedder, reranker }))
         })
         .await
@@ -336,12 +336,12 @@ pub async fn recall_hits(
     let Models { embedder, reranker } = &mut *guard;
 
     let qv: Vec<f32> = embedder
-        .embed(vec![query.clone()], None)?
+        .embed(&[query.as_str()])?
         .into_iter()
         .next()
         .context("empty embedding")?;
 
-    let read = open_read(&store, Some(&mut *embedder)).await?;
+    let read = open_read(&store, Some(embedder.as_mut())).await?;
     let note = read.note.clone().unwrap_or_default();
     let ds = &read.ds;
     // A `--harness` filter needs the column; on an un-migrated store it would fail deep inside Lance
@@ -362,14 +362,15 @@ pub async fn recall_hits(
     }
 
     let docs: Vec<&str> = hits.iter().map(|h| h.text.as_str()).collect();
-    let reranked = reranker.rerank(query.as_str(), docs, false, None)?;
+    let scores = reranker.rerank(query.as_str(), &docs)?;
 
     let now = Utc::now();
-    let mut scored: Vec<(usize, f64)> = reranked
+    let mut scored: Vec<(usize, f64)> = scores
         .iter()
-        .map(|r| {
-            let relevance = 1.0 / (1.0 + (-(r.score as f64)).exp());
-            (r.index, relevance * recency_weight(&hits[r.index].ts, now, half_life))
+        .enumerate()
+        .map(|(i, &s)| {
+            let relevance = 1.0 / (1.0 + (-(s as f64)).exp());
+            (i, relevance * recency_weight(&hits[i].ts, now, half_life))
         })
         .collect();
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));

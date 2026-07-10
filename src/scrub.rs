@@ -3,11 +3,11 @@
 //! re-indexing cannot. Operates only on the local store; it does not touch a published remote.
 
 use crate::index::{build_batch, embed_batched, schema};
+use crate::inference::{Embedder, OnnxEmbedder};
 use crate::{chunk, dataset, lock, scan};
 use anyhow::Result;
 use arrow_array::{BooleanArray, RecordBatch, RecordBatchIterator};
 use arrow_select::filter::filter_record_batch;
-use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use lance::dataset::{Dataset, WriteMode, WriteParams};
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -81,12 +81,12 @@ pub async fn run() -> Result<()> {
     let replacement_batch = if replacements.is_empty() {
         None
     } else {
-        let mut embedder = TextEmbedding::try_new(InitOptions::new(EmbeddingModel::BGESmallENV15))?;
+        let mut embedder: Box<dyn Embedder> = Box::new(OnnxEmbedder::new()?);
         let rtexts: Vec<&str> = replacements.iter().map(|c| c.text.as_str()).collect();
         let n = rtexts.len();
         eprintln!("re-embedding {n} redacted chunk(s)…");
         let t0 = Instant::now();
-        let vectors = embed_batched(&mut embedder, &rtexts, |done| {
+        let vectors = embed_batched(embedder.as_mut(), &rtexts, |done| {
             let secs = t0.elapsed().as_secs_f64().max(0.001);
             eprint!("\r    embedded {done}/{n}  ({:.0}/s)   ", done as f64 / secs);
             let _ = std::io::stderr().flush();
