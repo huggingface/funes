@@ -26,6 +26,7 @@ pub mod hello;
 pub mod hermes;
 pub mod hf_dataset;
 pub mod hf_traces;
+pub mod hooks;
 pub mod hub;
 pub mod index;
 pub mod inference;

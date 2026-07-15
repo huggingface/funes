@@ -1,0 +1,6 @@
+{
+  "name": "funes",
+  "version": "0.1.0",
+  "description": "funes recall automation hooks (index each turn; publish at session boundaries)",
+  "author": { "name": "funes" }
+}

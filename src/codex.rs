@@ -23,6 +23,11 @@ fn mcp_add_args(funes: &str, store: Option<&str>) -> Vec<String> {
 }
 
 pub fn install(store: Option<String>) -> Result<()> {
+    // The automation hooks (index every turn, publish at session boundaries) are files + a
+    // hooks.json edit — no `codex` binary needed — so install them first, regardless of whether the
+    // MCP registration below can reach the CLI.
+    crate::hooks::install(crate::hooks::Agent::Codex, store.as_deref())?;
+
     let funes = std::env::var("FUNES_BIN").unwrap_or_else(|_| "funes".to_string());
     let args = mcp_add_args(&funes, store.as_deref());
     let manual = format!("codex {}", args.join(" "));

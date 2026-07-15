@@ -6,7 +6,7 @@
 //! store. The command is `funes` from PATH (override with `FUNES_BIN`).
 
 use anyhow::Result;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// The `claude mcp add` argument vector registering `funes mcp [store]` at user scope. A non-local
 /// `store` is appended as `funes mcp <store>`, pinning this agent's recall to it.
@@ -22,9 +22,25 @@ fn mcp_add_args(funes: &str, store: Option<&str>) -> Vec<String> {
 }
 
 pub fn install(store: Option<String>) -> Result<()> {
+    // The automation hooks (index every turn, publish at session boundaries) are files + a
+    // settings.json edit — no `claude` binary needed — so install them first, regardless of whether
+    // the MCP registration below can reach the CLI.
+    crate::hooks::install(crate::hooks::Agent::Claude, store.as_deref())?;
+
     let funes = std::env::var("FUNES_BIN").unwrap_or_else(|_| "funes".to_string());
     let args = mcp_add_args(&funes, store.as_deref());
     let manual = format!("claude {}", args.join(" "));
+
+    // `claude mcp add` errors if `funes` is already registered, so a re-run — e.g. to change the
+    // store — would fail. Remove any existing registration first (silenced and ignored: it errors
+    // when absent), so add always succeeds and picks up the current store. Skipped when `claude`
+    // isn't on PATH — the add below handles that with a manual hint.
+    let _ = Command::new("claude")
+        .args(["mcp", "remove", "funes"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
     let status = match Command::new("claude").args(&args).status() {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -38,10 +54,8 @@ pub fn install(store: Option<String>) -> Result<()> {
         println!("installed funes recall into Claude Code (user scope) — `recall`/`get` are now available (restart Claude Code if it's running).");
         Ok(())
     } else {
-        // `claude mcp add` fails when a server named `funes` is already registered; point there
-        // rather than re-emitting a bare exit code.
         anyhow::bail!(
-            "`claude mcp add funes` failed (exit {:?}) — it may already be registered (see `claude mcp list`), else run `{manual}` manually.",
+            "`claude mcp add funes` failed (exit {:?}) — run `{manual}` manually to see why.",
             status.code()
         );
     }

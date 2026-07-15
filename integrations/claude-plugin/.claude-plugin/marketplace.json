@@ -1,0 +1,11 @@
+{
+  "name": "funes",
+  "owner": { "name": "funes" },
+  "plugins": [
+    {
+      "name": "funes",
+      "source": "./funes",
+      "description": "funes recall automation: index each turn, publish at session boundaries"
+    }
+  ]
+}
