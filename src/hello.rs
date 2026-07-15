@@ -62,11 +62,9 @@ pub const PASSAGES: &[(&str, &str)] = &[
     (
         "assistant",
         "Optional, and later: share your memory across machines or a team via the Hugging Face \
-         Hub. `funes use <org>/<repo>` attaches a dataset repo you own as your active store — \
-         recall then reads it, and `funes push` publishes your local store to it; `funes use \
-         local` detaches. To query a different store for one call without changing your default, \
-         pass `recall --store <org>/<repo>`. You never need the Hub to use funes locally — it's \
-         a tier you opt into.",
+         Hub. `funes push <org>/<repo>` publishes your local store to a dataset repo you own, and \
+         `recall --store <org>/<repo>` reads it. You never need the Hub to use funes locally — \
+         it's a tier you opt into.",
     ),
     (
         "assistant",
@@ -106,12 +104,12 @@ Once indexed, you can query the store yourself:
 
   funes recall \"why did we switch off lancedb\"    ask in natural language
   funes list                                       browse indexed sessions
-  funes status                                     what's indexed, and which store you're on
+  funes status                                     what's indexed
 
 Share across machines or a team (optional)
 
-  funes use <org>/<repo>    attach a Hugging Face dataset you own as your store
-  funes push                publish your local store to it
+  funes push <org>/<repo>              publish your local store to a dataset you own
+  funes recall \"…\" --store <org>/<repo>  read a remote store for one call
 
 Your indexed sessions stay on your machine until you `funes push`.
 "

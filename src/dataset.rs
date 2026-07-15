@@ -1,6 +1,6 @@
 //! Shared store helpers: the local store location, opening a dataset, plain scans, and building the
-//! FTS/IVF indexes. funes's home is `$FUNES_HOME`/`~/.funes` — it holds the config (`funes.json`),
-//! the incremental state, and the local store at `…/store` (the `chunks` Lance dataset).
+//! FTS/IVF indexes. funes's home is `$FUNES_HOME`/`~/.funes` — it holds the incremental state and
+//! the local store at `…/store` (the `chunks` Lance dataset).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -23,8 +23,8 @@ use lance_linalg::distance::MetricType;
 /// The table (Lance dataset) name within a store.
 pub const TABLE: &str = "chunks";
 
-/// funes's home directory: `$FUNES_HOME`, else `~/.funes`. Holds `funes.json`, the incremental
-/// state, and the local store.
+/// funes's home directory: `$FUNES_HOME`, else `~/.funes`. Holds the incremental state and the
+/// local store.
 pub fn funes_dir() -> PathBuf {
     if let Ok(d) = std::env::var("FUNES_HOME") {
         return PathBuf::from(d);

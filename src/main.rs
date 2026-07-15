@@ -6,7 +6,7 @@
 
 use funes::harness::Harness;
 use funes::recall::Hit;
-use funes::{claude, codex, config, hello, hermes, hub, index, mcp, opencode, pi, push, recall, render, scrub, update};
+use funes::{claude, codex, hello, hermes, hub, index, mcp, opencode, pi, push, recall, render, scrub, update};
 
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -128,18 +128,10 @@ enum Cmd {
         #[command(flatten)]
         store: StoreOpts,
     },
-    /// Set the active store: the remote this host reads from and publishes to (persisted in
-    /// funes.json; honored by recall/push and the MCP server).
-    Use {
-        /// Remote to attach: `<org>/<repo>` (→ `hf://datasets/<org>/<repo>`) or a full `hf://…`
-        /// URI. Pass `local` to detach and go back to your local store.
-        store: String,
-    },
-    /// Publish your local store's new chunks to a remote store on the HF Hub — the active store by
-    /// default, or `[store]` to publish elsewhere.
+    /// Publish your local store's new chunks to a remote store on the HF Hub.
     Push {
-        /// Store to publish to: `<org>/<repo>` or a full `hf://…` URI. Defaults to the active store.
-        store: Option<String>,
+        /// Store to publish to: `<org>/<repo>` or a full `hf://…` URI.
+        store: String,
         /// Skip the confirmation when the target shares no chunks with your local store.
         #[arg(short, long)]
         yes: bool,
@@ -193,8 +185,8 @@ enum AddAgent {
 /// Which store the read commands act on. Shared by `recall`/`list`/`get`/`status` and `mcp`.
 #[derive(Args)]
 struct StoreOpts {
-    /// The store to read — an `<org>/<repo>` shorthand, an `hf://…` URI, a local path, or `local`
-    /// — overriding the active store. Defaults to the active store, else your local store.
+    /// The store to read — an `<org>/<repo>` shorthand, an `hf://…` URI, a local path, or `local`.
+    /// Defaults to your local store.
     #[arg(long)]
     store: Option<String>,
 }
@@ -409,18 +401,11 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Use { store } => use_store(store).await,
         Cmd::Push {
-            store,
+            store: remote,
             yes,
             force_reindex,
         } => {
-            let remote = match store {
-                Some(s) => s,
-                None => config::load().remote.ok_or_else(|| {
-                    anyhow!("no active store — attach one with `funes use <org>/<repo>`, or name a store: `funes push <org>/<repo>`")
-                })?,
-            };
             let confirm = if yes {
                 push::Confirm::Yes
             } else {
@@ -845,70 +830,6 @@ fn parse_selection(line: &str, hits: usize) -> Selection {
     Selection::Expand { ordinal, window }
 }
 
-/// `funes use <store>`: attach a remote (or `local` to detach) and report the next step.
-async fn use_store(spec: String) -> Result<()> {
-    let mut cfg = config::load();
-    if spec == "local" {
-        cfg.remote = None;
-        config::save(&cfg)?;
-        println!("active store: local store");
-        return Ok(());
-    }
-    let uri = match hub::Store::parse(&spec) {
-        hub::Store::Remote { uri } => uri,
-        hub::Store::Local { .. } => {
-            return Err(anyhow!(
-                "`funes use` takes a remote (e.g. `acme/kb` or `hf://datasets/<org>/<repo>`); for the \
-                 local store use `funes use local`, or relocate funes's home with $FUNES_HOME"
-            ))
-        }
-    };
-    cfg.remote = Some(uri.clone());
-    config::save(&cfg)?;
-    println!("active store: {uri}");
-
-    // The overlap heuristic below reads the remote's chunk ids; a remote we can't read would come
-    // back empty and wrongly hint at pushing. Attach anyway (the intent is stored) but skip the
-    // heuristic and say what's wrong — caught here at attach time rather than at the next push.
-    match hub::remote_reachability(&uri).await {
-        hub::Reachability::Offline => {
-            println!("remote currently unreachable — recall will use your local store until it's back");
-            return Ok(());
-        }
-        hub::Reachability::Missing => {
-            println!("note: {}", hub::missing_remote(&uri));
-            return Ok(());
-        }
-        hub::Reachability::Ok => {}
-    }
-
-    let local = push::store_ids(&hub::Store::local()).await;
-    let remote = push::store_ids(&hub::Store::parse(&uri)).await;
-    let unpushed = local.difference(&remote).count();
-    println!("{}", attach_hint(local.len(), remote.len(), unpushed));
-    Ok(())
-}
-
-/// The next-step hint for `funes use`.
-fn attach_hint(local: usize, remote: usize, unpushed: usize) -> String {
-    if local == 0 && remote == 0 {
-        "no memories indexed yet — run `funes index` to build your local store, then `funes push` to publish it here."
-            .to_string()
-    } else if local == 0 {
-        format!("the remote holds {remote} chunks — recall reads them now. if you own this remote store, run `funes index` then `funes push` to add this machine's sessions.")
-    } else if unpushed == 0 {
-        format!("local store: {local} chunks, all present on the remote.")
-    } else if remote == 0 {
-        format!("local store: {local} chunks, none on the remote yet — run `funes push`.")
-    } else if local > unpushed {
-        // Shares chunks with the remote → it's yours to add to; publish the extras.
-        format!("local store: {local} chunks, {unpushed} not yet on the remote — run `funes push`.")
-    } else {
-        // No shared chunks with a populated remote: a fresh host of yours, or a store you only read.
-        format!("local store: {local} chunks, remote: {remote} — no shared chunks: a new host of yours, or a store you only read. `funes push` to contribute, skip if it's not yours.")
-    }
-}
-
 /// The push confirmation for a store the local index shares no chunks with. Fails closed (returns
 /// false) off a terminal, so an unattended push can't silently publish to the wrong store — there it
 /// must be re-run with `--yes`.
@@ -934,7 +855,7 @@ fn prompt_new_store(label: &str, chunks: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{attach_hint, fzf_style_args, parse_selection, Selection};
+    use super::{fzf_style_args, parse_selection, Selection};
 
     #[test]
     fn fzf_style_args_wear_the_accent_only_in_color() {
@@ -965,24 +886,5 @@ mod tests {
         assert!(matches!(parse_selection("x", 8), Selection::Help));
         assert!(matches!(parse_selection("3 -1", 8), Selection::Help));
         assert!(matches!(parse_selection("3 10 zzz", 8), Selection::Help));
-    }
-
-    #[test]
-    fn attach_hint_covers_each_state() {
-        // empty local + empty remote -> index
-        assert!(attach_hint(0, 0, 0).contains("funes index"));
-        // empty local + populated remote -> recall now, index to add local
-        let h = attach_hint(0, 5, 0);
-        assert!(h.contains("recall reads them") && h.contains("funes index"));
-        // local fully published -> no push hint
-        assert!(attach_hint(8, 8, 0).contains("all present"));
-        // empty remote -> first publish
-        assert!(attach_hint(8, 0, 8).contains("funes push"));
-        // local overlaps the remote (overlap = 8-5 = 3) -> push the extras
-        let h = attach_hint(8, 3, 5);
-        assert!(h.contains("5 not yet") && h.contains("funes push"));
-        // no overlap with a populated remote -> cautious, may be read-only
-        let h = attach_hint(8, 5, 8);
-        assert!(h.contains("no shared chunks") && h.contains("skip if it's not yours"));
     }
 }

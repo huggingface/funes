@@ -12,7 +12,6 @@ use anyhow::{anyhow, Context, Result};
 use hf_hub::{HFClient, HFError};
 use lance::dataset::Dataset;
 
-use crate::config;
 use crate::dataset;
 use crate::hf_dataset;
 use crate::index::{DIM, MODEL};
@@ -56,10 +55,14 @@ impl Store {
         }
     }
 
-    /// Resolve the store the read commands should use: an explicit `spec` (a CLI `--store`) wins,
-    /// else the persisted active store (`funes use`), else the local index.
+    /// Resolve the store the read commands should use: an explicit `spec` (a CLI `--store`), else
+    /// the local index. There is no persisted default — a store binding lives in the caller's
+    /// config (e.g. an agent's `funes mcp --store …` registration), not in funes.
     pub fn resolve(spec: Option<String>) -> Self {
-        resolve_with(spec, config::load().remote)
+        match spec.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+            Some(s) => Store::parse(&s),
+            None => Store::local(),
+        }
     }
 
     /// True only for the default local store (`$FUNES_HOME`/`~/.funes`), so the hello-world
@@ -106,15 +109,6 @@ impl Store {
         };
         check_compat(&ds)?;
         Ok(ds)
-    }
-}
-
-/// Pure core of [`Store::resolve`]: explicit `spec` over the active store, else local.
-fn resolve_with(spec: Option<String>, active: Option<String>) -> Store {
-    let clean = |o: Option<String>| o.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-    match clean(spec).or_else(|| clean(active)) {
-        Some(s) => Store::parse(&s),
-        None => Store::local(),
     }
 }
 
@@ -194,8 +188,8 @@ pub fn missing_remote(uri: &str) -> anyhow::Error {
 /// The remote repo exists but holds no index yet.
 pub fn empty_remote(uri: &str) -> anyhow::Error {
     anyhow!(
-        "{uri} exists on the Hub but holds no index yet — `funes push` to publish your local \
-         index there, or `funes use local` to read your local index"
+        "{uri} exists on the Hub but holds no index yet — `funes push {uri}` to publish your local \
+         index there, or drop `--store` to read your local index"
     )
 }
 
@@ -349,30 +343,21 @@ mod tests {
     }
 
     #[test]
-    fn resolve_prefers_explicit_then_active_then_local() {
+    fn resolve_prefers_explicit_spec_else_local() {
         // Explicit spec wins, with the org/repo shorthand applied.
-        match resolve_with(Some("acme/kb".into()), Some("hf://datasets/active/one".into())) {
+        match Store::resolve(Some("acme/kb".into())) {
             Store::Remote { uri } => assert_eq!(uri, "hf://datasets/acme/kb"),
             _ => panic!("explicit spec should win"),
         }
-        // No spec -> the persisted active store.
-        match resolve_with(None, Some("hf://datasets/active/one".into())) {
-            Store::Remote { uri } => assert_eq!(uri, "hf://datasets/active/one"),
-            _ => panic!("expected the active store"),
-        }
-        // Neither -> local.
-        assert!(matches!(resolve_with(None, None), Store::Local { .. }));
-        // An explicit local spec beats an active remote.
-        match resolve_with(Some("/local/path".into()), Some("hf://datasets/active/one".into())) {
+        // No spec -> local (there is no persisted default).
+        assert!(matches!(Store::resolve(None), Store::Local { .. }));
+        // An explicit local path stays local.
+        match Store::resolve(Some("/local/path".into())) {
             Store::Local { path } => assert_eq!(path, std::path::PathBuf::from("/local/path")),
-            _ => panic!("explicit local should beat the active remote"),
+            _ => panic!("explicit local path should resolve local"),
         }
-        // Blank spec falls through to the active store; both blank -> local.
-        assert!(matches!(resolve_with(Some("  ".into()), None), Store::Local { .. }));
-        match resolve_with(Some("   ".into()), Some("hf://datasets/active/one".into())) {
-            Store::Remote { uri } => assert_eq!(uri, "hf://datasets/active/one"),
-            _ => panic!("blank spec should fall through to active"),
-        }
+        // Blank spec -> local.
+        assert!(matches!(Store::resolve(Some("   ".into())), Store::Local { .. }));
     }
 
     // --- dim guard against real local datasets ---

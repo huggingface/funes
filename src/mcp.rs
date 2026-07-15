@@ -53,8 +53,8 @@ pub struct StatusRequest {
 
 #[derive(Clone)]
 pub(crate) struct Funes {
-    /// Explicit store spec (`funes mcp --store`), pinned for the server's lifetime. `None` keeps
-    /// resolution per call, so `funes use` takes effect on a running server without a restart.
+    /// Explicit store spec (`funes mcp --store`), pinned for the server's lifetime. `None` reads
+    /// the local store unless a call passes its own `store`.
     store: Option<String>,
     #[allow(dead_code)]
     tool_router: ToolRouter<Funes>,
@@ -70,7 +70,7 @@ impl Funes {
     }
 
     /// The store a call reads: its explicit `store` argument wins over the server's `--store`,
-    /// then the usual resolution (active store, else local).
+    /// else the local store.
     fn store(&self, spec: Option<String>) -> Store {
         Store::resolve(spec.filter(|s| !s.trim().is_empty()).or_else(|| self.store.clone()))
     }
