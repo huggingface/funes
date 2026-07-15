@@ -472,13 +472,125 @@ async fn main() -> Result<()> {
             // Claude and Codex have the full local pipeline (index + hooks + push), so `add`
             // bootstraps it: build the first index and do the first push — the two one-time steps
             // the hooks can't do unattended — so nothing is left to run by hand.
-            AddAgent::Claude { store } => bootstrap_add(Harness::Claude, baked_store(store), claude::install).await,
-            AddAgent::Codex { store } => bootstrap_add(Harness::Codex, baked_store(store), codex::install).await,
+            AddAgent::Claude { store } => {
+                bootstrap_add(Harness::Claude, resolve_add_store(store).await?, claude::install).await
+            }
+            AddAgent::Codex { store } => {
+                bootstrap_add(Harness::Codex, resolve_add_store(store).await?, codex::install).await
+            }
             // The rest register a read-side integration only (no local pipeline to bootstrap).
-            AddAgent::Pi { store, force } => pi::install(baked_store(store), force),
-            AddAgent::Hermes { store } => hermes::install(baked_store(store)),
-            AddAgent::Opencode { store } => opencode::install(baked_store(store)),
+            AddAgent::Pi { store, force } => pi::install(resolve_add_store(store).await?, force),
+            AddAgent::Hermes { store } => hermes::install(resolve_add_store(store).await?),
+            AddAgent::Opencode { store } => opencode::install(resolve_add_store(store).await?),
         },
+    }
+}
+
+/// Resolve the store `funes add` binds. An explicitly-named store is validated — offer to create it
+/// if it's missing on the Hub (a typo guard). With no store, offer to set one up on the Hub when a
+/// token is present (`<user>/funes-store`); otherwise stay local.
+async fn resolve_add_store(raw: AddStore) -> Result<Option<String>> {
+    match baked_store(raw) {
+        Some(remote) => {
+            ensure_remote_exists(&remote).await?;
+            Ok(Some(remote))
+        }
+        None => offer_hub_store().await,
+    }
+}
+
+/// Validate an explicitly-named store: fine if it exists; offer to create it if missing (default
+/// **no**, to catch typos); warn but proceed if the Hub is unreachable.
+async fn ensure_remote_exists(remote: &str) -> Result<()> {
+    let hub::Store::Remote { uri } = hub::Store::parse(remote) else {
+        return Ok(()); // a local path — nothing to check on the Hub
+    };
+    match hub::remote_reachability(&uri).await {
+        hub::Reachability::Ok => Ok(()),
+        hub::Reachability::Offline => {
+            eprintln!("note: can't reach {remote} right now — proceeding; it'll be used once it's back.");
+            Ok(())
+        }
+        hub::Reachability::Missing => {
+            let (owner, name, _) = hub::parse_hf(&uri)?;
+            if std::io::stdin().is_terminal()
+                && confirm(&format!("{remote} doesn't exist on the Hub. Create it? [y/N] "), false)
+            {
+                hub::create_dataset_repo(&owner, &name).await?;
+                eprintln!("created {owner}/{name}.");
+                Ok(())
+            } else {
+                Err(hub::missing_remote(&uri))
+            }
+        }
+    }
+}
+
+/// With no store named, offer to set one up on the Hub — but only when a token is present and we can
+/// prompt. Suggests `<user>/funes-store`: use it if it exists, offer to create it if not. Returns the
+/// store to bind, or `None` to stay local.
+async fn offer_hub_store() -> Result<Option<String>> {
+    let interactive = std::io::stdin().is_terminal();
+    if !hub::has_token() {
+        if interactive {
+            eprintln!("staying local — set HF_TOKEN (or run `hf auth login`) and re-run `funes add …` to sync across machines or a team.");
+        }
+        return Ok(None);
+    }
+    // A scripted (non-interactive) add can't prompt, so it stays local unless a store was named.
+    if !interactive
+        || !confirm(
+            "Sync your memory to a Hugging Face store, so it follows you across machines? [Y/n] ",
+            true,
+        )
+    {
+        return Ok(None);
+    }
+    let user = match hub::whoami().await {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("couldn't read your Hugging Face identity ({e:#}) — staying local.");
+            return Ok(None);
+        }
+    };
+    let store = format!("{user}/funes-store");
+    let uri = format!("hf://datasets/{store}");
+    match hub::remote_reachability(&uri).await {
+        hub::Reachability::Ok => Ok(confirm(&format!("Use your store {store}? [Y/n] "), true).then_some(store)),
+        hub::Reachability::Offline => {
+            eprintln!("can't reach the Hub right now — staying local; re-run when you're online.");
+            Ok(None)
+        }
+        hub::Reachability::Missing => {
+            if confirm(&format!("Create {store} for your memory? [Y/n] "), true) {
+                hub::create_dataset_repo(&user, "funes-store").await?;
+                eprintln!("created {store}.");
+                Ok(Some(store))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+}
+
+/// Prompt for yes/no on stderr and read a line from stdin. Empty input takes `default_yes`.
+fn confirm(prompt: &str, default_yes: bool) -> bool {
+    eprint!("{prompt}");
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    if std::io::stdin().read_line(&mut answer).is_err() {
+        return false;
+    }
+    parse_confirm(&answer, default_yes)
+}
+
+/// Pure core of [`confirm`]: empty → the default; `y`/`yes` → yes; anything else → no (conservative,
+/// so an unrecognized answer never creates a repo or publishes).
+fn parse_confirm(input: &str, default_yes: bool) -> bool {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "" => default_yes,
+        "y" | "yes" => true,
+        _ => false,
     }
 }
 
@@ -982,7 +1094,7 @@ fn prompt_new_store(label: &str, chunks: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{fzf_style_args, parse_selection, Selection};
+    use super::{fzf_style_args, parse_confirm, parse_selection, Selection};
 
     #[test]
     fn fzf_style_args_wear_the_accent_only_in_color() {
@@ -992,6 +1104,20 @@ mod tests {
         assert!(colored.iter().any(|a| a.starts_with("--color=hl:6")));
         let plain = fzf_style_args(false, "p", "h");
         assert!(plain.contains(&"--color=bw".to_string()));
+    }
+
+    #[test]
+    fn parse_confirm_honors_default_and_answers() {
+        // Empty takes the default either way.
+        assert!(parse_confirm("\n", true));
+        assert!(!parse_confirm("  ", false));
+        // Explicit yes/no, case- and whitespace-insensitive.
+        assert!(parse_confirm("y", false));
+        assert!(parse_confirm(" YES \n", false));
+        assert!(!parse_confirm("n", true));
+        // Anything unrecognized is a conservative no, even under a yes default.
+        assert!(!parse_confirm("nope", true));
+        assert!(!parse_confirm("maybe", true));
     }
 
     #[test]

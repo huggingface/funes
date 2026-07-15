@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use hf_hub::{HFClient, HFError};
+use hf_hub::{HFClient, HFError, RepoTypeDataset};
 use lance::dataset::Dataset;
 
 use crate::dataset;
@@ -119,7 +119,7 @@ pub fn is_remote_shorthand(spec: &str) -> bool {
 
 /// Parse `hf://datasets/<owner>/<name>[/<prefix…>]` into (owner, name, prefix). Empty prefix = repo
 /// root, matching how reads resolve a remote.
-pub(crate) fn parse_hf(uri: &str) -> Result<(String, String, String)> {
+pub fn parse_hf(uri: &str) -> Result<(String, String, String)> {
     let rest = uri.strip_prefix("hf://").context("remote store must be an hf:// URI")?;
     let segs: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
     match segs.as_slice() {
@@ -200,6 +200,48 @@ pub fn unauthorized_remote(uri: &str) -> anyhow::Error {
         "not authorized to read {uri} — set a Hugging Face token with read access to this dataset \
          (HF_TOKEN, or `hf auth login`), or check the token you have can read it."
     )
+}
+
+/// Build an authenticated Hub client, erroring if no token is configured. For the write/identity
+/// calls (`whoami`, `create_dataset_repo`) — reads pin their own revision separately.
+fn authed_client() -> Result<HFClient> {
+    let token = hf_token().context("no Hugging Face token — set HF_TOKEN, or run `hf auth login`")?;
+    HFClient::builder()
+        .token(token)
+        .build()
+        .context("building the Hugging Face client")
+}
+
+/// The authenticated user's Hub handle (`whoami`). Errors if the token is missing or invalid — the
+/// caller treats that as "no usable token" and stays local.
+pub async fn whoami() -> Result<String> {
+    let user = authed_client()?
+        .whoami()
+        .send()
+        .await
+        .context("querying your Hugging Face identity")?;
+    Ok(user.username)
+}
+
+/// Create the dataset repo `<owner>/<name>` on the Hub. Idempotent (`exist_ok`), so it's safe to
+/// call when unsure whether it already exists. funes only ever calls this on explicit interactive
+/// consent — never implicitly.
+pub async fn create_dataset_repo(owner: &str, name: &str) -> Result<()> {
+    authed_client()?
+        .create_repository()
+        .repo_id(format!("{owner}/{name}"))
+        .repo_type(RepoTypeDataset)
+        .exist_ok(true)
+        .send()
+        .await
+        .with_context(|| format!("creating dataset repo {owner}/{name}"))?;
+    Ok(())
+}
+
+/// Whether a Hugging Face token is configured — the signal `funes add` uses to decide whether to
+/// offer a Hub store, without exposing the token itself to the binary.
+pub fn has_token() -> bool {
+    hf_token().is_some()
 }
 
 /// HF token from the standard env var, else the `huggingface_hub` cached token file.
