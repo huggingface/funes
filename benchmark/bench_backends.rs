@@ -1,15 +1,14 @@
 //! A/B the inference backends behind the `Embedder`/`Reranker` traits: latency + agreement (does a
 //! faster backend embed/rank the same as the reference?). Backend-agnostic and cross-platform — it
-//! compares whatever backends are compiled in. ONNX (fastembed) is always present and is the
-//! reference; enable others via features:
-//!   cargo run --release --features blas --example bench_backends
+//! compares whatever backends are compiled in, with ONNX (fastembed) as the reference when present:
+//!   cargo run --release --features onnx --example bench_backends
 //!
 //! Adding a backend = impl Embedder+Reranker, gate it behind a feature, and push it in `backends()`.
 
 use std::time::Instant;
 
 use anyhow::Result;
-use funes::inference::{Embedder, OnnxEmbedder, OnnxReranker, Reranker};
+use funes::inference::{Embedder, Reranker};
 
 const QUERY: &str = "why did we move the reranker off the onnx runtime";
 
@@ -42,12 +41,16 @@ struct Backend {
 
 fn backends() -> Result<Vec<Backend>> {
     let mut v: Vec<Backend> = Vec::new();
-    // ONNX is always available and serves as the agreement reference.
-    v.push(Backend {
-        name: "onnx",
-        emb: Box::new(OnnxEmbedder::new()?),
-        rr: Box::new(OnnxReranker::new()?),
-    });
+    // ONNX first when compiled in: the first backend is the agreement reference.
+    #[cfg(feature = "onnx")]
+    {
+        use funes::inference::{OnnxEmbedder, OnnxReranker};
+        v.push(Backend {
+            name: "onnx",
+            emb: Box::new(OnnxEmbedder::new()?),
+            rr: Box::new(OnnxReranker::new()?),
+        });
+    }
     #[cfg(feature = "blas")]
     {
         use funes::blas::{BlasEmbedder, BlasReranker};
@@ -82,7 +85,7 @@ fn main() -> Result<()> {
     let docs = docs();
     let mut backs = backends()?;
     if backs.len() < 2 {
-        eprintln!("note: only the `onnx` backend is compiled — enable another to compare, e.g. --features blas\n");
+        eprintln!("note: only one backend is compiled — build with `--features onnx` to A/B against the reference\n");
     }
 
     // Run each backend once for correctness, then time it. Reference = the first backend (onnx).
