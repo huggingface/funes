@@ -17,7 +17,7 @@ use futures::TryStreamExt;
 use lance::dataset::{Dataset, ROW_ID};
 use lance::Error as LanceError;
 use lance_index::scalar::FullTextSearchQuery;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use tokio::sync::{Mutex, OnceCell};
 
@@ -783,15 +783,92 @@ pub async fn get_turns(
     Ok((note, turns))
 }
 
+/// `2026-07-07 13:30 UTC (2 days ago)` — a status timestamp with its coarse age.
+fn stamp(t: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    format!("{} ({})", t.format("%Y-%m-%d %H:%M UTC"), age(t, now))
+}
+
+/// Coarse relative age: "just now", then minutes, hours (up to two days), days.
+fn age(t: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let mins = (now - t).num_minutes().max(0);
+    let (n, unit) = match mins {
+        0 => return "just now".to_string(),
+        1..=59 => (mins, "minute"),
+        60..=2879 => (mins / 60, "hour"),
+        _ => (mins / (24 * 60), "day"),
+    };
+    format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
+}
+
+/// Distinct sessions in the store — the human-scale size of the index. Best-effort: a failed
+/// scan omits the line rather than failing status.
+async fn session_count(ds: &Dataset) -> Option<usize> {
+    let batches = dataset::scan_rows(ds, &["session_id"], None, None).await.ok()?;
+    let mut sessions = HashSet::new();
+    for batch in &batches {
+        let col = batch
+            .column_by_name("session_id")?
+            .as_any()
+            .downcast_ref::<StringArray>()?;
+        for i in 0..batch.num_rows() {
+            sessions.insert(col.value(i).to_string());
+        }
+    }
+    Some(sessions.len())
+}
+
+/// The indexation lines of a local store: how many sessions it holds and when it was last
+/// written to (an `index` or `scrub` run). A version with no recorded timestamp is omitted.
+async fn index_lines(ds: &Dataset, now: DateTime<Utc>) -> String {
+    let mut out = String::new();
+    if let Some(n) = session_count(ds).await {
+        let _ = writeln!(out, "sessions: {n}");
+    }
+    let t = ds.version().timestamp;
+    if t.timestamp() > 0 {
+        let _ = writeln!(out, "last indexed: {}", stamp(t, now));
+    }
+    out
+}
+
 pub async fn status(store: Store) -> Result<String> {
     match open_for_read(&store).await? {
         ReadOutcome::Ready(ds) => {
+            let now = Utc::now();
             let rows = ds.count_rows(None).await?;
-            Ok(format!(
-                "store: {}\ntable:  {}\nchunks: {rows}\n",
-                store.label(),
-                dataset::TABLE
-            ))
+            let mut out = format!("store: {}\nchunks: {rows}\n", store.label());
+            match &store {
+                Store::Local { .. } => out.push_str(&index_lines(&ds, now).await),
+                Store::Remote { .. } => {
+                    // Every write to a remote store is a `funes push` (data or reindex commit),
+                    // so the head version's timestamp is when it was last pushed to.
+                    let t = ds.version().timestamp;
+                    if t.timestamp() > 0 {
+                        let _ = writeln!(out, "last push: {}", stamp(t, now));
+                    }
+                    let unindexed = crate::hf_dataset::max_unindexed_rows(&ds).await;
+                    if unindexed > 0 {
+                        let _ = writeln!(
+                            out,
+                            "unindexed: {unindexed} chunks (searched brute-force until a push reindexes)"
+                        );
+                    }
+                    // The local index is what pushes here — show it alongside, so one status
+                    // answers both "what's published" and "what's indexed on this machine".
+                    if let Ok(local) = Store::local().open().await {
+                        let local_rows = local.count_rows(None).await?;
+                        let _ = write!(out, "\nlocal index: {}\nchunks: {local_rows}", Store::local().label());
+                        // A count difference only approximates the push delta (scrub-held
+                        // rows and other hosts' pushes also move it).
+                        if local_rows > rows {
+                            let _ = write!(out, " (≈{} not yet pushed)", local_rows - rows);
+                        }
+                        out.push('\n');
+                        out.push_str(&index_lines(&local, now).await);
+                    }
+                }
+            }
+            Ok(out)
         }
         // An unreachable remote shows the local index's status instead, like the read commands.
         ReadOutcome::Offline => {
@@ -815,6 +892,30 @@ pub async fn status(store: Store) -> Result<String> {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn age_picks_the_coarsest_readable_unit() {
+        let now = Utc.with_ymd_and_hms(2026, 7, 9, 12, 0, 0).unwrap();
+        let at = |y, mo, d, h, mi| Utc.with_ymd_and_hms(y, mo, d, h, mi, 0).unwrap();
+        assert_eq!(
+            age(Utc.with_ymd_and_hms(2026, 7, 9, 11, 59, 30).unwrap(), now),
+            "just now"
+        );
+        assert_eq!(age(at(2026, 7, 9, 11, 59), now), "1 minute ago");
+        assert_eq!(age(at(2026, 7, 9, 11, 15), now), "45 minutes ago");
+        assert_eq!(age(at(2026, 7, 9, 9, 0), now), "3 hours ago");
+        assert_eq!(age(at(2026, 7, 8, 11, 0), now), "25 hours ago"); // hours up to 2 days
+        assert_eq!(age(at(2026, 7, 4, 12, 0), now), "5 days ago");
+        // A future timestamp (clock skew) clamps to "just now" rather than going negative.
+        assert_eq!(age(at(2026, 7, 9, 13, 0), now), "just now");
+    }
+
+    #[test]
+    fn stamp_formats_utc_with_age() {
+        let now = Utc.with_ymd_and_hms(2026, 7, 9, 12, 0, 0).unwrap();
+        let t = Utc.with_ymd_and_hms(2026, 7, 7, 13, 30, 0).unwrap();
+        assert_eq!(stamp(t, now), "2026-07-07 13:30 UTC (46 hours ago)");
+    }
 
     #[tokio::test]
     async fn missing_dataset_is_detected() {

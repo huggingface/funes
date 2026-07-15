@@ -196,8 +196,8 @@ fn captured_files(wrapper: &CaptureWrapper) -> BTreeMap<String, Bytes> {
 
 /// The largest `num_unindexed_rows` across the dataset's indexes — how many rows aren't yet folded
 /// into an index (and so are answered by a brute-force scan at query time). 0 when there are no
-/// indexes. Best-effort: a stats read that errors is skipped rather than failing the append.
-async fn max_unindexed_rows(ds: &Dataset) -> u64 {
+/// indexes. Best-effort: a stats read that errors is skipped rather than failing the caller.
+pub(crate) async fn max_unindexed_rows(ds: &Dataset) -> u64 {
     let Ok(indices) = ds.load_indices().await else {
         return 0;
     };
