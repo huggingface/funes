@@ -8,7 +8,7 @@
 //!   `~/.funes/integrations/claude-plugin` and registers it with `claude plugin marketplace add`
 //!   plus `claude plugin install`. Claude's loader activates the plugin's own `hooks/hooks.json` —
 //!   funes never parses or rewrites the user's `settings.json`. Removal is `claude plugin uninstall
-//!   funes`.
+//!   funes@huggingface`.
 //! - **Codex** has no plugin system, so funes writes its hooks into `~/.codex/hooks.json` — a file
 //!   dedicated to hooks, not Codex's main `config.toml`. The merge is append-or-replace keyed by
 //!   funes's own scripts (re-running replaces funes's groups, leaves any others untouched).
@@ -141,7 +141,7 @@ fn install_claude(store: Option<&str>) -> Result<()> {
 /// a refresh (`dirty`) uninstalls first to force a fresh copy.
 fn register_claude(root: &Path, has_store: bool, dirty: bool) -> Result<()> {
     let root_str = root.display().to_string();
-    let manual = format!("  claude plugin marketplace add {root_str}\n  claude plugin install {PLUGIN_ID}");
+    let manual = format!("  claude plugin marketplace add \"{root_str}\"\n  claude plugin install {PLUGIN_ID}");
     match Command::new("claude").args(["plugin", "marketplace", "add", &root_str]).status() {
         Ok(s) if s.success() => {}
         Ok(s) => bail!(
