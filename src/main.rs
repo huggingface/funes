@@ -63,14 +63,15 @@ enum Cmd {
     },
     /// List indexed sessions, newest activity first.
     List {
+        /// Store to read — an `<org>/<repo>` shorthand, an `hf://…` URI, a local path, or `local`.
+        /// Defaults to your local store.
+        store: Option<String>,
         /// Restrict to a project.
         #[arg(long)]
         project: Option<String>,
         /// Max sessions to show.
         #[arg(long, default_value_t = 50)]
         limit: usize,
-        #[command(flatten)]
-        store: StoreOpts,
     },
     /// Drill down on a recall hit: a turn plus the turns around it, reassembled.
     Get {
@@ -125,8 +126,9 @@ enum Cmd {
     },
     /// Show index statistics.
     Status {
-        #[command(flatten)]
-        store: StoreOpts,
+        /// Store to inspect — an `<org>/<repo>` shorthand, an `hf://…` URI, a local path, or
+        /// `local`. Defaults to your local store.
+        store: Option<String>,
     },
     /// Publish your local store's new chunks to a remote store on the HF Hub.
     Push {
@@ -153,8 +155,9 @@ enum Cmd {
     },
     /// Run as an MCP server over stdio (for Claude Code, Cursor, …).
     Mcp {
-        #[command(flatten)]
-        store: StoreOpts,
+        /// Store to serve — an `<org>/<repo>` shorthand, an `hf://…` URI, a local path, or `local`.
+        /// Defaults to your local store.
+        store: Option<String>,
     },
     /// Add funes to a coding agent.
     #[command(subcommand_value_name = "AGENT", subcommand_help_heading = "Agents")]
@@ -303,8 +306,8 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::List { project, limit, store } => {
-            print!("{}", recall::list(store.resolve(), project, limit).await?);
+        Cmd::List { store, project, limit } => {
+            print!("{}", recall::list(hub::Store::resolve(store), project, limit).await?);
             Ok(())
         }
         Cmd::Get {
@@ -392,7 +395,7 @@ async fn main() -> Result<()> {
             index::run_index_roots(&roots, no_thinking, limit, yes).await
         }
         Cmd::Status { store } => {
-            print!("{}", recall::status(store.resolve()).await?);
+            print!("{}", recall::status(hub::Store::resolve(store)).await?);
             // Show the status body before the (bounded, best-effort) update check, so a slow or
             // offline Hub can't delay the useful output.
             std::io::stdout().flush().ok();
@@ -428,9 +431,7 @@ async fn main() -> Result<()> {
         }
         Cmd::Scrub => scrub::run().await,
         Cmd::Update { force } => update::run(force).await,
-        Cmd::Mcp {
-            store: StoreOpts { store },
-        } => mcp::run(store).await,
+        Cmd::Mcp { store } => mcp::run(store).await,
         Cmd::Add { agent } => match agent {
             AddAgent::Claude => claude::install(),
             AddAgent::Codex => codex::install(),
