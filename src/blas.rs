@@ -38,6 +38,8 @@ mod seam {
             ldc: i32,
         );
         fn vvexpf(y: *mut f32, x: *const f32, n: *const i32);
+        fn vDSP_maxv(a: *const f32, stride: isize, out: *mut f32, n: usize);
+        fn vDSP_sve(a: *const f32, stride: isize, out: *mut f32, n: usize);
     }
     /// C[m,n] = alpha·op(A)·op(B); row-major; ta/tb are CBLAS 111 (NoTrans) / 112 (Trans).
     #[allow(clippy::too_many_arguments)]
@@ -77,6 +79,18 @@ mod seam {
     pub fn vexp(buf: &mut [f32]) {
         let n = buf.len() as i32;
         unsafe { vvexpf(buf.as_mut_ptr(), buf.as_ptr(), &n) };
+    }
+    /// Vectorized max reduction (empty slice → -inf, like the fold it replaces).
+    pub fn vmax(x: &[f32]) -> f32 {
+        let mut out = f32::MIN;
+        unsafe { vDSP_maxv(x.as_ptr(), 1, &mut out, x.len()) };
+        out
+    }
+    /// Vectorized sum reduction.
+    pub fn vsum(x: &[f32]) -> f32 {
+        let mut out = 0f32;
+        unsafe { vDSP_sve(x.as_ptr(), 1, &mut out, x.len()) };
+        out
     }
 }
 
@@ -149,6 +163,40 @@ mod seam {
             let p = (((((C[0] * r + C[1]) * r + C[2]) * r + C[3]) * r + C[4]) * r + 1.0) * r + 1.0;
             *x = p * f32::from_bits((((f as i32) + 127) << 23) as u32);
         }
+    }
+
+    /// A strict-order fold over floats can't be vectorized (reassociation changes the result);
+    /// independent lane accumulators make the reduction order fixed and the loop vectorizable.
+    /// LANES spans two AVX2 registers / four NEON ones.
+    const LANES: usize = 16;
+
+    /// Vectorized max reduction (empty slice → -inf, like the fold it replaces).
+    #[multiversion::multiversion(targets("x86_64+avx512f+avx512bw+avx512dq", "x86_64+avx2+fma"))]
+    pub fn vmax(x: &[f32]) -> f32 {
+        let mut acc = [f32::MIN; LANES];
+        let chunks = x.chunks_exact(LANES);
+        let rem = chunks.remainder();
+        for c in chunks {
+            for (a, v) in acc.iter_mut().zip(c) {
+                *a = a.max(*v);
+            }
+        }
+        let m = rem.iter().copied().fold(f32::MIN, f32::max);
+        acc.into_iter().fold(m, f32::max)
+    }
+
+    /// Vectorized sum reduction.
+    #[multiversion::multiversion(targets("x86_64+avx512f+avx512bw+avx512dq", "x86_64+avx2+fma"))]
+    pub fn vsum(x: &[f32]) -> f32 {
+        let mut acc = [0f32; LANES];
+        let chunks = x.chunks_exact(LANES);
+        let rem = chunks.remainder();
+        for c in chunks {
+            for (a, v) in acc.iter_mut().zip(c) {
+                *a += *v;
+            }
+        }
+        acc.into_iter().sum::<f32>() + rem.iter().sum::<f32>()
     }
 }
 
@@ -311,7 +359,7 @@ fn gelu(v: &mut [f32]) {
 fn softmax_rows(s: &mut [f32], rows: usize, cols: usize) {
     for r in 0..rows {
         let row = &mut s[r * cols..r * cols + cols];
-        let mx = row.iter().copied().fold(f32::MIN, f32::max);
+        let mx = seam::vmax(row);
         for v in row.iter_mut() {
             *v -= mx;
         }
@@ -319,8 +367,7 @@ fn softmax_rows(s: &mut [f32], rows: usize, cols: usize) {
     seam::vexp(s);
     for r in 0..rows {
         let row = &mut s[r * cols..r * cols + cols];
-        let sum: f32 = row.iter().sum();
-        let inv = 1.0 / sum;
+        let inv = 1.0 / seam::vsum(row);
         for v in row.iter_mut() {
             *v *= inv;
         }
