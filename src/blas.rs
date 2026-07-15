@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, Context, Result};
 use safetensors::SafeTensors;
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 
@@ -526,9 +526,43 @@ fn encode(w: &HashMap<String, Vec<f32>>, c: Cfg, ids: &[i64], mask: &[i64], n: u
 // Model loading + tokenization (cross-platform)
 // ---------------------------------------------------------------------------------------------
 
-/// Resolve a local HF hub snapshot dir for `repo` (e.g. "BAAI/bge-small-en-v1.5"). Populated by any
-/// standard HF download; errors with the command to fetch it if absent.
+/// Resolve a snapshot dir for `repo` (e.g. "BAAI/bge-small-en-v1.5") in the standard HF cache,
+/// downloading the two files the forward needs on first use (like the ONNX backend does).
 fn hf_snapshot(repo: &str) -> Result<PathBuf> {
+    if let Some(dir) = local_snapshot(repo) {
+        return Ok(dir);
+    }
+    eprintln!("downloading {repo} (first use)…");
+    // A dedicated thread: the blocking hf-hub client drives its own runtime with block_on,
+    // which would panic if called from a thread already inside a tokio runtime (the MCP server).
+    let owned = repo.to_string();
+    let dir = std::thread::spawn(move || -> Result<PathBuf> {
+        let (owner, name) = owned
+            .split_once('/')
+            .ok_or_else(|| anyhow!("model repo {owned} is not owner/name"))?;
+        let client = hf_hub::HFClientSync::new().map_err(|e| anyhow!("hf-hub client: {e}"))?;
+        let r = client.model(owner, name);
+        r.download_file()
+            .filename("tokenizer.json")
+            .send()
+            .with_context(|| format!("downloading {owned}/tokenizer.json"))?;
+        let weights = r
+            .download_file()
+            .filename("model.safetensors")
+            .send()
+            .with_context(|| format!("downloading {owned}/model.safetensors"))?;
+        Ok(weights
+            .parent()
+            .ok_or_else(|| anyhow!("downloaded file has no parent dir"))?
+            .to_path_buf())
+    })
+    .join()
+    .map_err(|_| anyhow!("model download thread panicked"))??;
+    Ok(dir)
+}
+
+/// The newest cached snapshot of `repo` holding both files the forward needs, if any.
+fn local_snapshot(repo: &str) -> Option<PathBuf> {
     let base = std::env::var("HF_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache/huggingface"));
@@ -536,18 +570,13 @@ fn hf_snapshot(repo: &str) -> Result<PathBuf> {
         .join("hub")
         .join(format!("models--{}", repo.replace('/', "--")))
         .join("snapshots");
-    let entries = std::fs::read_dir(&snaps)
-        .with_context(|| format!("no local snapshot for {repo}; run: huggingface-cli download {repo}"))?;
-    for e in entries {
-        let p = e?.path();
-        if p.join("model.safetensors").exists() {
-            return Ok(p);
+    for e in std::fs::read_dir(&snaps).ok()?.flatten() {
+        let p = e.path();
+        if p.join("model.safetensors").exists() && p.join("tokenizer.json").exists() {
+            return Some(p);
         }
     }
-    bail!(
-        "no model.safetensors under {}; run: huggingface-cli download {repo}",
-        snaps.display()
-    )
+    None
 }
 
 fn load_weights(dir: &Path) -> Result<HashMap<String, Vec<f32>>> {

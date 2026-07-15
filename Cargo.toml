@@ -33,7 +33,7 @@ hex = "0.4"
 walkdir = "2"                    # recursive *.jsonl walk
 rmcp = { version = "1", features = ["server", "macros", "transport-io", "schemars"] }  # MCP stdio server
 tempfile = "3"                   # temp dir for the pre-publish secret scan; temp files/dirs in tests
-hf-hub = { version = "1.0.0-rc.1", features = ["rustls-tls"] }  # native create_commit + parent_commit CAS + Xet upload
+hf-hub = { version = "1.0.0-rc.1", features = ["rustls-tls", "blocking"] }  # native create_commit + parent_commit CAS + Xet upload; blocking: model download in the blas backend
 # Optional handle on the transitively-pulled openssl-sys (native-tls, via fastembed + lance).
 # The `vendored-openssl` feature builds OpenSSL from source so the aarch64-linux cross-build
 # needs no target sysroot. Off by default — native and macOS builds keep their system TLS.
