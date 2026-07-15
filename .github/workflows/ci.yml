@@ -48,7 +48,7 @@ jobs:
           # smaller caches that survive GitHub's 10 GB/repo limit instead of evicting.
           shared-key: ci
 
-      # Faster, lower-memory linker — keeps the heavy lance/onnxruntime link in budget.
+      # Faster, lower-memory linker — keeps the heavy lance link in budget.
       - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
 
       # lance-encoding (via lancedb) compiles protobuf in its build script.
@@ -58,8 +58,14 @@ jobs:
       - name: Format check
         run: cargo +nightly-2026-04-22 fmt --check
 
+      # Both backend variants, so a PR can't leave either failing fmt or a bumped linter — the
+      # onnx build/test job below only runs on merges. (fmt is feature-independent: one check
+      # covers both.)
       - name: Clippy
         run: cargo clippy --all-targets --profile ci -- -D warnings
+
+      - name: Clippy (onnx backend)
+        run: cargo clippy --all-targets --profile ci --no-default-features --features onnx -- -D warnings
 
       # trufflehog for the secret-scan unit tests, pinned to the version used locally.
       - name: Install trufflehog
@@ -102,14 +108,17 @@ jobs:
           curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin v3.95.5
           trufflehog --version
 
-      # Embedder/reranker weights (~hundreds of MB). Cache on main only — PRs restore
-      # main's copy, so there's no duplicate per-PR copy eating the 10 GB cache budget.
-      - name: Restore fastembed models
-        id: fastembed
+      # Embedder/reranker weights for the default (blas) backend (~1.2 GB of safetensors; funes
+      # downloads them into the HF cache on first use). Cache on main only — PRs restore main's
+      # copy, so there's no duplicate per-PR copy eating the 10 GB cache budget.
+      - name: Restore model weights
+        id: models
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: .fastembed_cache
-          key: fastembed-models-v1
+          path: |
+            ~/.cache/huggingface/hub/models--BAAI--bge-small-en-v1.5
+            ~/.cache/huggingface/hub/models--BAAI--bge-reranker-base
+          key: hf-models-blas-v1
 
       - name: Integration test
         run: cargo test --profile ci --test index_recall -- --nocapture
@@ -131,8 +140,56 @@ jobs:
           HF_FUNES_TEST_TOKEN: ${{ secrets.HF_FUNES_TEST_TOKEN }}
         run: cargo test --profile ci --test push_round_trip -- --nocapture
 
+      - name: Save model weights
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' && steps.models.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/huggingface/hub/models--BAAI--bge-small-en-v1.5
+            ~/.cache/huggingface/hub/models--BAAI--bge-reranker-base
+          key: hf-models-blas-v1
+
+  # The ONNX backend is an opt-in feature. Its lint runs on every PR (in lint-test above);
+  # the build + real-model integration test here run only on merges to main, so pull requests
+  # don't spend runners testing a backend they don't change.
+  onnx-variant:
+    name: ONNX Variant (merge only)
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    needs: lint-test
+    timeout-minutes: 45
+    env:
+      RUST_MIN_STACK: "16777216"
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # Its own cache: the onnx feature set has different dependency fingerprints than the
+          # default jobs' `ci` key, so sharing would evict one to store the other.
+          shared-key: ci-onnx
+
+      - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      # ONNX model files (fastembed's own cache, distinct from the safetensors the blas
+      # backend uses). This job only runs on main, so save directly on miss.
+      - name: Restore fastembed models
+        id: fastembed
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .fastembed_cache
+          key: fastembed-models-v1
+
+      - name: Integration test (onnx backend)
+        run: cargo test --profile ci --no-default-features --features onnx --test index_recall -- --nocapture
+
       - name: Save fastembed models
-        if: ${{ !cancelled() && github.ref == 'refs/heads/main' && steps.fastembed.outputs.cache-hit != 'true' }}
+        if: ${{ !cancelled() && steps.fastembed.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .fastembed_cache
