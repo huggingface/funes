@@ -122,6 +122,13 @@ note that the *retrieval* machinery (hybrid vector + lexical search, fused and r
 common to mature memory systems; funes does not differentiate on search. The difference is
 entirely *upstream*: deterministic no-LLM ingest, immutable passages, and provenance.
 
+This isn't a guess about search — it was measured. A run of recall-quality enhancements —
+abstention thresholds, MMR diversity, near-duplicate collapse, semantic expansion, deeper
+candidate pools, stronger rerankers, and a per-chunk *kind* facet, some at query time and
+some computed at index time — was A/B'd against a labeled retrieval anchor; none moved
+recall. The cross-encoder is the ceiling, and it already resolves a query's intent to the
+right *kind* of passage without a stored label.
+
 ## Where this leaves funes
 
 funes is the **verbatim recall layer**: the man who forgets nothing, with discrimination. It
