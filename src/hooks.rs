@@ -32,8 +32,9 @@ const TIMEOUT: u32 = 15;
 const INDEX_STATUS: &str = "Indexing turn into funes memory";
 const PUSH_STATUS: &str = "Publishing funes memory";
 
-/// The Claude marketplace + plugin ids funes registers (`plugin@marketplace`).
-const PLUGIN_ID: &str = "funes@funes";
+/// The Claude plugin id funes registers (`<plugin>@<marketplace>`): the `funes` plugin in the
+/// `huggingface` marketplace (names from the bundled plugin.json / marketplace.json).
+const PLUGIN_ID: &str = "funes@huggingface";
 
 /// An agent whose hooks funes manages.
 #[derive(Clone, Copy)]

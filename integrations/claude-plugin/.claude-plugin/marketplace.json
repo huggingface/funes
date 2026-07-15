@@ -1,6 +1,6 @@
 {
-  "name": "funes",
-  "owner": { "name": "funes" },
+  "name": "huggingface",
+  "owner": { "name": "huggingface" },
   "plugins": [
     {
       "name": "funes",

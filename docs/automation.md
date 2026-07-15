@@ -38,7 +38,7 @@ when they're indexed, and `funes index` re-embeds nothing already stored. Keepin
 - **Claude Code** has a plugin system, so funes ships a hooks-only plugin (extracted to
   `~/.funes/integrations/claude-plugin`) and registers it with `claude plugin marketplace add` +
   `claude plugin install`. Claude's loader activates the plugin's hooks — **funes never edits your
-  `settings.json`**. Remove it with `claude plugin uninstall funes`.
+  `settings.json`**. Remove it with `claude plugin uninstall funes@huggingface`.
 - **Codex** has no plugin system, so funes writes its hooks into `~/.codex/hooks.json` — a file
   dedicated to hooks, not your `config.toml`. The merge is append-or-replace keyed by funes's own
   scripts, so any hooks you added yourself are left untouched. Codex has no session-end event, so it
