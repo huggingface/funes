@@ -10,16 +10,38 @@
 // Install:  funes add pi   — or, from a funes checkout, `pi install
 // ./integrations/pi`, or `pi -e ./integrations/pi` for a single run.
 //
-// `funes` is taken from PATH; set FUNES_BIN to override — e.g. inside an
-// agentcap sandbox, --tool-dir puts the bundle's `funes` wrapper on PATH (which
-// also points FASTEMBED_CACHE_DIR at the prewarmed cache and FUNES_HOME at the
-// live-remote config). FUNES_STORE, if set, is forwarded as `funes mcp --store
-// <spec>` — pinning the server to that store instead of the active one.
+// `funes` is taken from PATH; set FUNES_BIN to override the binary. FUNES_BIN and
+// FUNES_STORE are generic environment overrides funes honors; a host that embeds
+// funes sets them from the outside. (agentcap's funes example is one such host —
+// that example depends on funes, not the reverse: it puts its own `funes` on PATH
+// and points FUNES_STORE at a live hf:// store. This extension knows nothing of
+// it — only of the vars.)
+//
+// The store this extension recalls from is resolved once, in order:
+//   1. FUNES_STORE in the environment (a per-run override, set by whatever host)
+//   2. the store bound at install by `funes add pi <store>`, saved in a `store`
+//      file next to this extension (absent = the local store)
+// The result is forwarded as the `funes mcp <store>` positional; empty forwards a
+// bare `funes mcp` (the local store).
 import { Type } from "typebox";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 
 const FUNES_BIN = process.env.FUNES_BIN || "funes";
-const FUNES_ARGS = process.env.FUNES_STORE ? ["mcp", "--store", process.env.FUNES_STORE] : ["mcp"];
+
+// The store `funes add pi <store>` wrote beside this extension, or "" if none (local).
+function boundStore(): string {
+  try {
+    return readFileSync(join(dirname(fileURLToPath(import.meta.url)), "store"), "utf8").trim();
+  } catch {
+    return "";
+  }
+}
+
+const store = (process.env.FUNES_STORE || boundStore()).trim();
+const FUNES_ARGS = store ? ["mcp", store] : ["mcp"];
 const PROTOCOL_VERSION = "2024-11-05"; // matches funes' rmcp server
 const CALL_TIMEOUT_MS = 120_000;
 

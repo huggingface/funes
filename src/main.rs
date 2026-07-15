@@ -171,22 +171,53 @@ enum Cmd {
     },
 }
 
+/// The store an agent recalls from, baked into its MCP registration. `<org>/<repo>`, an `hf://…`
+/// URI, or `local` (the default). Doc string is shared across the agents via `#[arg]`'s help.
+#[derive(Args)]
+struct AddStore {
+    /// Store this agent recalls from — `<org>/<repo>`, an `hf://…` URI, or `local` (default).
+    store: Option<String>,
+}
+
 #[derive(Subcommand)]
 enum AddAgent {
     /// claude: register funes as an MCP server with Claude Code (native MCP client, user scope).
-    Claude,
+    Claude {
+        #[command(flatten)]
+        store: AddStore,
+    },
     /// codex: register funes as an MCP server with Codex (native MCP client, user scope).
-    Codex,
+    Codex {
+        #[command(flatten)]
+        store: AddStore,
+    },
     /// pi: install funes as a pi extension user-wide (pi has no MCP client of its own).
     Pi {
+        #[command(flatten)]
+        store: AddStore,
         /// Reinstall even if the on-disk copy is already up to date.
         #[arg(long)]
         force: bool,
     },
     /// hermes: register funes as an MCP server (hermes has a native MCP client).
-    Hermes,
+    Hermes {
+        #[command(flatten)]
+        store: AddStore,
+    },
     /// opencode: register funes as an MCP server (user scope).
-    Opencode,
+    Opencode {
+        #[command(flatten)]
+        store: AddStore,
+    },
+}
+
+/// The store to bake into an agent's `funes mcp` registration: `None`/blank/`local` → the local
+/// store (a bare `funes mcp`), else the named remote/explicit store (`funes mcp <store>`).
+fn baked_store(store: AddStore) -> Option<String> {
+    store
+        .store
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && s != "local")
 }
 
 /// Which store the read commands act on. Shared by `recall`/`list`/`get`/`status` and `mcp`.
@@ -438,11 +469,11 @@ async fn main() -> Result<()> {
         Cmd::Update { force } => update::run(force).await,
         Cmd::Mcp { store } => mcp::run(store).await,
         Cmd::Add { agent } => match agent {
-            AddAgent::Claude => claude::install(),
-            AddAgent::Codex => codex::install(),
-            AddAgent::Pi { force } => pi::install(force),
-            AddAgent::Hermes => hermes::install(),
-            AddAgent::Opencode => opencode::install(),
+            AddAgent::Claude { store } => claude::install(baked_store(store)),
+            AddAgent::Codex { store } => codex::install(baked_store(store)),
+            AddAgent::Pi { store, force } => pi::install(baked_store(store), force),
+            AddAgent::Hermes { store } => hermes::install(baked_store(store)),
+            AddAgent::Opencode { store } => opencode::install(baked_store(store)),
         },
     }
 }

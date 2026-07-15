@@ -11,10 +11,20 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
-pub fn install() -> Result<()> {
+/// The `local` MCP-server block funes writes: `funes mcp [store]` over stdio. A non-local `store`
+/// is appended to the command, pinning this agent's recall to it.
+fn server_json(funes: &str, store: Option<&str>) -> Value {
+    let mut command = vec![funes.to_string(), "mcp".to_string()];
+    if let Some(s) = store {
+        command.push(s.to_string());
+    }
+    json!({ "type": "local", "command": command, "enabled": true })
+}
+
+pub fn install(store: Option<String>) -> Result<()> {
     let path = target_path()?;
     let funes = std::env::var("FUNES_BIN").unwrap_or_else(|_| "funes".to_string());
-    let server = json!({ "type": "local", "command": [funes, "mcp"], "enabled": true });
+    let server = server_json(&funes, store.as_deref());
 
     // An existing config may carry comments (JSONC), which serde can't round-trip. If the file
     // is there but doesn't parse as plain JSON, leave it untouched and tell the user exactly
@@ -91,7 +101,17 @@ fn manual_instructions(path: &Path, server: &Value) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::choose;
+    use super::{choose, server_json};
+    use serde_json::json;
+
+    #[test]
+    fn server_json_bakes_the_store_only_when_present() {
+        assert_eq!(server_json("funes", None)["command"], json!(["funes", "mcp"]));
+        assert_eq!(
+            server_json("funes", Some("acme/kb"))["command"],
+            json!(["funes", "mcp", "acme/kb"])
+        );
+    }
 
     #[test]
     fn choose_prefers_json_then_jsonc_then_new_json() {
