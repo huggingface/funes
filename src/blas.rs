@@ -234,17 +234,16 @@ fn par_add(dst: &mut [f32], src: &[f32]) {
     });
 }
 
-/// y[m,out] = x[m,in] · W[out,in]ᵀ + b[out]
-fn linear(x: &[f32], m: usize, in_: usize, w: &[f32], b: &[f32], out: usize) -> Vec<f32> {
-    let mut y = vec![0f32; m * out];
-    seam::sgemm(NO_T, T, m, out, in_, 1.0, x, in_, w, in_, &mut y);
-    for r in 0..m {
-        let row = &mut y[r * out..r * out + out];
-        for c in 0..out {
-            row[c] += b[c];
+/// y[m,out] = x[m,in] · W[out,in]ᵀ + b[out]. The caller owns y (m·out): buffers are reused
+/// across layers — a fresh allocation per call makes the allocator release and re-fault
+/// hundreds of MB per layer on platforms that return large frees to the OS.
+fn linear(x: &[f32], m: usize, in_: usize, w: &[f32], b: &[f32], out: usize, y: &mut [f32]) {
+    seam::sgemm(NO_T, T, m, out, in_, 1.0, x, in_, w, in_, y);
+    par_rows(y, out, |row| {
+        for (c, bc) in row.iter_mut().zip(b) {
+            *c += bc;
         }
-    }
-    y
+    });
 }
 
 fn layernorm(x: &mut [f32], h: usize, g: &[f32], b: &[f32]) {
@@ -345,35 +344,46 @@ fn encode(w: &HashMap<String, Vec<f32>>, c: Cfg, ids: &[i64], mask: &[i64], n: u
         g(&format!("{}embeddings.LayerNorm.bias", c.prefix)),
     );
 
+    // Layer scratch, allocated once and reused across all layers (see linear()).
+    let mut q = vec![0f32; m * h];
+    let mut k = vec![0f32; m * h];
+    let mut v = vec![0f32; m * h];
+    let mut ctx = vec![0f32; m * h];
+    let mut attn = vec![0f32; m * h];
+    let mut inter = vec![0f32; m * ffn];
+    let mut ffn_out = vec![0f32; m * h];
+
     let scale = 1.0 / (hd as f32).sqrt();
     for ly in 0..c.layers {
         let p = format!("{}encoder.layer.{ly}", c.prefix);
-        let q = linear(
+        linear(
             &hid,
             m,
             h,
             g(&format!("{p}.attention.self.query.weight")),
             g(&format!("{p}.attention.self.query.bias")),
             h,
+            &mut q,
         );
-        let k = linear(
+        linear(
             &hid,
             m,
             h,
             g(&format!("{p}.attention.self.key.weight")),
             g(&format!("{p}.attention.self.key.bias")),
             h,
+            &mut k,
         );
-        let v = linear(
+        linear(
             &hid,
             m,
             h,
             g(&format!("{p}.attention.self.value.weight")),
             g(&format!("{p}.attention.self.value.bias")),
             h,
+            &mut v,
         );
 
-        let mut ctx = vec![0f32; m * h];
         let seqs_per = ceil_div(n, nthreads()).max(1);
         let (qr, kr, vr, maskr) = (&q, &k, &v, &mask);
         std::thread::scope(|scope| {
@@ -415,13 +425,14 @@ fn encode(w: &HashMap<String, Vec<f32>>, c: Cfg, ids: &[i64], mask: &[i64], n: u
                 });
             }
         });
-        let attn = linear(
+        linear(
             &ctx,
             m,
             h,
             g(&format!("{p}.attention.output.dense.weight")),
             g(&format!("{p}.attention.output.dense.bias")),
             h,
+            &mut attn,
         );
         par_add(&mut hid, &attn);
         layernorm(
@@ -431,22 +442,24 @@ fn encode(w: &HashMap<String, Vec<f32>>, c: Cfg, ids: &[i64], mask: &[i64], n: u
             g(&format!("{p}.attention.output.LayerNorm.bias")),
         );
 
-        let mut inter = linear(
+        linear(
             &hid,
             m,
             h,
             g(&format!("{p}.intermediate.dense.weight")),
             g(&format!("{p}.intermediate.dense.bias")),
             ffn,
+            &mut inter,
         );
         gelu(&mut inter);
-        let ffn_out = linear(
+        linear(
             &inter,
             m,
             ffn,
             g(&format!("{p}.output.dense.weight")),
             g(&format!("{p}.output.dense.bias")),
             h,
+            &mut ffn_out,
         );
         par_add(&mut hid, &ffn_out);
         layernorm(
@@ -596,24 +609,29 @@ impl Reranker for BlasReranker {
         for s in 0..n {
             cls[s * h..s * h + h].copy_from_slice(&hid[(s * l) * h..(s * l) * h + h]);
         }
-        let mut d = linear(
+        let mut d = vec![0f32; n * h];
+        linear(
             &cls,
             n,
             h,
             self.w["classifier.dense.weight"].as_slice(),
             self.w["classifier.dense.bias"].as_slice(),
             h,
+            &mut d,
         );
         for v in d.iter_mut() {
             *v = v.tanh();
         }
-        Ok(linear(
+        let mut scores = vec![0f32; n];
+        linear(
             &d,
             n,
             h,
             self.w["classifier.out_proj.weight"].as_slice(),
             self.w["classifier.out_proj.bias"].as_slice(),
             1,
-        ))
+            &mut scores,
+        );
+        Ok(scores)
     }
 }
