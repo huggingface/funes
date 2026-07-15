@@ -608,7 +608,9 @@ fn hf_snapshot(repo: &str) -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// The newest cached snapshot of `repo` holding both files the forward needs, if any.
+/// A cached snapshot of `repo` holding both files the forward needs, if any. With several
+/// snapshots cached the pick is arbitrary — fine here: any complete copy of these frozen model
+/// repos is interchangeable.
 fn local_snapshot(repo: &str) -> Option<PathBuf> {
     let base = std::env::var("HF_HOME")
         .map(PathBuf::from)
