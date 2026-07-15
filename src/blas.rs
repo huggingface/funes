@@ -308,19 +308,45 @@ fn l2_normalize(v: &mut [f32]) {
     }
 }
 
-/// Shared BERT-family encoder → last_hidden_state [n*l*h]. `mask[s*l+j]` 1=real, 0=pad.
-fn encode(w: &HashMap<String, Vec<f32>>, c: Cfg, ids: &[i64], mask: &[i64], n: usize, l: usize) -> Vec<f32> {
+/// Forward-pass buffers, owned by the model and reused across calls, growing to the high-water
+/// mark. Freeing them between forwards hands the pages back to the OS, and the next call pays a
+/// page fault per 4 KiB rewritten — hundreds of MB per forward (see linear()).
+#[derive(Default)]
+struct Scratch {
+    hid: Vec<f32>,
+    q: Vec<f32>,
+    k: Vec<f32>,
+    v: Vec<f32>,
+    ctx: Vec<f32>,
+    attn: Vec<f32>,
+    inter: Vec<f32>,
+    ffn_out: Vec<f32>,
+}
+
+/// Shared BERT-family encoder → last_hidden_state in `s.hid` [n*l*h]. `mask[s*l+j]` 1=real, 0=pad.
+fn encode(w: &HashMap<String, Vec<f32>>, c: Cfg, ids: &[i64], mask: &[i64], n: usize, l: usize, s: &mut Scratch) {
     let g = |k: &str| w.get(k).unwrap_or_else(|| panic!("missing weight {k}")).as_slice();
     let (h, ffn, hd, heads) = (c.h, c.ffn, c.hd, c.heads);
     let m = n * l;
     let word = g(&format!("{}embeddings.word_embeddings.weight", c.prefix));
     let pos = g(&format!("{}embeddings.position_embeddings.weight", c.prefix));
     let typ = g(&format!("{}embeddings.token_type_embeddings.weight", c.prefix));
-    let mut hid = vec![0f32; m * h];
-    for s in 0..n {
+    for (buf, len) in [
+        (&mut s.hid, m * h),
+        (&mut s.q, m * h),
+        (&mut s.k, m * h),
+        (&mut s.v, m * h),
+        (&mut s.ctx, m * h),
+        (&mut s.attn, m * h),
+        (&mut s.inter, m * ffn),
+        (&mut s.ffn_out, m * h),
+    ] {
+        buf.resize(len, 0.0);
+    }
+    for sq in 0..n {
         let mut run = 0i64;
         for i in 0..l {
-            let id = ids[s * l + i];
+            let id = ids[sq * l + i];
             let posid = if c.bert_pos {
                 i
             } else if id != PAD {
@@ -329,7 +355,7 @@ fn encode(w: &HashMap<String, Vec<f32>>, c: Cfg, ids: &[i64], mask: &[i64], n: u
             } else {
                 PAD as usize
             };
-            let dst = &mut hid[(s * l + i) * h..(s * l + i) * h + h];
+            let dst = &mut s.hid[(sq * l + i) * h..(sq * l + i) * h + h];
             let we = &word[id as usize * h..id as usize * h + h];
             let pe = &pos[posid * h..posid * h + h];
             for cc in 0..h {
@@ -338,56 +364,47 @@ fn encode(w: &HashMap<String, Vec<f32>>, c: Cfg, ids: &[i64], mask: &[i64], n: u
         }
     }
     layernorm(
-        &mut hid,
+        &mut s.hid,
         h,
         g(&format!("{}embeddings.LayerNorm.weight", c.prefix)),
         g(&format!("{}embeddings.LayerNorm.bias", c.prefix)),
     );
 
-    // Layer scratch, allocated once and reused across all layers (see linear()).
-    let mut q = vec![0f32; m * h];
-    let mut k = vec![0f32; m * h];
-    let mut v = vec![0f32; m * h];
-    let mut ctx = vec![0f32; m * h];
-    let mut attn = vec![0f32; m * h];
-    let mut inter = vec![0f32; m * ffn];
-    let mut ffn_out = vec![0f32; m * h];
-
     let scale = 1.0 / (hd as f32).sqrt();
     for ly in 0..c.layers {
         let p = format!("{}encoder.layer.{ly}", c.prefix);
         linear(
-            &hid,
+            &s.hid,
             m,
             h,
             g(&format!("{p}.attention.self.query.weight")),
             g(&format!("{p}.attention.self.query.bias")),
             h,
-            &mut q,
+            &mut s.q,
         );
         linear(
-            &hid,
+            &s.hid,
             m,
             h,
             g(&format!("{p}.attention.self.key.weight")),
             g(&format!("{p}.attention.self.key.bias")),
             h,
-            &mut k,
+            &mut s.k,
         );
         linear(
-            &hid,
+            &s.hid,
             m,
             h,
             g(&format!("{p}.attention.self.value.weight")),
             g(&format!("{p}.attention.self.value.bias")),
             h,
-            &mut v,
+            &mut s.v,
         );
 
         let seqs_per = ceil_div(n, nthreads()).max(1);
-        let (qr, kr, vr, maskr) = (&q, &k, &v, &mask);
+        let (qr, kr, vr, maskr) = (&s.q, &s.k, &s.v, &mask);
         std::thread::scope(|scope| {
-            for (gi, grp) in ctx.chunks_mut(seqs_per * l * h).enumerate() {
+            for (gi, grp) in s.ctx.chunks_mut(seqs_per * l * h).enumerate() {
                 scope.spawn(move || {
                     let mut qh = vec![0f32; l * hd];
                     let mut kh = vec![0f32; l * hd];
@@ -426,50 +443,49 @@ fn encode(w: &HashMap<String, Vec<f32>>, c: Cfg, ids: &[i64], mask: &[i64], n: u
             }
         });
         linear(
-            &ctx,
+            &s.ctx,
             m,
             h,
             g(&format!("{p}.attention.output.dense.weight")),
             g(&format!("{p}.attention.output.dense.bias")),
             h,
-            &mut attn,
+            &mut s.attn,
         );
-        par_add(&mut hid, &attn);
+        par_add(&mut s.hid, &s.attn);
         layernorm(
-            &mut hid,
+            &mut s.hid,
             h,
             g(&format!("{p}.attention.output.LayerNorm.weight")),
             g(&format!("{p}.attention.output.LayerNorm.bias")),
         );
 
         linear(
-            &hid,
+            &s.hid,
             m,
             h,
             g(&format!("{p}.intermediate.dense.weight")),
             g(&format!("{p}.intermediate.dense.bias")),
             ffn,
-            &mut inter,
+            &mut s.inter,
         );
-        gelu(&mut inter);
+        gelu(&mut s.inter);
         linear(
-            &inter,
+            &s.inter,
             m,
             ffn,
             g(&format!("{p}.output.dense.weight")),
             g(&format!("{p}.output.dense.bias")),
             h,
-            &mut ffn_out,
+            &mut s.ffn_out,
         );
-        par_add(&mut hid, &ffn_out);
+        par_add(&mut s.hid, &s.ffn_out);
         layernorm(
-            &mut hid,
+            &mut s.hid,
             h,
             g(&format!("{p}.output.LayerNorm.weight")),
             g(&format!("{p}.output.LayerNorm.bias")),
         );
     }
-    hid
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -548,6 +564,7 @@ fn to_batch(encs: &[tokenizers::Encoding]) -> (Vec<i64>, Vec<i64>, usize, usize)
 pub struct BlasEmbedder {
     w: HashMap<String, Vec<f32>>,
     tok: Tokenizer,
+    scratch: Scratch,
 }
 
 impl BlasEmbedder {
@@ -556,6 +573,7 @@ impl BlasEmbedder {
         Ok(Self {
             w: load_weights(&dir)?,
             tok: load_tokenizer(&dir)?,
+            scratch: Scratch::default(),
         })
     }
 }
@@ -567,7 +585,8 @@ impl Embedder for BlasEmbedder {
             .encode_batch(texts.to_vec(), true)
             .map_err(|e| anyhow!("tokenize: {e}"))?;
         let (ids, mask, n, l) = to_batch(&encs);
-        let hid = encode(&self.w, EMBED, &ids, &mask, n, l);
+        encode(&self.w, EMBED, &ids, &mask, n, l, &mut self.scratch);
+        let hid = &self.scratch.hid;
         let h = EMBED.h;
         Ok((0..n)
             .map(|s| {
@@ -583,6 +602,7 @@ impl Embedder for BlasEmbedder {
 pub struct BlasReranker {
     w: HashMap<String, Vec<f32>>,
     tok: Tokenizer,
+    scratch: Scratch,
 }
 
 impl BlasReranker {
@@ -591,6 +611,7 @@ impl BlasReranker {
         Ok(Self {
             w: load_weights(&dir)?,
             tok: load_tokenizer(&dir)?,
+            scratch: Scratch::default(),
         })
     }
 }
@@ -603,7 +624,8 @@ impl Reranker for BlasReranker {
             .encode_batch(pairs, true)
             .map_err(|e| anyhow!("tokenize: {e}"))?;
         let (ids, mask, n, l) = to_batch(&encs);
-        let hid = encode(&self.w, RERANK, &ids, &mask, n, l);
+        encode(&self.w, RERANK, &ids, &mask, n, l, &mut self.scratch);
+        let hid = &self.scratch.hid;
         let h = RERANK.h;
         let mut cls = vec![0f32; n * h];
         for s in 0..n {
