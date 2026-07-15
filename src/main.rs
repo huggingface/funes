@@ -478,38 +478,48 @@ async fn main() -> Result<()> {
             AddAgent::Codex { store } => {
                 bootstrap_add(Harness::Codex, resolve_add_store(store).await?, codex::install).await
             }
-            // The rest register a read-side integration only (no local pipeline to bootstrap).
-            AddAgent::Pi { store, force } => pi::install(resolve_add_store(store).await?, force),
-            AddAgent::Hermes { store } => hermes::install(resolve_add_store(store).await?),
-            AddAgent::Opencode { store } => opencode::install(resolve_add_store(store).await?),
+            // The rest register a read-side integration only (no local pipeline to bootstrap), so
+            // they just take the resolved store — the `created` flag only matters to the first push.
+            AddAgent::Pi { store, force } => pi::install(resolve_add_store(store).await?.map(|r| r.store), force),
+            AddAgent::Hermes { store } => hermes::install(resolve_add_store(store).await?.map(|r| r.store)),
+            AddAgent::Opencode { store } => opencode::install(resolve_add_store(store).await?.map(|r| r.store)),
         },
     }
+}
+
+/// A resolved store binding: the store spec, and whether funes just created the repo this run — the
+/// signal the first push uses to skip the wrong-store guard (an empty repo funes made for the user
+/// is plainly not "the wrong store").
+struct Resolved {
+    store: String,
+    created: bool,
 }
 
 /// Resolve the store `funes add` binds. An explicitly-named store is validated — offer to create it
 /// if it's missing on the Hub (a typo guard). With no store, offer to set one up on the Hub when a
 /// token is present (`<user>/funes-store`); otherwise stay local.
-async fn resolve_add_store(raw: AddStore) -> Result<Option<String>> {
+async fn resolve_add_store(raw: AddStore) -> Result<Option<Resolved>> {
     match baked_store(raw) {
-        Some(remote) => {
-            ensure_remote_exists(&remote).await?;
-            Ok(Some(remote))
+        Some(store) => {
+            let created = ensure_remote_exists(&store).await?;
+            Ok(Some(Resolved { store, created }))
         }
         None => offer_hub_store().await,
     }
 }
 
 /// Validate an explicitly-named store: fine if it exists; offer to create it if missing (default
-/// **no**, to catch typos); warn but proceed if the Hub is unreachable.
-async fn ensure_remote_exists(remote: &str) -> Result<()> {
+/// **no**, to catch typos); warn but proceed if the Hub is unreachable. Returns whether it created
+/// the repo.
+async fn ensure_remote_exists(remote: &str) -> Result<bool> {
     let hub::Store::Remote { uri } = hub::Store::parse(remote) else {
-        return Ok(()); // a local path — nothing to check on the Hub
+        return Ok(false); // a local path — nothing to check on the Hub
     };
     match hub::remote_reachability(&uri).await {
-        hub::Reachability::Ok => Ok(()),
+        hub::Reachability::Ok => Ok(false),
         hub::Reachability::Offline => {
             eprintln!("note: can't reach {remote} right now — proceeding; it'll be used once it's back.");
-            Ok(())
+            Ok(false)
         }
         hub::Reachability::Missing => {
             let (owner, name, _) = hub::parse_hf(&uri)?;
@@ -518,7 +528,7 @@ async fn ensure_remote_exists(remote: &str) -> Result<()> {
             {
                 hub::create_dataset_repo(&owner, &name).await?;
                 eprintln!("created {owner}/{name}.");
-                Ok(())
+                Ok(true)
             } else {
                 Err(hub::missing_remote(&uri))
             }
@@ -528,8 +538,8 @@ async fn ensure_remote_exists(remote: &str) -> Result<()> {
 
 /// With no store named, offer to set one up on the Hub — but only when a token is present and we can
 /// prompt. Suggests `<user>/funes-store`: use it if it exists, offer to create it if not. Returns the
-/// store to bind, or `None` to stay local.
-async fn offer_hub_store() -> Result<Option<String>> {
+/// store to bind (with whether it was just created), or `None` to stay local.
+async fn offer_hub_store() -> Result<Option<Resolved>> {
     let interactive = std::io::stdin().is_terminal();
     if !hub::has_token() {
         if interactive {
@@ -556,7 +566,9 @@ async fn offer_hub_store() -> Result<Option<String>> {
     let store = format!("{user}/funes-store");
     let uri = format!("hf://datasets/{store}");
     match hub::remote_reachability(&uri).await {
-        hub::Reachability::Ok => Ok(confirm(&format!("Use your store {store}? [Y/n] "), true).then_some(store)),
+        hub::Reachability::Ok => {
+            Ok(confirm(&format!("Use your store {store}? [Y/n] "), true).then_some(Resolved { store, created: false }))
+        }
         hub::Reachability::Offline => {
             eprintln!("can't reach the Hub right now — staying local; re-run when you're online.");
             Ok(None)
@@ -565,7 +577,7 @@ async fn offer_hub_store() -> Result<Option<String>> {
             if confirm(&format!("Create {store} for your memory? [Y/n] "), true) {
                 hub::create_dataset_repo(&user, "funes-store").await?;
                 eprintln!("created {store}.");
-                Ok(Some(store))
+                Ok(Some(Resolved { store, created: true }))
             } else {
                 Ok(None)
             }
@@ -602,20 +614,19 @@ fn parse_confirm(input: &str, default_yes: bool) -> bool {
 /// 3. first push if a store is bound — clears the overlap guard so the push hook works thereafter.
 async fn bootstrap_add(
     harness: Harness,
-    store: Option<String>,
+    resolved: Option<Resolved>,
     install: impl FnOnce(Option<String>) -> Result<()>,
 ) -> Result<()> {
     ensure_local_index(harness).await;
-    install(store.clone())?;
+    install(resolved.as_ref().map(|r| r.store.clone()))?;
     // First push only when there's actually a local index to publish. Without one (a declined or
     // non-interactive first build, or no sessions yet) there's nothing to push, and running it
-    // would just error on the absent store. (Store validity — a missing remote — is Step 9's to
-    // handle up front; here `run_push` still bails cleanly if the remote turns out missing.)
-    if let Some(remote) = store {
+    // would just error on the absent store.
+    if let Some(Resolved { store, created }) = resolved {
         if hub::Store::local().open().await.is_ok() {
-            first_push(&remote).await?;
+            first_push(&store, created).await?;
         } else {
-            eprintln!("funes: nothing indexed yet — nothing to publish to {remote} yet. Run `funes index`, and the hooks keep it current from there.");
+            eprintln!("funes: nothing indexed yet — nothing to publish to {store} yet. Run `funes index`, and the hooks keep it current from there.");
         }
     }
     Ok(())
@@ -656,18 +667,17 @@ async fn ensure_local_index(harness: Harness) {
 }
 
 /// The one-time first publish `add` performs when a store is bound (the push hook can't, off a
-/// terminal — the overlap guard fails closed there). Interactive, so the guard prompts before
-/// publishing to a store this host shares no chunks with. Errors that aren't fatal to the install
-/// (a read-only token, held-back secrets) are reported without failing `add`.
-async fn first_push(remote: &str) -> Result<()> {
-    match push::run_push(
-        hub::Store::parse(remote),
-        None,
-        false,
-        push::Confirm::Ask(prompt_new_store),
-    )
-    .await
-    {
+/// terminal — the overlap guard fails closed there). The guard prompts before publishing to a store
+/// this host shares no chunks with — unless funes just `created` the store this run, which is
+/// plainly the user's own empty repo, so the push proceeds without re-asking. Errors that aren't
+/// fatal to the install (a read-only token, held-back secrets) are reported without failing `add`.
+async fn first_push(remote: &str, created: bool) -> Result<()> {
+    let confirm = if created {
+        push::Confirm::Yes
+    } else {
+        push::Confirm::Ask(prompt_new_store)
+    };
+    match push::run_push(hub::Store::parse(remote), None, false, confirm).await {
         Ok(pushed) => {
             print!("{}", pushed.report);
             Ok(())
