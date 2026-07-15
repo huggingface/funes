@@ -16,9 +16,10 @@ const SCENT_CAP: usize = 240;
 const PAYLOAD_LINES: usize = 6;
 
 /// The agent `recall` format: provenance header with score, a `→ get` line carrying `store_arg`
-/// (the pre-rendered ` --store <label>` suffix, empty for the built-in guide), a 400-char
-/// preview, and truncated neighbor lines per hit. Byte-stable — the layout is a published
-/// contract.
+/// (the pre-rendered ` --store <label>` suffix, empty for the built-in guide), the full chunk
+/// text, and truncated neighbor lines per hit. The chunk is never clipped — the ranking scored
+/// all of it, so a preview could hide exactly the span that made it a hit; the chunker's size
+/// cap bounds the payload instead. Byte-stable — the layout is a published contract.
 pub fn recall_agent(note: &str, store_arg: &str, hits: &[(Hit, f64)]) -> String {
     let mut out = note.to_string();
     for (h, score) in hits {
@@ -29,8 +30,7 @@ pub fn recall_agent(note: &str, store_arg: &str, hits: &[(Hit, f64)]) -> String 
             h.ts, h.harness, h.project, s8, h.block_type, score
         );
         let _ = writeln!(out, "  → get {} {}{}", h.session_id, h.turn_uuid, store_arg);
-        let preview: String = h.text.chars().take(400).collect();
-        let _ = writeln!(out, "{preview}");
+        let _ = writeln!(out, "{}", h.text);
         for n in &h.neighbors {
             let np: String = n.text.chars().take(160).collect();
             let _ = writeln!(out, "  ~ [{} {} seq{}] {}", n.role, n.block_type, n.seq, np);
@@ -522,13 +522,12 @@ mod tests {
     }
 
     #[test]
-    fn agent_prepends_note_and_truncates_preview() {
-        let long: String = "x".repeat(500);
+    fn agent_prepends_note_and_keeps_full_chunk() {
+        let long: String = "x".repeat(1200);
         let out = recall_agent("remote down\n", "", &[(hit("bad-ts", "text", &long), 1.0)]);
         assert!(out.starts_with("remote down\n[bad-ts]"));
-        // 400-char preview cap.
-        assert!(out.contains(&"x".repeat(400)));
-        assert!(!out.contains(&"x".repeat(401)));
+        // The matched chunk is never clipped.
+        assert!(out.contains(&long));
     }
 
     #[test]
