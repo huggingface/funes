@@ -74,10 +74,15 @@ path to index one place, or scope to a single agent with `--harness codex`.
 **2. Add funes to your agent.**
 
 ```bash
-funes add claude
+funes add claude                 # local
+funes add claude acme/kb         # …backed by a shared store you own (sync across machines/team)
 ```
 
-Your agent gets `recall` and `get` as tools, plus instructions on when to use them.
+Your agent gets `recall` and `get` as tools, plus instructions on when to use them. For **Claude
+and Codex**, `funes add` also wires the automation: it builds your first index if you skipped step 1,
+installs a hook that indexes every turn, and — when you name a shared store — publishes at each
+session boundary (and does the first push for you). Nothing is left to run by hand; see
+[docs/automation.md](docs/automation.md).
 
 `funes` can be added to: Claude, Codex, Pi, Hermes, OpenCode
 
@@ -88,8 +93,9 @@ finding, the agent reaches for `recall` itself — no pasting context back in. T
 small models: every model we tested — down to Gemma 4 E4B — invoked recall *spontaneously*, rather
 than needing to be told to.
 
-That closes the loop: the work you just did becomes recallable the next time you index — [automate it](#automate-it)
-with a session end hook and it stays current on its own.
+That closes the loop: the work you just did becomes recallable the next time you index — and for
+Claude and Codex, `funes add` already installed the hooks that [keep it current](#automate-it) on
+their own.
 
 ## Works across your agents (and models)
 
@@ -104,23 +110,25 @@ between sessions and the memory doesn't move.
 
 ## Share across machines or a team
 
-Your local store is a dataset — link a Hugging Face **dataset** repo you own as your **active store** to
-share it. `recall` then reads it, and `funes push` publishes your local store to it — no per-command flags:
+Your local store is a dataset — publish it to a Hugging Face **dataset** repo you own to share it
+across machines or a team. Bind the store when you add funes to an agent, and it recalls from there
+and keeps it current on its own:
 
 ```bash
-funes use acme/kb          # attach hf://datasets/acme/kb as the active store (persisted in funes.json)
-funes index                # build/update your local store
-funes push                 # publish your local store's new chunks to the active store
-funes recall "..."         # reads the active store
-funes use local            # detach — back to your local store
+funes add claude acme/kb   # recall reads acme/kb; the hooks publish there
+                           # (builds your first index and does the first push for you)
 ```
 
-To query a **different remote for a single call** — say, someone's published memories on a topic —
-without changing your default, pass `--store`:
+The binding lives in the agent's own config — there's no hidden global default. Under the hood it's
+two commands you can also run directly:
 
 ```bash
-funes recall "..." --store other-org/subject-kb
+funes push acme/kb                   # publish your local store's new chunks to acme/kb
+funes recall "..." --store acme/kb   # read any remote store for one call (no binding needed)
 ```
+
+That second form is also how you query **someone else's** published memories on a topic —
+`funes recall "..." --store other-org/subject-kb` — without touching your own setup.
 
 ![pi recalling a past decision from a shared Hugging Face dataset named in the prompt — a project this machine never worked on](docs/img/hub-store.gif)
 
@@ -140,7 +148,7 @@ only; the rest is published as-is.
 For example, when the gate holds back every dirty row, nothing ships and the push exits non-zero:
 
 ```console
-$ funes push
+$ funes push acme/kb
 scanning 512 chunk(s) for secrets…
 hf://datasets/acme/kb: nothing published — held back 3 row(s) with secrets (AWS×2, PrivateKey×1); run `funes scrub`, then push again
 $ echo $?
@@ -149,9 +157,10 @@ $ echo $?
 
 ## Automate it
 
-`funes index` is incremental and cheap, but you still have to remember to run it. To index — and
-push — at the end of every agent session instead of by hand, wire up a hook: see
-[docs/automation.md](docs/automation.md).
+`funes index` is incremental and cheap, but you still have to remember to run it — so for Claude and
+Codex, `funes add` already wired it up: every turn indexes automatically, and with a shared store
+bound, each session publishes. See [docs/automation.md](docs/automation.md) for what it installs and
+how it behaves.
 
 ## How it works
 
