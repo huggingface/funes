@@ -594,7 +594,10 @@ async fn select_turns_fzf(
     center: String,
     highlight: Option<String>,
 ) -> Result<()> {
+    let s8 = &session_id[..session_id.len().min(8)];
+    let spinner = Spinner::start(&format!("loading session {s8}…"));
     let (note, turns) = recall::get_turns(store.clone(), session_id.clone(), center.clone(), i64::MAX).await?;
+    drop(spinner);
     if turns.is_empty() {
         print!("{note}");
         println!("turn {center} not found in session {session_id}");
@@ -602,40 +605,37 @@ async fn select_turns_fzf(
     }
     let (color, width) = human_io();
     let rows = render::turn_rows(&turns, color, width);
+    // The session is fetched once, above; each turn's rendering is written to a file the preview
+    // and the pager read back — field 4 of the row — so neither touches the store again.
+    let dir = tempfile::tempdir()?;
     let mut lines = String::new();
-    for (t, row) in turns.iter().zip(&rows) {
+    for (i, (t, row)) in turns.iter().zip(&rows).enumerate() {
+        let path = dir.path().join(i.to_string());
+        let body = render::get_human("", std::slice::from_ref(t), color, width, highlight.as_deref());
+        std::fs::write(&path, body)?;
         let marker = if t.turn_uuid == center { "▶ " } else { "  " };
         lines.push_str(&format!(
-            "{marker}{}\t{}\t{}\n",
+            "{marker}{}\t{}\t{}\t{}\n",
             row.replace('\t', " "),
             session_id,
-            t.turn_uuid
+            t.turn_uuid,
+            path.display()
         ));
-    }
-    let exe = std::env::current_exe()?;
-    let mut turn_cmd = format!(
-        "{} get {{2}} {{3}} --format human --window 0 --store {}",
-        sh_quote(&exe.display().to_string()),
-        sh_quote(&store.label())
-    );
-    if let Some(h) = &highlight {
-        turn_cmd.push_str(&format!(" --highlight {}", sh_quote(h)));
     }
     let copy = clipboard_pipe();
     let hints = match copy {
         Some(_) => "enter pages the turn · ctrl-y copies its get command · esc goes back",
         None => "enter pages the turn · esc goes back",
     };
-    let s8 = &session_id[..session_id.len().min(8)];
     let mut args = fzf_style_args(color, "turns ❯ ", &format!("session {s8} · {}\n{hints}", store.label()));
     args.extend([
         "--preview".to_string(),
-        turn_cmd.clone(),
+        "cat {4}".to_string(),
         "--preview-window".to_string(),
         "right:60%:wrap".to_string(),
         "--bind".to_string(),
         // `less -R` passes the highlight's ANSI marks through.
-        format!("enter:execute:{turn_cmd} | ${{PAGER:-less -R}}"),
+        "enter:execute:cat {4} | ${PAGER:-less -R}".to_string(),
     ]);
     if let Some(pipe) = copy {
         args.extend(["--bind".to_string(), copy_bind(&store, pipe)]);
