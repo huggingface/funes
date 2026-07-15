@@ -206,7 +206,14 @@ fn ceil_div(a: usize, b: usize) -> usize {
     a.div_ceil(b)
 }
 
+/// Below this many elements the par_* helpers run inline: spawning nthreads() scoped threads
+/// costs more than the memory pass it would split.
+const PAR_MIN: usize = 1 << 16;
+
 fn par_chunks<F: Fn(&mut [f32]) + Sync>(x: &mut [f32], f: F) {
+    if x.len() <= PAR_MIN {
+        return f(x);
+    }
     let cs = ceil_div(x.len(), nthreads()).max(1);
     std::thread::scope(|s| {
         for chunk in x.chunks_mut(cs) {
@@ -216,6 +223,12 @@ fn par_chunks<F: Fn(&mut [f32]) + Sync>(x: &mut [f32], f: F) {
     });
 }
 fn par_rows<F: Fn(&mut [f32]) + Sync>(x: &mut [f32], row_len: usize, f: F) {
+    if x.len() <= PAR_MIN {
+        for row in x.chunks_mut(row_len) {
+            f(row);
+        }
+        return;
+    }
     let cr = ceil_div(x.len() / row_len, nthreads()).max(1);
     std::thread::scope(|s| {
         for chunk in x.chunks_mut(cr * row_len) {
@@ -229,6 +242,12 @@ fn par_rows<F: Fn(&mut [f32]) + Sync>(x: &mut [f32], row_len: usize, f: F) {
     });
 }
 fn par_add(dst: &mut [f32], src: &[f32]) {
+    if dst.len() <= PAR_MIN {
+        for (d, sc) in dst.iter_mut().zip(src) {
+            *d += sc;
+        }
+        return;
+    }
     let cs = ceil_div(dst.len(), nthreads()).max(1);
     std::thread::scope(|s| {
         for (d, sc) in dst.chunks_mut(cs).zip(src.chunks(cs)) {
