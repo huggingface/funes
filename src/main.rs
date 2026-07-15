@@ -260,6 +260,7 @@ async fn main() -> Result<()> {
             store,
         } => {
             let store = store.resolve();
+            let query = query.join(" ");
             let spinner = Spinner::start("recalling…");
             let progress = |label: &str| {
                 if let Some(s) = &spinner {
@@ -268,7 +269,7 @@ async fn main() -> Result<()> {
             };
             let (note, store_label, hits) = recall::recall_hits(
                 store.clone(),
-                query.join(" "),
+                query.clone(),
                 k,
                 candidates,
                 half_life,
@@ -303,7 +304,7 @@ async fn main() -> Result<()> {
                     // without TTYs (or without fzf installed) keeps the line selector.
                     let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
                     if interactive && use_fzf() {
-                        select_hits_fzf(&store, &hits, color, width)
+                        select_hits_fzf(&store, &query, &hits, color, width)
                     } else {
                         select_hits(&store, &hits, color, width).await
                     }
@@ -524,7 +525,7 @@ async fn select_hits(store: &hub::Store, hits: &[(Hit, f64)], color: bool, width
 /// browser and leaving it returns here — the walk-back; Esc quits. Each row carries hidden tab
 /// columns — session id and turn uuid for the drill-down, plus the matched chunk, which doubles
 /// as search text (a query matches content beyond the visible scent) and as the preview.
-fn select_hits_fzf(store: &hub::Store, hits: &[(Hit, f64)], color: bool, width: usize) -> Result<()> {
+fn select_hits_fzf(store: &hub::Store, query: &str, hits: &[(Hit, f64)], color: bool, width: usize) -> Result<()> {
     let rows = render::recall_rows(hits, color, width, chrono::Utc::now());
     let mut lines = String::new();
     for ((h, _), row) in hits.iter().zip(&rows) {
@@ -547,30 +548,33 @@ fn select_hits_fzf(store: &hub::Store, hits: &[(Hit, f64)], color: bool, width: 
         ));
     }
     let exe = std::env::current_exe()?;
+    let copy = clipboard_pipe();
+    let hints = match copy {
+        Some(_) => "enter browses the session · ctrl-y copies its get command · esc quits",
+        None => "enter browses the session · esc quits",
+    };
+    let mut args = fzf_style_args(color, "recall ❯ ", &format!("{query} · {}\n{hints}", store.label()));
+    args.extend([
+        "--preview".to_string(),
+        // The matched chunk, nothing else — the turn browser behind enter owns the context.
+        // Rendering the turn here too would show the match's text twice in different shapes
+        // (or, for a tool hit, not at all: the turn view compresses tool blocks).
+        "echo {4} | fold -s -w $FZF_PREVIEW_COLUMNS".to_string(),
+        "--preview-window".to_string(),
+        "right:60%:wrap".to_string(),
+        "--bind".to_string(),
+        // fzf shell-escapes {4} (the matched chunk) itself.
+        format!(
+            "enter:execute:{} turns {{2}} {{3}} --store {} --highlight {{4}}",
+            sh_quote(&exe.display().to_string()),
+            sh_quote(&store.label())
+        ),
+    ]);
+    if let Some(pipe) = copy {
+        args.extend(["--bind".to_string(), copy_bind(store, pipe)]);
+    }
     let mut fzf = std::process::Command::new("fzf")
-        .args([
-            "--ansi",
-            "--layout=reverse",
-            "--no-sort",
-            "--delimiter",
-            "\t",
-            "--with-nth",
-            "1",
-            "--preview",
-            // The matched chunk, nothing else — the turn browser behind enter owns the context.
-            // Rendering the turn here too would show the match's text twice in different shapes
-            // (or, for a tool hit, not at all: the turn view compresses tool blocks).
-            "echo {4} | fold -s -w $FZF_PREVIEW_COLUMNS",
-            "--preview-window",
-            "right:60%:wrap",
-            "--bind",
-            // fzf shell-escapes {4} (the matched chunk) itself.
-            &format!(
-                "enter:execute:{} turns {{2}} {{3}} --store {} --highlight {{4}}",
-                sh_quote(&exe.display().to_string()),
-                sh_quote(&store.label())
-            ),
-        ])
+        .args(&args)
         .stdin(std::process::Stdio::piped())
         .spawn()?;
     fzf.stdin.take().expect("stdin is piped").write_all(lines.as_bytes())?;
@@ -617,23 +621,27 @@ async fn select_turns_fzf(
     if let Some(h) = &highlight {
         turn_cmd.push_str(&format!(" --highlight {}", sh_quote(h)));
     }
-    let mut cmd = std::process::Command::new("fzf");
-    cmd.args([
-        "--ansi",
-        "--layout=reverse",
-        "--no-sort",
-        "--delimiter",
-        "\t",
-        "--with-nth",
-        "1",
-        "--preview",
-        &turn_cmd,
-        "--preview-window",
-        "right:60%:wrap",
-        "--bind",
+    let copy = clipboard_pipe();
+    let hints = match copy {
+        Some(_) => "enter pages the turn · ctrl-y copies its get command · esc goes back",
+        None => "enter pages the turn · esc goes back",
+    };
+    let s8 = &session_id[..session_id.len().min(8)];
+    let mut args = fzf_style_args(color, "turns ❯ ", &format!("session {s8} · {}\n{hints}", store.label()));
+    args.extend([
+        "--preview".to_string(),
+        turn_cmd.clone(),
+        "--preview-window".to_string(),
+        "right:60%:wrap".to_string(),
+        "--bind".to_string(),
         // `less -R` passes the highlight's ANSI marks through.
-        &format!("enter:execute:{turn_cmd} | ${{PAGER:-less -R}}"),
+        format!("enter:execute:{turn_cmd} | ${{PAGER:-less -R}}"),
     ]);
+    if let Some(pipe) = copy {
+        args.extend(["--bind".to_string(), copy_bind(&store, pipe)]);
+    }
+    let mut cmd = std::process::Command::new("fzf");
+    cmd.args(&args);
     // Land on the hit's turn rather than the top of a possibly huge session. `pos` needs
     // fzf 0.36; older ones still get the `▶` marker to search for.
     if let Some(idx) = turns.iter().position(|t| t.turn_uuid == center) {
@@ -645,6 +653,58 @@ async fn select_turns_fzf(
     fzf.stdin.take().expect("stdin is piped").write_all(lines.as_bytes())?;
     fzf.wait()?;
     Ok(())
+}
+
+/// The presentation flags the fzf pickers share: rows are tab-delimited with only the first field
+/// visible, the header carries the context and key hints, and fzf's own chrome (prompt, pointer,
+/// match highlights) wears the funes accent, cyan — monochrome when `color` is off.
+fn fzf_style_args(color: bool, prompt: &str, header: &str) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "--ansi",
+        "--layout=reverse",
+        "--no-sort",
+        "--info=inline",
+        "--pointer=❯",
+        "--delimiter",
+        "\t",
+        "--with-nth",
+        "1",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    args.push(format!("--prompt={prompt}"));
+    args.push(format!("--header={header}"));
+    args.push(if color {
+        "--color=hl:6,hl+:6,prompt:6,pointer:6,info:6,spinner:6,marker:6".to_string()
+    } else {
+        "--color=bw".to_string()
+    });
+    args
+}
+
+/// The ctrl-y bind for a picker whose rows carry session id and turn uuid in fields 2 and 3:
+/// copies the row's ready-to-run `funes get` command through `pipe`.
+fn copy_bind(store: &hub::Store, pipe: &str) -> String {
+    format!(
+        "ctrl-y:execute-silent(printf 'funes get %s %s --store %s' {{2}} {{3}} {} | {pipe})",
+        sh_word(&store.label())
+    )
+}
+
+/// The first clipboard writer on PATH, as a shell pipe target; None when the box has none.
+fn clipboard_pipe() -> Option<&'static str> {
+    const WRITERS: [(&str, &str); 4] = [
+        ("pbcopy", "pbcopy"),
+        ("wl-copy", "wl-copy"),
+        ("xclip", "xclip -selection clipboard"),
+        ("xsel", "xsel --input --clipboard"),
+    ];
+    let path = std::env::var_os("PATH")?;
+    WRITERS
+        .iter()
+        .find(|(bin, _)| std::env::split_paths(&path).any(|d| d.join(bin).is_file()))
+        .map(|(_, pipe)| *pipe)
 }
 
 /// A stderr spinner for the wait before results: braille frames plus a phase label, redrawn in
@@ -859,7 +919,17 @@ fn prompt_new_store(label: &str, chunks: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{attach_hint, parse_selection, Selection};
+    use super::{attach_hint, fzf_style_args, parse_selection, Selection};
+
+    #[test]
+    fn fzf_style_args_wear_the_accent_only_in_color() {
+        let colored = fzf_style_args(true, "recall ❯ ", "q · store\nhints");
+        assert!(colored.contains(&"--prompt=recall ❯ ".to_string()));
+        assert!(colored.contains(&"--header=q · store\nhints".to_string()));
+        assert!(colored.iter().any(|a| a.starts_with("--color=hl:6")));
+        let plain = fzf_style_args(false, "p", "h");
+        assert!(plain.contains(&"--color=bw".to_string()));
+    }
 
     #[test]
     fn parse_selection_grammar() {
