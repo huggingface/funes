@@ -201,6 +201,15 @@ export PROTOC="$PWD/.tools/protoc/bin/protoc"
 Then `cargo build --release` (binary at `target/release/funes`); `cargo test` runs the suite. The
 integration test downloads the embedder/reranker weights on first run.
 
+Inference (embedding + reranking) runs on a built-in backend — Accelerate on macOS, pure Rust on
+Linux — so the default build has no ML runtime dependency and runs on any glibc ≥ 2.35 (Ubuntu
+22.04). An ONNX Runtime backend is available as an opt-in variant:
+
+```bash
+cargo build --release --no-default-features --features onnx   # ONNX backend instead
+cargo run --release --features onnx --example bench_backends  # A/B both backends
+```
+
 ## Notes
 
 - **Embedding model is pinned** and stamped into the store; querying with a different embedding

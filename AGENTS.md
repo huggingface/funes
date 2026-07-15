@@ -77,3 +77,9 @@ Building needs `protoc` (lance compiles protobuf at build time): system package,
 `./scripts/bootstrap-protoc.sh` then `export PROTOC="$PWD/.tools/protoc/bin/protoc"`. Before
 calling work done: `cargo fmt && cargo clippy && cargo test` (the integration tests download the
 embedder/reranker weights on first run).
+
+Inference has two backends behind the `Embedder`/`Reranker` traits (`src/inference.rs`): the
+default `blas` (src/blas.rs, hand-written forward on Accelerate/faer) and the opt-in `onnx`
+(fastembed/ort). CI lints both on every PR, so also run
+`cargo clippy --all-targets --no-default-features --features onnx` before calling work done;
+`cargo run --release --features onnx --example bench_backends` A/Bs them (latency + agreement).
