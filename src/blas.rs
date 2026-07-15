@@ -195,6 +195,13 @@ fn nthreads() -> usize {
     static N: OnceLock<usize> = OnceLock::new();
     *N.get_or_init(|| std::env::var("NT").ok().and_then(|s| s.parse().ok()).unwrap_or(8))
 }
+/// Worker count for compute-bound per-sequence work (attention, embedding gather): one worker per
+/// sequence up to the core count. Unlike the memory-bound `par_*` helpers (see `nthreads`), this
+/// work scales with cores, so it must not be capped by the small NT default.
+fn seq_workers(n: usize) -> usize {
+    let cores = std::thread::available_parallelism().map(|c| c.get()).unwrap_or(8);
+    n.min(cores).max(1)
+}
 fn ceil_div(a: usize, b: usize) -> usize {
     a.div_ceil(b)
 }
@@ -343,26 +350,34 @@ fn encode(w: &HashMap<String, Vec<f32>>, c: Cfg, ids: &[i64], mask: &[i64], n: u
     ] {
         buf.resize(len, 0.0);
     }
-    for sq in 0..n {
-        let mut run = 0i64;
-        for i in 0..l {
-            let id = ids[sq * l + i];
-            let posid = if c.bert_pos {
-                i
-            } else if id != PAD {
-                run += 1;
-                (PAD + run) as usize
-            } else {
-                PAD as usize
-            };
-            let dst = &mut s.hid[(sq * l + i) * h..(sq * l + i) * h + h];
-            let we = &word[id as usize * h..id as usize * h + h];
-            let pe = &pos[posid * h..posid * h + h];
-            for cc in 0..h {
-                dst[cc] = we[cc] + pe[cc] + typ[cc];
-            }
+    let seqs_per = ceil_div(n, seq_workers(n));
+    std::thread::scope(|scope| {
+        for (gi, grp) in s.hid.chunks_mut(seqs_per * l * h).enumerate() {
+            scope.spawn(move || {
+                for (si, seq) in grp.chunks_mut(l * h).enumerate() {
+                    let sq = gi * seqs_per + si;
+                    let mut run = 0i64;
+                    for i in 0..l {
+                        let id = ids[sq * l + i];
+                        let posid = if c.bert_pos {
+                            i
+                        } else if id != PAD {
+                            run += 1;
+                            (PAD + run) as usize
+                        } else {
+                            PAD as usize
+                        };
+                        let dst = &mut seq[i * h..i * h + h];
+                        let we = &word[id as usize * h..id as usize * h + h];
+                        let pe = &pos[posid * h..posid * h + h];
+                        for cc in 0..h {
+                            dst[cc] = we[cc] + pe[cc] + typ[cc];
+                        }
+                    }
+                }
+            });
         }
-    }
+    });
     layernorm(
         &mut s.hid,
         h,
@@ -401,7 +416,7 @@ fn encode(w: &HashMap<String, Vec<f32>>, c: Cfg, ids: &[i64], mask: &[i64], n: u
             &mut s.v,
         );
 
-        let seqs_per = ceil_div(n, nthreads()).max(1);
+        let seqs_per = ceil_div(n, seq_workers(n));
         let (qr, kr, vr, maskr) = (&s.q, &s.k, &s.v, &mask);
         std::thread::scope(|scope| {
             for (gi, grp) in s.ctx.chunks_mut(seqs_per * l * h).enumerate() {
