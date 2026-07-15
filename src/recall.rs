@@ -295,7 +295,16 @@ pub async fn recall(
     harness: Option<String>,
 ) -> Result<String> {
     let (note, store_label, hits) = recall_hits(
-        store, query, k, candidates, half_life, neighbors, block_type, project, harness,
+        store,
+        query,
+        k,
+        candidates,
+        half_life,
+        neighbors,
+        block_type,
+        project,
+        harness,
+        &|_| (),
     )
     .await?;
     if hits.is_empty() {
@@ -311,7 +320,8 @@ pub async fn recall(
 /// Run the recall pipeline over one store: hybrid retrieval → rerank → recency reweight →
 /// neighbor expansion. Returns the degradation note (empty when the store opened normally), the
 /// label of the store actually read (`None` for the built-in guide), and the scored hits, best
-/// first — rendering is the caller's choice.
+/// first — rendering is the caller's choice. `progress` hears a short label as each slow phase
+/// starts (model load, search, rerank); pass a no-op to run silently.
 #[allow(clippy::too_many_arguments)]
 pub async fn recall_hits(
     store: Store,
@@ -323,6 +333,7 @@ pub async fn recall_hits(
     block_type: Option<String>,
     project: Option<String>,
     harness: Option<String>,
+    progress: &(dyn Fn(&str) + Sync),
 ) -> Result<(String, Option<String>, Vec<(Hit, f64)>)> {
     // `--harness` accepts the same spellings as `index`/`add` (claude|codex|pi); normalize to the
     // stored facet (Claude's is `claude_code`) so `--harness claude` filters instead of silently
@@ -332,6 +343,7 @@ pub async fn recall_hits(
         .transpose()?
         .map(|h| h.as_str().to_string());
 
+    progress("loading model…");
     let mut guard = models().await?.lock().await;
     let Models { embedder, reranker } = &mut *guard;
 
@@ -341,6 +353,7 @@ pub async fn recall_hits(
         .next()
         .context("empty embedding")?;
 
+    progress(&format!("searching {}…", store.label()));
     let read = open_read(&store, Some(embedder.as_mut())).await?;
     let note = read.note.clone().unwrap_or_default();
     let ds = &read.ds;
@@ -362,6 +375,7 @@ pub async fn recall_hits(
     }
 
     let docs: Vec<&str> = hits.iter().map(|h| h.text.as_str()).collect();
+    progress(&format!("reranking {} candidates…", docs.len()));
     let scores = reranker.rerank(query.as_str(), &docs)?;
 
     let now = Utc::now();
@@ -386,6 +400,7 @@ pub async fn recall_hits(
     }
 
     if neighbors > 0 {
+        progress("expanding neighbors…");
         let mut refs: Vec<&mut Hit> = top.iter_mut().map(|(h, _)| h).collect();
         attach_neighbors(ds, &mut refs, neighbors).await?;
     }

@@ -12,6 +12,8 @@ use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// Turns around a `get` target when no window is given — shared by the CLI flag and the hit selector.
 const DEFAULT_WINDOW: i64 = 3;
@@ -258,6 +260,12 @@ async fn main() -> Result<()> {
             store,
         } => {
             let store = store.resolve();
+            let spinner = Spinner::start("recalling…");
+            let progress = |label: &str| {
+                if let Some(s) = &spinner {
+                    s.set(label);
+                }
+            };
             let (note, store_label, hits) = recall::recall_hits(
                 store.clone(),
                 query.join(" "),
@@ -268,8 +276,10 @@ async fn main() -> Result<()> {
                 block_type,
                 project,
                 harness,
+                &progress,
             )
             .await?;
+            drop(spinner);
             match OutputFormat::resolve(format) {
                 OutputFormat::Agent => {
                     if hits.is_empty() {
@@ -635,6 +645,67 @@ async fn select_turns_fzf(
     fzf.stdin.take().expect("stdin is piped").write_all(lines.as_bytes())?;
     fzf.wait()?;
     Ok(())
+}
+
+/// A stderr spinner for the wait before results: braille frames plus a phase label, redrawn in
+/// place and erased when dropped — nothing lands in the output. [`Spinner::start`] returns None
+/// when stderr isn't a terminal, so piped and scripted runs stay silent.
+struct Spinner {
+    label: Arc<Mutex<String>>,
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Spinner {
+    fn start(label: &str) -> Option<Spinner> {
+        if !std::io::stderr().is_terminal() {
+            return None;
+        }
+        let label = Arc::new(Mutex::new(label.to_string()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (l, s) = (label.clone(), stop.clone());
+        let color = std::env::var_os("NO_COLOR").is_none();
+        let handle = std::thread::spawn(move || {
+            const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            for i in 0.. {
+                if s.load(Ordering::Relaxed) {
+                    break;
+                }
+                let text = l.lock().map(|g| g.clone()).unwrap_or_default();
+                let frame = FRAMES[i % FRAMES.len()];
+                if color {
+                    eprint!("\r\x1b[K\x1b[36m{frame}\x1b[0m {text}");
+                } else {
+                    eprint!("\r\x1b[K{frame} {text}");
+                }
+                let _ = std::io::stderr().flush();
+                std::thread::sleep(std::time::Duration::from_millis(80));
+            }
+            eprint!("\r\x1b[K");
+            let _ = std::io::stderr().flush();
+        });
+        Some(Spinner {
+            label,
+            stop,
+            handle: Some(handle),
+        })
+    }
+
+    /// Swap the label; the next frame shows it.
+    fn set(&self, label: &str) {
+        if let Ok(mut l) = self.label.lock() {
+            label.clone_into(&mut l);
+        }
+    }
+}
+
+impl Drop for Spinner {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
 }
 
 /// `s` single-quoted for a shell command line.
