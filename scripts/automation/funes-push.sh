@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# Publish the local funes store to the active remote store.
+# Publish the local funes store to a remote store on the HF Hub.
+#
+# The store to publish to is this script's first argument — `funes add <agent> <store>` bakes it
+# into the hook command (`funes-push.sh <org/repo>`). With no store (a local-only install), the
+# push hook isn't registered at all, so this script always runs with a store.
 #
 # Fired by SessionEnd (publish what this session produced) AND SessionStart (catch up
 # anything a previous session left unpublished — its SessionEnd may never have fired
@@ -7,9 +11,6 @@
 # switched away). Codex has no session-end event, so there it runs on SessionStart only.
 # The Stop hook (funes-index.sh) keeps the LOCAL store fresh per turn; this is the only
 # step that touches the network, so it runs at session boundaries, not per turn.
-#
-# Harness-agnostic: `funes push` publishes the whole local store, whatever produced it,
-# so this script takes no harness argument — one copy serves every agent.
 #
 # `funes push` is incremental and commit-guarded (it retries against a moved remote
 # head), so overlapping publishes — and a publish that overlaps an index — are safe;
@@ -21,9 +22,8 @@
 
 set -uo pipefail
 
-LOG="$HOME/.claude/hooks/funes-sync.log"
-FUNES_HOME="${FUNES_HOME:-$HOME/.funes}"
-FUNES_JSON="$FUNES_HOME/funes.json"
+# Log beside this script, wherever it was installed. $0 is the script's own path in both modes.
+LOG="$(dirname "$0")/funes-sync.log"
 
 log() { printf '%s %s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" "$*" >>"$LOG"; }
 
@@ -38,22 +38,19 @@ find_bin() {
 }
 
 worker() {
-    local funes rc remote
+    local funes rc remote="$1"
     funes="$(find_bin funes || true)"
     if [ -z "$funes" ] || [ ! -x "$funes" ]; then
         log "push ABORT: funes not found; skipping."
         return
     fi
-
-    # Push only when a remote is attached, naming it explicitly so the target is
-    # unambiguous in the log and immune to the active store changing mid-run. A first
-    # push to a store this index shares no chunks with is refused here (the overlap
-    # guard fails closed off a terminal) — clear it once by hand: `funes push <repo>`.
-    remote="$(sed -n 's/.*"remote"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$FUNES_JSON" 2>/dev/null)"
     if [ -z "$remote" ]; then
-        log "push: skipped (no remote attached — 'funes use <org>/<repo>' to enable)"
+        log "push: skipped (no store bound to this hook)"
         return
     fi
+
+    # A first push to a store this index shares no chunks with is refused here (the overlap
+    # guard fails closed off a terminal) — clear it once by hand: `funes push <repo>`.
     log "push: start ($remote)"
     "$funes" push "$remote" >>"$LOG" 2>&1
     rc=$?
@@ -64,14 +61,17 @@ worker() {
     esac
 }
 
-# Worker mode (re-exec): do the real work, already detached from the session.
+# Worker mode (re-exec): do the real work, already detached from the session. The store rides
+# through as $2.
 if [ "${1:-}" = "--worker" ]; then
-    worker
+    worker "${2:-}"
     exit 0
 fi
 
-# Foreground: drain the hook payload on stdin, hand off to a detached worker, return.
+# Foreground: the store is our first argument. Drain the hook payload on stdin, hand off to a
+# detached worker (carrying the store), and return.
+REMOTE="${1:-}"
 cat >/dev/null
-nohup bash "$0" --worker >/dev/null 2>&1 </dev/null &
+nohup bash "$0" --worker "$REMOTE" >/dev/null 2>&1 </dev/null &
 disown 2>/dev/null || true
 exit 0

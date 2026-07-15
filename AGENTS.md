@@ -37,7 +37,7 @@ fell back to; the built-in guide has no store to name and keeps a bare hint).
 | `--type` | — | restrict to `text \| thinking \| tool_use \| tool_result` |
 | `--project` | — | restrict to a project (the directory segment under `projects`) |
 | `--harness` | — | restrict to `claude \| codex \| pi` (the stored facet `claude_code` also parses) |
-| `--store` | active store | the store to read — `<org>/<repo>`, an `hf://…` URI, a local path, or `local` |
+| `--store` | local store | the store to read — `<org>/<repo>`, an `hf://…` URI, a local path, or `local` |
 
 ### get
 
@@ -57,19 +57,20 @@ Agent format, per turn:
 
 ### list / status
 
-- `funes list [--project …] [--limit 50]` — sessions, newest activity first:
+- `funes list [store] [--project …] [--limit 50]` — sessions, newest activity first:
   `[<last_ts>] <project>/<session8>  chunks=<n>  <first user message, first 120 chars>`.
   CLI-only; not an MCP tool.
-- `funes status` — store label, table name, chunk count.
+- `funes status [store]` — store label, table name, chunk count.
 
 ### MCP
 
-`funes mcp` serves stdio; `funes add claude|codex|pi|hermes|opencode` registers it. Tools:
-`recall` (query, k, block_type/project/harness filters, store), `get` (session_id, turn_uuid,
-window, store), `status` (store) — each returns the corresponding agent-format string verbatim.
-A tool call's `store` overrides the server's; `funes mcp --store <spec>` pins one for the
-server's lifetime, and with neither the active store resolves per call (so `funes use` takes
-effect without a restart).
+`funes mcp [store]` serves stdio; `funes add claude|codex|pi|hermes|opencode` registers it (and for
+claude/codex also installs the automation hooks — see [docs/automation.md](docs/automation.md)). A
+positional `store` binds the server to a store; `funes add <agent> <store>` bakes it into the
+registration. Tools: `recall` (query, k, block_type/project/harness filters, store), `get`
+(session_id, turn_uuid, window, store), `status` (store) — each returns the corresponding
+agent-format string verbatim. A tool call's `store` overrides the server's; with neither, it reads
+the local store.
 
 ## Working on the repo
 

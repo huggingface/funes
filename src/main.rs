@@ -6,7 +6,7 @@
 
 use funes::harness::Harness;
 use funes::recall::Hit;
-use funes::{claude, codex, config, hello, hermes, hub, index, mcp, opencode, pi, push, recall, render, scrub, update};
+use funes::{claude, codex, hello, hermes, hub, index, mcp, opencode, pi, push, recall, render, scrub, update};
 
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -63,14 +63,15 @@ enum Cmd {
     },
     /// List indexed sessions, newest activity first.
     List {
+        /// Store to read — an `<org>/<repo>` shorthand, an `hf://…` URI, a local path, or `local`.
+        /// Defaults to your local store.
+        store: Option<String>,
         /// Restrict to a project.
         #[arg(long)]
         project: Option<String>,
         /// Max sessions to show.
         #[arg(long, default_value_t = 50)]
         limit: usize,
-        #[command(flatten)]
-        store: StoreOpts,
     },
     /// Drill down on a recall hit: a turn plus the turns around it, reassembled.
     Get {
@@ -125,21 +126,18 @@ enum Cmd {
     },
     /// Show index statistics.
     Status {
-        #[command(flatten)]
-        store: StoreOpts,
-    },
-    /// Set the active store: the remote this host reads from and publishes to (persisted in
-    /// funes.json; honored by recall/push and the MCP server).
-    Use {
-        /// Remote to attach: `<org>/<repo>` (→ `hf://datasets/<org>/<repo>`) or a full `hf://…`
-        /// URI. Pass `local` to detach and go back to your local store.
-        store: String,
-    },
-    /// Publish your local store's new chunks to a remote store on the HF Hub — the active store by
-    /// default, or `[store]` to publish elsewhere.
-    Push {
-        /// Store to publish to: `<org>/<repo>` or a full `hf://…` URI. Defaults to the active store.
+        /// Store to inspect — an `<org>/<repo>` shorthand, an `hf://…` URI, a local path, or
+        /// `local`. Defaults to your local store.
         store: Option<String>,
+    },
+    /// Publish your local store's new chunks to a remote store on the HF Hub.
+    Push {
+        /// Store to publish to: `<org>/<repo>` or a full `hf://…` URI.
+        store: String,
+        /// Publish only this project's chunks (the path segment under `projects`) — a projection,
+        /// so a multi-project machine can seed a per-project store without leaking siblings.
+        #[arg(long)]
+        project: Option<String>,
         /// Skip the confirmation when the target shares no chunks with your local store.
         #[arg(short, long)]
         yes: bool,
@@ -161,8 +159,9 @@ enum Cmd {
     },
     /// Run as an MCP server over stdio (for Claude Code, Cursor, …).
     Mcp {
-        #[command(flatten)]
-        store: StoreOpts,
+        /// Store to serve — an `<org>/<repo>` shorthand, an `hf://…` URI, a local path, or `local`.
+        /// Defaults to your local store.
+        store: Option<String>,
     },
     /// Add funes to a coding agent.
     #[command(subcommand_value_name = "AGENT", subcommand_help_heading = "Agents")]
@@ -172,29 +171,60 @@ enum Cmd {
     },
 }
 
+/// The store an agent recalls from, baked into its MCP registration. `<org>/<repo>`, an `hf://…`
+/// URI, or `local` (the default). Doc string is shared across the agents via `#[arg]`'s help.
+#[derive(Args)]
+struct AddStore {
+    /// Store this agent recalls from — `<org>/<repo>`, an `hf://…` URI, or `local` (default).
+    store: Option<String>,
+}
+
 #[derive(Subcommand)]
 enum AddAgent {
     /// claude: register funes as an MCP server with Claude Code (native MCP client, user scope).
-    Claude,
+    Claude {
+        #[command(flatten)]
+        store: AddStore,
+    },
     /// codex: register funes as an MCP server with Codex (native MCP client, user scope).
-    Codex,
+    Codex {
+        #[command(flatten)]
+        store: AddStore,
+    },
     /// pi: install funes as a pi extension user-wide (pi has no MCP client of its own).
     Pi {
+        #[command(flatten)]
+        store: AddStore,
         /// Reinstall even if the on-disk copy is already up to date.
         #[arg(long)]
         force: bool,
     },
     /// hermes: register funes as an MCP server (hermes has a native MCP client).
-    Hermes,
+    Hermes {
+        #[command(flatten)]
+        store: AddStore,
+    },
     /// opencode: register funes as an MCP server (user scope).
-    Opencode,
+    Opencode {
+        #[command(flatten)]
+        store: AddStore,
+    },
+}
+
+/// The store to bake into an agent's `funes mcp` registration: `None`/blank/`local` → the local
+/// store (a bare `funes mcp`), else the named remote/explicit store (`funes mcp <store>`).
+fn baked_store(store: AddStore) -> Option<String> {
+    store
+        .store
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && s != "local")
 }
 
 /// Which store the read commands act on. Shared by `recall`/`list`/`get`/`status` and `mcp`.
 #[derive(Args)]
 struct StoreOpts {
-    /// The store to read — an `<org>/<repo>` shorthand, an `hf://…` URI, a local path, or `local`
-    /// — overriding the active store. Defaults to the active store, else your local store.
+    /// The store to read — an `<org>/<repo>` shorthand, an `hf://…` URI, a local path, or `local`.
+    /// Defaults to your local store.
     #[arg(long)]
     store: Option<String>,
 }
@@ -311,8 +341,8 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::List { project, limit, store } => {
-            print!("{}", recall::list(store.resolve(), project, limit).await?);
+        Cmd::List { store, project, limit } => {
+            print!("{}", recall::list(hub::Store::resolve(store), project, limit).await?);
             Ok(())
         }
         Cmd::Get {
@@ -400,7 +430,7 @@ async fn main() -> Result<()> {
             index::run_index_roots(&roots, no_thinking, limit, yes).await
         }
         Cmd::Status { store } => {
-            print!("{}", recall::status(store.resolve()).await?);
+            print!("{}", recall::status(hub::Store::resolve(store)).await?);
             // Show the status body before the (bounded, best-effort) update check, so a slow or
             // offline Hub can't delay the useful output.
             std::io::stdout().flush().ok();
@@ -409,24 +439,18 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Use { store } => use_store(store).await,
         Cmd::Push {
-            store,
+            store: remote,
+            project,
             yes,
             force_reindex,
         } => {
-            let remote = match store {
-                Some(s) => s,
-                None => config::load().remote.ok_or_else(|| {
-                    anyhow!("no active store — attach one with `funes use <org>/<repo>`, or name a store: `funes push <org>/<repo>`")
-                })?,
-            };
             let confirm = if yes {
                 push::Confirm::Yes
             } else {
                 push::Confirm::Ask(prompt_new_store)
             };
-            match push::run_push(hub::Store::parse(&remote), force_reindex, confirm).await {
+            match push::run_push(hub::Store::parse(&remote), project, force_reindex, confirm).await {
                 Ok(pushed) => {
                     print!("{}", pushed.report);
                     // Secrets held back everything — surface a non-zero exit so automation can react.
@@ -443,16 +467,226 @@ async fn main() -> Result<()> {
         }
         Cmd::Scrub => scrub::run().await,
         Cmd::Update { force } => update::run(force).await,
-        Cmd::Mcp {
-            store: StoreOpts { store },
-        } => mcp::run(store).await,
+        Cmd::Mcp { store } => mcp::run(store).await,
         Cmd::Add { agent } => match agent {
-            AddAgent::Claude => claude::install(),
-            AddAgent::Codex => codex::install(),
-            AddAgent::Pi { force } => pi::install(force),
-            AddAgent::Hermes => hermes::install(),
-            AddAgent::Opencode => opencode::install(),
+            // Claude and Codex have the full local pipeline (index + hooks + push), so `add`
+            // bootstraps it: build the first index and do the first push — the two one-time steps
+            // the hooks can't do unattended — so nothing is left to run by hand.
+            AddAgent::Claude { store } => {
+                bootstrap_add(Harness::Claude, resolve_add_store(store).await?, claude::install).await
+            }
+            AddAgent::Codex { store } => {
+                bootstrap_add(Harness::Codex, resolve_add_store(store).await?, codex::install).await
+            }
+            // The rest register a read-side integration only (no local pipeline to bootstrap), so
+            // they just take the resolved store — the `created` flag only matters to the first push.
+            AddAgent::Pi { store, force } => pi::install(resolve_add_store(store).await?.map(|r| r.store), force),
+            AddAgent::Hermes { store } => hermes::install(resolve_add_store(store).await?.map(|r| r.store)),
+            AddAgent::Opencode { store } => opencode::install(resolve_add_store(store).await?.map(|r| r.store)),
         },
+    }
+}
+
+/// A resolved store binding: the store spec, and whether funes just created the repo this run — the
+/// signal the first push uses to skip the wrong-store guard (an empty repo funes made for the user
+/// is plainly not "the wrong store").
+struct Resolved {
+    store: String,
+    created: bool,
+}
+
+/// Resolve the store `funes add` binds. An explicitly-named store is validated — offer to create it
+/// if it's missing on the Hub (a typo guard). With no store, offer to set one up on the Hub when a
+/// token is present (`<user>/funes-store`); otherwise stay local.
+async fn resolve_add_store(raw: AddStore) -> Result<Option<Resolved>> {
+    match baked_store(raw) {
+        Some(store) => {
+            let created = ensure_remote_exists(&store).await?;
+            Ok(Some(Resolved { store, created }))
+        }
+        None => offer_hub_store().await,
+    }
+}
+
+/// Validate an explicitly-named store: fine if it exists; offer to create it if missing (default
+/// **no**, to catch typos); warn but proceed if the Hub is unreachable. Returns whether it created
+/// the repo.
+async fn ensure_remote_exists(remote: &str) -> Result<bool> {
+    let hub::Store::Remote { uri } = hub::Store::parse(remote) else {
+        return Ok(false); // a local path — nothing to check on the Hub
+    };
+    match hub::remote_reachability(&uri).await {
+        hub::Reachability::Ok => Ok(false),
+        hub::Reachability::Offline => {
+            eprintln!("note: can't reach {remote} right now — proceeding; it'll be used once it's back.");
+            Ok(false)
+        }
+        hub::Reachability::Missing => {
+            let (owner, name, _) = hub::parse_hf(&uri)?;
+            if std::io::stdin().is_terminal()
+                && confirm(&format!("{remote} doesn't exist on the Hub. Create it? [y/N] "), false)
+            {
+                hub::create_dataset_repo(&owner, &name).await?;
+                eprintln!("created {owner}/{name}.");
+                Ok(true)
+            } else {
+                Err(hub::missing_remote(&uri))
+            }
+        }
+    }
+}
+
+/// With no store named, offer to set one up on the Hub — but only when a token is present and we can
+/// prompt. Suggests `<user>/funes-store`: use it if it exists, offer to create it if not. Returns the
+/// store to bind (with whether it was just created), or `None` to stay local.
+async fn offer_hub_store() -> Result<Option<Resolved>> {
+    let interactive = std::io::stdin().is_terminal();
+    if !hub::has_token() {
+        if interactive {
+            eprintln!("staying local — set HF_TOKEN (or run `hf auth login`) and re-run `funes add …` to sync across machines or a team.");
+        }
+        return Ok(None);
+    }
+    // A scripted (non-interactive) add can't prompt, so it stays local unless a store was named.
+    if !interactive
+        || !confirm(
+            "Sync your memory to a Hugging Face store, so it follows you across machines? [Y/n] ",
+            true,
+        )
+    {
+        return Ok(None);
+    }
+    let user = match hub::whoami().await {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("couldn't read your Hugging Face identity ({e:#}) — staying local.");
+            return Ok(None);
+        }
+    };
+    let store = format!("{user}/funes-store");
+    let uri = format!("hf://datasets/{store}");
+    match hub::remote_reachability(&uri).await {
+        hub::Reachability::Ok => {
+            Ok(confirm(&format!("Use your store {store}? [Y/n] "), true).then_some(Resolved { store, created: false }))
+        }
+        hub::Reachability::Offline => {
+            eprintln!("can't reach the Hub right now — staying local; re-run when you're online.");
+            Ok(None)
+        }
+        hub::Reachability::Missing => {
+            if confirm(&format!("Create {store} for your memory? [Y/n] "), true) {
+                hub::create_dataset_repo(&user, "funes-store").await?;
+                eprintln!("created {store}.");
+                Ok(Some(Resolved { store, created: true }))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+}
+
+/// Prompt for yes/no on stderr and read a line from stdin. Empty input takes `default_yes`.
+fn confirm(prompt: &str, default_yes: bool) -> bool {
+    eprint!("{prompt}");
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    if std::io::stdin().read_line(&mut answer).is_err() {
+        return false;
+    }
+    parse_confirm(&answer, default_yes)
+}
+
+/// Pure core of [`confirm`]: empty → the default; `y`/`yes` → yes; anything else → no (conservative,
+/// so an unrecognized answer never creates a repo or publishes).
+fn parse_confirm(input: &str, default_yes: bool) -> bool {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "" => default_yes,
+        "y" | "yes" => true,
+        _ => false,
+    }
+}
+
+/// `funes add claude|codex [store]` for the agents with a full local pipeline: bootstrap the
+/// one-time steps the hooks can't do unattended, around the per-agent `install` (hooks + MCP).
+///
+/// 1. build the first index if the local store is missing (so recall/push have content);
+/// 2. `install` — register hooks + MCP (bakes the store);
+/// 3. first push if a store is bound — clears the overlap guard so the push hook works thereafter.
+async fn bootstrap_add(
+    harness: Harness,
+    resolved: Option<Resolved>,
+    install: impl FnOnce(Option<String>) -> Result<()>,
+) -> Result<()> {
+    ensure_local_index(harness).await;
+    install(resolved.as_ref().map(|r| r.store.clone()))?;
+    // First push only when there's actually a local index to publish. Without one (a declined or
+    // non-interactive first build, or no sessions yet) there's nothing to push, and running it
+    // would just error on the absent store.
+    if let Some(Resolved { store, created }) = resolved {
+        if hub::Store::local().open().await.is_ok() {
+            first_push(&store, created).await?;
+        } else {
+            eprintln!("funes: nothing indexed yet — nothing to publish to {store} yet. Run `funes index`, and the hooks keep it current from there.");
+        }
+    }
+    Ok(())
+}
+
+/// Build the first index from `harness`'s sessions when the local store is missing, so `add` leaves
+/// recall working without a separate step. Best-effort: a decline, an empty/absent session dir, or
+/// a build error leaves a note and lets `add` finish — the hooks are still installed, and the user
+/// can run `funes index` later. A non-interactive run never triggers the (potentially long) first
+/// build; it just points at `funes index`.
+async fn ensure_local_index(harness: Harness) {
+    if hub::Store::local().open().await.is_ok() {
+        return; // already have a local index
+    }
+    if !std::io::stdin().is_terminal() {
+        eprintln!("funes: no local index yet — run `funes index` in a terminal to build it (the hooks index each turn after that).");
+        return;
+    }
+    let Some(root) = funes::harness::known_harness_roots()
+        .into_iter()
+        .find(|(_, h)| *h == harness)
+    else {
+        eprintln!(
+            "funes: no {} sessions found yet — the hooks are installed; run `funes index` once you've used it.",
+            harness.cli_name()
+        );
+        return;
+    };
+    eprintln!(
+        "funes: no local index yet — building it from your {} sessions…",
+        harness.cli_name()
+    );
+    if let Err(e) = index::run_index_roots(&[(root.0, Some(harness))], false, None, false).await {
+        eprintln!(
+            "funes: initial index didn't complete ({e:#}) — the hooks are installed; run `funes index` to build it."
+        );
+    }
+}
+
+/// The one-time first publish `add` performs when a store is bound (the push hook can't, off a
+/// terminal — the overlap guard fails closed there). The guard prompts before publishing to a store
+/// this host shares no chunks with — unless funes just `created` the store this run, which is
+/// plainly the user's own empty repo, so the push proceeds without re-asking. Errors that aren't
+/// fatal to the install (a read-only token, held-back secrets) are reported without failing `add`.
+async fn first_push(remote: &str, created: bool) -> Result<()> {
+    let confirm = if created {
+        push::Confirm::Yes
+    } else {
+        push::Confirm::Ask(prompt_new_store)
+    };
+    match push::run_push(hub::Store::parse(remote), None, false, confirm).await {
+        Ok(pushed) => {
+            print!("{}", pushed.report);
+            Ok(())
+        }
+        Err(e) if push::is_read_only(&e) => {
+            eprintln!("{remote} is read-only for your token — recall can read it, but publishing needs write access (check your HF token).");
+            Ok(())
+        }
+        Err(e) => Err(e),
     }
 }
 
@@ -845,70 +1079,6 @@ fn parse_selection(line: &str, hits: usize) -> Selection {
     Selection::Expand { ordinal, window }
 }
 
-/// `funes use <store>`: attach a remote (or `local` to detach) and report the next step.
-async fn use_store(spec: String) -> Result<()> {
-    let mut cfg = config::load();
-    if spec == "local" {
-        cfg.remote = None;
-        config::save(&cfg)?;
-        println!("active store: local store");
-        return Ok(());
-    }
-    let uri = match hub::Store::parse(&spec) {
-        hub::Store::Remote { uri } => uri,
-        hub::Store::Local { .. } => {
-            return Err(anyhow!(
-                "`funes use` takes a remote (e.g. `acme/kb` or `hf://datasets/<org>/<repo>`); for the \
-                 local store use `funes use local`, or relocate funes's home with $FUNES_HOME"
-            ))
-        }
-    };
-    cfg.remote = Some(uri.clone());
-    config::save(&cfg)?;
-    println!("active store: {uri}");
-
-    // The overlap heuristic below reads the remote's chunk ids; a remote we can't read would come
-    // back empty and wrongly hint at pushing. Attach anyway (the intent is stored) but skip the
-    // heuristic and say what's wrong — caught here at attach time rather than at the next push.
-    match hub::remote_reachability(&uri).await {
-        hub::Reachability::Offline => {
-            println!("remote currently unreachable — recall will use your local store until it's back");
-            return Ok(());
-        }
-        hub::Reachability::Missing => {
-            println!("note: {}", hub::missing_remote(&uri));
-            return Ok(());
-        }
-        hub::Reachability::Ok => {}
-    }
-
-    let local = push::store_ids(&hub::Store::local()).await;
-    let remote = push::store_ids(&hub::Store::parse(&uri)).await;
-    let unpushed = local.difference(&remote).count();
-    println!("{}", attach_hint(local.len(), remote.len(), unpushed));
-    Ok(())
-}
-
-/// The next-step hint for `funes use`.
-fn attach_hint(local: usize, remote: usize, unpushed: usize) -> String {
-    if local == 0 && remote == 0 {
-        "no memories indexed yet — run `funes index` to build your local store, then `funes push` to publish it here."
-            .to_string()
-    } else if local == 0 {
-        format!("the remote holds {remote} chunks — recall reads them now. if you own this remote store, run `funes index` then `funes push` to add this machine's sessions.")
-    } else if unpushed == 0 {
-        format!("local store: {local} chunks, all present on the remote.")
-    } else if remote == 0 {
-        format!("local store: {local} chunks, none on the remote yet — run `funes push`.")
-    } else if local > unpushed {
-        // Shares chunks with the remote → it's yours to add to; publish the extras.
-        format!("local store: {local} chunks, {unpushed} not yet on the remote — run `funes push`.")
-    } else {
-        // No shared chunks with a populated remote: a fresh host of yours, or a store you only read.
-        format!("local store: {local} chunks, remote: {remote} — no shared chunks: a new host of yours, or a store you only read. `funes push` to contribute, skip if it's not yours.")
-    }
-}
-
 /// The push confirmation for a store the local index shares no chunks with. Fails closed (returns
 /// false) off a terminal, so an unattended push can't silently publish to the wrong store — there it
 /// must be re-run with `--yes`.
@@ -934,7 +1104,7 @@ fn prompt_new_store(label: &str, chunks: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{attach_hint, fzf_style_args, parse_selection, Selection};
+    use super::{fzf_style_args, parse_confirm, parse_selection, Selection};
 
     #[test]
     fn fzf_style_args_wear_the_accent_only_in_color() {
@@ -944,6 +1114,20 @@ mod tests {
         assert!(colored.iter().any(|a| a.starts_with("--color=hl:6")));
         let plain = fzf_style_args(false, "p", "h");
         assert!(plain.contains(&"--color=bw".to_string()));
+    }
+
+    #[test]
+    fn parse_confirm_honors_default_and_answers() {
+        // Empty takes the default either way.
+        assert!(parse_confirm("\n", true));
+        assert!(!parse_confirm("  ", false));
+        // Explicit yes/no, case- and whitespace-insensitive.
+        assert!(parse_confirm("y", false));
+        assert!(parse_confirm(" YES \n", false));
+        assert!(!parse_confirm("n", true));
+        // Anything unrecognized is a conservative no, even under a yes default.
+        assert!(!parse_confirm("nope", true));
+        assert!(!parse_confirm("maybe", true));
     }
 
     #[test]
@@ -965,24 +1149,5 @@ mod tests {
         assert!(matches!(parse_selection("x", 8), Selection::Help));
         assert!(matches!(parse_selection("3 -1", 8), Selection::Help));
         assert!(matches!(parse_selection("3 10 zzz", 8), Selection::Help));
-    }
-
-    #[test]
-    fn attach_hint_covers_each_state() {
-        // empty local + empty remote -> index
-        assert!(attach_hint(0, 0, 0).contains("funes index"));
-        // empty local + populated remote -> recall now, index to add local
-        let h = attach_hint(0, 5, 0);
-        assert!(h.contains("recall reads them") && h.contains("funes index"));
-        // local fully published -> no push hint
-        assert!(attach_hint(8, 8, 0).contains("all present"));
-        // empty remote -> first publish
-        assert!(attach_hint(8, 0, 8).contains("funes push"));
-        // local overlaps the remote (overlap = 8-5 = 3) -> push the extras
-        let h = attach_hint(8, 3, 5);
-        assert!(h.contains("5 not yet") && h.contains("funes push"));
-        // no overlap with a populated remote -> cautious, may be read-only
-        let h = attach_hint(8, 5, 8);
-        assert!(h.contains("no shared chunks") && h.contains("skip if it's not yours"));
     }
 }

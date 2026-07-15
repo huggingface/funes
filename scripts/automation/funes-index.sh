@@ -21,7 +21,9 @@
 
 set -uo pipefail
 
-LOG="$HOME/.claude/hooks/funes-sync.log"
+# Log beside this script, wherever it was installed — `funes add` drops it in the agent's hooks
+# dir (~/.claude/hooks, ~/.codex/hooks). $0 is the script's own path in both foreground and worker.
+LOG="$(dirname "$0")/funes-sync.log"
 
 log() { printf '%s %s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" "$*" >>"$LOG"; }
 
