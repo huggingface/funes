@@ -11,6 +11,8 @@
 #[cfg(not(unix))]
 compile_error!("funes is unix-only (Linux/macOS)");
 
+#[cfg(feature = "blas")]
+pub mod blas;
 pub mod capture_store;
 pub mod chunk;
 pub mod claude;
@@ -27,6 +29,7 @@ pub mod hf_dataset;
 pub mod hf_traces;
 pub mod hub;
 pub mod index;
+pub mod inference;
 pub mod jsonl;
 pub mod lock;
 pub mod mcp;

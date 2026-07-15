@@ -103,10 +103,13 @@ jobs:
       !cancelled() &&
       (startsWith(github.ref, 'refs/tags/') || needs.compute.result == 'success'
         || github.event_name == 'pull_request' || github.ref == 'refs/heads/main')
-    # 24.04 (glibc 2.39): the prebuilt onnxruntime pulled by ort_sys/fastembed needs the
-    # glibc 2.38+ __isoc23_* symbols, so linking fails on 22.04.
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # glibc compatibility is one-way: a binary runs on any glibc >= the one it was built against.
+    # Building inside 22.04 pins the floor at glibc 2.35 — on the 24.04 runner image, C deps
+    # compiled during the build would bind __isoc23_*@GLIBC_2.38 symbols. A check below enforces
+    # the floor on every build.
+    container: ubuntu:22.04
+    timeout-minutes: 90
     # Published builds (a dispatch release or a tag push) get the optimized `dist` profile; PR/main
     # validation builds use the fast `release` profile. Dispatch is the primary release path — it
     # builds before `publish` creates the tag — so gating on tags alone would ship unoptimized.
@@ -118,10 +121,22 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             arch: x86_64
+            objdump: objdump
           - target: aarch64-unknown-linux-gnu
             arch: aarch64
             features: --features vendored-openssl
+            objdump: aarch64-linux-gnu-objdump
     steps:
+      # Everything the bare container lacks: compilers and binutils, git for checkout/rust-cache,
+      # perl for the version stamp, curl/ca-certificates for the toolchain installs, wget for
+      # setup-mold, pkg-config + libssl-dev for the native x86_64 TLS link, cmake for zstd-sys,
+      # unzip for bootstrap-protoc, zstd for rust-cache compression.
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            build-essential git perl curl ca-certificates pkg-config libssl-dev cmake unzip wget zstd
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
@@ -132,22 +147,28 @@ jobs:
         with:
           # Keyed by profile: fat-LTO deps have different fingerprints than the fast profile's, so a
           # shared key would make each profile's build restore the other's artifacts and recompile.
-          key: release-${{ matrix.target }}-${{ env.PROFILE }}
+          # The container tag is in the key because cargo fingerprints don't see the build image: a
+          # cache from another image would restore C objects bound to its newer glibc symbols.
+          key: release-ubuntu22.04-${{ matrix.target }}-${{ env.PROFILE }}
 
-      # Faster, lower-memory linker — keeps the heavy lance/onnxruntime link in budget.
+      # Faster, lower-memory linker — keeps the heavy lance link in budget. The action runs as
+      # root inside the container (no sudo) and downloads with wget, installed above.
       - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
 
+      # 22.04's packaged protoc is too old for the lance protos; bootstrap the pinned one.
       - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        run: |
+          ./scripts/bootstrap-protoc.sh
+          echo "PROTOC=$PWD/.tools/protoc/bin/protoc" >> "$GITHUB_ENV"
 
-      # aarch64 is cross-compiled on the x86_64 runner. gcc-aarch64-linux-gnu links the binary
-      # and (via the cc crate) builds vendored OpenSSL for the target; g++-aarch64-linux-gnu
-      # brings the target libstdc++ that onnxruntime (ort, C++) links against. cc derives the
-      # tool names from the target triple, so installing the packages is enough.
+      # aarch64 is cross-compiled inside the same 22.04 container, so its sysroot pins the same
+      # glibc 2.35 floor. gcc-aarch64-linux-gnu links the binary and (via the cc crate) builds
+      # vendored OpenSSL for the target; g++-aarch64-linux-gnu brings the target libstdc++.
+      # cc derives the tool names from the target triple, so installing the packages is enough.
       - name: Install aarch64 cross toolchain
         if: matrix.arch == 'aarch64'
         run: |
-          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          DEBIAN_FRONTEND=noninteractive apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
           mkdir -p ~/.cargo
           {
             echo '[target.aarch64-unknown-linux-gnu]'
@@ -162,6 +183,17 @@ jobs:
 
       - name: Build
         run: cargo build --profile ${{ env.PROFILE }} --target ${{ matrix.target }} ${{ matrix.features }}
+
+      # The point of the container build: fail loudly if anything drags the floor above 22.04.
+      - name: Check the glibc floor
+        run: |
+          BIN="target/${{ matrix.target }}/${{ env.PROFILE }}/funes"
+          MAX=$(${{ matrix.objdump }} -T "$BIN" | grep -o 'GLIBC_[0-9.]*' | sort -V | tail -1)
+          echo "max glibc symbol version: $MAX"
+          if [ "$(printf '%s\n' "${MAX#GLIBC_}" 2.35 | sort -V | tail -1)" != "2.35" ]; then
+            echo "::error::binary requires $MAX, above the glibc 2.35 floor (Ubuntu 22.04)"
+            exit 1
+          fi
 
       - name: Package
         run: |

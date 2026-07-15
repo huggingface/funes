@@ -4,9 +4,9 @@
 use crate::chunk::Chunk;
 use crate::dataset;
 use crate::index::{self, DIM};
+use crate::inference::Embedder;
 use anyhow::Result;
 use arrow_array::RecordBatchIterator;
-use fastembed::TextEmbedding;
 use lance::dataset::Dataset;
 use tempfile::TempDir;
 
@@ -120,7 +120,7 @@ Your indexed sessions stay on your machine until you `funes push`.
 
 /// Build the corpus as an ephemeral lance dataset; the returned temp dir backs it (keep alive
 /// while reading). With an `embedder`, passages get real vectors for search; without, zeros.
-pub async fn dataset(embedder: Option<&mut TextEmbedding>) -> Result<(TempDir, Dataset)> {
+pub async fn dataset(embedder: Option<&mut dyn Embedder>) -> Result<(TempDir, Dataset)> {
     let ts = chrono::Utc::now().to_rfc3339();
     let chunks: Vec<Chunk> = PASSAGES
         .iter()
@@ -146,7 +146,7 @@ pub async fn dataset(embedder: Option<&mut TextEmbedding>) -> Result<(TempDir, D
 
     let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
     let vectors: Vec<Vec<f32>> = match embedder {
-        Some(e) => e.embed(texts, None)?,
+        Some(e) => e.embed(&texts)?,
         None => vec![vec![0.0; DIM as usize]; chunks.len()],
     };
 
