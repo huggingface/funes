@@ -469,12 +469,102 @@ async fn main() -> Result<()> {
         Cmd::Update { force } => update::run(force).await,
         Cmd::Mcp { store } => mcp::run(store).await,
         Cmd::Add { agent } => match agent {
-            AddAgent::Claude { store } => claude::install(baked_store(store)),
-            AddAgent::Codex { store } => codex::install(baked_store(store)),
+            // Claude and Codex have the full local pipeline (index + hooks + push), so `add`
+            // bootstraps it: build the first index and do the first push — the two one-time steps
+            // the hooks can't do unattended — so nothing is left to run by hand.
+            AddAgent::Claude { store } => bootstrap_add(Harness::Claude, baked_store(store), claude::install).await,
+            AddAgent::Codex { store } => bootstrap_add(Harness::Codex, baked_store(store), codex::install).await,
+            // The rest register a read-side integration only (no local pipeline to bootstrap).
             AddAgent::Pi { store, force } => pi::install(baked_store(store), force),
             AddAgent::Hermes { store } => hermes::install(baked_store(store)),
             AddAgent::Opencode { store } => opencode::install(baked_store(store)),
         },
+    }
+}
+
+/// `funes add claude|codex [store]` for the agents with a full local pipeline: bootstrap the
+/// one-time steps the hooks can't do unattended, around the per-agent `install` (hooks + MCP).
+///
+/// 1. build the first index if the local store is missing (so recall/push have content);
+/// 2. `install` — register hooks + MCP (bakes the store);
+/// 3. first push if a store is bound — clears the overlap guard so the push hook works thereafter.
+async fn bootstrap_add(
+    harness: Harness,
+    store: Option<String>,
+    install: impl FnOnce(Option<String>) -> Result<()>,
+) -> Result<()> {
+    ensure_local_index(harness).await;
+    install(store.clone())?;
+    // First push only when there's actually a local index to publish. Without one (a declined or
+    // non-interactive first build, or no sessions yet) there's nothing to push, and running it
+    // would just error on the absent store. (Store validity — a missing remote — is Step 9's to
+    // handle up front; here `run_push` still bails cleanly if the remote turns out missing.)
+    if let Some(remote) = store {
+        if hub::Store::local().open().await.is_ok() {
+            first_push(&remote).await?;
+        } else {
+            eprintln!("funes: nothing indexed yet — nothing to publish to {remote} yet. Run `funes index`, and the hooks keep it current from there.");
+        }
+    }
+    Ok(())
+}
+
+/// Build the first index from `harness`'s sessions when the local store is missing, so `add` leaves
+/// recall working without a separate step. Best-effort: a decline, an empty/absent session dir, or
+/// a build error leaves a note and lets `add` finish — the hooks are still installed, and the user
+/// can run `funes index` later. A non-interactive run never triggers the (potentially long) first
+/// build; it just points at `funes index`.
+async fn ensure_local_index(harness: Harness) {
+    if hub::Store::local().open().await.is_ok() {
+        return; // already have a local index
+    }
+    if !std::io::stdin().is_terminal() {
+        eprintln!("funes: no local index yet — run `funes index` in a terminal to build it (the hooks index each turn after that).");
+        return;
+    }
+    let Some(root) = funes::harness::known_harness_roots()
+        .into_iter()
+        .find(|(_, h)| *h == harness)
+    else {
+        eprintln!(
+            "funes: no {} sessions found yet — the hooks are installed; run `funes index` once you've used it.",
+            harness.cli_name()
+        );
+        return;
+    };
+    eprintln!(
+        "funes: no local index yet — building it from your {} sessions…",
+        harness.cli_name()
+    );
+    if let Err(e) = index::run_index_roots(&[(root.0, Some(harness))], false, None, false).await {
+        eprintln!(
+            "funes: initial index didn't complete ({e:#}) — the hooks are installed; run `funes index` to build it."
+        );
+    }
+}
+
+/// The one-time first publish `add` performs when a store is bound (the push hook can't, off a
+/// terminal — the overlap guard fails closed there). Interactive, so the guard prompts before
+/// publishing to a store this host shares no chunks with. Errors that aren't fatal to the install
+/// (a read-only token, held-back secrets) are reported without failing `add`.
+async fn first_push(remote: &str) -> Result<()> {
+    match push::run_push(
+        hub::Store::parse(remote),
+        None,
+        false,
+        push::Confirm::Ask(prompt_new_store),
+    )
+    .await
+    {
+        Ok(pushed) => {
+            print!("{}", pushed.report);
+            Ok(())
+        }
+        Err(e) if push::is_read_only(&e) => {
+            eprintln!("{remote} is read-only for your token — recall can read it, but publishing needs write access (check your HF token).");
+            Ok(())
+        }
+        Err(e) => Err(e),
     }
 }
 
