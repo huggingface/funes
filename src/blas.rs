@@ -1,8 +1,8 @@
 //! A from-scratch forward for funes' two models — a BLAS-backed alternative to the ONNX backend
-//! (see `inference`). Every matmul goes through a small platform **seam** (`sgemm`/`vexp`); today
-//! macOS wires it to Accelerate (cblas_sgemm on AMX + vForce vvexpf), and Linux is a marked TODO
-//! (OpenBLAS/MKL + a vectorized exp). Everything else — the encoder, tokenization, the trait impls —
-//! is shared, cross-platform source. Gated behind the `blas` feature.
+//! (see `inference`). Every matmul goes through a small platform **seam** (`sgemm`/`vexp`): macOS
+//! wires it to Accelerate (cblas_sgemm on AMX + vForce vvexpf), Linux to faer's pure-Rust GEMM
+//! plus a runtime-dispatched polynomial exp. Everything else — the encoder, tokenization, the
+//! trait impls — is shared, cross-platform source. Gated behind the `blas` feature.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -14,8 +14,8 @@ use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 use crate::inference::{Embedder, Reranker};
 
 // ---------------------------------------------------------------------------------------------
-// Platform seam: the ONLY OS-specific code. A Linux backend implements just these two functions
-// (plus the link in build.rs) and inherits the entire encoder below.
+// Platform seam: the ONLY OS-specific code. A platform backend implements just these two
+// functions (plus any library link in build.rs) and inherits the entire encoder below.
 // ---------------------------------------------------------------------------------------------
 #[cfg(target_os = "macos")]
 mod seam {
@@ -82,27 +82,73 @@ mod seam {
 
 #[cfg(target_os = "linux")]
 mod seam {
-    // TODO(linux backend): wire these to a fast BLAS + vectorized exp, then add the library link in
-    // build.rs (e.g. `cargo:rustc-link-lib=openblas`). cblas_sgemm has the *same* signature in
-    // OpenBLAS/BLIS/MKL as Accelerate — this is the only new code the Linux port needs.
+    use faer::linalg::matmul::matmul;
+    use faer::{Accum, MatMut, MatRef, Par};
+
+    /// Below this many flops a GEMM runs sequentially: the small per-head attention GEMMs come
+    /// from worker threads that already own the parallelism; only the big batched linears
+    /// (called from the main thread) benefit from faer's rayon splitting.
+    const PAR_FLOPS: f64 = 1e8;
+
+    /// C[m,n] = alpha·op(A)·op(B); row-major; ta/tb are CBLAS 111 (NoTrans) / 112 (Trans).
     #[allow(clippy::too_many_arguments)]
     pub fn sgemm(
-        _ta: i32,
-        _tb: i32,
-        _m: usize,
-        _n: usize,
-        _k: usize,
-        _alpha: f32,
-        _a: &[f32],
-        _lda: usize,
-        _b: &[f32],
-        _ldb: usize,
-        _y: &mut [f32],
+        ta: i32,
+        tb: i32,
+        m: usize,
+        n: usize,
+        k: usize,
+        alpha: f32,
+        a: &[f32],
+        lda: usize,
+        b: &[f32],
+        ldb: usize,
+        y: &mut [f32],
     ) {
-        todo!("Linux: cblas_sgemm via OpenBLAS/MKL (+ link in build.rs)")
+        // op(A) is m×k, op(B) is k×n; a transposed operand swaps its (row, col) strides.
+        let (ars, acs) = if ta == super::NO_T {
+            (lda as isize, 1)
+        } else {
+            (1, lda as isize)
+        };
+        let (brs, bcs) = if tb == super::NO_T {
+            (ldb as isize, 1)
+        } else {
+            (1, ldb as isize)
+        };
+        let par = if 2.0 * m as f64 * n as f64 * k as f64 >= PAR_FLOPS {
+            Par::rayon(0)
+        } else {
+            Par::Seq
+        };
+        unsafe {
+            let a = MatRef::from_raw_parts(a.as_ptr(), m, k, ars, acs);
+            let b = MatRef::from_raw_parts(b.as_ptr(), k, n, brs, bcs);
+            let y = MatMut::from_raw_parts_mut(y.as_mut_ptr(), m, n, n as isize, 1);
+            matmul(y, Accum::Replace, a, b, alpha, par);
+        }
     }
-    pub fn vexp(_buf: &mut [f32]) {
-        todo!("Linux: vectorized expf (MKL vsExp or a SIMD exp)")
+
+    /// In-place vectorized exp: buf[i] = e^{buf[i]}. exp(x) = 2^f·exp(r), f = round(x/ln2), with
+    /// exp(r) a degree-6 Taylor on |r| ≤ ln2/2 and 2^f built in the float's exponent bits — all
+    /// branch-free so LLVM auto-vectorizes; multiversion picks the widest clone the CPU runs.
+    /// Max relative error 2.5e-7.
+    #[multiversion::multiversion(targets("x86_64+avx512f+avx512bw+avx512dq", "x86_64+avx2+fma"))]
+    pub fn vexp(buf: &mut [f32]) {
+        const LOG2E: f32 = std::f32::consts::LOG2_E;
+        // The digits are load-bearing: 355/512 is exactly representable, so f·LN2_HI is exact.
+        #[allow(clippy::excessive_precision)]
+        const LN2_HI: f32 = 0.693359375;
+        const LN2_LO: f32 = -2.121_944_4e-4;
+        const MAGIC: f32 = 12582912.0; // 1.5·2^23: add then subtract rounds to nearest integer
+        const C: [f32; 5] = [1.0 / 720.0, 1.0 / 120.0, 1.0 / 24.0, 1.0 / 6.0, 0.5];
+        for x in buf.iter_mut() {
+            let c = (*x).clamp(-87.336, 88.722);
+            let f = (c * LOG2E + MAGIC) - MAGIC;
+            let r = c - f * LN2_HI - f * LN2_LO;
+            let p = (((((C[0] * r + C[1]) * r + C[2]) * r + C[3]) * r + C[4]) * r + 1.0) * r + 1.0;
+            *x = p * f32::from_bits((((f as i32) + 127) << 23) as u32);
+        }
     }
 }
 

@@ -43,11 +43,17 @@ openssl-sys = { version = "0.9", optional = true }
 tokenizers = { version = "0.22", optional = true }  # already in the tree via fastembed
 safetensors = { version = "0.8", optional = true }  # already in the tree; unify (no duplicate)
 
+# The `blas` backend's Linux seam. Both are pure Rust with runtime CPU dispatch, so release
+# binaries stay baseline x86-64/aarch64 yet use AVX2/AVX-512/NEON where the host has them.
+[target.'cfg(target_os = "linux")'.dependencies]
+faer = { version = "0.24", optional = true, default-features = false, features = ["std", "rayon"] }  # GEMM ("std" pulls its fast x86 kernels)
+multiversion = { version = "0.8", optional = true }  # per-CPU clones of the vectorized exp
+
 [features]
 vendored-openssl = ["openssl-sys/vendored"]
-# BLAS inference backend (src/blas.rs). macOS wires it to Accelerate (see build.rs);
-# Linux is a marked TODO. Off by default — funes uses the ONNX backend unless this is enabled.
-blas = ["dep:tokenizers", "dep:safetensors"]
+# BLAS inference backend (src/blas.rs). macOS wires it to Accelerate (see build.rs); Linux to
+# faer + a polynomial exp. Off by default — funes uses the ONNX backend unless this is enabled.
+blas = ["dep:tokenizers", "dep:safetensors", "dep:faer", "dep:multiversion"]
 
 # Benchmarks live under benchmark/ alongside their README; run via `cargo run --example <name>`.
 [[example]]
