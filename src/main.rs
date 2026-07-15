@@ -586,8 +586,8 @@ fn select_hits_fzf(store: &hub::Store, query: &str, hits: &[(Hit, f64)], color: 
 
 /// The turn browser behind enter in the hit picker: one fzf row per turn of the session, oldest
 /// first, the recall hit's turn marked `▶`; the highlighted turn shows whole in the preview pane
-/// — the matched chunk reverse-videoed within it — and enter pages it. Esc walks back to the hit
-/// picker.
+/// — the matched chunk reverse-videoed within it — and enter toggles that pane full-screen for
+/// reading. Esc walks back to the hit picker.
 async fn select_turns_fzf(
     store: hub::Store,
     session_id: String,
@@ -623,9 +623,18 @@ async fn select_turns_fzf(
         ));
     }
     let copy = clipboard_pipe();
+    // Reading mode: enter grows the preview to most of the screen and back, and the arrows keep
+    // walking the turns while it's grown. An fzf without change-preview-window pages the turn
+    // through less instead.
+    let reader = fzf_version().is_some_and(|v| v >= (0, 30));
+    let enter_hint = if reader {
+        "enter toggles full-screen"
+    } else {
+        "enter opens the turn in less"
+    };
     let hints = match copy {
-        Some(_) => "enter pages the turn · ctrl-y copies its get command · esc goes back",
-        None => "enter pages the turn · esc goes back",
+        Some(_) => format!("{enter_hint} · ctrl-y copies the get command · esc goes back"),
+        None => format!("{enter_hint} · esc goes back"),
     };
     let mut args = fzf_style_args(color, "turns ❯ ", &format!("session {s8} · {}\n{hints}", store.label()));
     args.extend([
@@ -634,8 +643,14 @@ async fn select_turns_fzf(
         "--preview-window".to_string(),
         "right:60%:wrap".to_string(),
         "--bind".to_string(),
-        // `less -R` passes the highlight's ANSI marks through.
-        "enter:execute:cat {4} | ${PAGER:-less -R}".to_string(),
+        if reader {
+            "enter:change-preview-window(down,90%,wrap|right,60%,wrap)".to_string()
+        } else {
+            // fzf runs binds via $SHELL -c, and zsh doesn't word-split an unquoted
+            // `${PAGER:-less -R}` default — the command must be spelled out word by word.
+            // `-R` passes the highlight's ANSI marks through.
+            "enter:execute:cat {4} | less -R".to_string()
+        },
     ]);
     if let Some(pipe) = copy {
         args.extend(["--bind".to_string(), copy_bind(&store, pipe)]);
