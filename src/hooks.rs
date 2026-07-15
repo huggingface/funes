@@ -6,8 +6,9 @@
 //!
 //! - **Claude** has a plugin system, so funes ships a hooks-only plugin. `funes add` extracts it to
 //!   `~/.funes/integrations/claude-plugin` and registers it with `claude plugin marketplace add`
-//!   + `claude plugin install`. Claude's loader activates the plugin's own `hooks/hooks.json` — funes
-//!   never parses or rewrites the user's `settings.json`. Removal is `claude plugin uninstall funes`.
+//!   plus `claude plugin install`. Claude's loader activates the plugin's own `hooks/hooks.json` —
+//!   funes never parses or rewrites the user's `settings.json`. Removal is `claude plugin uninstall
+//!   funes`.
 //! - **Codex** has no plugin system, so funes writes its hooks into `~/.codex/hooks.json` — a file
 //!   dedicated to hooks, not Codex's main `config.toml`. The merge is append-or-replace keyed by
 //!   funes's own scripts (re-running replaces funes's groups, leaves any others untouched).
