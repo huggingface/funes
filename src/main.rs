@@ -134,6 +134,10 @@ enum Cmd {
     Push {
         /// Store to publish to: `<org>/<repo>` or a full `hf://…` URI.
         store: String,
+        /// Publish only this project's chunks (the path segment under `projects`) — a projection,
+        /// so a multi-project machine can seed a per-project store without leaking siblings.
+        #[arg(long)]
+        project: Option<String>,
         /// Skip the confirmation when the target shares no chunks with your local store.
         #[arg(short, long)]
         yes: bool,
@@ -406,6 +410,7 @@ async fn main() -> Result<()> {
         }
         Cmd::Push {
             store: remote,
+            project,
             yes,
             force_reindex,
         } => {
@@ -414,7 +419,7 @@ async fn main() -> Result<()> {
             } else {
                 push::Confirm::Ask(prompt_new_store)
             };
-            match push::run_push(hub::Store::parse(&remote), force_reindex, confirm).await {
+            match push::run_push(hub::Store::parse(&remote), project, force_reindex, confirm).await {
                 Ok(pushed) => {
                     print!("{}", pushed.report);
                     // Secrets held back everything — surface a non-zero exit so automation can react.
