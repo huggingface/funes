@@ -51,13 +51,14 @@ use hf_hub::repository::files::RepoTreeEntry;
 use hf_hub::repository::{CommitInfo, CommitOperation, GitRefs};
 use hf_hub::{HFClient, HFError, HFRepository, RepoTypeDataset};
 use lance::dataset::builder::DatasetBuilder;
-use lance::dataset::{Dataset, NewColumnTransform};
+use lance::dataset::{Dataset, NewColumnTransform, WriteParams};
 use lance::index::DatasetIndexExt;
 use lance_index::optimize::OptimizeOptions;
 use lance_io::object_store::WrappingObjectStore;
 use object_store::ObjectStore as OSObjectStore;
 
 use crate::capture_store::{CaptureStore, Captured};
+use crate::dataset;
 use crate::fetch_store::{FetchStore, FileFetcher};
 
 /// Outcome of an [`append`] commit.
@@ -123,6 +124,64 @@ pub(crate) async fn append(
         Err(e) if head_moved(&e) => Ok(Appended::Conflict),
         Err(e) => Err(anyhow::Error::new(e).context("data commit failed")),
     }
+}
+
+/// Build the whole dataset locally (data + indexes) and upload it in one `create_commit` — unlike
+/// [`append`]/[`reindex`], no head to guard against, since the dataset doesn't exist yet. `None` if
+/// the build produced no files.
+#[allow(clippy::too_many_arguments)] // internal orchestration, one call site (`push`)
+pub(crate) async fn first_publish(
+    repo: &HFRepository<RepoTypeDataset>,
+    prefix: &str,
+    batches: Vec<RecordBatch>,
+    schema: SchemaRef,
+    rev: &str,
+    message: String,
+    extra_files: &BTreeMap<String, Bytes>,
+    on_phase: impl Fn(&str),
+) -> Result<Option<String>> {
+    let staging = tempfile::tempdir()?;
+    // Empty prefix = dataset at the repo root; joining "" would leave a stray trailing separator.
+    let db_dir = if prefix.is_empty() {
+        staging.path().to_path_buf()
+    } else {
+        staging.path().join(prefix)
+    };
+    std::fs::create_dir_all(&db_dir)?;
+    let table_uri = dataset::table_uri(&db_dir.to_string_lossy());
+    let reader = RecordBatchIterator::new(batches.into_iter().map(Ok), schema);
+    let mut ds = Dataset::write(reader, &table_uri, Some(WriteParams::default()))
+        .await
+        .context("building the dataset for first publish")?;
+    dataset::build_indexes(&mut ds, on_phase).await;
+
+    let mut ops = Vec::new();
+    for entry in walkdir::WalkDir::new(&db_dir).into_iter().filter_map(|e| e.ok()) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let rel = entry.path().strip_prefix(staging.path()).unwrap_or(entry.path());
+        ops.push(CommitOperation::add_file(
+            rel.to_string_lossy().into_owned(),
+            entry.path().to_path_buf(),
+        ));
+    }
+    if ops.is_empty() {
+        return Ok(None);
+    }
+    let (extra_ops, _extra_dir) = write_ops(extra_files)?;
+    ops.extend(extra_ops);
+
+    let info = repo
+        .create_commit()
+        .operations(ops)
+        .commit_message(message)
+        .revision(rev.to_string())
+        .progress(upload_progress())
+        .send()
+        .await
+        .map_err(|e| anyhow::Error::new(e).context("create_commit failed"))?;
+    Ok(Some(info.commit_oid.unwrap_or_else(|| "?".to_string())))
 }
 
 /// Fold an index's delta sub-indexes back into one once this many pile up. Queries fan out across

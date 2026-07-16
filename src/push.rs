@@ -21,13 +21,11 @@ use crate::hf_dataset::{self, Appended, Reindexed};
 use crate::hub::{self, Store};
 use crate::{chunk, dataset, scan};
 use anyhow::{bail, Context, Result};
-use arrow_array::{BooleanArray, RecordBatch, RecordBatchIterator, StringArray};
+use arrow_array::{BooleanArray, RecordBatch, StringArray};
 use arrow_select::filter::filter_record_batch;
 use bytes::Bytes;
 use chrono::Utc;
-use hf_hub::repository::CommitOperation;
 use hf_hub::{HFClient, HFError, HFRepository, RepoTypeDataset};
-use lance::dataset::WriteParams;
 use lance::Dataset;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -253,59 +251,33 @@ pub async fn run_push(target: Store, force_reindex: bool, confirm: Confirm) -> R
         (None, String::new())
     };
 
-    // 5. First publish: build the whole dataset locally (data + indexes) and push it in one commit.
+    let message = format!("funes push: +{n_chunks} chunks");
+    // The dataset card rides the same commit as the data, on a first publish or an append.
+    let extra: BTreeMap<String, Bytes> = card_body
+        .map(|body| BTreeMap::from([("README.md".to_string(), Bytes::from(body))]))
+        .unwrap_or_default();
+
+    // 5. First publish: hf_dataset builds the dataset locally (data + indexes) and uploads it in
+    // one commit; the card rides along.
     if first_publish {
-        let staging = tempfile::tempdir()?;
-        // Empty prefix = dataset at the repo root; joining "" would leave a stray trailing separator.
-        let db_dir = if prefix.is_empty() {
-            staging.path().to_path_buf()
-        } else {
-            staging.path().join(&prefix)
-        };
-        std::fs::create_dir_all(&db_dir)?;
-        let table_uri = dataset::table_uri(&db_dir.to_string_lossy());
         eprintln!("building the dataset to publish…");
-        let reader = RecordBatchIterator::new(batches.into_iter().map(Ok), schema.clone());
-        let mut ds = Dataset::write(reader, &table_uri, Some(WriteParams::default()))
-            .await
-            .context("building the dataset for first publish")?;
-        dataset::build_indexes(&mut ds, |phase| eprintln!("building {phase}…")).await;
-
-        let mut ops = Vec::new();
-        for entry in walkdir::WalkDir::new(&db_dir).into_iter().filter_map(|e| e.ok()) {
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let rel = entry.path().strip_prefix(staging.path()).unwrap_or(entry.path());
-            ops.push(CommitOperation::add_file(
-                rel.to_string_lossy().into_owned(),
-                entry.path().to_path_buf(),
-            ));
-        }
-        if ops.is_empty() {
+        let oid = hf_dataset::first_publish(
+            &repo,
+            &prefix,
+            batches,
+            schema.clone(),
+            &rev,
+            message,
+            &extra,
+            |phase| eprintln!("building {phase}…"),
+        )
+        .await?;
+        let Some(oid) = oid else {
             return Ok(format!("{}: nothing new to upload\n", target.label()).into());
-        }
-
-        if let Some(body) = &card_body {
-            let card_path = staging.path().join("README.md");
-            std::fs::write(&card_path, body)?;
-            ops.push(CommitOperation::add_file("README.md".to_string(), card_path));
-        }
-
-        eprintln!("uploading {n_chunks} chunk(s) to {}…", target.label());
-        let info = repo
-            .create_commit()
-            .operations(ops)
-            .commit_message(format!("funes push: +{n_chunks} chunks"))
-            .revision(rev.clone())
-            .progress(hf_dataset::upload_progress())
-            .send()
-            .await
-            .map_err(|e| anyhow::Error::new(e).context("create_commit failed"))?;
+        };
         return Ok(format!(
-            "{}: pushed {n_chunks} chunks (commit {})\n{card_note}{}",
+            "{}: pushed {n_chunks} chunks (commit {oid})\n{card_note}{}",
             target.label(),
-            info.commit_oid.as_deref().unwrap_or("?"),
             skipped.warning()
         )
         .into());
@@ -313,11 +285,6 @@ pub async fn run_push(target: Store, force_reindex: bool, confirm: Confirm) -> R
 
     // 6. Append the data and commit it, retrying against a fresh head if a concurrent push moved it
     // (each attempt re-appends onto the new manifest — the data commit is small, so this is cheap).
-    let message = format!("funes push: +{n_chunks} chunks");
-    // The card refresh rides the same guarded commit as the data.
-    let extra: BTreeMap<String, Bytes> = card_body
-        .map(|body| BTreeMap::from([("README.md".to_string(), Bytes::from(body))]))
-        .unwrap_or_default();
     eprintln!("uploading {n_chunks} chunk(s) to {}…", target.label());
     let mut attempts = 0u32;
     let (oid, unindexed) = loop {
