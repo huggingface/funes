@@ -253,11 +253,12 @@ pub async fn run_push(target: Store, project: Option<String>, force_reindex: boo
     // carries the funes markers, a hand-written card left alone (see `card_file`). Root stores
     // only: the root README describes the whole repo, which a prefixed store is only part of
     // (and two stores sharing a repo would fight over one card's stats) — under a prefix it's
-    // the owner's. The chunk count is the post-push total.
+    // the owner's. The chunk count is the post-push total — best-effort: rows another writer
+    // lands concurrently are missed until the next push refreshes the card.
     let date = Utc::now().format("%Y-%m-%d").to_string();
     let ctx = CardCtx {
         repo: &repo_id,
-        chunks: (remote_ids.len() + n_chunks) as u64,
+        chunks: remote_ids.len() as u64 + n_chunks as u64,
         embedding_model: embedding_model(&schema),
         date: &date,
     };
