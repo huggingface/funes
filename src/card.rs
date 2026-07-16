@@ -12,8 +12,9 @@ const STATS_OPEN: &str = "<!-- funes:stats -->";
 const STATS_CLOSE: &str = "<!-- /funes:stats -->";
 
 /// Frontmatter tags. `funes` is the load-bearing one: it makes every published store
-/// discoverable via `huggingface.co/datasets?other=funes`.
-const TAGS: [&str; 4] = ["funes", "agent-traces", "embeddings", "lance"];
+/// discoverable via `huggingface.co/datasets?other=funes`. `agent-memory` names the category
+/// (no incumbent Hub tag exists — the ecosystem's category word, scoped to agents).
+const TAGS: [&str; 5] = ["funes", "agent-memory", "agent-traces", "embeddings", "lance"];
 
 /// The Hub's `size_categories` bands.
 const SIZE_BANDS: [(u64, &str); 10] = [
@@ -176,6 +177,7 @@ mod tests {
         // Frontmatter: the discovery tag, the computed band.
         assert!(card.starts_with("---\n"), "frontmatter first");
         assert!(card.contains("  - funes\n"));
+        assert!(card.contains("  - agent-memory\n"));
         assert!(card.contains("  - 10K<n<100K\n"));
         // Body: the recall example names this store; the stats region is marker-delimited.
         assert!(card.contains("--store acme/kb"));
