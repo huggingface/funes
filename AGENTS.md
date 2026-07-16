@@ -35,7 +35,6 @@ fell back to; the built-in guide has no store to name and keeps a bare hint).
 | `--half-life` | 30 | recency decay in days (a hit this old keeps half its weight); 0 disables |
 | `--neighbors` | 1 | adjacent chunks (by seq) attached per hit; 0 disables |
 | `--type` | — | restrict to `text \| thinking \| tool_use \| tool_result` |
-| `--project` | — | restrict to a project (the munged session working directory, e.g. `-home-u-dev-funes`) |
 | `--harness` | — | restrict to `claude \| codex \| pi` (the stored facet `claude_code` also parses) |
 | `--store` | local store | the store to read — `<org>/<repo>`, an `hf://…` URI, a local path, or `local` |
 
@@ -57,7 +56,7 @@ Agent format, per turn:
 
 ### list / status
 
-- `funes list [store] [--project …] [--limit 50]` — sessions, newest activity first:
+- `funes list [store] [--limit 50]` — sessions, newest activity first:
   `[<last_ts>] <project>/<session8>  chunks=<n>  <first user message, first 120 chars>`.
   CLI-only; not an MCP tool.
 - `funes status [store]` — store label, table name, chunk count.
@@ -67,7 +66,7 @@ Agent format, per turn:
 `funes mcp [store]` serves stdio; `funes add claude|codex|pi|hermes|opencode` registers it (and for
 claude/codex also installs the automation hooks — see [docs/automation.md](docs/automation.md)). A
 positional `store` binds the server to a store; `funes add <agent> <store>` bakes it into the
-registration. Tools: `recall` (query, k, block_type/project/harness filters, store), `get`
+registration. Tools: `recall` (query, k, block_type/harness filters, store), `get`
 (session_id, turn_uuid, window, store), `status` (store) — each returns the corresponding
 agent-format string verbatim. A tool call's `store` overrides the server's; with neither, it reads
 the local store.

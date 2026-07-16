@@ -37,7 +37,7 @@ pub const PASSAGES: &[(&str, &str)] = &[
         "assistant",
         "Recall with `funes recall \"<your question>\"`. The pipeline is hybrid vector + BM25 \
          search, then a cross-encoder rerank, then recency weighting, then neighbor expansion. \
-         Narrow with `--type text|thinking|tool_use|tool_result` and `--project <name>`; tune \
+         Narrow with `--type text|thinking|tool_use|tool_result` and `--harness <name>`; tune \
          breadth with `--k` (results) and `--candidates` (the rerank pool).",
     ),
     (

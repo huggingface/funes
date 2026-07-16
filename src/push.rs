@@ -46,14 +46,9 @@ const MAX_COMMIT_RETRIES: u32 = 10;
 /// or inaccessible remote).
 pub async fn store_ids(store: &Store) -> HashSet<String> {
     match store.open().await {
-        Ok(ds) => all_ids(&ds, None).await.unwrap_or_default(),
+        Ok(ds) => all_ids(&ds).await.unwrap_or_default(),
         Err(_) => HashSet::new(),
     }
-}
-
-/// Escape a value for inlining into a Lance SQL filter string.
-fn esc(s: &str) -> String {
-    s.replace('\'', "''")
 }
 
 /// Whether a publish error is the Hub refusing the write — a 403/Forbidden, i.e. the token can't
@@ -66,10 +61,9 @@ pub fn is_read_only(err: &anyhow::Error) -> bool {
     })
 }
 
-/// Every chunk id in a store (a plain `id`-column scan; plain scans aren't limit-capped). With a
-/// `filter` (e.g. `project = '…'`), only the ids matching it — the projection `--project` needs.
-async fn all_ids(ds: &Dataset, filter: Option<&str>) -> Result<HashSet<String>> {
-    let batches = dataset::scan_rows(ds, &["id"], filter, None).await?;
+/// Every chunk id in a store (a plain `id`-column scan; plain scans aren't limit-capped).
+async fn all_ids(ds: &Dataset) -> Result<HashSet<String>> {
+    let batches = dataset::scan_rows(ds, &["id"], None, None).await?;
     let mut ids = HashSet::new();
     for batch in batches {
         if let Some(col) = batch
@@ -85,16 +79,10 @@ async fn all_ids(ds: &Dataset, filter: Option<&str>) -> Result<HashSet<String>> 
 }
 
 /// The to-push rows (all columns) from the local store. An append reads just the missing ids via an
-/// `id IN (…)` predicate (already project-scoped, since `to_push` is). A first publish reads
-/// everything — or, under `--project`, only that project's rows.
-async fn rows_to_push(
-    local: &Dataset,
-    to_push: &HashSet<String>,
-    first_publish: bool,
-    project: Option<&str>,
-) -> Result<Vec<RecordBatch>> {
+/// `id IN (…)` predicate. A first publish reads everything.
+async fn rows_to_push(local: &Dataset, to_push: &HashSet<String>, first_publish: bool) -> Result<Vec<RecordBatch>> {
     let filter = if first_publish {
-        project.map(|p| format!("project = '{}'", esc(p)))
+        None
     } else {
         let list = to_push
             .iter()
@@ -149,7 +137,7 @@ fn must_confirm(local: usize, to_push: usize) -> bool {
 /// `force_reindex`, refresh the remote index after the data commit (retrying until it lands) even
 /// if the unindexed backlog is below [`REINDEX_THRESHOLD`]; with no new chunks pending it's a pure
 /// index refresh. `confirm` gates a publish to a store the local index shares no chunks with.
-pub async fn run_push(target: Store, project: Option<String>, force_reindex: bool, confirm: Confirm) -> Result<Pushed> {
+pub async fn run_push(target: Store, force_reindex: bool, confirm: Confirm) -> Result<Pushed> {
     let uri = match &target {
         Store::Remote { uri } => uri.clone(),
         Store::Local { .. } => {
@@ -167,19 +155,12 @@ pub async fn run_push(target: Store, project: Option<String>, force_reindex: boo
         hub::Reachability::Ok => {}
     }
 
-    // 1. Delta: local_ids − remote_ids (remote absent => first publish). Under `--project`, the
-    // local side is scoped to that project (a projection), so only its chunks are ever published;
-    // the remote side stays unfiltered — a chunk id already on the remote is published, whatever
-    // project it belongs to.
-    let project_filter = project.as_deref().map(|p| format!("project = '{}'", esc(p)));
-    if let Some(p) = &project {
-        eprintln!("publishing only project {p}…");
-    }
+    // 1. Delta: local_ids − remote_ids (remote absent => first publish).
     eprintln!("comparing local and remote indexes…");
     let local = Store::local().open().await?;
-    let local_ids = all_ids(&local, project_filter.as_deref()).await?;
+    let local_ids = all_ids(&local).await?;
     let remote_ids = match target.open().await {
-        Ok(t) => all_ids(&t, None).await?,
+        Ok(t) => all_ids(&t).await?,
         Err(_) => HashSet::new(),
     };
     let to_push: HashSet<String> = local_ids.difference(&remote_ids).cloned().collect();
@@ -223,7 +204,7 @@ pub async fn run_push(target: Store, project: Option<String>, force_reindex: boo
     // dataset's schema so its metadata (the embedding-model id) rides along — scan-result batches
     // drop it, and on first publish that schema is what the new dataset persists.
     let schema: arrow_schema::SchemaRef = Arc::new(arrow_schema::Schema::from(local.schema()));
-    let batches: Vec<RecordBatch> = rows_to_push(&local, &to_push, first_publish, project.as_deref())
+    let batches: Vec<RecordBatch> = rows_to_push(&local, &to_push, first_publish)
         .await?
         .into_iter()
         .map(|b| RecordBatch::try_new(schema.clone(), b.columns().to_vec()))
@@ -596,14 +577,9 @@ mod tests {
 
     /// One turn per text, each text its own block — so distinct texts land in distinct blocks.
     fn turn(idx: i64, block_text: &str) -> Turn {
-        turn_in("proj", idx, block_text)
-    }
-
-    /// Like [`turn`], but in a named project — for exercising the `--project` projection.
-    fn turn_in(project: &str, idx: i64, block_text: &str) -> Turn {
         Turn {
             session_id: "sess".into(),
-            project: project.into(),
+            project: "proj".into(),
             turn_uuid: format!("turn{idx}"),
             parent_uuid: None,
             seq: idx,
@@ -708,39 +684,6 @@ mod tests {
             clean.iter().map(|b| b.num_rows()).sum::<usize>(),
             1,
             "only the clean row stays"
-        );
-    }
-
-    #[tokio::test]
-    async fn project_projection_reads_only_that_project() {
-        // A local store holding two projects; `--project` must publish only one, never its sibling.
-        let (b, _) = batch(&[
-            turn_in("alpha", 0, "alpha decision about parsers"),
-            turn_in("beta", 1, "beta decision about chunking"),
-        ]);
-        let dir = tempfile::tempdir().unwrap();
-        let uri = dataset::table_uri(&dir.path().to_string_lossy());
-        let schema = b.schema();
-        let reader = RecordBatchIterator::new(vec![Ok(b)], schema);
-        Dataset::write(reader, &uri, Some(WriteParams::default()))
-            .await
-            .unwrap();
-        let ds = dataset::open(&uri, HashMap::new()).await.unwrap();
-
-        let all = all_ids(&ds, None).await.unwrap();
-        let alpha = all_ids(&ds, Some("project = 'alpha'")).await.unwrap();
-        assert!(
-            !alpha.is_empty() && alpha.len() < all.len(),
-            "alpha is a strict subset of the store"
-        );
-
-        // A first publish under `--project` reads exactly that project's rows — no sibling leak.
-        let rows = rows_to_push(&ds, &HashSet::new(), true, Some("alpha")).await.unwrap();
-        let pushed: usize = rows.iter().map(|b| b.num_rows()).sum();
-        assert_eq!(
-            pushed,
-            alpha.len(),
-            "first publish scoped to the project reads only its rows"
         );
     }
 }

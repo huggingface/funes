@@ -90,14 +90,11 @@ fn esc(s: &str) -> String {
     s.replace('\'', "''")
 }
 
-/// `block_type = '…' AND project = '…' AND harness = '…'` over whichever filters are set, else None.
-fn build_where(block_type: Option<&str>, project: Option<&str>, harness: Option<&str>) -> Option<String> {
+/// `block_type = '…' AND harness = '…'` over whichever filters are set, else None.
+fn build_where(block_type: Option<&str>, harness: Option<&str>) -> Option<String> {
     let mut clauses = Vec::new();
     if let Some(bt) = block_type {
         clauses.push(format!("block_type = '{}'", esc(bt)));
-    }
-    if let Some(p) = project {
-        clauses.push(format!("project = '{}'", esc(p)));
     }
     if let Some(h) = harness {
         clauses.push(format!("harness = '{}'", esc(h)));
@@ -291,7 +288,6 @@ pub async fn recall(
     half_life: f64,
     neighbors: i64,
     block_type: Option<String>,
-    project: Option<String>,
     harness: Option<String>,
 ) -> Result<String> {
     let (note, store_label, hits) = recall_hits(
@@ -302,7 +298,6 @@ pub async fn recall(
         half_life,
         neighbors,
         block_type,
-        project,
         harness,
         &|_| (),
     )
@@ -331,7 +326,6 @@ pub async fn recall_hits(
     half_life: f64,
     neighbors: i64,
     block_type: Option<String>,
-    project: Option<String>,
     harness: Option<String>,
     progress: &(dyn Fn(&str) + Sync),
 ) -> Result<(String, Option<String>, Vec<(Hit, f64)>)> {
@@ -364,7 +358,7 @@ pub async fn recall_hits(
             "this store predates the harness facet — reindex it, or drop --harness"
         ));
     }
-    let where_clause = build_where(block_type.as_deref(), project.as_deref(), harness.as_deref());
+    let where_clause = build_where(block_type.as_deref(), harness.as_deref());
 
     // Hybrid retrieval: a vector ANN scan and a BM25 scan, fused by reciprocal rank. The FTS index
     // can be absent (it's best-effort at index time), so the FTS leg is skipped when it errors —
@@ -429,7 +423,7 @@ async fn vector_candidates(ds: &Dataset, qv: &[f32], limit: usize, filter: Optio
     scan.nearest("vector", &query, limit)?;
     if let Some(f) = filter {
         // Prefilter: apply the filter before the ANN search, not as a post-filter on the top-`limit`
-        // nearest rows. A selective `--project`/`--type` would otherwise drop most (or all) of a
+        // nearest rows. A selective `--type`/`--harness` would otherwise drop most (or all) of a
         // globally-nearest pool, returning far fewer than `limit` hits even when matches exist.
         scan.prefilter(true);
         scan.filter(f)?;
@@ -609,14 +603,13 @@ async fn attach_neighbors(ds: &Dataset, hits: &mut [&mut Hit], window: i64) -> R
 }
 
 /// Browse indexed sessions: one line per session, newest activity first.
-pub async fn list(store: Store, project: Option<String>, limit: usize) -> Result<String> {
+pub async fn list(store: Store, limit: usize) -> Result<String> {
     let read = open_read(&store, None).await?;
     let note = read.note.clone().unwrap_or_default();
     let ds = &read.ds;
 
     let cols = ["session_id", "project", "ts", "role", "text"];
-    let filter = project.as_deref().map(|p| format!("project = '{}'", esc(p)));
-    let batches = dataset::scan_rows(ds, &cols, filter.as_deref(), None).await?;
+    let batches = dataset::scan_rows(ds, &cols, None, None).await?;
 
     struct Sess {
         project: String,
@@ -968,28 +961,15 @@ mod tests {
 
     #[test]
     fn build_where_combines_set_filters() {
-        assert_eq!(build_where(None, None, None), None);
+        assert_eq!(build_where(None, None), None);
+        assert_eq!(build_where(Some("text"), None).as_deref(), Some("block_type = 'text'"));
+        assert_eq!(build_where(None, Some("codex")).as_deref(), Some("harness = 'codex'"));
         assert_eq!(
-            build_where(Some("text"), None, None).as_deref(),
-            Some("block_type = 'text'")
-        );
-        assert_eq!(
-            build_where(None, Some("proj"), None).as_deref(),
-            Some("project = 'proj'")
-        );
-        assert_eq!(
-            build_where(None, None, Some("codex")).as_deref(),
-            Some("harness = 'codex'")
-        );
-        assert_eq!(
-            build_where(Some("tool_use"), Some("proj"), Some("pi")).as_deref(),
-            Some("block_type = 'tool_use' AND project = 'proj' AND harness = 'pi'")
+            build_where(Some("tool_use"), Some("pi")).as_deref(),
+            Some("block_type = 'tool_use' AND harness = 'pi'")
         );
         // values are escaped against filter-string injection.
-        assert_eq!(
-            build_where(None, Some("a'b"), None).as_deref(),
-            Some("project = 'a''b'")
-        );
+        assert_eq!(build_where(None, Some("a'b")).as_deref(), Some("harness = 'a''b'"));
     }
 
     #[test]

@@ -40,7 +40,7 @@ async fn index_then_read_surface() {
     assert!(status.contains("chunks:"), "status missing chunk count: {status}");
 
     // list: the session appears under its project.
-    let list = funes::recall::list(funes::hub::Store::local(), None, 50).await.unwrap();
+    let list = funes::recall::list(funes::hub::Store::local(), 50).await.unwrap();
     assert!(list.contains(&project), "list should name the project: {list}");
 
     // recall: the parsing turn surfaces, and the `→ get` line carries the full session id.
@@ -51,7 +51,6 @@ async fn index_then_read_surface() {
         30,
         30.0,
         1,
-        None,
         None,
         None,
     )
@@ -72,7 +71,6 @@ async fn index_then_read_surface() {
         0.0,
         0,
         Some("tool_use".into()),
-        None,
         None,
     )
     .await
@@ -100,7 +98,6 @@ async fn index_then_read_surface() {
         30,
         30.0,
         1,
-        None,
         None,
         None,
     )
