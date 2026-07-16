@@ -204,7 +204,7 @@ pub async fn rename_column(
 /// head-guarded commit. `transform` produces the new column per batch (a UDF over `read_columns`).
 /// Unlike [`rename_column`] this writes real per-fragment column data, but still ships as one
 /// captured commit; data, vectors, and indexes are untouched. Returns the new oid. A moved head is
-/// an error (single attempt — a backfill runs with no concurrent writers).
+/// an error — a single guarded attempt, not retried.
 pub async fn add_column(
     repo: &HFRepository<RepoTypeDataset>,
     dataset_uri: &str,

@@ -1,15 +1,12 @@
-//! Resolve the source repository a session belongs to, from the working directory its transcript
-//! recorded. Done once at index time and stored in the `repo` column, so curation (and anything
-//! else) can attribute a session by a plain column read — no live `git`, and robust to the
-//! checkout later being deleted or moved. The backfill migration uses the same resolver.
+//! Resolve the source repository a session belongs to: the `owner/name` of its checkout's git
+//! remotes, from the working directory its transcript recorded.
 
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::Command;
 
-/// The raw launch cwd a transcript records — top-level `cwd` (Claude, pi) or `payload.cwd`
-/// (Codex) — reading only as far as the first record that carries it. `None` for a file that
-/// isn't a cwd-bearing transcript (a parquet shard, a Hub import).
+/// The raw working directory a transcript recorded — top-level `cwd` (Claude, pi) or `payload.cwd`
+/// (Codex) — from the first record that carries one. `None` if none does.
 pub fn cwd_of_transcript(path: &Path) -> Option<String> {
     let file = std::fs::File::open(path).ok()?;
     for line in BufReader::new(file).lines().map_while(Result::ok) {
