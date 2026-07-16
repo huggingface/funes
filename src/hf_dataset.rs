@@ -51,7 +51,7 @@ use hf_hub::repository::files::RepoTreeEntry;
 use hf_hub::repository::{CommitInfo, CommitOperation, GitRefs};
 use hf_hub::{HFClient, HFError, HFRepository, RepoTypeDataset};
 use lance::dataset::builder::DatasetBuilder;
-use lance::dataset::Dataset;
+use lance::dataset::{Dataset, NewColumnTransform};
 use lance::index::DatasetIndexExt;
 use lance_index::optimize::OptimizeOptions;
 use lance_io::object_store::WrappingObjectStore;
@@ -197,6 +197,34 @@ pub async fn rename_column(
     let info = send_commit(repo, ops, parent, rev, message)
         .await
         .map_err(|e| anyhow::Error::new(e).context("rename commit failed"))?;
+    Ok(info.commit_oid.unwrap_or_else(|| "?".to_string()))
+}
+
+/// Add a column to the remote dataset via `add_columns`, landing the new column's files in one
+/// head-guarded commit. `transform` produces the new column per batch (a UDF over `read_columns`).
+/// Unlike [`rename_column`] this writes real per-fragment column data, but still ships as one
+/// captured commit; data, vectors, and indexes are untouched. Returns the new oid. A moved head is
+/// an error (single attempt — a backfill runs with no concurrent writers).
+pub async fn add_column(
+    repo: &HFRepository<RepoTypeDataset>,
+    dataset_uri: &str,
+    storage_options: HashMap<String, String>,
+    rev: &str,
+    message: String,
+    transform: NewColumnTransform,
+    read_columns: Vec<String>,
+) -> Result<String> {
+    let parent = head_oid(repo, rev).await?;
+    let (mut ds, wrapper) = open_capturing(dataset_uri, storage_options).await?;
+    ds.add_columns(transform, Some(read_columns), None)
+        .await
+        .context("adding the remote column")?;
+    let files = captured_files(&wrapper);
+    ensure!(!files.is_empty(), "add_columns produced no files to commit");
+    let (ops, _dir) = write_ops(&files)?;
+    let info = send_commit(repo, ops, parent, rev, message)
+        .await
+        .map_err(|e| anyhow::Error::new(e).context("add_column commit failed"))?;
     Ok(info.commit_oid.unwrap_or_else(|| "?".to_string()))
 }
 
