@@ -18,9 +18,7 @@ pub fn turns_from_jsonl_file(p: &Path, fallback_project: &str) -> std::io::Resul
     let session_id = session_meta_str(&records, "id").unwrap_or_else(|| jsonl::session_id_of(p));
     // The project facet is the basename of the session's recorded cwd, so the same clone names the
     // same project on every host; the path-derived fallback covers transcripts without one.
-    let project = session_meta_str(&records, "cwd")
-        .and_then(|cwd| jsonl::project_of_cwd(&cwd))
-        .unwrap_or_else(|| fallback_project.to_string());
+    let project = project_from_records(&records).unwrap_or_else(|| fallback_project.to_string());
 
     let mut turns = Vec::new();
     let mut seq = 0i64; // index among RETAINED turns, file order
@@ -69,6 +67,12 @@ pub fn turns_from_jsonl_file(p: &Path, fallback_project: &str) -> std::io::Resul
 
     jsonl::backfill_tool_names(&mut turns);
     Ok(turns)
+}
+
+/// The project a rollout's records name: the basename of the `session_meta` payload's `cwd`.
+/// `None` when no record carries one.
+pub fn project_from_records(records: &[Value]) -> Option<String> {
+    session_meta_str(records, "cwd").and_then(|cwd| jsonl::project_of_cwd(&cwd))
 }
 
 /// A string field of the first `session_meta` line's payload, if present.

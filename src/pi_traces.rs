@@ -10,20 +10,23 @@ use std::path::Path;
 use crate::jsonl;
 use crate::trace::{Block, Turn};
 
+/// The project a session's records name: the basename of the `session` line's `cwd`. `None` when
+/// no record carries one.
+pub fn project_from_records(records: &[Value]) -> Option<String> {
+    records.iter().find_map(|r| {
+        if r.get("type").and_then(Value::as_str) == Some("session") {
+            r.get("cwd").and_then(Value::as_str).and_then(jsonl::project_of_cwd)
+        } else {
+            None
+        }
+    })
+}
+
 pub fn turns_from_jsonl_file(p: &Path, session_id: &str, fallback_project: &str) -> std::io::Result<Vec<Turn>> {
     let records = jsonl::read_jsonl_records(p)?;
-    // The project facet is the basename of the cwd on the `session` line, so the same clone names
-    // the same project on every host; the path-derived fallback covers transcripts without one.
-    let project = records
-        .iter()
-        .find_map(|r| {
-            if r.get("type").and_then(Value::as_str) == Some("session") {
-                r.get("cwd").and_then(Value::as_str).and_then(jsonl::project_of_cwd)
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| fallback_project.to_string());
+    // The project facet is the basename of the session's recorded cwd, so the same clone names the
+    // same project on every host; the path-derived fallback covers transcripts without one.
+    let project = project_from_records(&records).unwrap_or_else(|| fallback_project.to_string());
 
     let mut turns = Vec::new();
     let mut seq = 0i64; // index among RETAINED turns, file order
