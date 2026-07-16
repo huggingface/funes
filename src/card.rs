@@ -176,9 +176,13 @@ mod tests {
         };
         // Frontmatter: the discovery tag, the computed band.
         assert!(card.starts_with("---\n"), "frontmatter first");
-        assert!(card.contains("  - funes\n"));
+        // Column-anchored: the `\` line continuations strip leading whitespace, so keys sit at
+        // column one and list items exactly two spaces in — what YAML requires. A reflow of the
+        // literals that breaks this fails here, not on the Hub.
+        assert!(card.contains("\ntags:\n  - funes\n"));
         assert!(card.contains("  - agent-memory\n"));
-        assert!(card.contains("  - 10K<n<100K\n"));
+        assert!(card.contains("\nsize_categories:\n  - 10K<n<100K\n"));
+        assert!(card.contains("\n# funes memory store\n"));
         // Body: the recall example names this store; the stats region is marker-delimited.
         assert!(card.contains("--store acme/kb"));
         assert!(card.contains(STATS_OPEN) && card.contains(STATS_CLOSE));
