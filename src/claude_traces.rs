@@ -7,9 +7,9 @@ use std::path::Path;
 use crate::jsonl;
 use crate::trace::{Block, Turn};
 
-/// Path-derived project fallback for a transcript that records no cwd: the segment right after a
+/// Path-derived workdir fallback for a transcript that records no cwd: the segment right after a
 /// `projects` dir, else the parent dir name.
-pub fn project_of(p: &Path) -> String {
+pub fn workdir_of(p: &Path) -> String {
     let parts: Vec<&str> = p.iter().filter_map(|s| s.to_str()).collect();
     if let Some(i) = parts.iter().position(|&s| s == "projects") {
         if i + 1 < parts.len() {
@@ -123,19 +123,19 @@ fn normalize_blocks(content: &Value) -> Vec<Block> {
     out
 }
 
-/// The project a session's records name: the basename of the first usable `cwd` (Claude Code
+/// The workdir a session's records name: the first usable `cwd`, munged (Claude Code
 /// stamps one on every entry). `None` when no record carries one.
-pub fn project_from_records(records: &[Value]) -> Option<String> {
+pub fn workdir_from_records(records: &[Value]) -> Option<String> {
     records
         .iter()
-        .find_map(|r| r.get("cwd").and_then(Value::as_str).and_then(jsonl::project_of_cwd))
+        .find_map(|r| r.get("cwd").and_then(Value::as_str).and_then(jsonl::workdir_of_cwd))
 }
 
-pub fn turns_from_jsonl_file(p: &Path, session_id: &str, fallback_project: &str) -> std::io::Result<Vec<Turn>> {
+pub fn turns_from_jsonl_file(p: &Path, session_id: &str, fallback_workdir: &str) -> std::io::Result<Vec<Turn>> {
     let records = jsonl::read_jsonl_records(p)?;
-    // The project facet is the basename of the session's recorded cwd, so the same clone names the
-    // same project on every host; the path-derived fallback covers transcripts without one.
-    let project = project_from_records(&records).unwrap_or_else(|| fallback_project.to_string());
+    // The workdir facet is the munged recorded cwd — the same value as the transcript's
+    // `projects` dir segment; the path-derived fallback covers transcripts without one.
+    let workdir = workdir_from_records(&records).unwrap_or_else(|| fallback_workdir.to_string());
 
     let mut turns = Vec::new();
     let mut seq = 0i64; // index among RETAINED turns, file order
@@ -161,7 +161,7 @@ pub fn turns_from_jsonl_file(p: &Path, session_id: &str, fallback_project: &str)
             .unwrap_or_else(|| rtype.to_string());
         turns.push(Turn {
             session_id: session_id.to_string(),
-            project: project.to_string(),
+            workdir: workdir.to_string(),
             turn_uuid: obj.get("uuid").and_then(|u| u.as_str()).unwrap_or("").to_string(),
             parent_uuid: obj.get("parentUuid").and_then(|u| u.as_str()).map(str::to_string),
             seq,
@@ -184,15 +184,15 @@ mod tests {
     use std::io::Write;
 
     #[test]
-    fn project_of_uses_segment_after_projects() {
+    fn workdir_of_uses_segment_after_projects() {
         let p = Path::new("/home/u/.claude/projects/-home-u-dev-funes/abc.jsonl");
-        assert_eq!(project_of(p), "-home-u-dev-funes");
+        assert_eq!(workdir_of(p), "-home-u-dev-funes");
     }
 
     #[test]
-    fn project_of_falls_back_to_parent_dir() {
+    fn workdir_of_falls_back_to_parent_dir() {
         let p = Path::new("/tmp/some-dir/abc.jsonl");
-        assert_eq!(project_of(p), "some-dir");
+        assert_eq!(workdir_of(p), "some-dir");
     }
 
     fn write_jsonl(lines: &[&str]) -> tempfile::NamedTempFile {
@@ -221,7 +221,7 @@ mod tests {
         assert_eq!(turns[0].seq, 0);
         assert_eq!(turns[1].seq, 1);
         assert_eq!(turns[0].session_id, "sess");
-        assert_eq!(turns[0].project, "proj");
+        assert_eq!(turns[0].workdir, "proj");
         assert_eq!(turns[1].parent_uuid.as_deref(), Some("u1"));
 
         let blocks0 = &turns[0].blocks;
@@ -246,21 +246,19 @@ mod tests {
             r#"{"type":"assistant","uuid":"a1","cwd":"/Users/d/dev/elsewhere","message":{"role":"assistant","content":"yo"}}"#,
         ]);
         let turns = turns_from_jsonl_file(f.path(), "s", "fallback").unwrap();
-        assert!(turns.iter().all(|t| t.project == "funes"));
+        assert!(turns.iter().all(|t| t.workdir == "-Users-d-dev-funes"));
     }
 
     #[test]
-    fn cross_host_cwds_yield_the_same_project() {
-        // The same clone indexed from a Mac and a Linux home lands in one facet value.
-        let line = |cwd: &str| {
-            format!(r#"{{"type":"user","uuid":"u1","cwd":"{cwd}","message":{{"role":"user","content":"hi"}}}}"#)
-        };
-        let (mac_line, linux_line) = (line("/Users/dcorvoysier/dev/funes"), line("/home/ubuntu/funes"));
-        let mac = write_jsonl(&[mac_line.as_str()]);
-        let linux = write_jsonl(&[linux_line.as_str()]);
-        let p = |f: &tempfile::NamedTempFile| turns_from_jsonl_file(f.path(), "s", "fb").unwrap()[0].project.clone();
-        assert_eq!(p(&mac), "funes");
-        assert_eq!(p(&mac), p(&linux));
+    fn recorded_cwd_facet_agrees_with_the_transcripts_path_segment() {
+        // A real Claude transcript sits under `projects/<munge(cwd)>/…`, so the cwd-derived facet
+        // and the path-derived fallback must be the same value — rows indexed from a transcript
+        // with and without a recorded cwd never diverge.
+        let f = write_jsonl(&[
+            r#"{"type":"user","uuid":"u1","cwd":"/home/u/dev/llama.cpp","message":{"role":"user","content":"hi"}}"#,
+        ]);
+        let turns = turns_from_jsonl_file(f.path(), "s", "-home-u-dev-llama-cpp").unwrap();
+        assert_eq!(turns[0].workdir, "-home-u-dev-llama-cpp");
     }
 
     #[test]

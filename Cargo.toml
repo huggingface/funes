@@ -76,11 +76,15 @@ path = "benchmark/bench_index.rs"
 name = "bench_backends"
 path = "benchmark/bench_backends.rs"
 
-# One-off store migration for the cwd-derived project facet; delete with the file once every
-# store is migrated.
+# One-off store migrations for the workdir facet (local: rename + value pass; remote: rename).
+# Delete both, and `hf_dataset::rename_column`, once every store is migrated.
 [[example]]
-name = "migrate_project_facet"
-path = "scripts/migrate_project_facet.rs"
+name = "migrate_workdir_facet"
+path = "scripts/migrate_workdir_facet.rs"
+
+[[example]]
+name = "migrate_remote_workdir"
+path = "scripts/migrate_remote_workdir.rs"
 
 [profile.release]
 opt-level = 3

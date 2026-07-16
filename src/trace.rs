@@ -12,7 +12,7 @@ pub struct Block {
 
 pub struct Turn {
     pub session_id: String,
-    pub project: String,
+    pub workdir: String,
     pub turn_uuid: String,
     pub parent_uuid: Option<String>,
     pub seq: i64,

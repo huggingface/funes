@@ -41,9 +41,9 @@ async fn scrub_redacts_an_escaped_key_in_place() {
     let escaped = key.replace('\n', "\\n");
     assert!(!escaped.contains('\n') && escaped.contains(&key_body));
 
-    let project = "-home-u-dev-demo";
+    let workdir = "-home-u-dev-demo";
     let session = "scrub-drop-0001";
-    let dir = source.path().join("projects").join(project);
+    let dir = source.path().join("projects").join(workdir);
     std::fs::create_dir_all(&dir).unwrap();
     // Two turns: a clean one (must survive) and the escaped-key one (must be dropped).
     let mut f = std::fs::File::create(dir.join(format!("{session}.jsonl"))).unwrap();

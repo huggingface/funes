@@ -10,23 +10,23 @@ use std::path::Path;
 use crate::jsonl;
 use crate::trace::{Block, Turn};
 
-/// The project a session's records name: the basename of the `session` line's `cwd`. `None` when
+/// The workdir a session's records name: the `session` line's `cwd`, munged. `None` when
 /// no record carries one.
-pub fn project_from_records(records: &[Value]) -> Option<String> {
+pub fn workdir_from_records(records: &[Value]) -> Option<String> {
     records.iter().find_map(|r| {
         if r.get("type").and_then(Value::as_str) == Some("session") {
-            r.get("cwd").and_then(Value::as_str).and_then(jsonl::project_of_cwd)
+            r.get("cwd").and_then(Value::as_str).and_then(jsonl::workdir_of_cwd)
         } else {
             None
         }
     })
 }
 
-pub fn turns_from_jsonl_file(p: &Path, session_id: &str, fallback_project: &str) -> std::io::Result<Vec<Turn>> {
+pub fn turns_from_jsonl_file(p: &Path, session_id: &str, fallback_workdir: &str) -> std::io::Result<Vec<Turn>> {
     let records = jsonl::read_jsonl_records(p)?;
-    // The project facet is the basename of the session's recorded cwd, so the same clone names the
-    // same project on every host; the path-derived fallback covers transcripts without one.
-    let project = project_from_records(&records).unwrap_or_else(|| fallback_project.to_string());
+    // The workdir facet is the munged recorded cwd — the munge Claude Code uses for its
+    // `projects` dir names, shared by every parser; the path-derived fallback covers transcripts without one.
+    let workdir = workdir_from_records(&records).unwrap_or_else(|| fallback_workdir.to_string());
 
     let mut turns = Vec::new();
     let mut seq = 0i64; // index among RETAINED turns, file order
@@ -55,7 +55,7 @@ pub fn turns_from_jsonl_file(p: &Path, session_id: &str, fallback_project: &str)
         };
         turns.push(Turn {
             session_id: session_id.to_string(),
-            project: project.to_string(),
+            workdir: workdir.to_string(),
             // The native line `id`/`parentId` — not the inner `toolCall.id` (that is the tool_use_id).
             turn_uuid: obj.get("id").and_then(Value::as_str).unwrap_or("").to_string(),
             parent_uuid: obj.get("parentId").and_then(Value::as_str).map(str::to_string),
@@ -281,18 +281,18 @@ mod tests {
             r#"{"type":"session","id":"s","timestamp":1,"cwd":"/home/u/funes","version":"1"}"#,
             msg,
         ]);
-        // The same clone names the same project on both hosts.
+        // The munged cwd — a real facet instead of the date-dir the path fallback would give.
         assert_eq!(
-            turns_from_jsonl_file(mac.path(), "s", "fb").unwrap()[0].project,
-            "funes"
+            turns_from_jsonl_file(mac.path(), "s", "fb").unwrap()[0].workdir,
+            "-Users-d-dev-funes"
         );
         assert_eq!(
-            turns_from_jsonl_file(linux.path(), "s", "fb").unwrap()[0].project,
-            "funes"
+            turns_from_jsonl_file(linux.path(), "s", "fb").unwrap()[0].workdir,
+            "-home-u-funes"
         );
         // No recorded cwd → the path-derived fallback.
         let bare = write_jsonl(&[msg]);
-        assert_eq!(turns_from_jsonl_file(bare.path(), "s", "fb").unwrap()[0].project, "fb");
+        assert_eq!(turns_from_jsonl_file(bare.path(), "s", "fb").unwrap()[0].workdir, "fb");
     }
 
     #[test]

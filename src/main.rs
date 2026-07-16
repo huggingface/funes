@@ -49,9 +49,6 @@ enum Cmd {
         /// Restrict to a block type: text | thinking | tool_use | tool_result.
         #[arg(long = "type", value_name = "BLOCK_TYPE")]
         block_type: Option<String>,
-        /// Restrict to a project (the basename of the session's working directory).
-        #[arg(long)]
-        project: Option<String>,
         /// Restrict to a harness: claude | codex | pi.
         #[arg(long)]
         harness: Option<String>,
@@ -66,9 +63,6 @@ enum Cmd {
         /// Store to read — an `<org>/<repo>` shorthand, an `hf://…` URI, a local path, or `local`.
         /// Defaults to your local store.
         store: Option<String>,
-        /// Restrict to a project.
-        #[arg(long)]
-        project: Option<String>,
         /// Max sessions to show.
         #[arg(long, default_value_t = 50)]
         limit: usize,
@@ -134,10 +128,6 @@ enum Cmd {
     Push {
         /// Store to publish to: `<org>/<repo>` or a full `hf://…` URI.
         store: String,
-        /// Publish only this project's chunks (the basename of the session's working directory) — a projection,
-        /// so a multi-project machine can seed a per-project store without leaking siblings.
-        #[arg(long)]
-        project: Option<String>,
         /// Skip the confirmation when the target shares no chunks with your local store.
         #[arg(short, long)]
         yes: bool,
@@ -284,7 +274,6 @@ async fn main() -> Result<()> {
             half_life,
             neighbors,
             block_type,
-            project,
             harness,
             format,
             store,
@@ -305,7 +294,6 @@ async fn main() -> Result<()> {
                 half_life,
                 neighbors,
                 block_type,
-                project,
                 harness,
                 &progress,
             )
@@ -341,8 +329,8 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::List { store, project, limit } => {
-            print!("{}", recall::list(hub::Store::resolve(store), project, limit).await?);
+        Cmd::List { store, limit } => {
+            print!("{}", recall::list(hub::Store::resolve(store), limit).await?);
             Ok(())
         }
         Cmd::Get {
@@ -441,7 +429,6 @@ async fn main() -> Result<()> {
         }
         Cmd::Push {
             store: remote,
-            project,
             yes,
             force_reindex,
         } => {
@@ -450,7 +437,7 @@ async fn main() -> Result<()> {
             } else {
                 push::Confirm::Ask(prompt_new_store)
             };
-            match push::run_push(hub::Store::parse(&remote), project, force_reindex, confirm).await {
+            match push::run_push(hub::Store::parse(&remote), force_reindex, confirm).await {
                 Ok(pushed) => {
                     print!("{}", pushed.report);
                     // Secrets held back everything — surface a non-zero exit so automation can react.
@@ -677,7 +664,7 @@ async fn first_push(remote: &str, created: bool) -> Result<()> {
     } else {
         push::Confirm::Ask(prompt_new_store)
     };
-    match push::run_push(hub::Store::parse(remote), None, false, confirm).await {
+    match push::run_push(hub::Store::parse(remote), false, confirm).await {
         Ok(pushed) => {
             print!("{}", pushed.report);
             Ok(())

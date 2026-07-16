@@ -27,7 +27,7 @@ pub fn recall_agent(note: &str, store_arg: &str, hits: &[(Hit, f64)]) -> String 
         let _ = writeln!(
             out,
             "[{}] {} {}/{} {}  score={:.3}",
-            h.ts, h.harness, h.project, s8, h.block_type, score
+            h.ts, h.harness, h.workdir, s8, h.block_type, score
         );
         let _ = writeln!(out, "  → get {} {}{}", h.session_id, h.turn_uuid, store_arg);
         let _ = writeln!(out, "{}", h.text);
@@ -40,7 +40,7 @@ pub fn recall_agent(note: &str, store_arg: &str, hits: &[(Hit, f64)]) -> String 
     out
 }
 
-/// The human `recall` list: `N  date  agent  project  scent`, one line per hit, fitted to
+/// The human `recall` list: `N  date  agent  workdir  scent`, one line per hit, fitted to
 /// `width`. Metadata dims when `color` is set; `now` anchors the date labels (years show only
 /// when some hit is from another year).
 pub fn recall_human(note: &str, hits: &[(Hit, f64)], color: bool, width: usize, now: DateTime<Utc>) -> String {
@@ -59,7 +59,7 @@ pub fn recall_rows(hits: &[(Hit, f64)], color: bool, width: usize, now: DateTime
     hit_rows(hits, color, width, now, 0)
 }
 
-/// One aligned row per hit — dim `date  agent  project` columns, then the scent, fitted to
+/// One aligned row per hit — dim `date  agent  workdir` columns, then the scent, fitted to
 /// `width` minus `indent` (the caller's own per-line prefix).
 fn hit_rows(hits: &[(Hit, f64)], color: bool, width: usize, now: DateTime<Utc>, indent: usize) -> Vec<String> {
     let with_year = hits.iter().any(|(h, _)| {
@@ -73,7 +73,7 @@ fn hit_rows(hits: &[(Hit, f64)], color: bool, width: usize, now: DateTime<Utc>, 
             (
                 date_label(&h.ts, with_year),
                 harness_display(&h.harness),
-                ellipsize(project_display(&h.project), 24),
+                ellipsize(project_display(&h.workdir), 24),
             )
         })
         .collect();
@@ -418,8 +418,8 @@ fn harness_display(h: &str) -> &str {
     }
 }
 
-/// A munged absolute path (Claude project dirs turn `/` into `-`, so they start with `-`) shows
-/// its last segment; any other project name shows whole.
+/// A munged absolute path (Claude workdir dirs turn `/` into `-`, so they start with `-`) shows
+/// its last segment; any other workdir name shows whole.
 fn project_display(p: &str) -> &str {
     if p.starts_with('-') {
         p.rsplit('-').find(|s| !s.is_empty()).unwrap_or(p)
@@ -486,7 +486,7 @@ mod tests {
         Hit {
             text: text.to_string(),
             session_id: "0123456789abcdef".to_string(),
-            project: "-home-u-funes".to_string(),
+            workdir: "-home-u-funes".to_string(),
             turn_uuid: "aaaa-bbbb".to_string(),
             seq: 7,
             ts: ts.to_string(),

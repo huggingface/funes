@@ -89,7 +89,7 @@ async fn card_created_refreshed_and_a_hand_card_respected() {
     funes::index::run_index(src.path(), false, None).await.unwrap();
 
     // First publish → the card rides the initial commit.
-    let create = funes::push::run_push(Store::parse(&uri), None, false, Confirm::Yes).await;
+    let create = funes::push::run_push(Store::parse(&uri), false, Confirm::Yes).await;
     let card_created = root_readme(&repo).await;
 
     // Grow by one turn → the append must refresh the stats in the same data commit.
@@ -98,7 +98,7 @@ async fn card_created_refreshed_and_a_hand_card_respected() {
         &[("s1", "CARDSMOKE the first turn"), ("s2", "CARDSMOKE2 the second turn")],
     );
     funes::index::run_index(src.path(), false, None).await.unwrap();
-    let append = funes::push::run_push(Store::parse(&uri), None, false, Confirm::Yes).await;
+    let append = funes::push::run_push(Store::parse(&uri), false, Confirm::Yes).await;
     let card_refreshed = root_readme(&repo).await;
 
     // Hand-write the README: from here on funes must keep its hands off.
@@ -122,7 +122,7 @@ async fn card_created_refreshed_and_a_hand_card_respected() {
         ],
     );
     funes::index::run_index(src.path(), false, None).await.unwrap();
-    let append_past_hand = funes::push::run_push(Store::parse(&uri), None, false, Confirm::Yes).await;
+    let append_past_hand = funes::push::run_push(Store::parse(&uri), false, Confirm::Yes).await;
     let card_after_hand = root_readme(&repo).await;
 
     // Cleanup before asserting, so a failed assertion can't leave the scratch repo behind.

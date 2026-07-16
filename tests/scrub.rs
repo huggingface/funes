@@ -38,9 +38,9 @@ async fn scrub_redacts_an_existing_secret_in_place() {
     std::fs::remove_file(&keyfile).unwrap();
     let key_body = key.lines().nth(1).unwrap().to_string();
 
-    let project = "-home-u-dev-demo";
+    let workdir = "-home-u-dev-demo";
     let session = "scrub-session-0001";
-    let dir = source.path().join("projects").join(project);
+    let dir = source.path().join("projects").join(workdir);
     std::fs::create_dir_all(&dir).unwrap();
     let content = format!("deploy key:\n{key}");
     let line = serde_json::json!({

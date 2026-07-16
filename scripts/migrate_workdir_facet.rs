@@ -1,18 +1,18 @@
-//! One-off migration: recompute each stored row's `project` facet from its source transcript, in
-//! place — for a store built before the facet came from the session's recorded cwd. Uses the same
-//! per-harness derivation as the indexer, so a migrated store matches a freshly rebuilt one
-//! wherever the transcript still exists; a row whose transcript is gone keeps its stored facet
-//! (the store may be its only remaining record). Text and vectors are untouched — only the one
-//! column is rewritten. Local store only (`$FUNES_HOME` selects which).
+//! One-off migration: bring a store's facet column up to date, in place. Renames the column from
+//! `project` to `workdir` if the store predates the rename, then recomputes each row's value from
+//! its source transcript — the same per-harness derivation as the indexer, so a migrated store
+//! matches a freshly rebuilt one wherever the transcript still exists; a row whose transcript is
+//! gone keeps its stored facet (the store may be its only remaining record). Text and vectors are
+//! untouched. Local store only (`$FUNES_HOME` selects which).
 //!
-//!   cargo run --example migrate_project_facet
+//!   cargo run --example migrate_workdir_facet
 //!
 //! Disposable: delete this file and its `[[example]]` entry once every store is migrated.
 
 use anyhow::{Context, Result};
 use arrow_array::{Array, RecordBatch, RecordBatchIterator, StringArray};
 use funes::{claude_traces, codex_traces, dataset, jsonl, lock, pi_traces};
-use lance::dataset::{Dataset, WriteMode, WriteParams};
+use lance::dataset::{ColumnAlteration, Dataset, WriteMode, WriteParams};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
@@ -22,10 +22,18 @@ async fn main() -> Result<()> {
     // The rewrite replaces the whole table, so hold the store lock to be the sole writer.
     let _lock = lock::StoreLock::acquire()?;
     let uri = dataset::table_uri(&dataset::local_store_dir());
-    let Ok(ds) = dataset::open(&uri, HashMap::new()).await else {
+    let Ok(mut ds) = dataset::open(&uri, HashMap::new()).await else {
         println!("no local store to migrate");
         return Ok(());
     };
+
+    // A store from before the rename: `alter_columns` is a metadata-only commit, no data rewrite.
+    let schema = arrow_schema::Schema::from(ds.schema());
+    if schema.column_with_name("workdir").is_none() && schema.column_with_name("project").is_some() {
+        eprintln!("renaming the `project` column to `workdir`…");
+        ds.alter_columns(&[ColumnAlteration::new("project".into()).rename("workdir".into())])
+            .await?;
+    }
 
     eprintln!("loading the local store…");
     let batches = dataset::scan_rows(&ds, &[], None, None).await?;
@@ -44,7 +52,7 @@ async fn main() -> Result<()> {
 
     let mut out: Vec<RecordBatch> = Vec::new();
     for b in &batches {
-        let projects = col_str(b, "project")?;
+        let projects = col_str(b, "workdir")?;
         let sources = col_str(b, "source_path")?;
         let harnesses = col_str(b, "harness")?;
         let mut new_projects: Vec<Option<String>> = Vec::with_capacity(b.num_rows());
@@ -67,7 +75,7 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        let proj_idx = b.schema().index_of("project")?;
+        let proj_idx = b.schema().index_of("workdir")?;
         let mut cols = b.columns().to_vec();
         cols[proj_idx] = Arc::new(StringArray::from(new_projects));
         out.push(RecordBatch::try_new(b.schema(), cols)?);
@@ -110,20 +118,25 @@ async fn main() -> Result<()> {
 /// The facet `source` derives to today, or `None` when it can't be re-derived — the caller leaves
 /// those rows alone. The extension gate matters: a parquet-sourced row's file-stem facet is
 /// already right, and the path fallback would clobber it with the parent dir. Mirrors the indexer:
-/// the recorded cwd's basename, else the path-derived fallback.
+/// the munged recorded cwd, else the path-derived fallback.
 fn derive_project(source: &str, harness: &str) -> Option<String> {
     let p = Path::new(source);
     if !p.extension().map(|x| x == "jsonl").unwrap_or(false) {
         return None;
     }
-    let records = jsonl::read_jsonl_records(p).ok()?;
+    let records = match jsonl::read_jsonl_records(p) {
+        Ok(r) => r,
+        // A gone Claude transcript still derives exactly: its path's `projects` segment IS the
+        // munged cwd. Other layouts carry nothing recoverable — leave their rows alone.
+        Err(_) => return (harness == "claude_code").then(|| claude_traces::workdir_of(p)),
+    };
     let from_cwd = match harness {
-        "claude_code" => claude_traces::project_from_records(&records),
-        "codex" => codex_traces::project_from_records(&records),
-        "pi" => pi_traces::project_from_records(&records),
+        "claude_code" => claude_traces::workdir_from_records(&records),
+        "codex" => codex_traces::workdir_from_records(&records),
+        "pi" => pi_traces::workdir_from_records(&records),
         _ => return None,
     };
-    Some(from_cwd.unwrap_or_else(|| claude_traces::project_of(p)))
+    Some(from_cwd.unwrap_or_else(|| claude_traces::workdir_of(p)))
 }
 
 /// A named Utf8 column of `b`, or an error naming what's missing.

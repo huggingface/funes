@@ -50,7 +50,6 @@ async fn recall_tolerates_a_store_without_the_harness_column() {
         1,
         None,
         None,
-        None,
     )
     .await
     .expect("recall over a store without the harness column");
@@ -68,7 +67,6 @@ async fn recall_tolerates_a_store_without_the_harness_column() {
         30,
         30.0,
         1,
-        None,
         None,
         Some("pi".into()),
     )

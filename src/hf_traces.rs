@@ -6,7 +6,7 @@
 //! JSON-encoded OpenAI-style chat messages — `{role, content, reasoning_content?, tool_calls?}`.
 //! `reasoning_content` becomes a thinking block, `content` a text block, and each `tool_calls`
 //! entry a tool_use block, matching funes' block vocabulary. Per-row columns carry the facets:
-//! `harness`, and the project as the basename of the `metadata` JSON's `cwd` key (where the
+//! `harness`, and the workdir as the munged `metadata` JSON `cwd` (where the
 //! normalizer surfaces the session's working directory) — the same derivation as the JSONL
 //! parsers.
 
@@ -24,7 +24,7 @@ use std::path::Path;
 /// sessions (one row each), skipping rows whose messages yield no indexable block. Each `Turn`
 /// carries its own `session_id`, so the index pipeline groups them without a per-session wrapper —
 /// mirroring `claude_traces::turns_from_jsonl_file`, which also returns `Vec<Turn>`.
-pub fn turns_from_parquet(path: &Path, fallback_project: &str, limit: Option<usize>) -> Result<Vec<Turn>> {
+pub fn turns_from_parquet(path: &Path, fallback_workdir: &str, limit: Option<usize>) -> Result<Vec<Turn>> {
     let file = File::open(path).with_context(|| format!("open parquet {}", path.display()))?;
     let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
     let cap = limit.unwrap_or(usize::MAX);
@@ -58,15 +58,15 @@ pub fn turns_from_parquet(path: &Path, fallback_project: &str, limit: Option<usi
             let source = str_at(&batch, "file_path", i).unwrap_or_else(|| path.display().to_string());
             // Per-row: a dataset can mix harnesses; a dataset without the column reads as "".
             let harness = str_at(&batch, "harness", i).unwrap_or_default();
-            // Per-row facet: the basename of the session's recorded cwd (`metadata.cwd`, where
+            // Per-row facet: the munged recorded cwd (`metadata.cwd`, where
             // the normalizer surfaces it), else the dataset-level fallback (its file stem).
-            let project = metadata_cwd(&batch, i)
+            let workdir = metadata_cwd(&batch, i)
                 .as_deref()
-                .and_then(jsonl::project_of_cwd)
-                .unwrap_or_else(|| fallback_project.to_string());
+                .and_then(jsonl::workdir_of_cwd)
+                .unwrap_or_else(|| fallback_workdir.to_string());
 
             let msgs = parse_message_list(&messages.value(i))?;
-            let turns = turns_from_messages(&msgs, &sid, &project, &ts, &source, &harness);
+            let turns = turns_from_messages(&msgs, &sid, &workdir, &ts, &source, &harness);
             if !turns.is_empty() {
                 out.extend(turns);
                 sessions += 1;
@@ -121,7 +121,7 @@ fn parse_message_list(elems: &dyn Array) -> Result<Vec<Value>> {
 fn turns_from_messages(
     msgs: &[Value],
     session_id: &str,
-    project: &str,
+    workdir: &str,
     ts: &str,
     source: &str,
     harness: &str,
@@ -138,7 +138,7 @@ fn turns_from_messages(
         let turn_uuid = format!("{session_id}-{seq}");
         turns.push(Turn {
             session_id: session_id.to_string(),
-            project: project.to_string(),
+            workdir: workdir.to_string(),
             turn_uuid: turn_uuid.clone(),
             parent_uuid: parent.take(),
             seq,
@@ -255,7 +255,7 @@ mod tests {
         let u = &turns[0];
         assert_eq!(u.session_id, "sess-1");
         assert_eq!(u.role, "user");
-        assert_eq!(u.project, "Fable-5-traces");
+        assert_eq!(u.workdir, "Fable-5-traces");
         assert_eq!(u.seq, 0);
         assert_eq!(u.ts, "2026-06-19T00:00:02.000Z");
         assert_eq!(u.blocks.len(), 1);
@@ -323,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn project_is_the_metadata_cwd_basename_with_the_stem_fallback() {
+    fn project_is_the_munged_metadata_cwd_with_the_stem_fallback() {
         let msg = r#"{"role":"user","content":"hi"}"#;
         let schema = Arc::new(Schema::new(vec![
             Field::new("session_id", DataType::Utf8, false),
@@ -358,11 +358,15 @@ mod tests {
         w.close().unwrap();
 
         let turns = turns_from_parquet(f.path(), "stem", None).unwrap();
-        let project_for =
-            |sess: &str| -> String { turns.iter().find(|t| t.session_id == sess).unwrap().project.clone() };
-        assert_eq!(project_for("s1"), "huggingface.js", "metadata.cwd basename");
-        assert_eq!(project_for("s2"), "stem", "null cwd → the dataset fallback");
-        assert_eq!(project_for("s3"), "stem", "no metadata → the dataset fallback");
+        let workdir_for =
+            |sess: &str| -> String { turns.iter().find(|t| t.session_id == sess).unwrap().workdir.clone() };
+        assert_eq!(
+            workdir_for("s1"),
+            "-Users-g-Desktop-huggingface-js",
+            "munged metadata.cwd"
+        );
+        assert_eq!(workdir_for("s2"), "stem", "null cwd → the dataset fallback");
+        assert_eq!(workdir_for("s3"), "stem", "no metadata → the dataset fallback");
     }
 
     #[test]

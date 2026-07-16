@@ -33,7 +33,7 @@ pub(crate) fn schema() -> Arc<Schema> {
             utf8("id"),
             utf8("text"),
             utf8("session_id"),
-            utf8("project"),
+            utf8("workdir"),
             utf8("turn_uuid"),
             utf8("parent_uuid"),
             i64f("seq"),
@@ -72,7 +72,7 @@ pub(crate) fn build_batch(chunks: &[chunk::Chunk], vectors: &[Vec<f32>]) -> Resu
             Arc::new(s(&|c| Some(c.id.clone()))),
             Arc::new(s(&|c| Some(c.text.clone()))),
             Arc::new(s(&|c| Some(c.session_id.clone()))),
-            Arc::new(s(&|c| Some(c.project.clone()))),
+            Arc::new(s(&|c| Some(c.workdir.clone()))),
             Arc::new(s(&|c| Some(c.turn_uuid.clone()))),
             Arc::new(s(&|c| c.parent_uuid.clone())),
             Arc::new(i(&|c| c.seq)),
@@ -168,7 +168,7 @@ fn redact_turns(turns: &mut [trace::Turn], scanner: &dyn scan::SecretScanner) ->
     Ok(())
 }
 
-/// A unit's distinct-session count and a log label: `"<sid> (<project>)"` for a single session (a
+/// A unit's distinct-session count and a log label: `"<sid> (<workdir>)"` for a single session (a
 /// JSONL file), `"<n> sessions"` for a bulk unit (many sessions in one artifact), and the unit's `key` (its
 /// path) when it has no turns at all. The borrow of `turns` is confined here so callers keep it mutable.
 fn unit_summary(turns: &[trace::Turn], key: &str) -> (u64, String) {
@@ -177,7 +177,7 @@ fn unit_summary(turns: &[trace::Turn], key: &str) -> (u64, String) {
     sids.dedup();
     let label = match (sids.len(), turns.first()) {
         (0, _) => key.to_string(),
-        (1, Some(t)) => format!("{} ({})", t.session_id, t.project),
+        (1, Some(t)) => format!("{} ({})", t.session_id, t.workdir),
         (n, _) => format!("{n} sessions"),
     };
     (sids.len() as u64, label)
@@ -520,7 +520,7 @@ mod tests {
                 "id",
                 "text",
                 "session_id",
-                "project",
+                "workdir",
                 "turn_uuid",
                 "parent_uuid",
                 "seq",
@@ -561,7 +561,7 @@ mod tests {
         ]);
         let mut turns = vec![trace::Turn {
             session_id: "sess".into(),
-            project: "proj".into(),
+            workdir: "proj".into(),
             turn_uuid: "turn".into(),
             parent_uuid: None,
             seq: 0,

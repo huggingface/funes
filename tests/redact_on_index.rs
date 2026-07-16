@@ -33,9 +33,9 @@ async fn planted_key_is_redacted_at_index_time() {
     let key_body = key.lines().nth(1).unwrap().to_string();
     assert!(key_body.len() > 20);
 
-    let project = "-home-u-dev-demo";
+    let workdir = "-home-u-dev-demo";
     let session = "redact-session-0001";
-    let dir = source.path().join("projects").join(project);
+    let dir = source.path().join("projects").join(workdir);
     std::fs::create_dir_all(&dir).unwrap();
     let content = format!("here is my deploy key, keep it safe:\n{key}");
     let line = serde_json::json!({
