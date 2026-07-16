@@ -32,7 +32,9 @@ pub fn cwd_of_transcript(path: &Path) -> Option<String> {
 /// stripped, taking the last two path segments. Handles ssh (`git@host:owner/name.git`) and https
 /// (`https://host/owner/name`, `https://host/datasets/owner/name`). `None` without a path.
 fn identity(url: &str) -> Option<String> {
-    let u = url.trim().trim_end_matches(".git").trim_end_matches('/');
+    // Trailing slashes first, then `.git` — a `…/name.git/` URL must still shed `.git`.
+    let u = url.trim().trim_end_matches('/');
+    let u = u.strip_suffix(".git").unwrap_or(u);
     let path = if let Some((_, rest)) = u.split_once("://") {
         rest.split_once('/').map(|(_, p)| p)? // host/owner/name… → owner/name…
     } else if let Some((_, rest)) = u.split_once(':') {
@@ -88,6 +90,11 @@ mod tests {
             identity("https://huggingface.co/datasets/acme/kb").as_deref(),
             Some("acme/kb"),
             "the HF datasets/ segment is dropped — identity is owner/name"
+        );
+        assert_eq!(
+            identity("https://github.com/huggingface/funes.git/").as_deref(),
+            Some("huggingface/funes"),
+            "a trailing slash after .git must still shed .git"
         );
         assert_eq!(identity("garbage"), None);
     }
