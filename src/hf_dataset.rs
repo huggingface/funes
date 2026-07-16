@@ -172,6 +172,34 @@ pub(crate) async fn reindex(
     }
 }
 
+/// Rename a column on the remote dataset in one head-guarded commit. `alter_columns` is
+/// metadata-only — the captured writes are a new manifest and transaction, no data files — so the
+/// commit is small whatever the store's size. Returns the new commit oid. A moved head is an
+/// error (single attempt): a rename is an exclusive-writer operation, not something to retry
+/// under concurrency.
+pub async fn rename_column(
+    repo: &HFRepository<RepoTypeDataset>,
+    dataset_uri: &str,
+    storage_options: HashMap<String, String>,
+    rev: &str,
+    message: String,
+    from: &str,
+    to: &str,
+) -> Result<String> {
+    let parent = head_oid(repo, rev).await?;
+    let (mut ds, wrapper) = open_capturing(dataset_uri, storage_options).await?;
+    ds.alter_columns(&[lance::dataset::ColumnAlteration::new(from.into()).rename(to.into())])
+        .await
+        .context("renaming the remote column")?;
+    let files = captured_files(&wrapper);
+    anyhow::ensure!(!files.is_empty(), "the rename produced no files to commit");
+    let (ops, _dir) = write_ops(&files)?;
+    let info = send_commit(repo, ops, parent, rev, message)
+        .await
+        .map_err(|e| anyhow::Error::new(e).context("rename commit failed"))?;
+    Ok(info.commit_oid.unwrap_or_else(|| "?".to_string()))
+}
+
 /// Open the remote dataset with a [`CaptureStore`] installed, returning the wrapped dataset and the
 /// wrapper that holds the shared capture map.
 async fn open_capturing(

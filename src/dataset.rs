@@ -56,37 +56,6 @@ pub fn reject_pre_workdir(ds: &Dataset) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod workdir_guard_tests {
-    use super::*;
-    use arrow_array::{RecordBatch, RecordBatchIterator, StringArray};
-    use arrow_schema::{DataType, Field, Schema};
-
-    async fn store_with_column(name: &str) -> (tempfile::TempDir, Dataset) {
-        let dir = tempfile::tempdir().unwrap();
-        let schema = Arc::new(Schema::new(vec![Field::new(name, DataType::Utf8, true)]));
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![Arc::new(StringArray::from(vec!["-home-u-dev-funes"]))],
-        )
-        .unwrap();
-        let uri = table_uri(&dir.path().to_string_lossy());
-        let reader = RecordBatchIterator::new(vec![Ok(batch)], schema);
-        let ds = Dataset::write(reader, &uri, None).await.unwrap();
-        (dir, ds)
-    }
-
-    #[tokio::test]
-    async fn pre_workdir_store_is_refused_with_the_migration_hint() {
-        let (_d, old) = store_with_column("project").await;
-        let err = reject_pre_workdir(&old).unwrap_err().to_string();
-        assert!(err.contains("migrate_workdir_facet"), "unhelpful error: {err}");
-
-        let (_d, new) = store_with_column("workdir").await;
-        assert!(reject_pre_workdir(&new).is_ok());
-    }
-}
-
 /// Open the `chunks` dataset at `uri`; `storage_options` carries the backend credentials/revision a
 /// remote needs (empty for a local store).
 pub async fn open(uri: &str, storage_options: HashMap<String, String>) -> Result<Dataset> {
@@ -190,4 +159,35 @@ fn ivf_pq_params(ds: &Dataset) -> Option<VectorIndexParams> {
         IvfBuildParams::default(),
         pq,
     ))
+}
+
+#[cfg(test)]
+mod workdir_guard_tests {
+    use super::*;
+    use arrow_array::{RecordBatch, RecordBatchIterator, StringArray};
+    use arrow_schema::{DataType, Field, Schema};
+
+    async fn store_with_column(name: &str) -> (tempfile::TempDir, Dataset) {
+        let dir = tempfile::tempdir().unwrap();
+        let schema = Arc::new(Schema::new(vec![Field::new(name, DataType::Utf8, true)]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(StringArray::from(vec!["-home-u-dev-funes"]))],
+        )
+        .unwrap();
+        let uri = table_uri(&dir.path().to_string_lossy());
+        let reader = RecordBatchIterator::new(vec![Ok(batch)], schema);
+        let ds = Dataset::write(reader, &uri, None).await.unwrap();
+        (dir, ds)
+    }
+
+    #[tokio::test]
+    async fn pre_workdir_store_is_refused_with_the_migration_hint() {
+        let (_d, old) = store_with_column("project").await;
+        let err = reject_pre_workdir(&old).unwrap_err().to_string();
+        assert!(err.contains("migrate_workdir_facet"), "unhelpful error: {err}");
+
+        let (_d, new) = store_with_column("workdir").await;
+        assert!(reject_pre_workdir(&new).is_ok());
+    }
 }
