@@ -249,6 +249,23 @@ fn write_ops(files: &BTreeMap<String, Bytes>) -> Result<(Vec<CommitOperation>, t
     Ok((ops, dir))
 }
 
+/// The repo's `README.md` at `rev`, or `None` when it has none — fetched straight to bytes,
+/// never the shared cache, so a push always classifies the dataset card against the branch
+/// head it targets.
+pub(crate) async fn fetch_readme(repo: &HFRepository<RepoTypeDataset>, rev: &str) -> Result<Option<String>> {
+    let fetched = repo
+        .download_file_to_bytes()
+        .filename("README.md")
+        .revision(rev.to_string())
+        .send()
+        .await;
+    match fetched {
+        Ok(bytes) => Ok(Some(String::from_utf8_lossy(&bytes).into_owned())),
+        Err(HFError::EntryNotFound { .. }) => Ok(None),
+        Err(e) => Err(anyhow::Error::new(e).context("reading the remote dataset card")),
+    }
+}
+
 /// One `create_commit` of `ops` on branch `rev`, guarded by `parent`. Returns the raw hf-hub
 /// result so callers can tell a head-moved [`HFError::Conflict`] from other failures.
 async fn send_commit(

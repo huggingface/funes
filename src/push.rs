@@ -16,12 +16,14 @@
 //!   crosses [`REINDEX_THRESHOLD`] (best-effort: a head-moved conflict is a warning, the next push
 //!   retries), or eagerly with `--force-reindex` (retried until it lands).
 
+use crate::card::{self, CardAction, CardCtx};
 use crate::hf_dataset::{self, Appended, Reindexed};
 use crate::hub::{self, Store};
 use crate::{chunk, dataset, scan};
 use anyhow::{bail, Context, Result};
 use arrow_array::{BooleanArray, RecordBatch, RecordBatchIterator, StringArray};
 use arrow_select::filter::filter_record_batch;
+use chrono::Utc;
 use hf_hub::repository::CommitOperation;
 use hf_hub::{HFClient, HFError, HFRepository, RepoTypeDataset};
 use lance::dataset::WriteParams;
@@ -191,6 +193,7 @@ pub async fn run_push(target: Store, project: Option<String>, force_reindex: boo
     // 2. HF repo handle. Resolve the target and token before the confirmation, so a bad URI or a
     // missing token fails before we prompt for one.
     let (owner, name, prefix) = hub::parse_hf(&uri)?;
+    let repo_id = format!("{owner}/{name}");
     let token = hub::hf_token().context("no HF token (set HF_TOKEN) — required to push")?;
 
     // When required, ask for confirmation before publishing.
@@ -277,6 +280,23 @@ pub async fn run_push(target: Store, project: Option<String>, force_reindex: boo
         if ops.is_empty() {
             return Ok(format!("{}: nothing new to upload\n", target.label()).into());
         }
+
+        // The dataset card rides the same commit — created when the repo has none, a
+        // hand-written card left alone (see `card_file`).
+        let date = Utc::now().format("%Y-%m-%d").to_string();
+        let ctx = CardCtx {
+            repo: &repo_id,
+            chunks: n_chunks as u64,
+            embedding_model: embedding_model(&schema),
+            date: &date,
+        };
+        let (card_body, card_note) = card_file(hf_dataset::fetch_readme(&repo, &rev).await, &ctx);
+        if let Some(body) = &card_body {
+            let card_path = staging.path().join("README.md");
+            std::fs::write(&card_path, body)?;
+            ops.push(CommitOperation::add_file("README.md".to_string(), card_path));
+        }
+
         eprintln!("uploading {n_chunks} chunk(s) to {}…", target.label());
         let info = repo
             .create_commit()
@@ -288,7 +308,7 @@ pub async fn run_push(target: Store, project: Option<String>, force_reindex: boo
             .await
             .map_err(|e| anyhow::Error::new(e).context("create_commit failed"))?;
         return Ok(format!(
-            "{}: pushed {n_chunks} chunks (commit {})\n{}",
+            "{}: pushed {n_chunks} chunks (commit {})\n{card_note}{}",
             target.label(),
             info.commit_oid.as_deref().unwrap_or("?"),
             skipped.warning()
@@ -335,6 +355,37 @@ pub async fn run_push(target: Store, project: Option<String>, force_reindex: boo
     }
     out.push_str(&skipped.warning());
     Ok(out.into())
+}
+
+/// The store's pinned embedding model, from the schema metadata `index` stamps. A pre-metadata
+/// store has no id to show.
+fn embedding_model(schema: &arrow_schema::Schema) -> &str {
+    schema
+        .metadata()
+        .get("embedding_model")
+        .map(String::as_str)
+        .unwrap_or("unknown")
+}
+
+/// What a push does about the dataset card, from the remote README fetch (`Err` = unreadable):
+/// the content to commit as `README.md`, if any, and the report line. An unreadable README is
+/// indistinguishable from a hand-written card, so it's left alone rather than risk clobbering
+/// it — the next push retries.
+fn card_file(remote_readme: Result<Option<String>>, ctx: &CardCtx) -> (Option<String>, String) {
+    let existing = match remote_readme {
+        Ok(existing) => existing,
+        Err(e) => {
+            return (
+                None,
+                format!("  note: dataset card left untouched (couldn't read the current one: {e})\n"),
+            )
+        }
+    };
+    match card::plan(existing.as_deref(), ctx) {
+        CardAction::Create(text) => (Some(text), "  dataset card created\n".into()),
+        CardAction::Refresh(text) => (Some(text), "  dataset card refreshed\n".into()),
+        CardAction::LeaveAlone => (None, String::new()),
+    }
 }
 
 /// Rows held back from a push because their text still contained a secret.
@@ -467,6 +518,46 @@ mod tests {
         // path can't be built here; it's exercised by the gated round-trip.)
         assert!(!is_read_only(&anyhow::anyhow!("server said 403 Forbidden")));
         assert!(!is_read_only(&anyhow::anyhow!("no HF token")));
+    }
+
+    /// Card context for the [`card_file`] tests.
+    fn card_ctx(chunks: u64) -> CardCtx<'static> {
+        CardCtx {
+            repo: "acme/kb",
+            chunks,
+            embedding_model: "BAAI/bge-small-en-v1.5",
+            date: "2026-07-16",
+        }
+    }
+
+    #[test]
+    fn card_file_creates_when_the_remote_has_none() {
+        let (body, note) = card_file(Ok(None), &card_ctx(10));
+        assert!(body.expect("a card").contains("--store acme/kb"));
+        assert_eq!(note, "  dataset card created\n");
+    }
+
+    #[test]
+    fn card_file_refreshes_a_funes_card() {
+        let CardAction::Create(current) = card::plan(None, &card_ctx(10)) else {
+            panic!("expected Create");
+        };
+        let (body, note) = card_file(Ok(Some(current)), &card_ctx(999));
+        assert!(body.expect("a refresh").contains("| Chunks | 999 |"));
+        assert_eq!(note, "  dataset card refreshed\n");
+    }
+
+    #[test]
+    fn card_file_never_touches_a_hand_written_card() {
+        let (body, note) = card_file(Ok(Some("# my store\n".into())), &card_ctx(10));
+        assert!(body.is_none() && note.is_empty());
+    }
+
+    #[test]
+    fn card_file_skips_when_the_remote_readme_is_unreadable() {
+        let (body, note) = card_file(Err(anyhow::anyhow!("504")), &card_ctx(10));
+        assert!(body.is_none());
+        assert!(note.contains("left untouched"), "note: {note}");
     }
 
     use crate::trace::{Block, Turn};
