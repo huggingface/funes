@@ -25,7 +25,7 @@ use arrow_array::{BooleanArray, RecordBatch, StringArray};
 use arrow_select::filter::filter_record_batch;
 use bytes::Bytes;
 use chrono::Utc;
-use hf_hub::{HFClient, HFError, HFRepository, RepoTypeDataset};
+use hf_hub::{HFError, HFRepository, RepoTypeDataset};
 use lance::Dataset;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -185,11 +185,7 @@ pub async fn run_push(target: Store, force_reindex: bool, confirm: Confirm) -> R
         bail!("push aborted");
     }
 
-    let client = HFClient::builder()
-        .token(token.clone())
-        .build()
-        .context("building hf-hub client")?;
-    let repo = client.dataset(owner, name);
+    let repo = hub::client(Some(token.as_str()), true)?.dataset(owner, name);
     // No revision pinning: always the `main` branch head.
     let rev = "main".to_string();
     let dataset_uri = format!("{uri}/{}.lance", dataset::TABLE);

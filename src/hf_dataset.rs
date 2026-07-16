@@ -49,7 +49,7 @@ use futures::TryStreamExt;
 use hf_hub::progress::{Progress, ProgressEvent, ProgressHandler, UploadEvent};
 use hf_hub::repository::files::RepoTreeEntry;
 use hf_hub::repository::{CommitInfo, CommitOperation, GitRefs};
-use hf_hub::{HFClient, HFError, HFRepository, RepoTypeDataset};
+use hf_hub::{HFError, HFRepository, RepoTypeDataset};
 use lance::dataset::builder::DatasetBuilder;
 use lance::dataset::{Dataset, NewColumnTransform, WriteParams};
 use lance::index::DatasetIndexExt;
@@ -60,6 +60,7 @@ use object_store::ObjectStore as OSObjectStore;
 use crate::capture_store::{CaptureStore, Captured};
 use crate::dataset;
 use crate::fetch_store::{FetchStore, FileFetcher};
+use crate::hub;
 
 /// Outcome of an [`append`] commit.
 pub(crate) enum Appended {
@@ -525,12 +526,7 @@ pub(crate) async fn fetch_wrapper(
     token: Option<&str>,
     branch: &str,
 ) -> Result<(Arc<FetchWrapper>, String)> {
-    let mut builder = HFClient::builder();
-    if let Some(t) = token {
-        builder = builder.token(t.to_string());
-    }
-    let client = builder.build().context("building hf-hub client")?;
-    let repo = Arc::new(client.dataset(owner, name));
+    let repo = Arc::new(hub::client(token, true)?.dataset(owner, name));
     let sha = head_oid(&repo, branch).await?;
     Ok((Arc::new(FetchWrapper::new(repo, sha.clone())), sha))
 }
@@ -570,12 +566,7 @@ pub(crate) fn parquet_paths(entries: &[RepoTreeEntry]) -> Vec<String> {
 /// Resolve a Hub trace dataset's auto-converted parquet: the `refs/convert/parquet` commit and its
 /// `*.parquet` shards, via the public `list_refs` + `list_tree` API (no datasets-server HTTP dep).
 pub(crate) async fn resolve_parquet(owner: &str, name: &str, token: Option<&str>) -> Result<RemoteParquet> {
-    let mut builder = HFClient::builder();
-    if let Some(t) = token {
-        builder = builder.token(t.to_string());
-    }
-    let client = builder.build().context("building hf-hub client")?;
-    let repo = Arc::new(client.dataset(owner, name));
+    let repo = Arc::new(hub::client(token, true)?.dataset(owner, name));
 
     let refs = repo.list_refs().send().await.context("listing dataset refs")?;
     let revision = pick_convert_oid(&refs)

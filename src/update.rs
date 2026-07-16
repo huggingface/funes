@@ -11,7 +11,7 @@
 use crate::hub;
 use anyhow::{anyhow, bail, Context, Result};
 use hf_hub::buckets::BucketDownload;
-use hf_hub::{HFBucket, HFClient};
+use hf_hub::HFBucket;
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -55,7 +55,7 @@ pub async fn run(force: bool) -> Result<()> {
     })?;
 
     let current = env!("CARGO_PKG_VERSION");
-    let bucket = release_bucket(None)?;
+    let bucket = release_bucket(true)?;
     let latest = fetch_latest_version(&bucket)
         .await
         .context("checking the latest funes version")?;
@@ -157,7 +157,7 @@ fn verify_runs(path: &Path) -> Result<std::process::Output> {
 /// offline, or the check fails. Never errors and never blocks for long — a short timeout and
 /// any failure just yield no notice, so the check can't break or stall status.
 pub async fn upgrade_notice() -> Option<String> {
-    let bucket = release_bucket(Some(0)).ok()?;
+    let bucket = release_bucket(false).ok()?;
     let latest = match tokio::time::timeout(NOTICE_TIMEOUT, fetch_latest_version(&bucket)).await {
         Ok(Ok(v)) => v,
         _ => return None,
@@ -181,18 +181,10 @@ fn notice_for(latest_raw: &str, current_raw: &str) -> Option<String> {
 }
 
 /// An [`HFBucket`] handle for the funes release bucket, with the standard HF token if one is
-/// set (the bucket is public, so a token isn't required). `retry_max_attempts` caps hf-hub's
-/// retry loop — `Some(0)` for the fail-fast status check, `None` for the update's default.
-fn release_bucket(retry_max_attempts: Option<usize>) -> Result<HFBucket> {
-    let mut builder = HFClient::builder();
-    if let Some(n) = retry_max_attempts {
-        builder = builder.retry_max_attempts(n);
-    }
-    if let Some(token) = hub::hf_token() {
-        builder = builder.token(token);
-    }
-    let client = builder.build().context("building the Hugging Face client")?;
-    Ok(client.bucket(BUCKET_OWNER, BUCKET_NAME))
+/// set (the bucket is public, so a token isn't required). `retries` is false for the fail-fast
+/// status check, true for the update's default.
+fn release_bucket(retries: bool) -> Result<HFBucket> {
+    Ok(hub::client(hub::hf_token().as_deref(), retries)?.bucket(BUCKET_OWNER, BUCKET_NAME))
 }
 
 /// Download the bucket's `VERSION` marker (the latest published release) into a scratch dir and
