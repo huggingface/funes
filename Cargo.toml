@@ -79,8 +79,8 @@ path = "benchmark/bench_backends.rs"
 # One-off store migration for the cwd-derived project facet; delete with the file once every
 # store is migrated.
 [[example]]
-name = "migrate_project_facet"
-path = "scripts/migrate_project_facet.rs"
+name = "migrate_workdir_facet"
+path = "scripts/migrate_workdir_facet.rs"
 
 [profile.release]
 opt-level = 3

@@ -5,12 +5,12 @@
 
 use std::io::Write;
 
-/// Write a `<source>/projects/<project>/<session>.jsonl` transcript so `project_of` /
+/// Write a `<source>/projects/<project>/<session>.jsonl` transcript so `workdir_of` /
 /// `session_id_of` resolve the way they do for real Claude Code projects.
 fn write_transcript(source: &std::path::Path) -> (String, String) {
-    let project = "-home-u-dev-demo";
+    let workdir = "-home-u-dev-demo";
     let session = "test-session-0001";
-    let dir = source.join("projects").join(project);
+    let dir = source.join("projects").join(workdir);
     std::fs::create_dir_all(&dir).unwrap();
     let mut f = std::fs::File::create(dir.join(format!("{session}.jsonl"))).unwrap();
     let lines = [
@@ -21,7 +21,7 @@ fn write_transcript(source: &std::path::Path) -> (String, String) {
     for l in lines {
         writeln!(f, "{l}").unwrap();
     }
-    (session.to_string(), project.to_string())
+    (session.to_string(), workdir.to_string())
 }
 
 #[tokio::test]
@@ -30,7 +30,7 @@ async fn index_then_read_surface() {
     let source = tempfile::tempdir().unwrap();
     // db::funes_dir() reads $FUNES_HOME; point the whole read/write surface at the temp dir.
     std::env::set_var("FUNES_HOME", db_dir.path());
-    let (session, project) = write_transcript(source.path());
+    let (session, workdir) = write_transcript(source.path());
 
     // Build the index for real: parse → chunk → embed → Lance + FTS.
     funes::index::run_index(source.path(), false, None).await.unwrap();
@@ -39,9 +39,9 @@ async fn index_then_read_surface() {
     let status = funes::recall::status(funes::hub::Store::local()).await.unwrap();
     assert!(status.contains("chunks:"), "status missing chunk count: {status}");
 
-    // list: the session appears under its project.
+    // list: the session appears under its workdir.
     let list = funes::recall::list(funes::hub::Store::local(), 50).await.unwrap();
-    assert!(list.contains(&project), "list should name the project: {list}");
+    assert!(list.contains(&workdir), "list should name the workdir: {list}");
 
     // recall: the parsing turn surfaces, and the `→ get` line carries the full session id.
     let out = funes::recall::recall(

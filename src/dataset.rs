@@ -43,6 +43,50 @@ pub fn table_uri(base: &str) -> String {
     format!("{base}/{TABLE}.lance")
 }
 
+/// Refuse a store whose facet column is still named `project`: reads project `workdir`, and
+/// Lance's missing-column error names neither the store nor the fix. Checked wherever a read or
+/// append would otherwise hit the schema mismatch (recall's open, push's local and remote ends).
+pub fn reject_pre_workdir(ds: &Dataset) -> Result<()> {
+    let schema = arrow_schema::Schema::from(ds.schema());
+    if schema.column_with_name("workdir").is_none() && schema.column_with_name("project").is_some() {
+        anyhow::bail!(
+            "this store's facet column is still named `project` — migrate it (cargo run --example migrate_workdir_facet), or read it with a funes release that predates the `workdir` column"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod workdir_guard_tests {
+    use super::*;
+    use arrow_array::{RecordBatch, RecordBatchIterator, StringArray};
+    use arrow_schema::{DataType, Field, Schema};
+
+    async fn store_with_column(name: &str) -> (tempfile::TempDir, Dataset) {
+        let dir = tempfile::tempdir().unwrap();
+        let schema = Arc::new(Schema::new(vec![Field::new(name, DataType::Utf8, true)]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(StringArray::from(vec!["-home-u-dev-funes"]))],
+        )
+        .unwrap();
+        let uri = table_uri(&dir.path().to_string_lossy());
+        let reader = RecordBatchIterator::new(vec![Ok(batch)], schema);
+        let ds = Dataset::write(reader, &uri, None).await.unwrap();
+        (dir, ds)
+    }
+
+    #[tokio::test]
+    async fn pre_workdir_store_is_refused_with_the_migration_hint() {
+        let (_d, old) = store_with_column("project").await;
+        let err = reject_pre_workdir(&old).unwrap_err().to_string();
+        assert!(err.contains("migrate_workdir_facet"), "unhelpful error: {err}");
+
+        let (_d, new) = store_with_column("workdir").await;
+        assert!(reject_pre_workdir(&new).is_ok());
+    }
+}
+
 /// Open the `chunks` dataset at `uri`; `storage_options` carries the backend credentials/revision a
 /// remote needs (empty for a local store).
 pub async fn open(uri: &str, storage_options: HashMap<String, String>) -> Result<Dataset> {

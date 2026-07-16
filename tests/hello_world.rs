@@ -39,7 +39,7 @@ async fn recall_without_an_index_uses_the_builtin_guide() {
         .unwrap();
     assert!(got.contains("funes add"), "get should expand a corpus turn: {got}");
 
-    // list: the synthetic session shows under the funes project.
+    // list: the synthetic session shows under the funes workdir.
     let list = funes::recall::list(Store::local(), 50).await.unwrap();
     assert!(
         list.contains("funes/hello"),

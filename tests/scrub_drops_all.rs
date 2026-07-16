@@ -43,9 +43,9 @@ async fn scrub_dropping_every_block_leaves_a_valid_empty_store() {
     };
 
     // A single session, a single block — the unredactable key and nothing else. Scrub drops it all.
-    let project = "-home-u-dev-demo";
+    let workdir = "-home-u-dev-demo";
     let session = "scrub-all-0001";
-    let dir = source.path().join("projects").join(project);
+    let dir = source.path().join("projects").join(workdir);
     std::fs::create_dir_all(&dir).unwrap();
     let line = serde_json::json!({
         "type": "user",

@@ -158,9 +158,13 @@ pub async fn run_push(target: Store, force_reindex: bool, confirm: Confirm) -> R
     // 1. Delta: local_ids − remote_ids (remote absent => first publish).
     eprintln!("comparing local and remote indexes…");
     let local = Store::local().open().await?;
+    dataset::reject_pre_workdir(&local)?;
     let local_ids = all_ids(&local).await?;
     let remote_ids = match target.open().await {
-        Ok(t) => all_ids(&t).await?,
+        Ok(t) => {
+            dataset::reject_pre_workdir(&t)?;
+            all_ids(&t).await?
+        }
         Err(_) => HashSet::new(),
     };
     let to_push: HashSet<String> = local_ids.difference(&remote_ids).cloned().collect();
@@ -579,7 +583,7 @@ mod tests {
     fn turn(idx: i64, block_text: &str) -> Turn {
         Turn {
             session_id: "sess".into(),
-            project: "proj".into(),
+            workdir: "proj".into(),
             turn_uuid: format!("turn{idx}"),
             parent_uuid: None,
             seq: idx,

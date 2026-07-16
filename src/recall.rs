@@ -25,7 +25,7 @@ use tokio::sync::{Mutex, OnceCell};
 const HIT_COLS: &[&str] = &[
     "text",
     "session_id",
-    "project",
+    "workdir",
     "turn_uuid",
     "ts",
     "block_type",
@@ -51,7 +51,7 @@ pub struct Neighbor {
 pub struct Hit {
     pub text: String,
     pub session_id: String,
-    pub project: String,
+    pub workdir: String,
     pub turn_uuid: String,
     pub seq: i64,
     pub ts: String,
@@ -204,12 +204,15 @@ fn is_auth_error(e: &anyhow::Error) -> bool {
 /// built-in corpus real vectors for search (recall); `None` suits `get`/`list`.
 async fn open_read(store: &Store, embedder: Option<&mut dyn Embedder>) -> Result<Read> {
     match open_for_read(store).await? {
-        ReadOutcome::Ready(ds) => Ok(Read {
-            _hello: None,
-            ds,
-            note: None,
-            store_label: Some(store.label()),
-        }),
+        ReadOutcome::Ready(ds) => {
+            dataset::reject_pre_workdir(&ds)?;
+            Ok(Read {
+                _hello: None,
+                ds,
+                note: None,
+                store_label: Some(store.label()),
+            })
+        }
         ReadOutcome::Offline => degrade_offline(&store.label(), embedder).await,
         ReadOutcome::NoIndex => {
             let (dir, ds) = hello::dataset(embedder).await?;
@@ -478,7 +481,7 @@ async fn collect_hits(scan: lance::dataset::scanner::Scanner) -> Result<Vec<(u64
         let (text, sess, proj, turn, ts, bt) = (
             scol(&batch, "text"),
             scol(&batch, "session_id"),
-            scol(&batch, "project"),
+            scol(&batch, "workdir"),
             scol(&batch, "turn_uuid"),
             scol(&batch, "ts"),
             scol(&batch, "block_type"),
@@ -492,7 +495,7 @@ async fn collect_hits(scan: lance::dataset::scanner::Scanner) -> Result<Vec<(u64
                 Hit {
                     text: sval(text, i),
                     session_id: sval(sess, i),
-                    project: sval(proj, i),
+                    workdir: sval(proj, i),
                     turn_uuid: sval(turn, i),
                     seq: ival(seq, i),
                     ts: sval(ts, i),
@@ -608,11 +611,11 @@ pub async fn list(store: Store, limit: usize) -> Result<String> {
     let note = read.note.clone().unwrap_or_default();
     let ds = &read.ds;
 
-    let cols = ["session_id", "project", "ts", "role", "text"];
+    let cols = ["session_id", "workdir", "ts", "role", "text"];
     let batches = dataset::scan_rows(ds, &cols, None, None).await?;
 
     struct Sess {
-        project: String,
+        workdir: String,
         chunks: u64,
         first_ts: String,
         last_ts: String,
@@ -622,7 +625,7 @@ pub async fn list(store: Store, limit: usize) -> Result<String> {
     for batch in batches {
         let (sess, proj, ts, role, text) = (
             scol(&batch, "session_id"),
-            scol(&batch, "project"),
+            scol(&batch, "workdir"),
             scol(&batch, "ts"),
             scol(&batch, "role"),
             scol(&batch, "text"),
@@ -631,7 +634,7 @@ pub async fn list(store: Store, limit: usize) -> Result<String> {
             let sid = sval(sess, i);
             let ts_i = sval(ts, i);
             let s = sessions.entry(sid).or_insert_with(|| Sess {
-                project: sval(proj, i),
+                workdir: sval(proj, i),
                 chunks: 0,
                 first_ts: ts_i.clone(),
                 last_ts: ts_i.clone(),
@@ -663,7 +666,7 @@ pub async fn list(store: Store, limit: usize) -> Result<String> {
             out,
             "[{}] {}/{}  chunks={}  {}",
             s.last_ts,
-            s.project,
+            s.workdir,
             s8,
             s.chunks,
             s.first_user.as_deref().unwrap_or("")

@@ -13,7 +13,7 @@ use tempfile::TempDir;
 /// Synthetic session these passages belong to: they surface as `funes/hello` in recall output and
 /// resolve under `funes get hello <turn>`.
 const SESSION: &str = "hello";
-const PROJECT: &str = "funes";
+const WORKDIR: &str = "funes";
 
 /// The onboarding passages as `(role, text)`. The first is the user's question (so `list` has a
 /// summary line); the rest are guidance.
@@ -127,7 +127,7 @@ pub async fn dataset(embedder: Option<&mut dyn Embedder>) -> Result<(TempDir, Da
             id: format!("{SESSION}-{i:04}"),
             text: (*text).to_string(),
             session_id: SESSION.to_string(),
-            project: PROJECT.to_string(),
+            workdir: WORKDIR.to_string(),
             turn_uuid: format!("{SESSION}-{i:04}"),
             parent_uuid: (i > 0).then(|| format!("{SESSION}-{:04}", i - 1)),
             seq: i as i64,

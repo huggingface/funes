@@ -17,7 +17,7 @@ always returns agent-format strings.
 rank) → cross-encoder rerank → recency reweight → neighbor expansion. Agent format, per hit:
 
 ```
-[<ts>] <harness> <project>/<session8> <block_type>  score=<s.sss>
+[<ts>] <harness> <workdir>/<session8> <block_type>  score=<s.sss>
   → get <session_id> <turn_uuid> --store <label>
 <the chunk, first 400 chars>
   ~ [<role> <block_type> seq<N>] <neighbor chunk, first 160 chars>
@@ -57,7 +57,7 @@ Agent format, per turn:
 ### list / status
 
 - `funes list [store] [--limit 50]` — sessions, newest activity first:
-  `[<last_ts>] <project>/<session8>  chunks=<n>  <first user message, first 120 chars>`.
+  `[<last_ts>] <workdir>/<session8>  chunks=<n>  <first user message, first 120 chars>`.
   CLI-only; not an MCP tool.
 - `funes status [store]` — store label, table name, chunk count.
 

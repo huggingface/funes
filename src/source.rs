@@ -39,7 +39,7 @@ pub trait TraceSource {
     /// The units to consider, in deterministic order.
     fn units(&self) -> Result<Vec<Unit>>;
 
-    /// Parse one unit into turns (each [`Turn`] already carries its `session_id` and `project`).
+    /// Parse one unit into turns (each [`Turn`] already carries its `session_id` and `workdir`).
     fn read(&self, unit: &Unit) -> Result<Vec<Turn>>;
 
     /// Whether a `read` error aborts the whole index. Best-effort sources (a JSONL tree, where one
@@ -137,9 +137,9 @@ impl TraceSource for JsonlTree {
 
     fn read(&self, unit: &Unit) -> Result<Vec<Turn>> {
         let p = Path::new(&unit.key);
-        // Each parser derives the project facet from the session's recorded cwd; the path-derived
+        // Each parser derives the workdir facet from the session's recorded cwd; the path-derived
         // value is only the fallback for transcripts that never recorded one.
-        let fallback = claude_traces::project_of(p);
+        let fallback = claude_traces::workdir_of(p);
         let turns = match self.harness {
             Harness::Claude => claude_traces::turns_from_jsonl_file(p, &jsonl::session_id_of(p), &fallback)?,
             Harness::Codex => codex_traces::turns_from_jsonl_file(p, &fallback)?,
@@ -172,7 +172,7 @@ impl TraceSource for ParquetDataset {
 
     fn read(&self, unit: &Unit) -> Result<Vec<Turn>> {
         let p = Path::new(&unit.key);
-        // Fallback project for rows without a recorded cwd: the dataset's file stem.
+        // Fallback workdir for rows without a recorded cwd: the dataset's file stem.
         let fallback = p.file_stem().and_then(|s| s.to_str()).unwrap_or("parquet").to_string();
         hf_traces::turns_from_parquet(p, &fallback, self.limit)
     }
@@ -189,9 +189,9 @@ struct RemoteShard {
     key: String,
     /// The shard downloaded whole into hf-hub's cache.
     local: PathBuf,
-    /// Fallback project for rows without a recorded cwd: the shard's file stem (parity with
+    /// Fallback workdir for rows without a recorded cwd: the shard's file stem (parity with
     /// [`ParquetDataset`]).
-    project: String,
+    workdir: String,
 }
 
 /// A Hub trace dataset's `refs/convert/parquet` shards, resolved and pre-downloaded by
@@ -219,7 +219,7 @@ pub async fn open_remote(owner: &str, name: &str, max_shards: Option<usize>) -> 
     let mut shards = Vec::with_capacity(paths.len());
     for shard in &paths {
         let local = hf_dataset::download_shard(&remote.repo, shard, &remote.revision).await?;
-        let project = Path::new(shard)
+        let workdir = Path::new(shard)
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("parquet")
@@ -227,7 +227,7 @@ pub async fn open_remote(owner: &str, name: &str, max_shards: Option<usize>) -> 
         shards.push(RemoteShard {
             key: format!("hf://datasets/{owner}/{name}/{shard}"),
             local,
-            project,
+            workdir,
         });
     }
     Ok(Box::new(RemoteParquetDataset {
@@ -264,7 +264,7 @@ impl TraceSource for RemoteParquetDataset {
             .iter()
             .find(|s| s.key == unit.key)
             .context("unknown remote shard")?;
-        hf_traces::turns_from_parquet(&shard.local, &shard.project, None)
+        hf_traces::turns_from_parquet(&shard.local, &shard.workdir, None)
     }
 
     fn fatal_on_read_error(&self) -> bool {
@@ -284,12 +284,12 @@ mod tests {
                 RemoteShard {
                     key: "hf://datasets/o/n/default/train/0000.parquet".into(),
                     local: "/tmp/a".into(),
-                    project: "0000".into(),
+                    workdir: "0000".into(),
                 },
                 RemoteShard {
                     key: "hf://datasets/o/n/default/train/0001.parquet".into(),
                     local: "/tmp/b".into(),
-                    project: "0001".into(),
+                    workdir: "0001".into(),
                 },
             ],
             revision: "abc123".into(),
