@@ -35,7 +35,7 @@ fell back to; the built-in guide has no store to name and keeps a bare hint).
 | `--half-life` | 30 | recency decay in days (a hit this old keeps half its weight); 0 disables |
 | `--neighbors` | 1 | adjacent chunks (by seq) attached per hit; 0 disables |
 | `--type` | — | restrict to `text \| thinking \| tool_use \| tool_result` |
-| `--project` | — | restrict to a project (the basename of the session's working directory, e.g. `funes`) |
+| `--project` | — | restrict to a project (the munged session working directory, e.g. `-home-u-dev-funes`) |
 | `--harness` | — | restrict to `claude \| codex \| pi` (the stored facet `claude_code` also parses) |
 | `--store` | local store | the store to read — `<org>/<repo>`, an `hf://…` URI, a local path, or `local` |
 

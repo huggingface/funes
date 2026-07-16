@@ -10,7 +10,7 @@ use std::path::Path;
 use crate::jsonl;
 use crate::trace::{Block, Turn};
 
-/// The project a session's records name: the basename of the `session` line's `cwd`. `None` when
+/// The project a session's records name: the `session` line's `cwd`, munged. `None` when
 /// no record carries one.
 pub fn project_from_records(records: &[Value]) -> Option<String> {
     records.iter().find_map(|r| {
@@ -24,8 +24,8 @@ pub fn project_from_records(records: &[Value]) -> Option<String> {
 
 pub fn turns_from_jsonl_file(p: &Path, session_id: &str, fallback_project: &str) -> std::io::Result<Vec<Turn>> {
     let records = jsonl::read_jsonl_records(p)?;
-    // The project facet is the basename of the session's recorded cwd, so the same clone names the
-    // same project on every host; the path-derived fallback covers transcripts without one.
+    // The project facet is the munged recorded cwd — Claude Code's project-dir convention,
+    // shared by every parser; the path-derived fallback covers transcripts without one.
     let project = project_from_records(&records).unwrap_or_else(|| fallback_project.to_string());
 
     let mut turns = Vec::new();
@@ -281,14 +281,14 @@ mod tests {
             r#"{"type":"session","id":"s","timestamp":1,"cwd":"/home/u/funes","version":"1"}"#,
             msg,
         ]);
-        // The same clone names the same project on both hosts.
+        // The munged cwd — a real facet instead of the date-dir the path fallback would give.
         assert_eq!(
             turns_from_jsonl_file(mac.path(), "s", "fb").unwrap()[0].project,
-            "funes"
+            "-Users-d-dev-funes"
         );
         assert_eq!(
             turns_from_jsonl_file(linux.path(), "s", "fb").unwrap()[0].project,
-            "funes"
+            "-home-u-funes"
         );
         // No recorded cwd → the path-derived fallback.
         let bare = write_jsonl(&[msg]);

@@ -110,13 +110,18 @@ async fn main() -> Result<()> {
 /// The facet `source` derives to today, or `None` when it can't be re-derived — the caller leaves
 /// those rows alone. The extension gate matters: a parquet-sourced row's file-stem facet is
 /// already right, and the path fallback would clobber it with the parent dir. Mirrors the indexer:
-/// the recorded cwd's basename, else the path-derived fallback.
+/// the munged recorded cwd, else the path-derived fallback.
 fn derive_project(source: &str, harness: &str) -> Option<String> {
     let p = Path::new(source);
     if !p.extension().map(|x| x == "jsonl").unwrap_or(false) {
         return None;
     }
-    let records = jsonl::read_jsonl_records(p).ok()?;
+    let records = match jsonl::read_jsonl_records(p) {
+        Ok(r) => r,
+        // A gone Claude transcript still derives exactly: its path's `projects` segment IS the
+        // munged cwd. Other layouts carry nothing recoverable — leave their rows alone.
+        Err(_) => return (harness == "claude_code").then(|| claude_traces::project_of(p)),
+    };
     let from_cwd = match harness {
         "claude_code" => claude_traces::project_from_records(&records),
         "codex" => codex_traces::project_from_records(&records),

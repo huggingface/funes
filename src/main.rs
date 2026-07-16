@@ -49,7 +49,7 @@ enum Cmd {
         /// Restrict to a block type: text | thinking | tool_use | tool_result.
         #[arg(long = "type", value_name = "BLOCK_TYPE")]
         block_type: Option<String>,
-        /// Restrict to a project (the basename of the session's working directory).
+        /// Restrict to a project (the munged session working directory, e.g. `-home-u-dev-funes`).
         #[arg(long)]
         project: Option<String>,
         /// Restrict to a harness: claude | codex | pi.
@@ -134,7 +134,7 @@ enum Cmd {
     Push {
         /// Store to publish to: `<org>/<repo>` or a full `hf://…` URI.
         store: String,
-        /// Publish only this project's chunks (the basename of the session's working directory) — a projection,
+        /// Publish only this project's chunks (the munged session working directory) — a projection,
         /// so a multi-project machine can seed a per-project store without leaking siblings.
         #[arg(long)]
         project: Option<String>,

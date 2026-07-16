@@ -6,7 +6,7 @@
 //! JSON-encoded OpenAI-style chat messages — `{role, content, reasoning_content?, tool_calls?}`.
 //! `reasoning_content` becomes a thinking block, `content` a text block, and each `tool_calls`
 //! entry a tool_use block, matching funes' block vocabulary. Per-row columns carry the facets:
-//! `harness`, and the project as the basename of the `metadata` JSON's `cwd` key (where the
+//! `harness`, and the project as the munged `metadata` JSON `cwd` (where the
 //! normalizer surfaces the session's working directory) — the same derivation as the JSONL
 //! parsers.
 
@@ -58,7 +58,7 @@ pub fn turns_from_parquet(path: &Path, fallback_project: &str, limit: Option<usi
             let source = str_at(&batch, "file_path", i).unwrap_or_else(|| path.display().to_string());
             // Per-row: a dataset can mix harnesses; a dataset without the column reads as "".
             let harness = str_at(&batch, "harness", i).unwrap_or_default();
-            // Per-row facet: the basename of the session's recorded cwd (`metadata.cwd`, where
+            // Per-row facet: the munged recorded cwd (`metadata.cwd`, where
             // the normalizer surfaces it), else the dataset-level fallback (its file stem).
             let project = metadata_cwd(&batch, i)
                 .as_deref()
@@ -323,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn project_is_the_metadata_cwd_basename_with_the_stem_fallback() {
+    fn project_is_the_munged_metadata_cwd_with_the_stem_fallback() {
         let msg = r#"{"role":"user","content":"hi"}"#;
         let schema = Arc::new(Schema::new(vec![
             Field::new("session_id", DataType::Utf8, false),
@@ -360,7 +360,11 @@ mod tests {
         let turns = turns_from_parquet(f.path(), "stem", None).unwrap();
         let project_for =
             |sess: &str| -> String { turns.iter().find(|t| t.session_id == sess).unwrap().project.clone() };
-        assert_eq!(project_for("s1"), "huggingface.js", "metadata.cwd basename");
+        assert_eq!(
+            project_for("s1"),
+            "-Users-g-Desktop-huggingface-js",
+            "munged metadata.cwd"
+        );
         assert_eq!(project_for("s2"), "stem", "null cwd → the dataset fallback");
         assert_eq!(project_for("s3"), "stem", "no metadata → the dataset fallback");
     }

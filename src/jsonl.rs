@@ -29,15 +29,18 @@ pub fn session_id_of(p: &Path) -> String {
     p.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string()
 }
 
-/// The project facet for a session's recorded working directory: the cwd's basename, so clones of
-/// the same repo agree across hosts and teammates (`/Users/d/dev/funes` and `/home/u/funes` are
-/// both `funes`). The cwd was written by whatever machine ran the session, so both separator
-/// styles are split rather than trusting the local platform's path semantics. `None` when there
-/// is no final component (an empty or root cwd — a Windows drive root like `C:\` counts, its
-/// basename being the bare drive designator).
+/// The project facet for a session's recorded working directory: the whole cwd munged the way
+/// Claude Code names its project dirs — every non-alphanumeric character becomes `-` — so the
+/// facet is unique per directory per host (no basename collisions) and matches the `projects`
+/// segment Claude Code itself writes, meaning rows indexed before and after this derivation
+/// agree. `None` when nothing of the cwd survives the munge (empty, or a bare `/`-ish root).
 pub fn project_of_cwd(cwd: &str) -> Option<String> {
-    let name = cwd.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next()?;
-    (!name.is_empty() && !name.ends_with(':')).then(|| name.to_string())
+    let munged: String = cwd
+        .trim()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    munged.contains(|c: char| c != '-').then_some(munged)
 }
 
 /// Parse a `*.jsonl` file into one [`Value`] per non-blank, parseable line. A read failure
@@ -116,12 +119,23 @@ mod tests {
     }
 
     #[test]
-    fn project_of_cwd_is_the_basename_on_any_host() {
-        // The same clone dir name yields the same facet whichever machine recorded the cwd.
-        assert_eq!(project_of_cwd("/Users/dcorvoysier/dev/funes").as_deref(), Some("funes"));
-        assert_eq!(project_of_cwd("/home/ubuntu/funes").as_deref(), Some("funes"));
-        assert_eq!(project_of_cwd(r"C:\Users\d\dev\funes").as_deref(), Some("funes"));
-        assert_eq!(project_of_cwd("/home/ubuntu/funes/").as_deref(), Some("funes"));
+    fn project_of_cwd_matches_claude_codes_project_dir_convention() {
+        // The munge must reproduce the `projects` segment Claude Code itself writes, so old and
+        // new rows of the same project share one facet.
+        assert_eq!(
+            project_of_cwd("/home/ubuntu/funes").as_deref(),
+            Some("-home-ubuntu-funes")
+        );
+        assert_eq!(
+            project_of_cwd("/home/ubuntu/llama.cpp").as_deref(),
+            Some("-home-ubuntu-llama-cpp")
+        );
+        assert_eq!(
+            project_of_cwd(r"C:\Users\d\dev\funes").as_deref(),
+            Some("C--Users-d-dev-funes")
+        );
+        // Distinct directories can never share a facet, whatever their basenames.
+        assert_ne!(project_of_cwd("/work/api"), project_of_cwd("/personal/api"));
     }
 
     #[test]
@@ -129,8 +143,7 @@ mod tests {
         assert_eq!(project_of_cwd(""), None);
         assert_eq!(project_of_cwd("/"), None);
         assert_eq!(project_of_cwd("///"), None);
-        assert_eq!(project_of_cwd(r"C:\"), None);
-        assert_eq!(project_of_cwd("C:/"), None);
+        assert_eq!(project_of_cwd("  "), None);
     }
 
     #[test]

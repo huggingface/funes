@@ -16,8 +16,8 @@ pub fn turns_from_jsonl_file(p: &Path, fallback_project: &str) -> std::io::Resul
     // Rollout filenames (`rollout-<ts>-<uuid>.jsonl`) aren't a clean session id; take it from the
     // `session_meta` line in this same pass, else fall back to the file stem.
     let session_id = session_meta_str(&records, "id").unwrap_or_else(|| jsonl::session_id_of(p));
-    // The project facet is the basename of the session's recorded cwd, so the same clone names the
-    // same project on every host; the path-derived fallback covers transcripts without one.
+    // The project facet is the munged recorded cwd — Claude Code's project-dir convention,
+    // shared by every parser; the path-derived fallback covers transcripts without one.
     let project = project_from_records(&records).unwrap_or_else(|| fallback_project.to_string());
 
     let mut turns = Vec::new();
@@ -69,7 +69,7 @@ pub fn turns_from_jsonl_file(p: &Path, fallback_project: &str) -> std::io::Resul
     Ok(turns)
 }
 
-/// The project a rollout's records name: the basename of the `session_meta` payload's `cwd`.
+/// The project a rollout's records name: the `session_meta` payload's `cwd`, munged.
 /// `None` when no record carries one.
 pub fn project_from_records(records: &[Value]) -> Option<String> {
     session_meta_str(records, "cwd").and_then(|cwd| jsonl::project_of_cwd(&cwd))
@@ -269,9 +269,15 @@ mod tests {
             r#"{"type":"session_meta","timestamp":"t0","payload":{"id":"s","cwd":"/home/u/funes"}}"#,
             msg,
         ]);
-        // The same clone names the same project on both hosts.
-        assert_eq!(turns_from_jsonl_file(mac.path(), "fb").unwrap()[0].project, "funes");
-        assert_eq!(turns_from_jsonl_file(linux.path(), "fb").unwrap()[0].project, "funes");
+        // The munged cwd — a real facet instead of the date-dir the path fallback would give.
+        assert_eq!(
+            turns_from_jsonl_file(mac.path(), "fb").unwrap()[0].project,
+            "-Users-d-dev-funes"
+        );
+        assert_eq!(
+            turns_from_jsonl_file(linux.path(), "fb").unwrap()[0].project,
+            "-home-u-funes"
+        );
         // No recorded cwd → the path-derived fallback.
         let bare = write_jsonl(&[msg]);
         assert_eq!(turns_from_jsonl_file(bare.path(), "fb").unwrap()[0].project, "fb");
