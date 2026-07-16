@@ -134,6 +134,11 @@ That second form is also how you query **someone else's** published memories on 
 
 *A project this machine never worked on: the prompt names `dacorvo/funes-Glint-Research-Fable-5` — ~21.6k chunks on the Hub — and pi recalls the past decision straight from it, one `store` argument on the recall call. Nothing attached, no local index.*
 
+On its first publish, `funes push` also writes the repo's **dataset card** — what a funes store
+is, how to recall from it, live stats — tagged `funes`, so every shared store is recognizable
+(and [discoverable](https://huggingface.co/datasets?other=funes)) on the Hub; later pushes keep
+the stats fresh. A card you've written yourself is never touched.
+
 The first push to a store that shares no chunks with your local one (a first push, a new host, or the
 wrong store) asks to confirm before uploading; off a terminal it refuses rather than guess (`--yes`
 overrides). You never need the Hub to use `funes` locally — it's a tier you opt into. Recall over a remote caches whole files to local disk, so warm calls run at local speed ([how caching works](docs/hub-caching.md)).
