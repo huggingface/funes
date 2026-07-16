@@ -172,9 +172,9 @@ impl TraceSource for ParquetDataset {
 
     fn read(&self, unit: &Unit) -> Result<Vec<Turn>> {
         let p = Path::new(&unit.key);
-        // The project facet for a parquet dataset is its file stem.
-        let project = p.file_stem().and_then(|s| s.to_str()).unwrap_or("parquet").to_string();
-        hf_traces::turns_from_parquet(p, &project, self.limit)
+        // Fallback project for rows without a recorded cwd: the dataset's file stem.
+        let fallback = p.file_stem().and_then(|s| s.to_str()).unwrap_or("parquet").to_string();
+        hf_traces::turns_from_parquet(p, &fallback, self.limit)
     }
 
     fn fatal_on_read_error(&self) -> bool {
@@ -189,7 +189,8 @@ struct RemoteShard {
     key: String,
     /// The shard downloaded whole into hf-hub's cache.
     local: PathBuf,
-    /// Project facet = the shard's file stem (parity with [`ParquetDataset`]).
+    /// Fallback project for rows without a recorded cwd: the shard's file stem (parity with
+    /// [`ParquetDataset`]).
     project: String,
 }
 

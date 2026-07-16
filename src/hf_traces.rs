@@ -5,8 +5,12 @@
 //! `Glint-Research/Fable-5-traces`): each row is one session whose `messages` column is a list of
 //! JSON-encoded OpenAI-style chat messages — `{role, content, reasoning_content?, tool_calls?}`.
 //! `reasoning_content` becomes a thinking block, `content` a text block, and each `tool_calls`
-//! entry a tool_use block, matching funes' block vocabulary.
+//! entry a tool_use block, matching funes' block vocabulary. Per-row columns carry the facets:
+//! `harness`, and the project as the basename of the `metadata` JSON's `cwd` key (where the
+//! normalizer surfaces the session's working directory) — the same derivation as the JSONL
+//! parsers.
 
+use crate::jsonl;
 use crate::trace::{Block, Turn};
 
 use anyhow::{anyhow, Context, Result};
@@ -20,7 +24,7 @@ use std::path::Path;
 /// sessions (one row each), skipping rows whose messages yield no indexable block. Each `Turn`
 /// carries its own `session_id`, so the index pipeline groups them without a per-session wrapper —
 /// mirroring `claude_traces::turns_from_jsonl_file`, which also returns `Vec<Turn>`.
-pub fn turns_from_parquet(path: &Path, project: &str, limit: Option<usize>) -> Result<Vec<Turn>> {
+pub fn turns_from_parquet(path: &Path, fallback_project: &str, limit: Option<usize>) -> Result<Vec<Turn>> {
     let file = File::open(path).with_context(|| format!("open parquet {}", path.display()))?;
     let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
     let cap = limit.unwrap_or(usize::MAX);
@@ -54,9 +58,15 @@ pub fn turns_from_parquet(path: &Path, project: &str, limit: Option<usize>) -> R
             let source = str_at(&batch, "file_path", i).unwrap_or_else(|| path.display().to_string());
             // Per-row: a dataset can mix harnesses; a dataset without the column reads as "".
             let harness = str_at(&batch, "harness", i).unwrap_or_default();
+            // Per-row facet: the basename of the session's recorded cwd (`metadata.cwd`, where
+            // the normalizer surfaces it), else the dataset-level fallback (its file stem).
+            let project = metadata_cwd(&batch, i)
+                .as_deref()
+                .and_then(jsonl::project_of_cwd)
+                .unwrap_or_else(|| fallback_project.to_string());
 
             let msgs = parse_message_list(&messages.value(i))?;
-            let turns = turns_from_messages(&msgs, &sid, project, &ts, &source, &harness);
+            let turns = turns_from_messages(&msgs, &sid, &project, &ts, &source, &harness);
             if !turns.is_empty() {
                 out.extend(turns);
                 sessions += 1;
@@ -64,6 +74,14 @@ pub fn turns_from_parquet(path: &Path, project: &str, limit: Option<usize>) -> R
         }
     }
     Ok(out)
+}
+
+/// The `cwd` recorded in a row's `metadata` JSON column — where the Hub's agent-traces normalizer
+/// surfaces the session's working directory.
+fn metadata_cwd(batch: &RecordBatch, i: usize) -> Option<String> {
+    let md = str_at(batch, "metadata", i)?;
+    let v: Value = serde_json::from_str(&md).ok()?;
+    v.get("cwd").and_then(Value::as_str).map(str::to_string)
 }
 
 /// A `Utf8`/`LargeUtf8` column's non-null value at row `i`. HF auto-conversion can emit either
@@ -302,6 +320,49 @@ mod tests {
             "s2 rows are claude_code"
         );
         assert!(!harness_for("s1").is_empty() && !harness_for("s2").is_empty());
+    }
+
+    #[test]
+    fn project_is_the_metadata_cwd_basename_with_the_stem_fallback() {
+        let msg = r#"{"role":"user","content":"hi"}"#;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("session_id", DataType::Utf8, false),
+            Field::new(
+                "messages",
+                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                false,
+            ),
+            Field::new("metadata", DataType::Utf8, true),
+        ]));
+        let mut sid = StringBuilder::new();
+        let mut msgs = ListBuilder::new(StringBuilder::new());
+        let mut md = StringBuilder::new();
+        for (s, m) in [
+            ("s1", Some(r#"{"cwd":"/Users/g/Desktop/huggingface.js"}"#)),
+            ("s2", Some(r#"{"cwd":null}"#)),
+            ("s3", None),
+        ] {
+            sid.append_value(s);
+            msgs.values().append_value(msg);
+            msgs.append(true);
+            md.append_option(m);
+        }
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(sid.finish()), Arc::new(msgs.finish()), Arc::new(md.finish())],
+        )
+        .unwrap();
+        let f = tempfile::Builder::new().suffix(".parquet").tempfile().unwrap();
+        let mut w = ArrowWriter::try_new(f.reopen().unwrap(), schema, None).unwrap();
+        w.write(&batch).unwrap();
+        w.close().unwrap();
+
+        let turns = turns_from_parquet(f.path(), "stem", None).unwrap();
+        let project_for =
+            |sess: &str| -> String { turns.iter().find(|t| t.session_id == sess).unwrap().project.clone() };
+        assert_eq!(project_for("s1"), "huggingface.js", "metadata.cwd basename");
+        assert_eq!(project_for("s2"), "stem", "null cwd → the dataset fallback");
+        assert_eq!(project_for("s3"), "stem", "no metadata → the dataset fallback");
     }
 
     #[test]
