@@ -10,8 +10,23 @@ use std::path::Path;
 use crate::jsonl;
 use crate::trace::{Block, Turn};
 
-pub fn turns_from_jsonl_file(p: &Path, session_id: &str, project: &str) -> std::io::Result<Vec<Turn>> {
+/// The project a session's records name: the basename of the `session` line's `cwd`. `None` when
+/// no record carries one.
+pub fn project_from_records(records: &[Value]) -> Option<String> {
+    records.iter().find_map(|r| {
+        if r.get("type").and_then(Value::as_str) == Some("session") {
+            r.get("cwd").and_then(Value::as_str).and_then(jsonl::project_of_cwd)
+        } else {
+            None
+        }
+    })
+}
+
+pub fn turns_from_jsonl_file(p: &Path, session_id: &str, fallback_project: &str) -> std::io::Result<Vec<Turn>> {
     let records = jsonl::read_jsonl_records(p)?;
+    // The project facet is the basename of the session's recorded cwd, so the same clone names the
+    // same project on every host; the path-derived fallback covers transcripts without one.
+    let project = project_from_records(&records).unwrap_or_else(|| fallback_project.to_string());
 
     let mut turns = Vec::new();
     let mut seq = 0i64; // index among RETAINED turns, file order
@@ -253,6 +268,31 @@ mod tests {
         // name is inline, id from toolCallId.
         assert_eq!(r.blocks[0].tool_name.as_deref(), Some("bash"));
         assert_eq!(r.blocks[0].tool_use_id.as_deref(), Some("call_1"));
+    }
+
+    #[test]
+    fn project_comes_from_the_session_line_cwd_with_path_fallback() {
+        let msg = r#"{"type":"message","id":"u1","timestamp":1,"message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#;
+        let mac = write_jsonl(&[
+            r#"{"type":"session","id":"s","timestamp":1,"cwd":"/Users/d/dev/funes","version":"1"}"#,
+            msg,
+        ]);
+        let linux = write_jsonl(&[
+            r#"{"type":"session","id":"s","timestamp":1,"cwd":"/home/u/funes","version":"1"}"#,
+            msg,
+        ]);
+        // The same clone names the same project on both hosts.
+        assert_eq!(
+            turns_from_jsonl_file(mac.path(), "s", "fb").unwrap()[0].project,
+            "funes"
+        );
+        assert_eq!(
+            turns_from_jsonl_file(linux.path(), "s", "fb").unwrap()[0].project,
+            "funes"
+        );
+        // No recorded cwd → the path-derived fallback.
+        let bare = write_jsonl(&[msg]);
+        assert_eq!(turns_from_jsonl_file(bare.path(), "s", "fb").unwrap()[0].project, "fb");
     }
 
     #[test]

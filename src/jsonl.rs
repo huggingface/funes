@@ -29,6 +29,17 @@ pub fn session_id_of(p: &Path) -> String {
     p.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string()
 }
 
+/// The project facet for a session's recorded working directory: the cwd's basename, so clones of
+/// the same repo agree across hosts and teammates (`/Users/d/dev/funes` and `/home/u/funes` are
+/// both `funes`). The cwd was written by whatever machine ran the session, so both separator
+/// styles are split rather than trusting the local platform's path semantics. `None` when there
+/// is no final component (an empty or root cwd — a Windows drive root like `C:\` counts, its
+/// basename being the bare drive designator).
+pub fn project_of_cwd(cwd: &str) -> Option<String> {
+    let name = cwd.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next()?;
+    (!name.is_empty() && !name.ends_with(':')).then(|| name.to_string())
+}
+
 /// Parse a `*.jsonl` file into one [`Value`] per non-blank, parseable line. A read failure
 /// propagates as `Err` so the indexer skips the file *without recording state* — swallowing it
 /// would silently mark an unreadable file fully indexed. A line that doesn't parse is dropped (a
@@ -102,6 +113,24 @@ mod tests {
     #[test]
     fn session_id_is_file_stem() {
         assert_eq!(session_id_of(Path::new("/x/y/71626b12.jsonl")), "71626b12");
+    }
+
+    #[test]
+    fn project_of_cwd_is_the_basename_on_any_host() {
+        // The same clone dir name yields the same facet whichever machine recorded the cwd.
+        assert_eq!(project_of_cwd("/Users/dcorvoysier/dev/funes").as_deref(), Some("funes"));
+        assert_eq!(project_of_cwd("/home/ubuntu/funes").as_deref(), Some("funes"));
+        assert_eq!(project_of_cwd(r"C:\Users\d\dev\funes").as_deref(), Some("funes"));
+        assert_eq!(project_of_cwd("/home/ubuntu/funes/").as_deref(), Some("funes"));
+    }
+
+    #[test]
+    fn project_of_cwd_rejects_empty_and_root_cwds() {
+        assert_eq!(project_of_cwd(""), None);
+        assert_eq!(project_of_cwd("/"), None);
+        assert_eq!(project_of_cwd("///"), None);
+        assert_eq!(project_of_cwd(r"C:\"), None);
+        assert_eq!(project_of_cwd("C:/"), None);
     }
 
     #[test]
