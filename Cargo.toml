@@ -86,6 +86,16 @@ path = "scripts/migrate_workdir_facet.rs"
 name = "migrate_remote_workdir"
 path = "scripts/migrate_remote_workdir.rs"
 
+# One-off backfill of the `repo` column (local: add_columns; remote: add_columns via a guarded
+# commit). Delete both, and `hf_dataset::add_column`, once every store carries `repo`.
+[[example]]
+name = "backfill_repo"
+path = "scripts/backfill_repo.rs"
+
+[[example]]
+name = "backfill_remote_repo"
+path = "scripts/backfill_remote_repo.rs"
+
 [profile.release]
 opt-level = 3
 

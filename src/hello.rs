@@ -139,6 +139,7 @@ pub async fn dataset(embedder: Option<&mut dyn Embedder>) -> Result<(TempDir, Da
             block_idx: 0,
             split_idx: 0,
             harness: "claude_code".to_string(),
+            repo: String::new(),
         })
         .collect();
 
