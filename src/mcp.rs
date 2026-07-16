@@ -19,7 +19,7 @@ pub struct RecallRequest {
     pub k: Option<usize>,
     #[schemars(description = "Restrict to a block type: text | thinking | tool_use | tool_result")]
     pub block_type: Option<String>,
-    #[schemars(description = "Restrict to a project (the directory segment under `projects`)")]
+    #[schemars(description = "Restrict to a project (the basename of the session's working directory, e.g. `funes`)")]
     pub project: Option<String>,
     #[schemars(description = "Restrict to a harness: claude | codex | pi")]
     pub harness: Option<String>,

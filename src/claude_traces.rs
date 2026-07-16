@@ -7,7 +7,8 @@ use std::path::Path;
 use crate::jsonl;
 use crate::trace::{Block, Turn};
 
-/// The path segment right after a `projects` dir, else the parent dir name.
+/// Path-derived project fallback for a transcript that records no cwd: the segment right after a
+/// `projects` dir, else the parent dir name.
 pub fn project_of(p: &Path) -> String {
     let parts: Vec<&str> = p.iter().filter_map(|s| s.to_str()).collect();
     if let Some(i) = parts.iter().position(|&s| s == "projects") {
@@ -122,8 +123,15 @@ fn normalize_blocks(content: &Value) -> Vec<Block> {
     out
 }
 
-pub fn turns_from_jsonl_file(p: &Path, session_id: &str, project: &str) -> std::io::Result<Vec<Turn>> {
+pub fn turns_from_jsonl_file(p: &Path, session_id: &str, fallback_project: &str) -> std::io::Result<Vec<Turn>> {
     let records = jsonl::read_jsonl_records(p)?;
+    // The project facet is the basename of the session's recorded cwd (first usable one wins), so
+    // the same clone names the same project on every host; the path-derived fallback covers
+    // transcripts that never recorded one.
+    let project = records
+        .iter()
+        .find_map(|r| r.get("cwd").and_then(Value::as_str).and_then(jsonl::project_of_cwd))
+        .unwrap_or_else(|| fallback_project.to_string());
 
     let mut turns = Vec::new();
     let mut seq = 0i64; // index among RETAINED turns, file order
@@ -225,6 +233,30 @@ mod tests {
         assert_eq!(result.text, "file.txt");
         // name correlated from the tool_use with the same id.
         assert_eq!(result.tool_name.as_deref(), Some("Bash"));
+    }
+
+    #[test]
+    fn project_prefers_the_recorded_cwd_first_usable_wins() {
+        let f = write_jsonl(&[
+            r#"{"type":"user","uuid":"u1","cwd":"/Users/d/dev/funes","message":{"role":"user","content":"hi"}}"#,
+            r#"{"type":"assistant","uuid":"a1","cwd":"/Users/d/dev/elsewhere","message":{"role":"assistant","content":"yo"}}"#,
+        ]);
+        let turns = turns_from_jsonl_file(f.path(), "s", "fallback").unwrap();
+        assert!(turns.iter().all(|t| t.project == "funes"));
+    }
+
+    #[test]
+    fn cross_host_cwds_yield_the_same_project() {
+        // The same clone indexed from a Mac and a Linux home lands in one facet value.
+        let line = |cwd: &str| {
+            format!(r#"{{"type":"user","uuid":"u1","cwd":"{cwd}","message":{{"role":"user","content":"hi"}}}}"#)
+        };
+        let (mac_line, linux_line) = (line("/Users/dcorvoysier/dev/funes"), line("/home/ubuntu/funes"));
+        let mac = write_jsonl(&[mac_line.as_str()]);
+        let linux = write_jsonl(&[linux_line.as_str()]);
+        let p = |f: &tempfile::NamedTempFile| turns_from_jsonl_file(f.path(), "s", "fb").unwrap()[0].project.clone();
+        assert_eq!(p(&mac), "funes");
+        assert_eq!(p(&mac), p(&linux));
     }
 
     #[test]

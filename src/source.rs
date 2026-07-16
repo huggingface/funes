@@ -137,11 +137,13 @@ impl TraceSource for JsonlTree {
 
     fn read(&self, unit: &Unit) -> Result<Vec<Turn>> {
         let p = Path::new(&unit.key);
-        let project = claude_traces::project_of(p);
+        // Each parser derives the project facet from the session's recorded cwd; the path-derived
+        // value is only the fallback for transcripts that never recorded one.
+        let fallback = claude_traces::project_of(p);
         let turns = match self.harness {
-            Harness::Claude => claude_traces::turns_from_jsonl_file(p, &jsonl::session_id_of(p), &project)?,
-            Harness::Codex => codex_traces::turns_from_jsonl_file(p, &project)?,
-            Harness::Pi => pi_traces::turns_from_jsonl_file(p, &jsonl::session_id_of(p), &project)?,
+            Harness::Claude => claude_traces::turns_from_jsonl_file(p, &jsonl::session_id_of(p), &fallback)?,
+            Harness::Codex => codex_traces::turns_from_jsonl_file(p, &fallback)?,
+            Harness::Pi => pi_traces::turns_from_jsonl_file(p, &jsonl::session_id_of(p), &fallback)?,
         };
         Ok(turns)
     }

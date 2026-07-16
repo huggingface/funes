@@ -11,11 +11,16 @@ use std::path::Path;
 use crate::jsonl;
 use crate::trace::{Block, Turn};
 
-pub fn turns_from_jsonl_file(p: &Path, project: &str) -> std::io::Result<Vec<Turn>> {
+pub fn turns_from_jsonl_file(p: &Path, fallback_project: &str) -> std::io::Result<Vec<Turn>> {
     let records = jsonl::read_jsonl_records(p)?;
     // Rollout filenames (`rollout-<ts>-<uuid>.jsonl`) aren't a clean session id; take it from the
     // `session_meta` line in this same pass, else fall back to the file stem.
-    let session_id = session_meta_id(&records).unwrap_or_else(|| jsonl::session_id_of(p));
+    let session_id = session_meta_str(&records, "id").unwrap_or_else(|| jsonl::session_id_of(p));
+    // The project facet is the basename of the session's recorded cwd, so the same clone names the
+    // same project on every host; the path-derived fallback covers transcripts without one.
+    let project = session_meta_str(&records, "cwd")
+        .and_then(|cwd| jsonl::project_of_cwd(&cwd))
+        .unwrap_or_else(|| fallback_project.to_string());
 
     let mut turns = Vec::new();
     let mut seq = 0i64; // index among RETAINED turns, file order
@@ -66,11 +71,13 @@ pub fn turns_from_jsonl_file(p: &Path, project: &str) -> std::io::Result<Vec<Tur
     Ok(turns)
 }
 
-/// The session id from the `session_meta` line's `payload.id`, if present.
-fn session_meta_id(records: &[Value]) -> Option<String> {
+/// A string field of the first `session_meta` line's payload, if present.
+fn session_meta_str(records: &[Value], key: &str) -> Option<String> {
     records.iter().find_map(|rec| {
         if rec.get("type").and_then(Value::as_str) == Some("session_meta") {
-            rec.pointer("/payload/id").and_then(Value::as_str).map(str::to_string)
+            rec.pointer(&format!("/payload/{key}"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
         } else {
             None
         }
@@ -245,6 +252,25 @@ mod tests {
         assert_eq!(result.blocks[0].text, "file.txt");
         // name correlated from the function_call with the same call_id.
         assert_eq!(result.blocks[0].tool_name.as_deref(), Some("exec_command"));
+    }
+
+    #[test]
+    fn project_comes_from_the_session_meta_cwd_with_path_fallback() {
+        let msg = r#"{"type":"response_item","timestamp":"t","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}}"#;
+        let mac = write_jsonl(&[
+            r#"{"type":"session_meta","timestamp":"t0","payload":{"id":"s","cwd":"/Users/d/dev/funes"}}"#,
+            msg,
+        ]);
+        let linux = write_jsonl(&[
+            r#"{"type":"session_meta","timestamp":"t0","payload":{"id":"s","cwd":"/home/u/funes"}}"#,
+            msg,
+        ]);
+        // The same clone names the same project on both hosts.
+        assert_eq!(turns_from_jsonl_file(mac.path(), "fb").unwrap()[0].project, "funes");
+        assert_eq!(turns_from_jsonl_file(linux.path(), "fb").unwrap()[0].project, "funes");
+        // No recorded cwd → the path-derived fallback.
+        let bare = write_jsonl(&[msg]);
+        assert_eq!(turns_from_jsonl_file(bare.path(), "fb").unwrap()[0].project, "fb");
     }
 
     #[test]
