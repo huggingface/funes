@@ -8,7 +8,7 @@
 
 use crate::harness::Harness;
 use crate::inference::{self, Embedder};
-use crate::{chunk, dataset, hub, lock, scan, source, trace};
+use crate::{chunk, dataset, hub, lock, repo, scan, source, trace};
 use anyhow::{anyhow, Result};
 use arrow_array::types::Float32Type;
 use arrow_array::{Array, FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator, StringArray};
@@ -49,9 +49,11 @@ pub(crate) fn schema() -> Arc<Schema> {
                 DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), DIM),
                 true,
             ),
-            // Last, after `vector`: `add_columns` appends a migrated column at the end, so a
-            // freshly-built store must match that order (the tripwire test pins it).
+            // After `vector`: `add_columns` appends a migrated column at the end, so a
+            // freshly-built store must match that order (the tripwire test pins it). `harness`
+            // came first, then `repo` — each appended in turn.
             utf8("harness"),
+            utf8("repo"),
         ],
         HashMap::from([("embedding_model".to_string(), MODEL.to_string())]),
     ))
@@ -85,6 +87,7 @@ pub(crate) fn build_batch(chunks: &[chunk::Chunk], vectors: &[Vec<f32>]) -> Resu
             Arc::new(i(&|c| c.split_idx)),
             Arc::new(vector),
             Arc::new(s(&|c| Some(c.harness.clone()))),
+            Arc::new(s(&|c| Some(c.repo.clone()))),
         ],
     )?)
 }
@@ -192,6 +195,8 @@ struct Indexer<'a> {
     embedder: Box<dyn Embedder>,
     scanner: Option<&'a dyn scan::SecretScanner>,
     include_thinking: bool,
+    /// cwd → resolved `repo` value, so each distinct checkout runs `git` once across the run.
+    repo_cache: HashMap<String, String>,
 }
 
 impl Indexer<'_> {
@@ -209,7 +214,13 @@ impl Indexer<'_> {
         if let Some(scanner) = self.scanner {
             redact_turns(&mut turns, scanner)?;
         }
-        let chunks = chunk::chunks_from_turns(&turns, self.include_thinking);
+        let mut chunks = chunk::chunks_from_turns(&turns, self.include_thinking);
+        let repo = self.repo_for(key);
+        if !repo.is_empty() {
+            for c in &mut chunks {
+                c.repo.clone_from(&repo);
+            }
+        }
         let total_chunks = chunks.len();
         if total_chunks == 0 {
             eprintln!("{progress} {label} — no indexable content");
@@ -229,6 +240,19 @@ impl Indexer<'_> {
         eprintln!("{progress} {label} — {} new of {total_chunks} chunks", new_chunks.len());
         let added = self.embed_and_write(&new_chunks).await?;
         Ok((sessions, added))
+    }
+
+    /// The session's repo(s) for the unit at `key`, resolved from its transcript's cwd and cached
+    /// per cwd so each distinct checkout runs `git` once across the run. Empty for a non-transcript
+    /// unit (a parquet shard) or a checkout that can't be resolved (gone, not a git repo).
+    fn repo_for(&mut self, key: &str) -> String {
+        let Some(cwd) = repo::cwd_of_transcript(Path::new(key)) else {
+            return String::new();
+        };
+        self.repo_cache
+            .entry(cwd.clone())
+            .or_insert_with(|| repo::of_cwd(&cwd))
+            .clone()
     }
 
     /// Embed `new_chunks` and add them — appending to the dataset, or creating it at `uri` on the
@@ -356,6 +380,7 @@ async fn index_sources(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: 
         embedder,
         scanner,
         include_thinking,
+        repo_cache: HashMap::new(),
     };
     // First interactive index: after the first session lands, estimate the whole run from its time
     // and — if it looks long — ask whether to continue or bail and re-run with --limit.
@@ -533,6 +558,7 @@ mod tests {
                 "split_idx",
                 "vector",
                 "harness",
+                "repo",
             ]
         );
     }

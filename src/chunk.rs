@@ -28,6 +28,9 @@ pub struct Chunk {
     pub block_idx: i64,
     pub split_idx: i64,
     pub harness: String,
+    /// The session's source repo(s) as `owner/name`, space-joined — resolved from its checkout's
+    /// git remotes at index time; empty when unresolvable. Stamped by the indexer, not the chunker.
+    pub repo: String,
 }
 
 /// A missing tool name renders as the literal "None".
@@ -190,6 +193,7 @@ pub(crate) fn chunks_from_batches(batches: &[RecordBatch]) -> Vec<Chunk> {
                 block_idx: iv(b, "block_idx", i),
                 split_idx: iv(b, "split_idx", i),
                 harness: sv(b, "harness", i),
+                repo: sv(b, "repo", i),
             });
         }
     }
@@ -254,6 +258,7 @@ pub fn chunks_from_turns(turns: &[Turn], include_thinking: bool) -> Vec<Chunk> {
                     block_idx: bi as i64,
                     split_idx: si as i64,
                     harness: turn.harness.clone(),
+                    repo: String::new(), // stamped per session by the indexer
                 });
             }
         }

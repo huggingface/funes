@@ -40,6 +40,7 @@ pub mod pi_traces;
 pub mod push;
 pub mod recall;
 pub mod render;
+pub mod repo;
 pub mod scan;
 pub mod scrub;
 pub mod source;
