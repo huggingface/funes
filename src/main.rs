@@ -50,7 +50,7 @@ enum Cmd {
         #[arg(long = "type", value_name = "BLOCK_TYPE")]
         block_type: Option<String>,
         /// Restrict to a project (the munged session working directory, e.g. `-home-u-dev-funes`).
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         project: Option<String>,
         /// Restrict to a harness: claude | codex | pi.
         #[arg(long)]
@@ -67,7 +67,7 @@ enum Cmd {
         /// Defaults to your local store.
         store: Option<String>,
         /// Restrict to a project.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         project: Option<String>,
         /// Max sessions to show.
         #[arg(long, default_value_t = 50)]
@@ -136,7 +136,7 @@ enum Cmd {
         store: String,
         /// Publish only this project's chunks (the munged session working directory) — a projection,
         /// so a multi-project machine can seed a per-project store without leaking siblings.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         project: Option<String>,
         /// Skip the confirmation when the target shares no chunks with your local store.
         #[arg(short, long)]
