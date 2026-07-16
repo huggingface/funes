@@ -31,16 +31,9 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      # Pin nightly so rustfmt rules don't drift between CI and contributor machines.
-      # Bump together with the nightly used for `cargo +nightly fmt` locally.
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly-2026-04-22
-          components: rustfmt
-
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
-          components: clippy
+          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -56,7 +49,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Format check
-        run: cargo +nightly-2026-04-22 fmt --check
+        run: cargo fmt --check
 
       # Both backend variants, so a PR can't leave either failing fmt or a bumped linter — the
       # onnx build/test job below only runs on merges. (fmt is feature-independent: one check
