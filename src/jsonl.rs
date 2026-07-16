@@ -33,10 +33,11 @@ pub fn session_id_of(p: &Path) -> String {
 /// the same repo agree across hosts and teammates (`/Users/d/dev/funes` and `/home/u/funes` are
 /// both `funes`). The cwd was written by whatever machine ran the session, so both separator
 /// styles are split rather than trusting the local platform's path semantics. `None` when there
-/// is no final component (an empty or root cwd).
+/// is no final component (an empty or root cwd — a Windows drive root like `C:\` counts, its
+/// basename being the bare drive designator).
 pub fn project_of_cwd(cwd: &str) -> Option<String> {
     let name = cwd.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next()?;
-    (!name.is_empty()).then(|| name.to_string())
+    (!name.is_empty() && !name.ends_with(':')).then(|| name.to_string())
 }
 
 /// Parse a `*.jsonl` file into one [`Value`] per non-blank, parseable line. A read failure
@@ -128,6 +129,8 @@ mod tests {
         assert_eq!(project_of_cwd(""), None);
         assert_eq!(project_of_cwd("/"), None);
         assert_eq!(project_of_cwd("///"), None);
+        assert_eq!(project_of_cwd(r"C:\"), None);
+        assert_eq!(project_of_cwd("C:/"), None);
     }
 
     #[test]
