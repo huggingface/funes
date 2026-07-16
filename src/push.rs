@@ -282,7 +282,9 @@ pub async fn run_push(target: Store, project: Option<String>, force_reindex: boo
         }
 
         // The dataset card rides the same commit — created when the repo has none, a
-        // hand-written card left alone (see `card_file`).
+        // hand-written card left alone (see `card_file`). Root stores only: the root README
+        // describes the whole repo, which a prefixed store is only part of (and two stores
+        // sharing a repo would fight over one card's stats) — under a prefix it's the owner's.
         let date = Utc::now().format("%Y-%m-%d").to_string();
         let ctx = CardCtx {
             repo: &repo_id,
@@ -290,7 +292,11 @@ pub async fn run_push(target: Store, project: Option<String>, force_reindex: boo
             embedding_model: embedding_model(&schema),
             date: &date,
         };
-        let (card_body, card_note) = card_file(hf_dataset::fetch_readme(&repo, &rev).await, &ctx);
+        let (card_body, card_note) = if prefix.is_empty() {
+            card_file(hf_dataset::fetch_readme(&repo, &rev).await, &ctx)
+        } else {
+            (None, String::new())
+        };
         if let Some(body) = &card_body {
             let card_path = staging.path().join("README.md");
             std::fs::write(&card_path, body)?;
