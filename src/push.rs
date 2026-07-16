@@ -23,12 +23,13 @@ use crate::{chunk, dataset, scan};
 use anyhow::{bail, Context, Result};
 use arrow_array::{BooleanArray, RecordBatch, RecordBatchIterator, StringArray};
 use arrow_select::filter::filter_record_batch;
+use bytes::Bytes;
 use chrono::Utc;
 use hf_hub::repository::CommitOperation;
 use hf_hub::{HFClient, HFError, HFRepository, RepoTypeDataset};
 use lance::dataset::WriteParams;
 use lance::Dataset;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 /// Reindex the remote once this many appended rows are sitting unindexed (answered by a
@@ -248,6 +249,24 @@ pub async fn run_push(target: Store, project: Option<String>, force_reindex: boo
         });
     }
 
+    // The dataset card rides the data commit — created when the repo has none, refreshed when it
+    // carries the funes markers, a hand-written card left alone (see `card_file`). Root stores
+    // only: the root README describes the whole repo, which a prefixed store is only part of
+    // (and two stores sharing a repo would fight over one card's stats) — under a prefix it's
+    // the owner's. The chunk count is the post-push total.
+    let date = Utc::now().format("%Y-%m-%d").to_string();
+    let ctx = CardCtx {
+        repo: &repo_id,
+        chunks: (remote_ids.len() + n_chunks) as u64,
+        embedding_model: embedding_model(&schema),
+        date: &date,
+    };
+    let (card_body, card_note) = if prefix.is_empty() {
+        card_file(hf_dataset::fetch_readme(&repo, &rev).await, &ctx)
+    } else {
+        (None, String::new())
+    };
+
     // 5. First publish: build the whole dataset locally (data + indexes) and push it in one commit.
     if first_publish {
         let staging = tempfile::tempdir()?;
@@ -281,22 +300,6 @@ pub async fn run_push(target: Store, project: Option<String>, force_reindex: boo
             return Ok(format!("{}: nothing new to upload\n", target.label()).into());
         }
 
-        // The dataset card rides the same commit — created when the repo has none, a
-        // hand-written card left alone (see `card_file`). Root stores only: the root README
-        // describes the whole repo, which a prefixed store is only part of (and two stores
-        // sharing a repo would fight over one card's stats) — under a prefix it's the owner's.
-        let date = Utc::now().format("%Y-%m-%d").to_string();
-        let ctx = CardCtx {
-            repo: &repo_id,
-            chunks: n_chunks as u64,
-            embedding_model: embedding_model(&schema),
-            date: &date,
-        };
-        let (card_body, card_note) = if prefix.is_empty() {
-            card_file(hf_dataset::fetch_readme(&repo, &rev).await, &ctx)
-        } else {
-            (None, String::new())
-        };
         if let Some(body) = &card_body {
             let card_path = staging.path().join("README.md");
             std::fs::write(&card_path, body)?;
@@ -325,6 +328,10 @@ pub async fn run_push(target: Store, project: Option<String>, force_reindex: boo
     // 6. Append the data and commit it, retrying against a fresh head if a concurrent push moved it
     // (each attempt re-appends onto the new manifest — the data commit is small, so this is cheap).
     let message = format!("funes push: +{n_chunks} chunks");
+    // The card refresh rides the same guarded commit as the data.
+    let extra: BTreeMap<String, Bytes> = card_body
+        .map(|body| BTreeMap::from([("README.md".to_string(), Bytes::from(body))]))
+        .unwrap_or_default();
     eprintln!("uploading {n_chunks} chunk(s) to {}…", target.label());
     let mut attempts = 0u32;
     let (oid, unindexed) = loop {
@@ -336,6 +343,7 @@ pub async fn run_push(target: Store, project: Option<String>, force_reindex: boo
             message.clone(),
             batches.clone(),
             schema.clone(),
+            &extra,
         )
         .await?;
         match attempt {
@@ -349,6 +357,7 @@ pub async fn run_push(target: Store, project: Option<String>, force_reindex: boo
         }
     };
     let mut out = format!("{}: pushed {n_chunks} chunks (commit {oid})\n", target.label());
+    out.push_str(&card_note);
 
     // 7. Reindex as a separate commit: forced (retried until it lands) or, past the threshold,
     // best-effort (one shot, warn on a conflict — the next push retries).

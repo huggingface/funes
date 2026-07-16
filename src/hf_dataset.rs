@@ -81,10 +81,13 @@ pub(crate) enum Reindexed {
 /// Append `batches` to the remote Lance dataset at `dataset_uri` (an `hf://…/<table>.lance` URI)
 /// and land them in one `create_commit` on branch `rev`, guarded by the current head. The append
 /// writes only data — a new fragment, manifest, and transaction — and leaves the new rows
-/// unindexed (refresh the index separately with [`reindex`]). Returns [`Appended::Committed`] with
-/// the new commit oid and the resulting unindexed-row backlog (the largest across the dataset's
-/// indexes — what `push` thresholds on), or [`Appended::Conflict`] if the head moved first — a
-/// single attempt against the head it read, so the caller drives the retry.
+/// unindexed (refresh the index separately with [`reindex`]). `extra_files` (repo path → bytes,
+/// e.g. the dataset card) ride the same guarded commit; cloned per attempt, so a conflict retry
+/// re-attaches them. Returns [`Appended::Committed`] with the new commit oid and the resulting
+/// unindexed-row backlog (the largest across the dataset's indexes — what `push` thresholds on),
+/// or [`Appended::Conflict`] if the head moved first — a single attempt against the head it read,
+/// so the caller drives the retry.
+#[allow(clippy::too_many_arguments)] // internal orchestration, one call site (`push`)
 pub(crate) async fn append(
     repo: &HFRepository<RepoTypeDataset>,
     dataset_uri: &str,
@@ -93,6 +96,7 @@ pub(crate) async fn append(
     message: String,
     batches: Vec<RecordBatch>,
     schema: SchemaRef,
+    extra_files: &BTreeMap<String, Bytes>,
 ) -> Result<Appended> {
     let parent = head_oid(repo, rev).await?;
     let (mut ds, wrapper) = open_capturing(dataset_uri, storage_options).await?;
@@ -104,8 +108,11 @@ pub(crate) async fn append(
 
     // Snapshot the captured writes before reading index stats: `index_statistics` can write a stats
     // migration through the same wrapper, and that must not leak into the data commit.
-    let files = captured_files(&wrapper);
+    let mut files = captured_files(&wrapper);
     let unindexed = max_unindexed_rows(&ds).await;
+    for (path, body) in extra_files {
+        files.insert(path.clone(), body.clone());
+    }
 
     let (ops, _dir) = write_ops(&files)?;
     match send_commit(repo, ops, parent, rev, message).await {
