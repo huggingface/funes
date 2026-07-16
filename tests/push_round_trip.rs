@@ -22,7 +22,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use funes::hub::Store;
 use funes::push::Confirm;
-use hf_hub::HFClient;
+use hf_hub::{HFClient, HFError, HFRepository, RepoTypeDataset};
 
 const OWNER: &str = "optimum-internal-testing";
 const NAME: &str = "funes-test";
@@ -47,6 +47,16 @@ fn tool_ok(bin: &str, arg: &str) -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+/// The repo-root README, or None when the repo has none. Any other failure panics: a transport
+/// error must fail the test loudly, not masquerade as "no README".
+async fn root_readme(repo: &HFRepository<RepoTypeDataset>) -> Option<String> {
+    match repo.download_file_to_bytes().filename("README.md").send().await {
+        Ok(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
+        Err(HFError::EntryNotFound { .. }) => None,
+        Err(e) => panic!("querying the repo-root README: {e}"),
+    }
 }
 
 async fn recall_remote(uri: &str, query: &str) -> String {
@@ -91,6 +101,10 @@ async fn push_round_trip_create_append_recall() {
     std::env::set_var("HF_TOKEN", &token);
     let client = HFClient::builder().token(token).build().unwrap();
     let repo = client.dataset(OWNER, NAME);
+
+    // The store lives under a prefix, so no push here may ever touch the repo-root README (the
+    // dataset card is root-stores-only). Snapshot it now, compare after every push ran.
+    let readme_before = root_readme(&repo).await;
 
     // Unique scratch path so concurrent/repeated runs don't collide.
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
@@ -140,6 +154,7 @@ async fn push_round_trip_create_append_recall() {
     // the index as its own commit (capture_reindex + a separate commit), then recall it again.
     let reindex = funes::push::run_push(Store::parse(&uri), None, true, Confirm::Yes).await;
     let recall_reindexed = recall_remote(&uri, "SYNCSMOKE2 continuation").await;
+    let readme_after = root_readme(&repo).await;
     // The model id must travel with the store (stamped in the schema metadata, uploaded by push).
     let remote_model = match Store::parse(&uri).open().await {
         Ok(t) => t.schema().metadata.get("embedding_model").cloned(),
@@ -209,5 +224,9 @@ async fn push_round_trip_create_append_recall() {
         remote_model.as_deref(),
         Some(funes::index::MODEL),
         "the model id should travel with the store via push"
+    );
+    assert_eq!(
+        readme_before, readme_after,
+        "a prefixed push must never touch the repo-root README (the card is root-stores-only)"
     );
 }

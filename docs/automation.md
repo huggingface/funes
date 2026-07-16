@@ -67,6 +67,9 @@ timeout.
 - **Secrets held back.** funes redacts credentials at index time; on push, a separate always-on gate
   withholds any chunk that still contains one and exits non-zero (code `2`). Run `funes scrub`, then
   the next push publishes it.
+- **The card rides along.** A push to a store at the repo root creates the repo's dataset card
+  (tagged `funes`) and keeps its stats fresh — in the same commit as the data. A hand-written
+  card is never touched.
 - **The wrong-store guard.** A first push to a store your local store shares no chunks with (a first
   push, a new host, or the wrong store) is refused off a terminal. `funes add` clears it by doing
   that first push interactively — so on a new host, re-run `funes add <agent> <org>/<repo>` there
