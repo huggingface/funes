@@ -15,11 +15,15 @@
 //!   the data commit stays small. `push` runs it after the data commit when the unindexed backlog
 //!   crosses [`REINDEX_THRESHOLD`] (best-effort: a head-moved conflict is a warning, the next push
 //!   retries), or eagerly with `--force-reindex` (retried until it lands).
+//!
+//! A **project memory** — a store whose schema metadata names its project (see
+//! [`crate::curate`]) — ships only the sessions marked include; any other store is a **personal
+//! memory** and takes everything, as ever.
 
 use crate::card::{self, CardAction, CardCtx};
 use crate::hf_dataset::{self, Appended, Reindexed};
 use crate::hub::{self, Store};
-use crate::{chunk, dataset, scan};
+use crate::{chunk, curate, dataset, scan};
 use anyhow::{bail, Context, Result};
 use arrow_array::{BooleanArray, RecordBatch, StringArray};
 use arrow_select::filter::filter_record_batch;
@@ -77,19 +81,26 @@ async fn all_ids(ds: &Dataset) -> Result<HashSet<String>> {
 }
 
 /// The to-push rows (all columns) from the local store. An append reads just the missing ids via an
-/// `id IN (…)` predicate. A first publish reads everything.
+/// `id IN (…)` predicate (already decision-scoped, since `to_push` is). A personal memory's first
+/// publish reads everything — a project memory is never first-published (it is born empty).
 async fn rows_to_push(local: &Dataset, to_push: &HashSet<String>, first_publish: bool) -> Result<Vec<RecordBatch>> {
-    let filter = if first_publish {
-        None
-    } else {
+    let filter = (!first_publish).then(|| {
         let list = to_push
             .iter()
             .map(|id| format!("'{id}'"))
             .collect::<Vec<_>>()
             .join(", ");
-        Some(format!("id IN ({list})"))
-    };
+        format!("id IN ({list})")
+    });
     dataset::scan_rows(local, &[], filter.as_deref(), None).await
+}
+
+/// The hold-back line a report carries when sessions are pending review — empty when none are.
+fn pending_note(pending: usize, store: &str) -> String {
+    if pending == 0 {
+        return String::new();
+    }
+    format!("  {pending} session(s) on this machine pending review — run `funes curate {store}`\n")
 }
 
 /// The outcome of a [`run_push`]: the report to print, and `blocked` — true when the secret gate
@@ -153,25 +164,64 @@ pub async fn run_push(target: Store, force_reindex: bool, confirm: Confirm) -> R
         hub::Reachability::Ok => {}
     }
 
-    // 1. Delta: local_ids − remote_ids (remote absent => first publish).
+    // 1. What the remote *is*, and what's on it. An unreadable dataset is a hard error, never
+    // "empty": treating it as a first publish would commit a fresh dataset's files into a repo
+    // that already holds one (`check_compat` rejections land here too — a mixed-version
+    // teammate must stop, not clobber). A missing dataset is a personal memory's first publish;
+    // a project memory always exists (born empty when named).
     eprintln!("comparing local and remote indexes…");
     let local = Store::local().open().await?;
-    dataset::reject_pre_workdir(&local)?;
-    let local_ids = all_ids(&local).await?;
-    let remote_ids = match target.open().await {
-        Ok(t) => {
-            dataset::reject_pre_workdir(&t)?;
-            all_ids(&t).await?
+    let remote = match target.open().await {
+        Ok(ds) => Some(ds),
+        Err(e) if hub::dataset_absent(&e) => None,
+        Err(e) => {
+            return Err(e.context(format!(
+                "{} exists but can't be read — refusing to treat it as empty",
+                target.label()
+            )))
         }
-        Err(_) => HashSet::new(),
     };
-    let to_push: HashSet<String> = local_ids.difference(&remote_ids).cloned().collect();
-    let first_publish = remote_ids.is_empty();
+    let project = remote.as_ref().and_then(curate::project);
+    let remote_ids = match &remote {
+        Some(ds) => all_ids(ds).await?,
+        None => HashSet::new(),
+    };
+    let first_publish = remote.is_none();
+
+    // 2. The local side. A project memory ships exactly the sessions marked include — your
+    // review alone decides what ships (see [`crate::curate`]); anything undecided stays local
+    // and is counted for the report. A personal memory takes everything.
+    let (candidates, not_reviewed) = match &project {
+        Some(project) => {
+            eprintln!("project memory of {project} — ships only sessions you've included");
+            let decisions = curate::load(&uri)?.unwrap_or_default();
+            let by_session = curate::candidate_sessions(&local).await?;
+            let (shipped, pending) = curate::partition(&by_session, &decisions, &remote_ids);
+            // Report pending only for sessions that belong to this project — the same repo rule the
+            // review scopes to. Undecided sessions of other repos (or with no resolvable checkout)
+            // never ship here and aren't this memory's to-do.
+            let matched = curate::project_sessions(&local, project).await?;
+            let pending: Vec<String> = pending.into_iter().filter(|s| matched.contains(s)).collect();
+            (shipped, pending)
+        }
+        None => (all_ids(&local).await?, Vec::new()),
+    };
+    let held_back = pending_note(not_reviewed.len(), &target.label());
+    let to_push: HashSet<String> = candidates.difference(&remote_ids).cloned().collect();
 
     // Nothing to push => done (no token needed), unless this is a forced reindex of an existing
     // remote, which is still work.
     if to_push.is_empty() && (first_publish || !force_reindex) {
-        return Ok(format!("{}: already up to date ({} chunks)\n", target.label(), remote_ids.len()).into());
+        let base = if not_reviewed.is_empty() {
+            format!("{}: already up to date ({} chunks)\n", target.label(), remote_ids.len())
+        } else {
+            format!(
+                "{}: nothing published ({} chunks on the remote)\n",
+                target.label(),
+                remote_ids.len()
+            )
+        };
+        return Ok(format!("{base}{held_back}").into());
     }
 
     // 2. HF repo handle. Resolve the target and token before the confirmation, so a bad URI or a
@@ -181,7 +231,7 @@ pub async fn run_push(target: Store, force_reindex: bool, confirm: Confirm) -> R
     let token = hub::hf_token().context("no HF token (set HF_TOKEN) — required to push")?;
 
     // When required, ask for confirmation before publishing.
-    if must_confirm(local_ids.len(), to_push.len()) && !confirm.proceed(&target.label(), to_push.len()) {
+    if must_confirm(candidates.len(), to_push.len()) && !confirm.proceed(&target.label(), to_push.len()) {
         bail!("push aborted");
     }
 
@@ -195,7 +245,12 @@ pub async fn run_push(target: Store, force_reindex: bool, confirm: Confirm) -> R
     if to_push.is_empty() {
         eprintln!("refreshing the remote index…");
         let note = reindex_forced(&repo, &dataset_uri, &opts, &rev).await?;
-        return Ok(format!("{}: up to date ({} chunks)\n{note}", target.label(), remote_ids.len()).into());
+        return Ok(format!(
+            "{}: up to date ({} chunks)\n{note}{held_back}",
+            target.label(),
+            remote_ids.len()
+        )
+        .into());
     }
 
     // 4. Rows, then hold back any that still contain a secret. Re-stamp each batch with the local
@@ -272,7 +327,7 @@ pub async fn run_push(target: Store, force_reindex: bool, confirm: Confirm) -> R
             return Ok(format!("{}: nothing new to upload\n", target.label()).into());
         };
         return Ok(format!(
-            "{}: pushed {n_chunks} chunks (commit {oid})\n{card_note}{}",
+            "{}: pushed {n_chunks} chunks (commit {oid})\n{card_note}{held_back}{}",
             target.label(),
             skipped.warning()
         )
@@ -307,6 +362,7 @@ pub async fn run_push(target: Store, force_reindex: bool, confirm: Confirm) -> R
     };
     let mut out = format!("{}: pushed {n_chunks} chunks (commit {oid})\n", target.label());
     out.push_str(&card_note);
+    out.push_str(&held_back);
 
     // 7. Reindex as a separate commit: forced (retried until it lands) or, past the threshold,
     // best-effort (one shot, warn on a conflict — the next push retries).
@@ -462,6 +518,8 @@ async fn reindex_auto(
 mod tests {
     use super::*;
     use crate::index;
+    use arrow_array::RecordBatchIterator;
+    use lance::dataset::WriteParams;
 
     #[test]
     fn must_confirm_only_when_overlap_is_empty_and_there_is_work() {
@@ -563,6 +621,14 @@ mod tests {
         }
     }
 
+    /// Like [`turn`], but in a named session — for exercising session-level curation.
+    fn turn_sess(session: &str, idx: i64, block_text: &str) -> Turn {
+        Turn {
+            session_id: session.into(),
+            ..turn(idx, block_text)
+        }
+    }
+
     /// Build a to-push batch the way the store stores it: chunk the turns, stamp zero vectors.
     fn batch(turns: &[Turn]) -> (RecordBatch, Vec<chunk::Chunk>) {
         let chunks = chunk::chunks_from_turns(turns, true);
@@ -652,5 +718,54 @@ mod tests {
             1,
             "only the clean row stays"
         );
+    }
+
+    /// A two-session local dataset for the curation tests.
+    async fn two_session_ds(dir: &std::path::Path) -> Dataset {
+        let (b, _) = batch(&[
+            turn_sess("reviewed", 0, "a decision we can share"),
+            turn_sess("private", 1, "an internal discussion"),
+        ]);
+        let uri = dataset::table_uri(&dir.to_string_lossy());
+        let schema = b.schema();
+        let reader = RecordBatchIterator::new(vec![Ok(b)], schema);
+        Dataset::write(reader, &uri, Some(WriteParams::default()))
+            .await
+            .unwrap();
+        dataset::open(&uri, HashMap::new()).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn ids_by_session_groups_the_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let ds = two_session_ds(dir.path()).await;
+        let by_session = curate::ids_by_session(&ds).await.unwrap();
+        assert_eq!(by_session.len(), 2, "one entry per session");
+        assert!(by_session.contains_key("reviewed") && by_session.contains_key("private"));
+        assert!(by_session.values().all(|ids| !ids.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn an_append_reads_only_the_included_delta() {
+        // The append path reads exactly the ids in `to_push` — the set your review already
+        // gated — never the sibling session's rows.
+        let dir = tempfile::tempdir().unwrap();
+        let ds = two_session_ds(dir.path()).await;
+        let reviewed = curate::ids_by_session(&ds).await.unwrap()["reviewed"].clone();
+        let to_push: HashSet<String> = reviewed.iter().cloned().collect();
+        let rows = rows_to_push(&ds, &to_push, false).await.unwrap();
+        let pushed: usize = rows.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(pushed, reviewed.len(), "only the included session's rows are read");
+    }
+
+    #[test]
+    fn pending_note_is_actionable_or_absent() {
+        assert!(pending_note(0, "hf://datasets/acme/kb").is_empty());
+        let note = pending_note(2, "hf://datasets/acme/kb");
+        assert!(
+            note.contains("2 session(s) on this machine pending review"),
+            "note: {note}"
+        );
+        assert!(note.contains("funes curate hf://datasets/acme/kb"), "note: {note}");
     }
 }

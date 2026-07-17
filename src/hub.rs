@@ -237,6 +237,9 @@ pub async fn create_dataset_repo(owner: &str, name: &str) -> Result<()> {
         .create_repository()
         .repo_id(format!("{owner}/{name}"))
         .repo_type(RepoTypeDataset)
+        // Agent memory is the user's own data — create private; going public is a deliberate act
+        // on the Hub. `exist_ok` means an already-created repo keeps whatever visibility it has.
+        .private(true)
         .exist_ok(true)
         .send()
         .await
@@ -273,6 +276,23 @@ fn token_from(env: impl Fn(&str) -> Option<String>, token_file: Option<&Path>) -
     let cached = std::fs::read_to_string(token_file?).ok()?;
     let t = cached.trim();
     (!t.is_empty()).then(|| t.to_string())
+}
+
+/// Whether a [`Store::open`] failure means the dataset does not exist (a missing table in an
+/// otherwise-reachable repo) — as opposed to one that exists but can't be read (a
+/// [`check_compat`] rejection, a transport failure). Callers must treat only the former as
+/// "empty": mistaking an unreadable store for an absent one turns a mixed-version teammate's
+/// push into a first publish over live data.
+pub fn dataset_absent(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        if let Some(hf) = cause.downcast_ref::<HFError>() {
+            return matches!(hf, HFError::EntryNotFound { .. });
+        }
+        if let Some(lance) = cause.downcast_ref::<lance::Error>() {
+            return matches!(lance, lance::Error::DatasetNotFound { .. });
+        }
+        false
+    })
 }
 
 /// Reject a store funes can't query with its own embeddings: the `vector` dimension must be
@@ -313,6 +333,15 @@ mod tests {
 
     use arrow_array::types::Float32Type;
     use arrow_array::{ArrayRef, FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator};
+
+    #[test]
+    fn dataset_absent_matches_the_type_not_the_message() {
+        // Chain-typed only — text that merely mentions "not found" is not an absence signal.
+        // (The positive paths carry #[non_exhaustive] errors that can't be built here; the
+        // gated round-trip exercises them live — its first publish runs through this.)
+        assert!(!dataset_absent(&anyhow::anyhow!("404 Entry not found")));
+        assert!(!dataset_absent(&anyhow::anyhow!("Dataset not found: chunks")));
+    }
     use arrow_schema::{DataType, Field, Schema};
 
     #[test]

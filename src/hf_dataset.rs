@@ -344,6 +344,40 @@ fn write_ops(files: &BTreeMap<String, Bytes>) -> Result<(Vec<CommitOperation>, t
     Ok((ops, dir))
 }
 
+/// Stamp `updates` into the remote dataset's schema metadata in one guarded commit — how an
+/// existing store is named a project memory. The full merged map is written (lance's amend
+/// replaces the metadata wholesale). Single attempt: naming is a rare, interactive act, so a
+/// moved head is an error to re-run, not a retry loop.
+pub(crate) async fn amend_schema_metadata(
+    repo: &HFRepository<RepoTypeDataset>,
+    dataset_uri: &str,
+    storage_options: HashMap<String, String>,
+    rev: &str,
+    message: String,
+    updates: HashMap<String, String>,
+) -> Result<()> {
+    let parent = head_oid(repo, rev).await?;
+    let (mut ds, wrapper) = open_capturing(dataset_uri, storage_options).await?;
+    let mut metadata = ds.schema().metadata.clone();
+    metadata.extend(updates);
+    // The project key lives in the *schema* metadata, beside the embedding-model pin — the
+    // suggested `update_schema_metadata` builder targets the same map; the deprecated wrapper
+    // is the stable one-call form of it.
+    #[allow(deprecated)]
+    ds.replace_schema_metadata(metadata)
+        .await
+        .context("stamping the project metadata")?;
+    let files = captured_files(&wrapper);
+    let (ops, _dir) = write_ops(&files)?;
+    match send_commit(repo, ops, parent, rev, message).await {
+        Ok(_) => Ok(()),
+        Err(e) if head_moved(&e) => Err(anyhow::anyhow!(
+            "the store moved while naming it — re-run `funes curate`"
+        )),
+        Err(e) => Err(anyhow::Error::new(e).context("naming commit failed")),
+    }
+}
+
 /// The repo's `README.md` at `rev`, or `None` when it has none — fetched straight to bytes,
 /// never the shared cache, so a push always classifies the dataset card against the branch
 /// head it targets.
