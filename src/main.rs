@@ -6,7 +6,7 @@
 
 use funes::harness::Harness;
 use funes::recall::Hit;
-use funes::{claude, codex, hello, hermes, hub, index, mcp, opencode, pi, push, recall, render, scrub, update};
+use funes::{claude, codex, curate, hello, hermes, hub, index, mcp, opencode, pi, push, recall, render, scrub, update};
 
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -123,6 +123,21 @@ enum Cmd {
         /// backlog is below the auto-reindex threshold. With nothing new to push, reindex only.
         #[arg(long)]
         force_reindex: bool,
+    },
+    /// Curate a project memory: a store that ships only the sessions you've reviewed and marked
+    /// `include`. Your review alone decides what `funes push` ships there.
+    Curate {
+        /// The store — the Hub dataset the memory lives in: `<org>/<repo>` or a full `hf://…` URI.
+        store: String,
+        /// The project the store is the memory of — the git repo it's about (`huggingface/funes`)
+        /// or a plain label. Give it the first time to name the store; omit to review.
+        project: Option<String>,
+        /// Mark these sessions `include` — they ship on the next push to this store.
+        #[arg(long, value_name = "SESSION")]
+        include: Vec<String>,
+        /// Mark these sessions `exclude` — held back from this store.
+        #[arg(long, value_name = "SESSION")]
+        exclude: Vec<String>,
     },
     /// Redact secrets from your local store in place — for rows indexed before redaction existed (or
     /// flagged by an updated ruleset); needs no source transcript. Cleans the local store only: it
@@ -445,6 +460,38 @@ async fn main() -> Result<()> {
                 Err(e) => Err(e),
             }
         }
+        Cmd::Curate {
+            store,
+            project,
+            include,
+            exclude,
+        } => {
+            let store = hub::Store::parse(&store);
+            // A project memory is of a git repo — funes attributes sessions to it by their
+            // checkout's remotes, so the project must be a repo identity (`owner/name`). A bare
+            // name gets a "did you mean", inferring the owner from local repos with that name.
+            if let Some(project) = project.as_deref() {
+                if !project.contains('/') {
+                    return Err(match curate::projects_named(project).await?.as_slice() {
+                        [] => anyhow!("a project is a repo, like `huggingface/transformers` — got `{project}`"),
+                        [one] => anyhow!(
+                            "a project is a repo — did you mean `{one}`?  run: funes curate {} {one}",
+                            store.label()
+                        ),
+                        many => anyhow!("a project is a repo — did you mean one of: {}", many.join(", ")),
+                    });
+                }
+            }
+            // With no decision flags, a terminal gets the interactive review; scripts and pipes
+            // (and the FUNES_NO_TUI opt-out) get the plain text listing.
+            let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+            if include.is_empty() && exclude.is_empty() && interactive && std::env::var_os("FUNES_NO_TUI").is_none() {
+                curate_review(&store, project.as_deref()).await
+            } else {
+                print!("{}", curate::run(&store, project.as_deref(), &include, &exclude).await?);
+                Ok(())
+            }
+        }
         Cmd::Scrub => scrub::run().await,
         Cmd::Update { force } => update::run(force).await,
         Cmd::Mcp { store } => mcp::run(store).await,
@@ -486,6 +533,136 @@ async fn resolve_add_store(raw: AddStore) -> Result<Option<Resolved>> {
         }
         None => offer_hub_store().await,
     }
+}
+
+/// The deferred creation the interactive review runs once you've included sessions: materialize
+/// `store` as the project memory of `project`, with consent. `create_repo` makes the Hub repo first
+/// (the store was absent); otherwise it exists (a personal memory) and we only stamp it. Returns
+/// whether it happened — declining stops cleanly, publishing nothing.
+/// The interactive review behind `funes curate <store>` in a terminal: the project's candidate
+/// sessions in the in-process [`funes::tui`] picker where `→` includes a session and `←` excludes it
+/// (the same arrow again clears to pending), the preview showing each session's user prompts.
+/// Decisions persist as they're made; leaving summarizes, and — once something is included — offers
+/// the push, materializing the store as the project memory first when it isn't one yet.
+async fn curate_review(store: &hub::Store, project: Option<&str>) -> Result<()> {
+    // Resolve without creating: `materialize` is None when the store is already the project memory,
+    // else Some(create_repo) — the deferred creation to run at the close if anything is included.
+    let (uri, project, materialize) = match curate::prepare(store, project).await? {
+        curate::Prepared::Ready { uri, project } => (uri, project, None),
+        curate::Prepared::Absent { uri, project } => (uri, project, Some(true)),
+        curate::Prepared::Personal { uri, project } => (uri, project, Some(false)),
+    };
+    let found = curate::candidates(store, &uri, &project, true).await?;
+    if found.matched.is_empty() {
+        let skipped = found.other.len() + found.unresolvable.len();
+        if skipped > 0 {
+            println!("project memory of {project} — no local session resolves to {project}");
+            println!("  ({skipped} session(s) resolve to other repos or have no resolvable checkout)");
+        } else {
+            println!("project memory of {project} — nothing new to review");
+        }
+        return Ok(());
+    }
+
+    // Pre-render each candidate's user prompts (scaffolding dropped) — the preview pane, and
+    // (whitespace-collapsed) the surface the fuzzy filter searches beyond the visible row.
+    let ids: Vec<String> = found.matched.iter().map(|s| s.session_id.clone()).collect();
+    let mut previews = recall::session_prompts(&hub::Store::local(), &ids).await?;
+    for turns in previews.values_mut() {
+        for turn in turns.iter_mut() {
+            turn.blocks.retain(|b| !curate::is_scaffolding(b));
+        }
+        turns.retain(|turn| !turn.blocks.is_empty());
+    }
+    let (color, width) = human_io();
+    let items: Vec<funes::tui::curate::Candidate> = found
+        .matched
+        .iter()
+        .map(|s| {
+            let body = previews
+                .get(&s.session_id)
+                .map(|turns| render::get_human("", turns, color, width, None))
+                .unwrap_or_default();
+            let filter: String = body
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .take(2000)
+                .collect();
+            funes::tui::curate::Candidate {
+                id: s.session_id.clone(),
+                date: s.date().to_string(),
+                prompt: s.first_prompt.clone(),
+                comment: format!("{} {}", s.date(), s.first_prompt).trim().to_string(),
+                filter,
+                chunks: s.chunks,
+                preview: funes::tui::ansi_to_text(&body),
+            }
+        })
+        .collect();
+    funes::tui::curate::run(uri.clone(), project.clone(), items)?;
+
+    // The review persisted every decision, so leaving just summarizes and offers the push.
+    let curation = curate::load(&uri)?.unwrap_or_default();
+    // A stale include (the session grew since it was reviewed) counts as pending here, not as a
+    // fresh include — it won't ship until it's reviewed again.
+    let inc = found
+        .matched
+        .iter()
+        .filter(|s| curation.include.contains(&s.session_id) && !curation.is_stale(&s.session_id, s.chunks))
+        .count();
+    let exc = found
+        .matched
+        .iter()
+        .filter(|s| curation.exclude.contains(&s.session_id))
+        .count();
+    println!(
+        "project memory of {project} — {inc} include, {exc} exclude, {} pending",
+        found.matched.len() - inc - exc
+    );
+    if inc == 0 {
+        return Ok(()); // nothing included — nothing to publish, and no store created
+    }
+    // Now there's something to publish. A store that already exists just needs the push; a missing
+    // or personal one is materialized as the project memory first (its consent doubles as the
+    // publish consent). Either way, ship on a yes.
+    let publish = match materialize {
+        None => confirm(&format!("push {} now? [Y/n] ", store.label()), true),
+        Some(create_repo) => create_project_memory(store, &project, create_repo, inc).await?,
+    };
+    if publish {
+        match push::run_push(store.clone(), false, push::Confirm::Yes).await {
+            Ok(pushed) => print!("{}", pushed.report),
+            Err(e) if push::is_read_only(&e) => eprintln!(
+                "{} is read-only for your token — recall can read it, but publishing needs write access.",
+                store.label()
+            ),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+async fn create_project_memory(store: &hub::Store, project: &str, create_repo: bool, includes: usize) -> Result<bool> {
+    let hub::Store::Remote { uri } = store else {
+        return Ok(false);
+    };
+    let prompt = format!(
+        "publish {includes} session(s) to {} as the project memory of {project}? [Y/n] ",
+        store.label()
+    );
+    if !confirm(&prompt, true) {
+        eprintln!("nothing published; {} left as is.", store.label());
+        return Ok(false);
+    }
+    if create_repo {
+        let (owner, name, _) = hub::parse_hf(uri)?;
+        hub::create_dataset_repo(&owner, &name).await?;
+    }
+    curate::name_project(store, project).await?;
+    eprintln!("{} is now the project memory of {project}.", store.label());
+    Ok(true)
 }
 
 /// Validate an explicitly-named store: fine if it exists; offer to create it if missing (default

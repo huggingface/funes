@@ -10,6 +10,7 @@
 //! holds) each keypress with no aliasing, and stay open across those mutations.
 
 pub mod browser;
+pub mod curate;
 
 use std::io::{Stdout, Write};
 

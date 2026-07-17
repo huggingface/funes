@@ -147,16 +147,11 @@ pub async fn remote_reachability(uri: &str) -> Reachability {
     let Ok((owner, name, _)) = parse_hf(uri) else {
         return Reachability::Ok; // not an hf:// dataset URI — let the open/commit report the real error
     };
-    // No retries: this is a reachability check, so one failed request already means offline. Without
-    // this, hf-hub's default exponential backoff (5 attempts) would drag the probe out for seconds.
-    let mut builder = HFClient::builder().retry_max_attempts(0);
-    if let Some(token) = hf_token() {
-        builder = builder.token(token);
-    }
-    let Ok(client) = builder.build() else {
-        return Reachability::Ok;
+    // No retries: this is a reachability check, so one failed request already means offline.
+    let repo = match client(hf_token().as_deref(), false) {
+        Ok(c) => c.dataset(owner, name),
+        Err(_) => return Reachability::Ok,
     };
-    let repo = client.dataset(owner, name);
     match tokio::time::timeout(PROBE_TIMEOUT, repo.info().send()).await {
         Err(_elapsed) => Reachability::Offline,
         Ok(Ok(_)) => Reachability::Ok,
@@ -202,14 +197,25 @@ pub fn unauthorized_remote(uri: &str) -> anyhow::Error {
     )
 }
 
+/// Build an hf-hub client — the one place the crate does. `retries` is false only for the
+/// fail-fast reachability/status probes, where hf-hub's default backoff would drag a single
+/// offline check out for seconds.
+pub(crate) fn client(token: Option<&str>, retries: bool) -> Result<HFClient> {
+    let mut builder = HFClient::builder();
+    if !retries {
+        builder = builder.retry_max_attempts(0);
+    }
+    if let Some(token) = token {
+        builder = builder.token(token.to_string());
+    }
+    builder.build().context("building the Hugging Face client")
+}
+
 /// Build an authenticated Hub client, erroring if no token is configured. For the write/identity
 /// calls (`whoami`, `create_dataset_repo`) — reads pin their own revision separately.
 fn authed_client() -> Result<HFClient> {
     let token = hf_token().context("no Hugging Face token — set HF_TOKEN, or run `hf auth login`")?;
-    HFClient::builder()
-        .token(token)
-        .build()
-        .context("building the Hugging Face client")
+    client(Some(&token), true)
 }
 
 /// The authenticated user's Hub handle (`whoami`). Errors if the token is missing or invalid — the
@@ -231,6 +237,9 @@ pub async fn create_dataset_repo(owner: &str, name: &str) -> Result<()> {
         .create_repository()
         .repo_id(format!("{owner}/{name}"))
         .repo_type(RepoTypeDataset)
+        // Agent memory is the user's own data — create private; going public is a deliberate act
+        // on the Hub. `exist_ok` means an already-created repo keeps whatever visibility it has.
+        .private(true)
         .exist_ok(true)
         .send()
         .await
@@ -267,6 +276,23 @@ fn token_from(env: impl Fn(&str) -> Option<String>, token_file: Option<&Path>) -
     let cached = std::fs::read_to_string(token_file?).ok()?;
     let t = cached.trim();
     (!t.is_empty()).then(|| t.to_string())
+}
+
+/// Whether a [`Store::open`] failure means the dataset does not exist (a missing table in an
+/// otherwise-reachable repo) — as opposed to one that exists but can't be read (a
+/// [`check_compat`] rejection, a transport failure). Callers must treat only the former as
+/// "empty": mistaking an unreadable store for an absent one turns a mixed-version teammate's
+/// push into a first publish over live data.
+pub fn dataset_absent(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        if let Some(hf) = cause.downcast_ref::<HFError>() {
+            return matches!(hf, HFError::EntryNotFound { .. });
+        }
+        if let Some(lance) = cause.downcast_ref::<lance::Error>() {
+            return matches!(lance, lance::Error::DatasetNotFound { .. });
+        }
+        false
+    })
 }
 
 /// Reject a store funes can't query with its own embeddings: the `vector` dimension must be
@@ -307,6 +333,15 @@ mod tests {
 
     use arrow_array::types::Float32Type;
     use arrow_array::{ArrayRef, FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator};
+
+    #[test]
+    fn dataset_absent_matches_the_type_not_the_message() {
+        // Chain-typed only — text that merely mentions "not found" is not an absence signal.
+        // (The positive paths carry #[non_exhaustive] errors that can't be built here; the
+        // gated round-trip exercises them live — its first publish runs through this.)
+        assert!(!dataset_absent(&anyhow::anyhow!("404 Entry not found")));
+        assert!(!dataset_absent(&anyhow::anyhow!("Dataset not found: chunks")));
+    }
     use arrow_schema::{DataType, Field, Schema};
 
     #[test]

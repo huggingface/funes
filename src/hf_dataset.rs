@@ -49,16 +49,18 @@ use futures::TryStreamExt;
 use hf_hub::progress::{Progress, ProgressEvent, ProgressHandler, UploadEvent};
 use hf_hub::repository::files::RepoTreeEntry;
 use hf_hub::repository::{CommitInfo, CommitOperation, GitRefs};
-use hf_hub::{HFClient, HFError, HFRepository, RepoTypeDataset};
+use hf_hub::{HFError, HFRepository, RepoTypeDataset};
 use lance::dataset::builder::DatasetBuilder;
-use lance::dataset::{Dataset, NewColumnTransform};
+use lance::dataset::{Dataset, NewColumnTransform, WriteParams};
 use lance::index::DatasetIndexExt;
 use lance_index::optimize::OptimizeOptions;
 use lance_io::object_store::WrappingObjectStore;
 use object_store::ObjectStore as OSObjectStore;
 
 use crate::capture_store::{CaptureStore, Captured};
+use crate::dataset;
 use crate::fetch_store::{FetchStore, FileFetcher};
+use crate::hub;
 
 /// Outcome of an [`append`] commit.
 pub(crate) enum Appended {
@@ -125,6 +127,64 @@ pub(crate) async fn append(
     }
 }
 
+/// Build the whole dataset locally (data + indexes) and upload it in one `create_commit` — unlike
+/// [`append`]/[`reindex`], no head to guard against, since the dataset doesn't exist yet. `None` if
+/// the build produced no files.
+#[allow(clippy::too_many_arguments)] // internal orchestration, one call site (`push`)
+pub(crate) async fn first_publish(
+    repo: &HFRepository<RepoTypeDataset>,
+    prefix: &str,
+    batches: Vec<RecordBatch>,
+    schema: SchemaRef,
+    rev: &str,
+    message: String,
+    extra_files: &BTreeMap<String, Bytes>,
+    on_phase: impl Fn(&str),
+) -> Result<Option<String>> {
+    let staging = tempfile::tempdir()?;
+    // Empty prefix = dataset at the repo root; joining "" would leave a stray trailing separator.
+    let db_dir = if prefix.is_empty() {
+        staging.path().to_path_buf()
+    } else {
+        staging.path().join(prefix)
+    };
+    std::fs::create_dir_all(&db_dir)?;
+    let table_uri = dataset::table_uri(&db_dir.to_string_lossy());
+    let reader = RecordBatchIterator::new(batches.into_iter().map(Ok), schema);
+    let mut ds = Dataset::write(reader, &table_uri, Some(WriteParams::default()))
+        .await
+        .context("building the dataset for first publish")?;
+    dataset::build_indexes(&mut ds, on_phase).await;
+
+    let mut ops = Vec::new();
+    for entry in walkdir::WalkDir::new(&db_dir).into_iter().filter_map(|e| e.ok()) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let rel = entry.path().strip_prefix(staging.path()).unwrap_or(entry.path());
+        ops.push(CommitOperation::add_file(
+            rel.to_string_lossy().into_owned(),
+            entry.path().to_path_buf(),
+        ));
+    }
+    if ops.is_empty() {
+        return Ok(None);
+    }
+    let (extra_ops, _extra_dir) = write_ops(extra_files)?;
+    ops.extend(extra_ops);
+
+    let info = repo
+        .create_commit()
+        .operations(ops)
+        .commit_message(message)
+        .revision(rev.to_string())
+        .progress(upload_progress())
+        .send()
+        .await
+        .map_err(|e| anyhow::Error::new(e).context("create_commit failed"))?;
+    Ok(Some(info.commit_oid.unwrap_or_else(|| "?".to_string())))
+}
+
 /// Fold an index's delta sub-indexes back into one once this many pile up. Queries fan out across
 /// every delta (and per-segment BM25 stats drift), so the pile must stay bounded. Only the deltas
 /// are merged — the base is never re-read, which would be the full-index rewrite [`reindex`]
@@ -172,39 +232,11 @@ pub(crate) async fn reindex(
     }
 }
 
-/// Rename a column on the remote dataset in one head-guarded commit. `alter_columns` is
-/// metadata-only — the captured writes are a new manifest and transaction, no data files — so the
-/// commit is small whatever the store's size. Returns the new commit oid. A moved head is an
-/// error (single attempt): a rename is an exclusive-writer operation, not something to retry
-/// under concurrency.
-pub async fn rename_column(
-    repo: &HFRepository<RepoTypeDataset>,
-    dataset_uri: &str,
-    storage_options: HashMap<String, String>,
-    rev: &str,
-    message: String,
-    from: &str,
-    to: &str,
-) -> Result<String> {
-    let parent = head_oid(repo, rev).await?;
-    let (mut ds, wrapper) = open_capturing(dataset_uri, storage_options).await?;
-    ds.alter_columns(&[lance::dataset::ColumnAlteration::new(from.into()).rename(to.into())])
-        .await
-        .context("renaming the remote column")?;
-    let files = captured_files(&wrapper);
-    anyhow::ensure!(!files.is_empty(), "the rename produced no files to commit");
-    let (ops, _dir) = write_ops(&files)?;
-    let info = send_commit(repo, ops, parent, rev, message)
-        .await
-        .map_err(|e| anyhow::Error::new(e).context("rename commit failed"))?;
-    Ok(info.commit_oid.unwrap_or_else(|| "?".to_string()))
-}
-
 /// Add a column to the remote dataset via `add_columns`, landing the new column's files in one
 /// head-guarded commit. `transform` produces the new column per batch (a UDF over `read_columns`).
-/// Unlike [`rename_column`] this writes real per-fragment column data, but still ships as one
-/// captured commit; data, vectors, and indexes are untouched. Returns the new oid. A moved head is
-/// an error — a single guarded attempt, not retried.
+/// Writes real per-fragment column data, shipped as one captured commit; data, vectors, and
+/// indexes are untouched. Returns the new oid. A moved head is an error — a single guarded
+/// attempt, not retried.
 pub async fn add_column(
     repo: &HFRepository<RepoTypeDataset>,
     dataset_uri: &str,
@@ -310,6 +342,40 @@ fn write_ops(files: &BTreeMap<String, Bytes>) -> Result<(Vec<CommitOperation>, t
         ops.push(CommitOperation::add_file(repo_path.clone(), local));
     }
     Ok((ops, dir))
+}
+
+/// Stamp `updates` into the remote dataset's schema metadata in one guarded commit — how an
+/// existing store is named a project memory. The full merged map is written (lance's amend
+/// replaces the metadata wholesale). Single attempt: naming is a rare, interactive act, so a
+/// moved head is an error to re-run, not a retry loop.
+pub(crate) async fn amend_schema_metadata(
+    repo: &HFRepository<RepoTypeDataset>,
+    dataset_uri: &str,
+    storage_options: HashMap<String, String>,
+    rev: &str,
+    message: String,
+    updates: HashMap<String, String>,
+) -> Result<()> {
+    let parent = head_oid(repo, rev).await?;
+    let (mut ds, wrapper) = open_capturing(dataset_uri, storage_options).await?;
+    let mut metadata = ds.schema().metadata.clone();
+    metadata.extend(updates);
+    // The project key lives in the *schema* metadata, beside the embedding-model pin — the
+    // suggested `update_schema_metadata` builder targets the same map; the deprecated wrapper
+    // is the stable one-call form of it.
+    #[allow(deprecated)]
+    ds.replace_schema_metadata(metadata)
+        .await
+        .context("stamping the project metadata")?;
+    let files = captured_files(&wrapper);
+    let (ops, _dir) = write_ops(&files)?;
+    match send_commit(repo, ops, parent, rev, message).await {
+        Ok(_) => Ok(()),
+        Err(e) if head_moved(&e) => Err(anyhow::anyhow!(
+            "the store moved while naming it — re-run `funes curate`"
+        )),
+        Err(e) => Err(anyhow::Error::new(e).context("naming commit failed")),
+    }
 }
 
 /// The repo's `README.md` at `rev`, or `None` when it has none — fetched straight to bytes,
@@ -494,12 +560,7 @@ pub(crate) async fn fetch_wrapper(
     token: Option<&str>,
     branch: &str,
 ) -> Result<(Arc<FetchWrapper>, String)> {
-    let mut builder = HFClient::builder();
-    if let Some(t) = token {
-        builder = builder.token(t.to_string());
-    }
-    let client = builder.build().context("building hf-hub client")?;
-    let repo = Arc::new(client.dataset(owner, name));
+    let repo = Arc::new(hub::client(token, true)?.dataset(owner, name));
     let sha = head_oid(&repo, branch).await?;
     Ok((Arc::new(FetchWrapper::new(repo, sha.clone())), sha))
 }
@@ -539,12 +600,7 @@ pub(crate) fn parquet_paths(entries: &[RepoTreeEntry]) -> Vec<String> {
 /// Resolve a Hub trace dataset's auto-converted parquet: the `refs/convert/parquet` commit and its
 /// `*.parquet` shards, via the public `list_refs` + `list_tree` API (no datasets-server HTTP dep).
 pub(crate) async fn resolve_parquet(owner: &str, name: &str, token: Option<&str>) -> Result<RemoteParquet> {
-    let mut builder = HFClient::builder();
-    if let Some(t) = token {
-        builder = builder.token(t.to_string());
-    }
-    let client = builder.build().context("building hf-hub client")?;
-    let repo = Arc::new(client.dataset(owner, name));
+    let repo = Arc::new(hub::client(token, true)?.dataset(owner, name));
 
     let refs = repo.list_refs().send().await.context("listing dataset refs")?;
     let revision = pick_convert_oid(&refs)

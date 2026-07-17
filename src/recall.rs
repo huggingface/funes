@@ -5,6 +5,7 @@
 //! (see `render`).
 
 use crate::chunk;
+use crate::curate;
 use crate::dataset;
 use crate::harness::Harness;
 use crate::hello;
@@ -204,15 +205,12 @@ fn is_auth_error(e: &anyhow::Error) -> bool {
 /// built-in corpus real vectors for search (recall); `None` suits `get`/`list`.
 async fn open_read(store: &Store, embedder: Option<&mut dyn Embedder>) -> Result<Read> {
     match open_for_read(store).await? {
-        ReadOutcome::Ready(ds) => {
-            dataset::reject_pre_workdir(&ds)?;
-            Ok(Read {
-                _hello: None,
-                ds,
-                note: None,
-                store_label: Some(store.label()),
-            })
-        }
+        ReadOutcome::Ready(ds) => Ok(Read {
+            _hello: None,
+            ds,
+            note: None,
+            store_label: Some(store.label()),
+        }),
         ReadOutcome::Offline => degrade_offline(&store.label(), embedder).await,
         ReadOutcome::NoIndex => {
             let (dir, ds) = hello::dataset(embedder).await?;
@@ -736,19 +734,24 @@ pub async fn get_turns(
         Some(r) => r.0,
         None => return Ok((note, Vec::new())),
     };
+    Ok((
+        note,
+        turns_from_rows(rows.iter().filter(|r| (r.0 - center).abs() <= window)),
+    ))
+}
 
-    // Group selected rows by (seq, turn_uuid).
+/// Reassemble rows into turns: group by (seq, turn_uuid), order blocks by (block_idx, split_idx),
+/// stitching consecutive splits of one block. Ordered by seq. `text` is already the rendered chunk
+/// as stored by the indexer — never re-rendered.
+fn turns_from_rows<'a>(rows: impl Iterator<Item = &'a TurnRow>) -> Vec<Turn> {
     let mut groups: BTreeMap<(i64, String), Vec<&TurnRow>> = BTreeMap::new();
-    for r in rows.iter().filter(|r| (r.0 - center).abs() <= window) {
+    for r in rows {
         groups.entry((r.0, r.1.clone())).or_default().push(r);
     }
-
     let mut turns = Vec::new();
     for ((seq, turn), mut chunks) in groups {
         chunks.sort_by_key(|r| (r.4, r.5)); // block_idx, split_idx
         let head = chunks[0];
-        // Reassemble blocks: consecutive splits of one block_idx are stitched; a new
-        // block_idx starts a new block.
         let mut blocks: Vec<String> = Vec::new();
         let mut cur_bi: Option<i64> = None;
         let mut cur = String::new();
@@ -776,7 +779,64 @@ pub async fn get_turns(
             blocks,
         });
     }
-    Ok((note, turns))
+    turns
+}
+
+/// The reassembled user prompts (role `user`, block type `text`) of each session in `ids`, keyed by
+/// session id — one scan, for previewing candidates before a curation decision. Only user turns
+/// carry the human's judgment; assistant replies and tool results are left out. Sessions with no
+/// prompts (or an empty `ids`) are simply absent from the map.
+pub async fn session_prompts(store: &Store, ids: &[String]) -> Result<HashMap<String, Vec<Turn>>> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let read = open_read(store, None).await?;
+    let cols = [
+        "session_id",
+        "turn_uuid",
+        "seq",
+        "ts",
+        "role",
+        "text",
+        "block_idx",
+        "split_idx",
+    ];
+    let list: Vec<String> = ids.iter().map(|id| format!("'{}'", esc(id))).collect();
+    let filter = format!(
+        "session_id IN ({}) AND role = 'user' AND block_type = 'text'",
+        list.join(", ")
+    );
+    let batches = dataset::scan_rows(&read.ds, &cols, Some(&filter), None).await?;
+    let mut by_session: HashMap<String, Vec<TurnRow>> = HashMap::new();
+    for batch in batches {
+        let sid = scol(&batch, "session_id");
+        let (turn, ts, role, text) = (
+            scol(&batch, "turn_uuid"),
+            scol(&batch, "ts"),
+            scol(&batch, "role"),
+            scol(&batch, "text"),
+        );
+        let (seq, bi, si) = (
+            icol(&batch, "seq"),
+            icol(&batch, "block_idx"),
+            icol(&batch, "split_idx"),
+        );
+        for i in 0..batch.num_rows() {
+            by_session.entry(sval(sid, i)).or_default().push((
+                ival(seq, i),
+                sval(turn, i),
+                sval(ts, i),
+                sval(role, i),
+                ival(bi, i),
+                ival(si, i),
+                sval(text, i),
+            ));
+        }
+    }
+    Ok(by_session
+        .into_iter()
+        .map(|(k, rows)| (k, turns_from_rows(rows.iter())))
+        .collect())
 }
 
 /// `2026-07-07 13:30 UTC (2 days ago)` — a status timestamp with its coarse age.
@@ -835,7 +895,15 @@ pub async fn status(store: Store) -> Result<String> {
             let mut out = format!("store: {}\nchunks: {rows}\n", store.label());
             match &store {
                 Store::Local { .. } => out.push_str(&index_lines(&ds, now).await),
-                Store::Remote { .. } => {
+                Store::Remote { uri } => {
+                    // A project memory announces itself and this machine's review backlog.
+                    if let Some(project) = curate::project(&ds) {
+                        let _ = writeln!(out, "project memory of {project}");
+                        let pending = curate::pending_count(&ds, uri).await?;
+                        if pending > 0 {
+                            let _ = writeln!(out, "pending review: {pending} session(s) — run `funes curate {}`", store.label());
+                        }
+                    }
                     // Every write to a remote store is a `funes push` (data or reindex commit),
                     // so the head version's timestamp is when it was last pushed to.
                     let t = ds.version().timestamp;

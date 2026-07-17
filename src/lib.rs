@@ -20,6 +20,7 @@ pub mod claude;
 pub mod claude_traces;
 pub mod codex;
 pub mod codex_traces;
+pub mod curate;
 pub mod dataset;
 pub mod fetch_store;
 pub mod harness;
