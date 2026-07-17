@@ -192,8 +192,8 @@ Run recall in a terminal, though, and it notices — and switches to an interact
 funes recall "why must sparse attention mask future keys before top-k selection" --store dacorvo/funes-Glint-Research-Fable-5
 ```
 
-Browse the hits and expand any of them into its full surrounding turns.
-Install [fzf](https://github.com/junegunn/fzf) for a richer interface.
+Browse the hits, filter as you type, and press enter on any of them to read its full surrounding
+turns — a built-in browser, no extra tools to install.
 
 The full interface — output formats, flags, defaults — is specified in [AGENTS.md](AGENTS.md).
 
