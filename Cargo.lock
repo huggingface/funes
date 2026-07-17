@@ -3070,7 +3070,7 @@ dependencies = [
 
 [[package]]
 name = "funes"
-version = "0.13.0+dev"
+version = "1.0.0+dev"
 dependencies = [
  "anyhow",
  "arrow-array",
