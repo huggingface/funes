@@ -78,16 +78,6 @@ path = "benchmark/bench_index.rs"
 name = "bench_backends"
 path = "benchmark/bench_backends.rs"
 
-# One-off store migrations for the workdir facet (local: rename + value pass; remote: rename).
-# Delete both, and `hf_dataset::rename_column`, once every store is migrated.
-[[example]]
-name = "migrate_workdir_facet"
-path = "scripts/migrate_workdir_facet.rs"
-
-[[example]]
-name = "migrate_remote_workdir"
-path = "scripts/migrate_remote_workdir.rs"
-
 # One-off backfill of the `repo` column (local: add_columns; remote: add_columns via a guarded
 # commit). Delete both, and `hf_dataset::add_column`, once every store carries `repo`.
 [[example]]
