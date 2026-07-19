@@ -27,6 +27,28 @@ pub const MODEL: &str = "BAAI/bge-small-en-v1.5";
 pub const DIM: i32 = 384;
 const EMBED_BATCH: usize = 256;
 
+/// Take the store lock. An interactive caller (a human at `funes index`/`funes add`) waits out a
+/// brief contention — up to 3 retries, 5s apart — since a store operation rarely runs long; an
+/// automated run (a hook) bails at once and re-sweeps next turn.
+async fn acquire_lock(interactive: bool) -> Result<lock::StoreLock> {
+    let retries = if interactive { 3 } else { 0 };
+    for attempt in 0..=retries {
+        if let Some(l) = lock::StoreLock::try_acquire()? {
+            return Ok(l);
+        }
+        if attempt < retries {
+            eprintln!(
+                "funes: another store operation is in progress; retrying in 5s… ({}/{retries})",
+                attempt + 1
+            );
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    }
+    Err(anyhow!(
+        "another funes store operation is in progress; retry in a moment"
+    ))
+}
+
 /// The table schema (column order is load-bearing for Lance).
 pub(crate) fn schema() -> Arc<Schema> {
     let utf8 = |name: &str| Field::new(name, DataType::Utf8, true);
@@ -242,8 +264,9 @@ impl Indexer {
     async fn open(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: bool) -> Result<Indexer> {
         let dir = dataset::funes_dir();
         std::fs::create_dir_all(&dir)?;
+        let interactive = std::io::stdin().is_terminal();
         // Held for the whole run so the stored-id read and the appends see one stable version.
-        let _lock = lock::StoreLock::acquire()?;
+        let _lock = acquire_lock(interactive).await?;
 
         let uri = dataset::table_uri(&dataset::local_store_dir());
         let ds = dataset::open(&uri, HashMap::new()).await.ok();
@@ -305,7 +328,7 @@ impl Indexer {
             state,
             state_path,
             first_index,
-            interactive: std::io::stdin().is_terminal(),
+            interactive,
             _lock,
             sources,
             units,

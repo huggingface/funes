@@ -6,7 +6,7 @@
 
 use std::fs::{File, TryLockError};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, Context, Result};
 
 use crate::dataset;
 
@@ -28,15 +28,20 @@ fn open_lockfile() -> Result<File> {
 }
 
 impl StoreLock {
-    /// Take the lock, or fail if another store operation holds it. Never blocks.
-    pub fn acquire() -> Result<Self> {
+    /// Try to take the lock without blocking: `Some` if acquired, `None` if another operation holds
+    /// it. A caller that wants to wait retries this itself.
+    pub fn try_acquire() -> Result<Option<Self>> {
         let f = open_lockfile()?;
         match f.try_lock() {
-            Ok(()) => Ok(Self(f)),
-            Err(TryLockError::WouldBlock) => {
-                bail!("another funes store operation is in progress; retry once it finishes")
-            }
+            Ok(()) => Ok(Some(Self(f))),
+            Err(TryLockError::WouldBlock) => Ok(None),
             Err(TryLockError::Error(e)) => Err(e).context("locking the store"),
         }
+    }
+
+    /// Take the lock, or fail if another store operation holds it. Never blocks.
+    pub fn acquire() -> Result<Self> {
+        Self::try_acquire()?
+            .ok_or_else(|| anyhow!("another funes store operation is in progress; retry once it finishes"))
     }
 }
