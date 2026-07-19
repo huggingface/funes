@@ -157,15 +157,24 @@ enum Cmd {
         store: Option<String>,
     },
     /// Add funes to a coding agent.
-    #[command(subcommand_value_name = "AGENT", subcommand_help_heading = "Agents")]
+    ///
+    /// Installs the `recall`/`get` tools for any agent — and, for claude and codex, automatic
+    /// per-turn indexing. Name a store the agent recalls from — and, for claude and codex,
+    /// publishes to — an `<org>/<repo>` shorthand or an `hf://…` URI; omit it to stay local
+    /// (the default).
+    #[command(
+        subcommand_value_name = "AGENT",
+        subcommand_help_heading = "Agents",
+        override_usage = "funes add <AGENT> [STORE]"
+    )]
     Add {
         #[command(subcommand)]
         agent: AddAgent,
     },
 }
 
-/// The store an agent recalls from, baked into its MCP registration. `<org>/<repo>`, an `hf://…`
-/// URI, or `local` (the default). Doc string is shared across the agents via `#[arg]`'s help.
+// Flattened into every agent so they share one optional `[STORE]` positional; the user-facing help
+// comes from the field doc below.
 #[derive(Args)]
 struct AddStore {
     /// Store this agent recalls from — `<org>/<repo>`, an `hf://…` URI, or `local` (default).
@@ -174,17 +183,14 @@ struct AddStore {
 
 #[derive(Subcommand)]
 enum AddAgent {
-    /// claude: register funes as an MCP server with Claude Code (native MCP client, user scope).
     Claude {
         #[command(flatten)]
         store: AddStore,
     },
-    /// codex: register funes as an MCP server with Codex (native MCP client, user scope).
     Codex {
         #[command(flatten)]
         store: AddStore,
     },
-    /// pi: install funes as a pi extension user-wide (pi has no MCP client of its own).
     Pi {
         #[command(flatten)]
         store: AddStore,
@@ -192,12 +198,10 @@ enum AddAgent {
         #[arg(long)]
         force: bool,
     },
-    /// hermes: register funes as an MCP server (hermes has a native MCP client).
     Hermes {
         #[command(flatten)]
         store: AddStore,
     },
-    /// opencode: register funes as an MCP server (user scope).
     Opencode {
         #[command(flatten)]
         store: AddStore,
