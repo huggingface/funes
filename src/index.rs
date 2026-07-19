@@ -132,38 +132,40 @@ async fn stored_ids(ds: &Dataset) -> Result<HashSet<String>> {
 
 /// Redact secrets from a session's turns *before* chunking — so a long key that chunking would
 /// split across pieces is whole when scanned, and never reaches the embedding, the local store, or
-/// (via push) the Hub. Best-effort: removes a secret whose value byte-matches the stored text (the
-/// common case, real newlines); anything that resists is caught downstream by the fail-closed push
-/// gate. Reports to stderr what it removed.
-fn redact_turns(turns: &mut [trace::Turn], scanner: &dyn scan::SecretScanner) -> Result<()> {
-    let texts: Vec<String> = turns
-        .iter()
-        .flat_map(|t| t.blocks.iter().map(|b| b.text.clone()))
-        .collect();
-    if texts.is_empty() {
-        return Ok(());
-    }
-    let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-    let per_block = scan::scan_blocks(&refs, scanner)?;
-
-    let mut removed: Vec<String> = Vec::new();
-    let redacted: Vec<String> = texts
-        .iter()
-        .zip(&per_block)
-        .map(|(text, findings)| {
-            let r = scan::excise(text, findings);
+/// (via push) the Hub. Scans exactly the blocks the pass will store ([`chunk::block_selected`]), so
+/// deferred tiers aren't scanned now and a tier-major backfill doesn't re-scan each session per
+/// tier. Best-effort: removes a secret whose value byte-matches the stored text (the common case,
+/// real newlines); anything that resists is caught downstream by the fail-closed push gate.
+/// Reports to stderr what it removed.
+fn redact_turns(
+    turns: &mut [trace::Turn],
+    scanner: &dyn scan::SecretScanner,
+    tiers: &[Tier],
+    include_thinking: bool,
+) -> Result<()> {
+    let removed: Vec<String> = {
+        let mut blocks: Vec<&mut trace::Block> = turns
+            .iter_mut()
+            .flat_map(|t| t.blocks.iter_mut())
+            .filter(|b| chunk::block_selected(&b.block_type, tiers, include_thinking))
+            .collect();
+        if blocks.is_empty() {
+            return Ok(());
+        }
+        let per_block = {
+            let texts: Vec<&str> = blocks.iter().map(|b| b.text.as_str()).collect();
+            scan::scan_blocks(&texts, scanner)?
+        };
+        let mut removed = Vec::new();
+        for (b, findings) in blocks.iter_mut().zip(&per_block) {
+            let r = scan::excise(&b.text, findings);
             removed.extend(r.removed_detectors);
-            r.text
-        })
-        .collect();
+            b.text = r.text;
+        }
+        removed
+    };
     if removed.is_empty() {
         return Ok(());
-    }
-    let mut it = redacted.into_iter();
-    for t in turns.iter_mut() {
-        for b in t.blocks.iter_mut() {
-            b.text = it.next().expect("one redacted text per block");
-        }
     }
     let sid = turns.first().map(|t| t.session_id.as_str()).unwrap_or("?");
     eprintln!(
@@ -229,7 +231,7 @@ impl Indexer<'_> {
         let (sessions, label) = unit_summary(&turns, key);
 
         if let Some(scanner) = self.scanner {
-            redact_turns(&mut turns, scanner)?;
+            redact_turns(&mut turns, scanner, &chunk::Tier::ALL, self.include_thinking)?;
         }
         let mut chunks = chunk::chunks_from_turns(&turns, &chunk::Tier::ALL, self.include_thinking);
         let repo = self.repo_for(key);
@@ -655,10 +657,56 @@ mod tests {
             source_path: String::new(),
             harness: "claude_code".into(),
         }];
-        redact_turns(&mut turns, &scanner).unwrap();
+        redact_turns(&mut turns, &scanner, &chunk::Tier::ALL, true).unwrap();
         assert_eq!(
             turns[0].blocks[0].text,
             "key=[REDACTED:PrivateKey] hash=[REDACTED:VirusTotal]"
+        );
+    }
+
+    #[test]
+    fn redact_only_scans_the_pass_tier_blocks() {
+        struct Fake;
+        impl scan::SecretScanner for Fake {
+            fn scan(&self, _blob: &str) -> Result<Vec<scan::Finding>> {
+                Ok(vec![scan::Finding {
+                    detector: "PrivateKey".into(),
+                    raw: "SECRET".into(),
+                    line: None,
+                    decoder: "PLAIN".into(),
+                }])
+            }
+        }
+        let block = |bt: &str, text: &str| trace::Block {
+            block_type: bt.into(),
+            text: text.into(),
+            tool_name: None,
+            tool_use_id: None,
+        };
+        let mut turns = vec![trace::Turn {
+            session_id: "sess".into(),
+            workdir: "proj".into(),
+            turn_uuid: "turn".into(),
+            parent_uuid: None,
+            seq: 0,
+            ts: String::new(),
+            role: "user".into(),
+            blocks: vec![
+                block("text", "note SECRET here"),
+                block("tool_result", "output SECRET dump"),
+            ],
+            source_path: String::new(),
+            harness: "claude_code".into(),
+        }];
+        // A text-only pass redacts the text block but leaves the tool_result it won't store untouched.
+        redact_turns(&mut turns, &Fake, &[chunk::Tier::Text], true).unwrap();
+        assert!(
+            turns[0].blocks[0].text.contains("[REDACTED:PrivateKey]"),
+            "text block redacted"
+        );
+        assert_eq!(
+            turns[0].blocks[1].text, "output SECRET dump",
+            "unindexed tool_result untouched"
         );
     }
 }

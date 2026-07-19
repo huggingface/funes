@@ -256,16 +256,20 @@ pub(crate) fn resplit(template: &Chunk, text: &str) -> Vec<Chunk> {
         .collect()
 }
 
+/// Whether a pass over `tiers` (with `include_thinking`) indexes a block of this type: its tier is
+/// requested and it isn't a dropped thinking block. Shared with redaction, so the blocks scanned for
+/// secrets are exactly the blocks stored.
+pub fn block_selected(block_type: &str, tiers: &[Tier], include_thinking: bool) -> bool {
+    tiers.contains(&Tier::of_block(block_type)) && (block_type != "thinking" || include_thinking)
+}
+
 pub fn chunks_from_turns(turns: &[Turn], tiers: &[Tier], include_thinking: bool) -> Vec<Chunk> {
     let mut out = Vec::new();
     for turn in turns {
         for (bi, block) in turn.blocks.iter().enumerate() {
             // block_idx counts every block, so skipping one here (tier or thinking) never
             // renumbers the rest.
-            if !tiers.contains(&Tier::of_block(&block.block_type)) {
-                continue;
-            }
-            if block.block_type == "thinking" && !include_thinking {
+            if !block_selected(&block.block_type, tiers, include_thinking) {
                 continue;
             }
             let rendered = render(&block.block_type, &block.text, &block.tool_name);
