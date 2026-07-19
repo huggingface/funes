@@ -2,18 +2,21 @@
 //! local Lance dataset. One generic loop drives every source — a JSONL tree today, new formats by
 //! implementing the trait — indexing each of its units in a single append.
 //!
-//! Incremental on two levels: skip a unit whose signature is unchanged (size:mtime in state.json),
-//! and within a re-read unit add only chunks whose id is new — a grown session (the same memory)
-//! contributes just its new turns, nothing is re-embedded or deleted.
+//! Incremental on two levels: skip a unit whose stamp (size:mtime) is unchanged *and* which
+//! state.json records as already indexed to the run's target tier; and within a re-read unit add
+//! only chunks whose id is new — a grown session (the same memory) contributes just its new turns,
+//! nothing is re-embedded or deleted.
 
+use crate::chunk::{self, Tier};
 use crate::harness::Harness;
 use crate::inference::{self, Embedder};
-use crate::{chunk, dataset, hub, lock, repo, scan, source, trace};
+use crate::{dataset, hub, lock, repo, scan, source, trace};
 use anyhow::{anyhow, Result};
 use arrow_array::types::Float32Type;
 use arrow_array::{Array, FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use lance::dataset::{Dataset, WriteParams};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::io::{IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
@@ -186,6 +189,20 @@ fn unit_summary(turns: &[trace::Turn], key: &str) -> (u64, String) {
     (sids.len() as u64, label)
 }
 
+/// What `state.json` records per unit: the change-stamp last seen and the highest [`Tier`] it has
+/// been indexed to.
+#[derive(Serialize, Deserialize, Clone)]
+struct UnitState {
+    sig: String,
+    level: Tier,
+}
+
+/// Whether a recorded unit is current for a run targeting `target`: its stamp still matches and it
+/// has already reached at least that tier. A lower recorded tier still needs a pass.
+fn unit_current(entry: Option<&UnitState>, sig: &str, target: Tier) -> bool {
+    entry.is_some_and(|e| e.sig == sig && e.level >= target)
+}
+
 /// The run-wide indexing state: the local store uri, the dataset (created on the first write), the
 /// embedder, and the optional redaction scanner. Bundling it lets each unit be indexed by a method
 /// instead of threading the same handles through every call.
@@ -355,12 +372,14 @@ async fn index_sources(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: 
         return Ok(());
     }
 
-    // Incremental state: path -> "size:mtime".
+    // Incremental state: path -> {size:mtime stamp, tier}; an unreadable or old-schema file → empty.
     let state_path = dir.join("state.json");
-    let mut state: HashMap<String, String> = std::fs::read_to_string(&state_path)
+    let mut state: HashMap<String, UnitState> = std::fs::read_to_string(&state_path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
+    // This run indexes every tier, so a unit counts as current only once it has reached the highest.
+    let target = *Tier::ALL.iter().max().expect("Tier::ALL is non-empty");
 
     let embedder: Box<dyn Embedder> = inference::embedder()?;
     // Best-effort secret redaction: if the scanner isn't installed, indexing continues unredacted —
@@ -399,7 +418,11 @@ async fn index_sources(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: 
         let total = units.len();
         let cached = units
             .iter()
-            .filter(|u| u.signature.as_ref().is_some_and(|s| state.get(&u.key) == Some(s)))
+            .filter(|u| {
+                u.signature
+                    .as_ref()
+                    .is_some_and(|s| unit_current(state.get(&u.key), s, target))
+            })
             .count();
         eprintln!("{} — {} to index, {cached} cached", src.describe(), total - cached);
 
@@ -408,7 +431,7 @@ async fn index_sources(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: 
             // signature-less (bulk) unit has none, so it's never skipped here — always re-read (its
             // chunk-id dedup makes a re-run a no-op).
             if let Some(sig) = &unit.signature {
-                if state.get(&unit.key) == Some(sig) {
+                if unit_current(state.get(&unit.key), sig, target) {
                     n_skipped += 1;
                     continue;
                 }
@@ -434,7 +457,13 @@ async fn index_sources(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: 
             // when empty"), and persist after each so an interrupted run is resumable.
             // Signature-less (bulk) units are never recorded: a re-run re-reads and dedups to a no-op.
             if let Some(sig) = &unit.signature {
-                state.insert(unit.key.clone(), sig.clone());
+                state.insert(
+                    unit.key.clone(),
+                    UnitState {
+                        sig: sig.clone(),
+                        level: target,
+                    },
+                );
                 std::fs::write(&state_path, serde_json::to_string_pretty(&state)?)?;
             }
 
@@ -518,6 +547,30 @@ fn fmt_eta(d: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unit_current_needs_matching_sig_and_reached_target_tier() {
+        let l1 = UnitState {
+            sig: "10:20".into(),
+            level: Tier::Text,
+        };
+        // Signature mismatch is never current, whatever the tier.
+        assert!(!unit_current(Some(&l1), "99:99", Tier::Text));
+        // Sig matches and the recorded tier meets the target → current.
+        assert!(unit_current(Some(&l1), "10:20", Tier::Text));
+        // Sig matches but a higher tier is targeted → NOT current; L2/L3 still owe a pass.
+        assert!(!unit_current(Some(&l1), "10:20", Tier::ToolUse));
+        assert!(!unit_current(Some(&l1), "10:20", Tier::ToolResult));
+        // A fully-indexed unit satisfies every target.
+        let full = UnitState {
+            sig: "10:20".into(),
+            level: Tier::ToolResult,
+        };
+        assert!(unit_current(Some(&full), "10:20", Tier::Text));
+        assert!(unit_current(Some(&full), "10:20", Tier::ToolResult));
+        // No record → not current.
+        assert!(!unit_current(None, "10:20", Tier::Text));
+    }
 
     #[test]
     fn fmt_eta_uses_the_right_unit_at_each_boundary() {

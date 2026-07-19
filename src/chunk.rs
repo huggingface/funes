@@ -3,6 +3,7 @@
 
 use crate::trace::Turn;
 use arrow_array::{Array, Int64Array, RecordBatch, StringArray};
+use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::collections::HashMap;
 
@@ -14,7 +15,7 @@ pub const OVERLAP: usize = 150;
 /// Indexing tiers, cheapest-and-highest-value first: L1 `text` (onboarding), L2 `tool_use`, L3
 /// `tool_result` (bulky, lowest value). A block's tier decides *when* it's indexed. `thinking` and
 /// any unknown block type fold into L1 so nothing is ever dropped by tiering.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub enum Tier {
     Text,
     ToolUse,
