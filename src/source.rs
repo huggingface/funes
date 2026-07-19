@@ -28,6 +28,7 @@ use std::time::UNIX_EPOCH;
 pub struct Unit {
     pub key: String,
     pub signature: Option<String>,
+    pub is_subagent: bool,
 }
 
 /// A source of agent-session transcripts. `units()` is cheap (enumerate + stat, no parsing);
@@ -118,21 +119,25 @@ impl TraceSource for JsonlTree {
 
     fn units(&self) -> Result<Vec<Unit>> {
         let mut files = jsonl::iter_jsonl_files(&self.root);
+        // Newest-first by mtime; `--limit` then keeps the recent N. (Default filename order is
+        // ≈ random for UUID-named sessions.)
+        files.sort_by_cached_key(|p| {
+            std::cmp::Reverse(std::fs::metadata(p).and_then(|m| m.modified()).unwrap_or(UNIX_EPOCH))
+        });
         if let Some(n) = self.limit {
-            // Keep the most recent `n` by mtime: recall values recency, and the default order is by
-            // filename (≈ random for UUID-named sessions), so a plain truncate would drop recent work.
-            files.sort_by_cached_key(|p| {
-                std::cmp::Reverse(std::fs::metadata(p).and_then(|m| m.modified()).unwrap_or(UNIX_EPOCH))
-            });
             files.truncate(n);
         }
-        Ok(files
+        let mut units: Vec<Unit> = files
             .into_iter()
             .map(|p| Unit {
+                is_subagent: jsonl::is_subagent(&jsonl::session_id_of(&p)),
                 signature: file_sig(&p),
                 key: p.to_string_lossy().into_owned(),
             })
-            .collect())
+            .collect();
+        // Subagents last (stable sort preserves recency within each group).
+        units.sort_by_key(|u| u.is_subagent);
+        Ok(units)
     }
 
     fn read(&self, unit: &Unit) -> Result<Vec<Turn>> {
@@ -167,6 +172,7 @@ impl TraceSource for ParquetDataset {
         Ok(vec![Unit {
             key: self.path.to_string_lossy().into_owned(),
             signature: None,
+            is_subagent: false,
         }])
     }
 
@@ -254,6 +260,7 @@ impl TraceSource for RemoteParquetDataset {
             .map(|s| Unit {
                 key: s.key.clone(),
                 signature: Some(self.revision.clone()),
+                is_subagent: false,
             })
             .collect())
     }
@@ -342,6 +349,20 @@ mod tests {
         let pq = open(Path::new("/x/data.parquet"), None).units().unwrap();
         assert_eq!(pq.len(), 1);
         assert!(pq[0].signature.is_none());
+    }
+
+    #[test]
+    fn jsonl_tree_orders_subagents_last() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["sess-a.jsonl", "agent-x.jsonl", "sess-b.jsonl", "agent-y.jsonl"] {
+            std::fs::write(dir.path().join(name), b"{}\n").unwrap();
+        }
+        let units = open(dir.path(), None).units().unwrap();
+        // Whatever the mtimes, every main precedes every subagent.
+        let first_sub = units.iter().position(|u| u.is_subagent).expect("has a subagent unit");
+        assert!(units[..first_sub].iter().all(|u| !u.is_subagent));
+        assert!(units[first_sub..].iter().all(|u| u.is_subagent));
+        assert_eq!(units.iter().filter(|u| u.is_subagent).count(), 2);
     }
 
     #[test]

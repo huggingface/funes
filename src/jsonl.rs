@@ -29,6 +29,11 @@ pub fn session_id_of(p: &Path) -> String {
     p.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string()
 }
 
+/// A Claude Code sub-agent session id: each sub-agent's transcript is named `agent-<hash>.jsonl`.
+pub fn is_subagent(session_id: &str) -> bool {
+    session_id.starts_with("agent-")
+}
+
 /// The workdir facet for a session's recorded working directory: the whole cwd munged the way
 /// Claude Code names its workdir dirs — every non-alphanumeric character becomes `-` — so the
 /// facet is unique per directory per host (no basename collisions) and matches the `projects`
@@ -116,6 +121,16 @@ mod tests {
     #[test]
     fn session_id_is_file_stem() {
         assert_eq!(session_id_of(Path::new("/x/y/71626b12.jsonl")), "71626b12");
+    }
+
+    #[test]
+    fn is_subagent_matches_the_agent_prefix() {
+        assert!(is_subagent("agent-a90670a3067db59ca"));
+        assert!(
+            !is_subagent("72e856b6-9214-47ed-ab2d-0a1905093f45"),
+            "a uuid is a top-level session"
+        );
+        assert!(!is_subagent("agentic-refactor"), "the prefix is `agent-`, not `agent`");
     }
 
     #[test]
