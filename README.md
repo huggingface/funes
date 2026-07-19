@@ -62,12 +62,14 @@ To build it yourself instead, see [Building from source](#building-from-source).
 **1. Index — one store for every agent on the machine.**
 
 ```bash
-funes index      # sweeps ~/.claude/projects, ~/.codex/sessions, ~/.pi/agent/sessions into one store
+funes index      # a fast, text-first pass over ~/.claude/projects, ~/.codex/sessions, ~/.pi/agent/sessions
 ```
 
-Run with no arguments and `funes` indexes every supported agent's sessions it finds, into one store.
-It's incremental — only new turns are embedded — so it's cheap to re-run as you work — a store runs ~2.3 KB/chunk and grows ~6 MB on a heavy day ([storage growth](docs/storage.md)). Point it at a
-path to index one place, or scope to a single agent with `--harness codex`.
+Run with no arguments and `funes` does a fast, text-first pass over every supported agent's sessions
+it finds, into one store, offering to finish the rest. It's incremental — only new turns are embedded
+— so re-running (and the per-turn hooks) fill in the deeper content a bounded step at a time — a store
+runs ~2.3 KB/chunk and grows ~6 MB on a heavy day ([storage growth](docs/storage.md)). Point it at a
+path to index one place in full, or scope to a single agent with `--harness codex`.
 
 `funes` can index sessions from: Claude, Codex, Pi
 
@@ -79,8 +81,9 @@ funes add claude acme/kb         # …backed by a shared store you own (sync acr
 ```
 
 Your agent gets `recall` and `get` as tools, plus instructions on when to use them. For **Claude
-and Codex**, `funes add` also wires the automation: it builds your first index if you skipped step 1,
-installs a hook that indexes every turn, and — when you name a shared store — publishes at each
+and Codex**, `funes add` also wires the automation: it builds your first index — a fast, text-first
+pass (about a minute, after asking), with deeper content backfilling as you work — installs a hook
+that indexes every turn, and — when you name a shared store — publishes at each
 session boundary (and does the first push for you). Nothing is left to run by hand; see
 [docs/automation.md](docs/automation.md).
 
