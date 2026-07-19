@@ -11,6 +11,30 @@ const MAX_CHARS: usize = 1200;
 /// (`recall::stitch`) never needs to match a longer overlap than this.
 pub const OVERLAP: usize = 150;
 
+/// Indexing tiers, cheapest-and-highest-value first: L1 `text` (onboarding), L2 `tool_use`, L3
+/// `tool_result` (bulky, lowest value). A block's tier decides *when* it's indexed. `thinking` and
+/// any unknown block type fold into L1 so nothing is ever dropped by tiering.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Tier {
+    Text,
+    ToolUse,
+    ToolResult,
+}
+
+impl Tier {
+    /// Every tier, in index order — the block-type set a full index emits.
+    pub const ALL: [Tier; 3] = [Tier::Text, Tier::ToolUse, Tier::ToolResult];
+
+    /// The tier a block type belongs to; unknown types fold into L1.
+    pub fn of_block(block_type: &str) -> Tier {
+        match block_type {
+            "tool_use" => Tier::ToolUse,
+            "tool_result" => Tier::ToolResult,
+            _ => Tier::Text,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Chunk {
     pub id: String,
@@ -231,11 +255,15 @@ pub(crate) fn resplit(template: &Chunk, text: &str) -> Vec<Chunk> {
         .collect()
 }
 
-pub fn chunks_from_turns(turns: &[Turn], include_thinking: bool) -> Vec<Chunk> {
+pub fn chunks_from_turns(turns: &[Turn], tiers: &[Tier], include_thinking: bool) -> Vec<Chunk> {
     let mut out = Vec::new();
     for turn in turns {
         for (bi, block) in turn.blocks.iter().enumerate() {
-            // block_idx counts every block; dropping a thinking block does not renumber it.
+            // block_idx counts every block, so skipping one here (tier or thinking) never
+            // renumbers the rest.
+            if !tiers.contains(&Tier::of_block(&block.block_type)) {
+                continue;
+            }
             if block.block_type == "thinking" && !include_thinking {
                 continue;
             }
@@ -394,7 +422,7 @@ mod tests {
         // would produce for that text — so a scrub's delete-by-id + append stays coordinate-stable.
         let long: String = (0..600).map(|i| format!("word{i} ")).collect();
         let t = turn(vec![block("text", &long, None)]);
-        let fresh = chunks_from_turns(std::slice::from_ref(&t), true);
+        let fresh = chunks_from_turns(std::slice::from_ref(&t), &Tier::ALL, true);
         let template = fresh[0].clone();
         let rendered = render("text", &long, &None);
         let re = resplit(&template, &rendered);
@@ -415,13 +443,71 @@ mod tests {
             block("thinking", "secret", None),
             block("text", "third", None),
         ]);
-        let with = chunks_from_turns(std::slice::from_ref(&t), true);
+        let with = chunks_from_turns(std::slice::from_ref(&t), &Tier::ALL, true);
         assert_eq!(with.len(), 3);
         assert_eq!(with.iter().map(|c| c.block_idx).collect::<Vec<_>>(), vec![0, 1, 2]);
 
-        let without = chunks_from_turns(std::slice::from_ref(&t), false);
+        let without = chunks_from_turns(std::slice::from_ref(&t), &Tier::ALL, false);
         assert_eq!(without.len(), 2);
         assert_eq!(without.iter().map(|c| c.block_idx).collect::<Vec<_>>(), vec![0, 2]);
         assert!(without.iter().all(|c| c.block_type != "thinking"));
+    }
+
+    #[test]
+    fn tier_of_block_maps_and_orders() {
+        assert_eq!(Tier::of_block("text"), Tier::Text);
+        assert_eq!(Tier::of_block("thinking"), Tier::Text);
+        assert_eq!(Tier::of_block("tool_use"), Tier::ToolUse);
+        assert_eq!(Tier::of_block("tool_result"), Tier::ToolResult);
+        assert_eq!(Tier::of_block("mystery"), Tier::Text); // unknown folds into L1, never dropped
+        assert!(Tier::Text < Tier::ToolUse && Tier::ToolUse < Tier::ToolResult);
+    }
+
+    #[test]
+    fn tiers_filter_selects_only_requested_block_types() {
+        let t = turn(vec![
+            block("text", "decision", None),
+            block("tool_use", r#"{"cmd":1}"#, Some("Bash")),
+            block("tool_result", "output", Some("Bash")),
+        ]);
+        let kinds = |cs: &[Chunk]| cs.iter().map(|c| c.block_type.clone()).collect::<Vec<_>>();
+        assert_eq!(
+            kinds(&chunks_from_turns(std::slice::from_ref(&t), &[Tier::Text], true)),
+            vec!["text"]
+        );
+        assert_eq!(
+            kinds(&chunks_from_turns(std::slice::from_ref(&t), &[Tier::ToolUse], true)),
+            vec!["tool_use"]
+        );
+        assert_eq!(
+            kinds(&chunks_from_turns(std::slice::from_ref(&t), &[Tier::ToolResult], true)),
+            vec!["tool_result"]
+        );
+        assert_eq!(
+            kinds(&chunks_from_turns(std::slice::from_ref(&t), &Tier::ALL, true)),
+            vec!["text", "tool_use", "tool_result"]
+        );
+    }
+
+    #[test]
+    fn chunk_ids_are_tier_pass_independent() {
+        // The core invariant behind tier backfill: a block's id/coordinate is the same whether a
+        // pass emits every tier or only that block's tier — so a later L3 pass dedups exactly
+        // against what a full index would have written, with no gaps or renumbering.
+        let t = turn(vec![
+            block("text", "decision", None),
+            block("tool_use", r#"{"cmd":1}"#, Some("Bash")),
+            block("tool_result", "output", Some("Bash")),
+        ]);
+        let all = chunks_from_turns(std::slice::from_ref(&t), &Tier::ALL, true);
+        let only_result = chunks_from_turns(std::slice::from_ref(&t), &[Tier::ToolResult], true);
+        let from_all: Vec<&Chunk> = all.iter().filter(|c| c.block_type == "tool_result").collect();
+        assert_eq!(only_result.len(), from_all.len());
+        assert!(!only_result.is_empty());
+        for (a, b) in only_result.iter().zip(from_all) {
+            assert_eq!(a.id, b.id, "tool_result id must match across tier passes");
+            assert_eq!(a.block_idx, b.block_idx);
+            assert_eq!(a.split_idx, b.split_idx);
+        }
     }
 }

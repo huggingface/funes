@@ -214,7 +214,7 @@ impl Indexer<'_> {
         if let Some(scanner) = self.scanner {
             redact_turns(&mut turns, scanner)?;
         }
-        let mut chunks = chunk::chunks_from_turns(&turns, self.include_thinking);
+        let mut chunks = chunk::chunks_from_turns(&turns, &chunk::Tier::ALL, self.include_thinking);
         let repo = self.repo_for(key);
         if !repo.is_empty() {
             for c in &mut chunks {
