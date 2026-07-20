@@ -25,6 +25,7 @@ async-trait = "0.1"              # for the ObjectStore impl in src/capture_store
 bytes = "1"                      # captured write payloads
 chrono = "0.4"                   # recency weighting
 rusqlite = { version = "0.32", features = ["bundled"] }  # read hermes' ~/.hermes/state.db; bundled = SQLite compiled in, no runtime dep
+serde_yaml = "0.9"               # merge funes' hooks into hermes' ~/.hermes/config.yaml
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "sync"] }  # sync: OnceCell/Mutex cache the recall models
 futures = "0.3"
 anyhow = "1"

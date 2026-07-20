@@ -61,8 +61,8 @@ struct Desired {
 
 /// `bash "<script>" "<arg>"` — the hook command line. `script` is a path or a `${CLAUDE_PLUGIN_ROOT}`
 /// expression (Claude expands the latter before the shell runs it); double-quoted so a space
-/// survives.
-fn command(script: &str, arg: &str) -> String {
+/// survives. Also used by hermes' YAML hook install.
+pub fn command(script: &str, arg: &str) -> String {
     format!("bash \"{script}\" \"{arg}\"")
 }
 
@@ -277,8 +277,9 @@ fn is_funes_hook(hook: &Value) -> bool {
 }
 
 /// Write the embedded scripts into `dir`, executable. Returns whether anything changed (a drifted
-/// or absent copy is rewritten); the executable bit is (re)set every time regardless.
-fn write_scripts(dir: &Path) -> Result<bool> {
+/// or absent copy is rewritten); the executable bit is (re)set every time regardless. Shared with
+/// hermes, which drops the same scripts into `~/.hermes/hooks`.
+pub fn write_scripts(dir: &Path) -> Result<bool> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let mut changed = false;
     for (name, content) in [("funes-index.sh", INDEX_SH), ("funes-push.sh", PUSH_SH)] {

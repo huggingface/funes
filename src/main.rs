@@ -508,7 +508,7 @@ async fn main() -> Result<()> {
         Cmd::Update { force } => update::run(force).await,
         Cmd::Mcp { store } => mcp::run(store).await,
         Cmd::Add { agent } => match agent {
-            // Claude and Codex have the full local pipeline (index + hooks + push), so `add`
+            // Claude, Codex, and Hermes have the full local pipeline (index + hooks + push), so `add`
             // bootstraps it: build the first index and do the first push — the two one-time steps
             // the hooks can't do unattended — so nothing is left to run by hand.
             AddAgent::Claude { store } => {
@@ -517,10 +517,12 @@ async fn main() -> Result<()> {
             AddAgent::Codex { store } => {
                 bootstrap_add(Harness::Codex, resolve_add_store(store).await?, codex::install).await
             }
+            AddAgent::Hermes { store } => {
+                bootstrap_add(Harness::Hermes, resolve_add_store(store).await?, hermes::install).await
+            }
             // The rest register a read-side integration only (no local pipeline to bootstrap), so
             // they just take the resolved store — the `created` flag only matters to the first push.
             AddAgent::Pi { store, force } => pi::install(resolve_add_store(store).await?.map(|r| r.store), force),
-            AddAgent::Hermes { store } => hermes::install(resolve_add_store(store).await?.map(|r| r.store)),
             AddAgent::Opencode { store } => opencode::install(resolve_add_store(store).await?.map(|r| r.store)),
         },
     }
