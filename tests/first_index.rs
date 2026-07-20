@@ -66,4 +66,12 @@ async fn seed_indexes_text_then_budgeted_run_adds_deeper_tiers() {
         "ToolResult",
         "a finished backfill records the top tier"
     );
+
+    // A deleted store self-heals: the store dir is gone but state.json survived — the next run
+    // must re-index everything, not trust the stale state and skip against an empty store.
+    std::fs::remove_dir_all(home.path().join("store")).unwrap();
+    funes::index::run_index_budgeted(&roots, false, None, false)
+        .await
+        .unwrap();
+    assert_eq!(chunk_count().await, full, "deleted store rebuilt in full");
 }

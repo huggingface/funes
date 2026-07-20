@@ -285,12 +285,18 @@ impl Indexer {
 
         let first_index = ds.is_none();
 
-        // Incremental state: path -> {size:mtime stamp, tier}; an unreadable or old-schema file → empty.
+        // Incremental state: path -> {size:mtime stamp, tier}; an unreadable or old-schema file →
+        // empty. A first index (store missing) owes everything, whatever an old state.json says — a
+        // stale one would silently skip every unit against the empty store.
         let state_path = dir.join("state.json");
-        let state = std::fs::read_to_string(&state_path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+        let state = if first_index {
+            HashMap::new()
+        } else {
+            std::fs::read_to_string(&state_path)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default()
+        };
 
         let embedder: Box<dyn Embedder> = inference::embedder()?;
         // Best-effort secret redaction: if the scanner isn't installed, indexing continues
@@ -524,7 +530,7 @@ impl Indexer {
 /// where `None` auto-detects. All roots share one store, embedder, and `state.json` (keyed by
 /// absolute file path, so cross-root incremental works). Writes only locally — publishing is the
 /// separate `push`. `max_sessions` caps sessions *per root* to the most recent N (`None` = all).
-/// `yes` skips the first-index confirmation and the automated-first-index guard (`--yes`).
+/// `yes` skips the first-index confirmation (`--yes`).
 pub async fn run_index_roots(
     roots: &[(PathBuf, Option<Harness>)],
     no_thinking: bool,
@@ -544,7 +550,7 @@ pub async fn run_index_roots(
 pub async fn run_index_remote(uri: &str, no_thinking: bool) -> Result<()> {
     let (owner, name, _prefix) = hub::parse_hf(uri)?;
     let src = source::open_remote(&owner, &name, None).await?;
-    // A Hub import is an explicit, deliberate command — bypass the first-index confirmation/guard.
+    // A Hub import is an explicit, deliberate command — skip the first-index confirmation.
     index_sources(vec![src], no_thinking, true).await
 }
 
@@ -656,21 +662,6 @@ async fn run_budgeted(
 /// the run after the first session and asks before the long haul.
 async fn index_sources(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: bool, yes: bool) -> Result<()> {
     let interactive = std::io::stdin().is_terminal();
-
-    // A first index can take a long time; never let an automated run (no TTY — a hook, cron) trigger
-    // it. Fail closed like push's new-store guard: require a manual `funes index` first, or --yes to
-    // force. Exit 0 so a session-end hook isn't treated as failed.
-    if !yes && !interactive {
-        let uri = dataset::table_uri(&dataset::local_store_dir());
-        if dataset::open(&uri, HashMap::new()).await.is_err() {
-            eprintln!(
-                "funes: no index yet — run `funes index` in a terminal first to build the initial index \
-                 (one-time; it can take a while), or pass --yes to force it here. Skipping."
-            );
-            return Ok(());
-        }
-    }
-
     let mut indexer = Indexer::open(sources, no_thinking).await?;
     let total = indexer.unit_count();
 

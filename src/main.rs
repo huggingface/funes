@@ -102,8 +102,7 @@ enum Cmd {
         #[arg(long)]
         limit: Option<usize>,
         /// Don't ask: a budgeted (no-path) run finishes all remaining work instead of offering it;
-        /// an explicit path skips the first-index size confirmation, and a first index is allowed
-        /// from a non-interactive run (otherwise refused so the long initial build stays manual).
+        /// an explicit path skips the first-index size confirmation.
         #[arg(long)]
         yes: bool,
     },
