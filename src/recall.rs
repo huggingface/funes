@@ -222,14 +222,16 @@ fn no_index_error() -> anyhow::Error {
 /// An unreachable remote degrades to the local index, carrying a note that explains what happened;
 /// with no local index either there's nothing to read, so it errors.
 async fn degrade_offline(uri: &str) -> Result<Read> {
-    match open_for_read(&Store::local()).await {
-        Ok(ReadOutcome::Ready(ds)) => Ok(Read {
+    // `?` propagates a real local-open failure rather than folding it into "no local index".
+    match open_for_read(&Store::local()).await? {
+        ReadOutcome::Ready(ds) => Ok(Read {
             ds,
             note: Some(format!("remote {uri} unreachable — recalling from your local store\n")),
             store_label: Some(Store::local().label()),
         }),
+        // No local index either — point at onboarding (a local store is never classified Offline).
         _ => Err(anyhow!(
-            "remote {uri} unreachable and no local index yet — nothing to recall"
+            "remote {uri} unreachable and no local index yet — run `funes add <agent>` (or `funes index`) to build one"
         )),
     }
 }
