@@ -6,7 +6,7 @@
 
 use funes::harness::Harness;
 use funes::recall::Hit;
-use funes::{claude, codex, curate, hermes, hub, index, mcp, pi, push, recall, render, scrub, update};
+use funes::{ask, claude, codex, curate, hermes, hub, index, mcp, pi, push, recall, render, scrub, update};
 
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -82,6 +82,21 @@ enum Cmd {
         highlight: Option<String>,
         #[command(flatten)]
         store: StoreOpts,
+    },
+    /// Ask a coding agent one question, grounded in a store — nothing installed.
+    ///
+    /// Borrows the agent for a single answer: claude gets funes recall/get as session-only MCP
+    /// tools and recalls on its own; codex gets the recalled passages in its prompt (its exec
+    /// mode can't run MCP tools). Name a store with --store to ask against any published memory;
+    /// omit it for your local one.
+    #[command(
+        subcommand_value_name = "AGENT",
+        subcommand_help_heading = "Agents",
+        override_usage = "funes ask <AGENT> <QUESTION>... [--store STORE]"
+    )]
+    Ask {
+        #[command(subcommand)]
+        agent: AskAgent,
     },
     /// Build or update your local store from session transcripts.
     Index {
@@ -209,6 +224,29 @@ fn baked_store(store: AddStore) -> Option<String> {
         .store
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty() && s != "local")
+}
+
+// Flattened into every ask agent so they share the question positional and the read `--store`
+// flag; the user-facing help comes from the field docs.
+#[derive(Args)]
+struct AskArgs {
+    /// The question to answer (free text).
+    #[arg(required = true, num_args = 1..)]
+    question: Vec<String>,
+    #[command(flatten)]
+    store: StoreOpts,
+}
+
+#[derive(Subcommand)]
+enum AskAgent {
+    Claude {
+        #[command(flatten)]
+        args: AskArgs,
+    },
+    Codex {
+        #[command(flatten)]
+        args: AskArgs,
+    },
 }
 
 /// Which store the read commands act on. Shared by `recall`/`list`/`get`/`status` and `mcp`.
@@ -366,6 +404,23 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
+        Cmd::Ask { agent } => match agent {
+            AskAgent::Claude { args } => ask::claude(args.question.join(" "), args.store.store).await,
+            AskAgent::Codex { args } => {
+                // The binary probe comes first — grounding pays for a model load.
+                ask::preflight("codex")?;
+                let question = args.question.join(" ");
+                let spinner = Spinner::start("recalling…");
+                let progress = |label: &str| {
+                    if let Some(s) = &spinner {
+                        s.set(label);
+                    }
+                };
+                let prompt = ask::codex_grounding(args.store.resolve(), &question, &progress).await?;
+                drop(spinner);
+                ask::run_codex(&prompt)
+            }
+        },
         Cmd::Index {
             path,
             harness,

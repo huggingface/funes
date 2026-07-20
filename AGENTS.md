@@ -54,6 +54,27 @@ Agent format, per turn:
 
 `turn <uuid> not found in session <id>` when absent.
 
+### ask
+
+`funes ask claude|codex "<question>" [--store <label>]` — one grounded answer from a coding
+agent, nothing installed. claude runs with funes mounted as a session-only MCP server
+(`claude -p <prompt> --strict-mcp-config --mcp-config <funes mcp [store]> --allowedTools
+mcp__funes__recall,mcp__funes__get`) and recalls on its own; codex exec can't run MCP tools (its
+tool-approval elicitation is auto-cancelled headless), so funes recalls in-process and embeds the
+passages in the prompt (`codex exec --skip-git-repo-check -c mcp_servers={} -- <prompt>`).
+
+stdout is the agent's free-text answer — an explicit exception to the two-renderings contract
+above; there is nothing stable to parse. ask reads no stdin. Quote the question (or put `--`
+before it) when it contains flag-like words. CLI-only; not an MCP tool.
+
+funes errors before any agent spawns on: a store that can't be read (missing, empty,
+unauthorized, no index yet, or unreachable), a missing agent CLI, and (codex) zero
+recalled passages. A non-zero agent exit fails funes (exit 1, the child's code quoted).
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--store` | local store | the store to ground in — `<org>/<repo>`, an `hf://…` URI, a local path, or `local` |
+
 ### list / status
 
 - `funes list [store] [--limit 50]` — sessions, newest activity first:
