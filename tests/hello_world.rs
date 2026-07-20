@@ -12,7 +12,7 @@ async fn recall_without_an_index_uses_the_builtin_guide() {
     // so the read surface must fall back to the hello-world corpus.
     std::env::set_var("FUNES_HOME", empty.path());
 
-    // recall: a question about wiring funes into an agent surfaces the MCP-setup passage.
+    // recall: a question about wiring funes into an agent surfaces the onboarding passage.
     let out = funes::recall::recall(
         Store::local(),
         "how do I connect funes to claude code".into(),
@@ -33,8 +33,9 @@ async fn recall_without_an_index_uses_the_builtin_guide() {
         "hit should carry a resolvable get line: {out}"
     );
 
-    // get: the `→ get` line resolves against the corpus and expands the turn.
-    let got = funes::recall::get(Store::local(), "hello".into(), "hello-0005".into(), 3)
+    // get: the `→ get` line resolves against the corpus and expands the turn (0003 is the
+    // `funes add` onboarding passage).
+    let got = funes::recall::get(Store::local(), "hello".into(), "hello-0003".into(), 3)
         .await
         .unwrap();
     assert!(got.contains("funes add"), "get should expand a corpus turn: {got}");

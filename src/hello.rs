@@ -28,10 +28,22 @@ pub const PASSAGES: &[(&str, &str)] = &[
     ),
     (
         "assistant",
-        "Build your store first: run `funes index`. It walks ~/.claude/projects, \
-         ~/.codex/sessions, ~/.pi/agent/sessions, and ~/.hermes/state.db, parses each session, and \
-         embeds the turns into a local store at ~/.funes. It's incremental — \
-         re-running it only adds new turns — so it's cheap to run often.",
+        "Get started by wiring funes into your agent: run `funes add <agent>` — claude, codex, \
+         pi, or hermes. New sessions then get the `recall` and `get` tools plus \
+         instructions on when to use them, so the agent reaches for prior decisions and rationale \
+         on its own — without you pasting context. For Claude, Codex, and Hermes, `funes add` also \
+         builds your first index — a fast, text-first pass, after asking — and installs hooks that \
+         keep it current as you work, with deeper content backfilling per turn. Nothing is left to \
+         run by hand.",
+    ),
+    (
+        "assistant",
+        "Under the hood, recall reads a local store built by `funes index`: it walks \
+         ~/.claude/projects, ~/.codex/sessions, ~/.pi/agent/sessions, and ~/.hermes/state.db, \
+         parses each session, and embeds the turns into ~/.funes. It's incremental and text-first — \
+         re-running it (and the hooks `funes add` installs for Claude, Codex, and Hermes) adds new \
+         turns and backfills deeper content a step at a time. With pi, re-run it yourself so the \
+         latest turns are searchable.",
     ),
     (
         "assistant",
@@ -48,22 +60,11 @@ pub const PASSAGES: &[(&str, &str)] = &[
     ),
     (
         "assistant",
-        "Wire funes into your agent so it can recall on its own: register the MCP server with \
-         `funes add <agent>`. New sessions then get the `recall` and `get` tools plus \
-         instructions on when to use them, so the agent reaches for prior decisions and \
-         rationale on its own — without you pasting context.",
-    ),
-    (
-        "assistant",
-        "Keep recall fresh. Your store only updates when `funes index` runs, so the latest turns of \
-         the current session aren't searchable until you re-run it. Re-run it periodically, or add \
-         a session-end hook that runs `funes index` after each session (see docs/automation.md).",
-    ),
-    (
-        "assistant",
         "Optional, and later: share your memory across machines or a team via the Hugging Face \
-         Hub. `funes push <org>/<repo>` publishes your local store to a dataset repo you own, and \
-         `recall --store <org>/<repo>` reads it. You never need the Hub to use funes locally — \
+         Hub. Name a dataset repo you own when you add funes to an agent — `funes add claude \
+         <org>/<repo>` — and recall reads it while your sessions publish to it. Or drive it \
+         directly: `funes push <org>/<repo>` publishes your local store, and `recall --store \
+         <org>/<repo>` reads any store for one call. You never need the Hub to use funes locally — \
          it's a tier you opt into.",
     ),
     (
@@ -73,48 +74,6 @@ pub const PASSAGES: &[(&str, &str)] = &[
          always rebuild from your transcripts. The transcripts are the source of truth.",
     ),
 ];
-
-/// A short, human-readable welcome shown by `funes guide`. It is the friendly counterpart to
-/// `recall`'s ranked, provenance-tagged output: that format is built for an agent to parse, and on
-/// a fresh install it makes a person work to read a scrambled list. A first-time human runs this
-/// instead. Kept separate from `PASSAGES` (which feeds the agent-facing recall fallback) so each
-/// can speak to its own audience.
-pub fn guide() -> String {
-    "\
-funes — durable, local memory for your AI coding agent
-
-funes indexes your past AI agent sessions and lets your agent recall its own decisions,
-rationale, and findings mid-task — the exact passages, with provenance, all on your machine.
-
-Getting started
-
-  1. Index your sessions       funes index
-     Sweeps ~/.claude/projects, ~/.codex/sessions, ~/.pi/agent/sessions, and ~/.hermes/state.db
-     into one local store. It's incremental, so it's cheap to re-run as you work.
-
-  2. Add funes to your agent    funes add <agent>
-     Works with claude, codex, pi, and hermes. Your agent gains `recall` and
-     `get` as tools and reaches for them on its own — no pasting context back in.
-
-  3. Just work.
-     When something touches a past decision, its rationale, or an earlier finding, your
-     agent recalls it for you — no re-pasting context.
-
-Once indexed, you can query the store yourself:
-
-  funes recall \"why did we switch off lancedb\"    ask in natural language
-  funes list                                       browse indexed sessions
-  funes status                                     what's indexed
-
-Share across machines or a team (optional)
-
-  funes push <org>/<repo>              publish your local store to a dataset you own
-  funes recall \"…\" --store <org>/<repo>  read a remote store for one call
-
-Your indexed sessions stay on your machine until you `funes push`.
-"
-    .to_string()
-}
 
 /// Build the corpus as an ephemeral lance dataset; the returned temp dir backs it (keep alive
 /// while reading). With an `embedder`, passages get real vectors for search; without, zeros.
