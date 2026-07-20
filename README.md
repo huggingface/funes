@@ -190,25 +190,19 @@ Each source is a [`TraceSource`](src/source.rs) that reads its format into a gen
 shape; everything downstream — chunk → embed → store → recall — is source-agnostic. Adding another
 agent means implementing one trait, not touching the indexing or query path.
 
-### Inspect it yourself
+### Ask it yourself
 
-`funes` shapes its output for agents, not people.
-
-Run recall in a terminal, though, and it notices — and switches to an interactive mode for inspecting a store by hand:
-
-```bash
-funes recall "why is funes append-only" --store huggingface/funes-memory
-```
-
-Browse the hits, filter as you type, and press enter on any of them to read its full surrounding
-turns — a built-in browser, no extra tools to install.
-
-When you want an **answer** to the same question rather than the passages, `funes ask` borrows a
-coding agent for it — it recalls from the store and answers grounded in what it finds:
+`funes` shapes its output for agents, not people — so to put a question to a memory yourself,
+borrow an agent: `funes ask` recalls from the store and answers grounded in what it finds,
+installing nothing:
 
 ```bash
 funes ask claude "why is funes append-only" --store huggingface/funes-memory
 ```
+
+Every answer names the sessions it drew from. To see the evidence with your own eyes,
+`funes recall` prints the raw ranked passages behind it, and `funes get <session> <turn>`
+reassembles any cited turn in full.
 
 The full interface — output formats, flags, defaults — is specified in [AGENTS.md](AGENTS.md).
 

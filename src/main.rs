@@ -5,7 +5,6 @@
 //! `$FUNES_HOME` or `~/.funes`.
 
 use funes::harness::Harness;
-use funes::recall::Hit;
 use funes::{ask, claude, codex, curate, hermes, hub, index, mcp, pi, push, recall, render, scrub, update};
 
 use anyhow::{anyhow, Result};
@@ -15,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// Turns around a `get` target when no window is given — shared by the CLI flag and the hit selector.
+/// Turns around a `get` target when no window is given.
 const DEFAULT_WINDOW: i64 = 3;
 
 #[derive(Parser)]
@@ -50,9 +49,6 @@ enum Cmd {
         /// Restrict to a harness: claude | codex | pi | hermes.
         #[arg(long)]
         harness: Option<String>,
-        /// Output format. Default: human in a terminal, agent when piped.
-        #[arg(long, value_enum)]
-        format: Option<OutputFormat>,
         #[command(flatten)]
         store: StoreOpts,
     },
@@ -264,7 +260,7 @@ impl StoreOpts {
     }
 }
 
-/// The two output layouts for the read commands.
+/// The two output layouts for `get`.
 #[derive(Clone, Copy, ValueEnum)]
 enum OutputFormat {
     /// A numbered list with a hit selector.
@@ -310,7 +306,6 @@ async fn main() -> Result<()> {
             neighbors,
             block_type,
             harness,
-            format,
             store,
         } => {
             let store = store.resolve();
@@ -322,58 +317,19 @@ async fn main() -> Result<()> {
                 }
             };
             let (note, store_label, hits) = recall::recall_hits(
-                store.clone(),
-                query.clone(),
-                k,
-                candidates,
-                half_life,
-                neighbors,
-                block_type,
-                harness,
-                &progress,
+                store, query, k, candidates, half_life, neighbors, block_type, harness, &progress,
             )
             .await?;
             drop(spinner);
-            match OutputFormat::resolve(format) {
-                OutputFormat::Agent => {
-                    if hits.is_empty() {
-                        print!("{note}no results");
-                    } else {
-                        print!(
-                            "{}",
-                            render::recall_agent(&note, &recall::store_hint(store_label.as_deref()), &hits)
-                        );
-                    }
-                    Ok(())
-                }
-                OutputFormat::Human => {
-                    if hits.is_empty() {
-                        println!("{note}no results");
-                        return Ok(());
-                    }
-                    let (color, width) = human_io();
-                    // The in-process browser owns the whole terminal, so it needs real TTYs; a
-                    // forced human format without them (or the FUNES_NO_TUI opt-out) keeps the
-                    // plain line selector. It runs on its own thread — not a runtime worker — so it
-                    // can `block_on` a session load when drilling into a hit.
-                    let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-                    if interactive && std::env::var_os("FUNES_NO_TUI").is_none() {
-                        let rt = tokio::runtime::Handle::current();
-                        std::thread::scope(|s| {
-                            match s
-                                .spawn(|| funes::tui::browser::run(store, note, query, &hits, color, width, rt))
-                                .join()
-                            {
-                                Ok(res) => res,
-                                Err(_) => Err(anyhow!("recall browser thread panicked")),
-                            }
-                        })
-                    } else {
-                        print!("{note}");
-                        select_hits(&store, &hits, color, width).await
-                    }
-                }
+            if hits.is_empty() {
+                print!("{note}no results");
+            } else {
+                print!(
+                    "{}",
+                    render::recall_agent(&note, &recall::store_hint(store_label.as_deref()), &hits)
+                );
             }
+            Ok(())
         }
         Cmd::List { store, limit } => {
             print!("{}", recall::list(hub::Store::resolve(store), limit).await?);
@@ -916,70 +872,6 @@ async fn first_push(remote: &str, created: bool) -> Result<()> {
     }
 }
 
-/// The hit selector after a human recall: prints the numbered menu, then a typed number expands
-/// that hit via `get` (`3 10` widens the window) and the menu reprints — the walk-back. An empty
-/// line, `q`, or end-of-input quits.
-async fn select_hits(store: &hub::Store, hits: &[(Hit, f64)], color: bool, width: usize) -> Result<()> {
-    let menu = render::recall_human("", hits, color, width, chrono::Utc::now());
-    let hint = render::dim(
-        "type a number to expand a hit (`3 10` widens the context) — enter or q quits",
-        color,
-    );
-    print!("{menu}");
-    println!("{hint}");
-    let mut line = String::new();
-    loop {
-        print!("› ");
-        std::io::stdout().flush().ok();
-        line.clear();
-        if std::io::stdin().read_line(&mut line)? == 0 {
-            println!();
-            return Ok(());
-        }
-        match parse_selection(line.trim(), hits.len()) {
-            Selection::Quit => return Ok(()),
-            Selection::Help => {
-                println!(
-                    "1–{} expands a hit (`3 10` widens the context); enter or q quits",
-                    hits.len()
-                )
-            }
-            Selection::Expand { ordinal, window } => {
-                let h = &hits[ordinal - 1].0;
-                match recall::get_turns(store.clone(), h.session_id.clone(), h.turn_uuid.clone(), window).await {
-                    Ok((note, turns)) if turns.is_empty() => {
-                        print!("{note}");
-                        println!("turn {} not found in session {}", h.turn_uuid, h.session_id);
-                    }
-                    Ok((note, turns)) => {
-                        // Mark the matched chunk so it stands out of the surrounding turns.
-                        let mark: String = h.text.split_whitespace().collect::<Vec<_>>().join(" ");
-                        print!("{}", render::get_human(&note, &turns, color, width, Some(&mark)));
-                        println!(
-                            "{}",
-                            render::dim(
-                                &format!(
-                                    "funes get {} {} --window {window} --store {}",
-                                    h.session_id,
-                                    h.turn_uuid,
-                                    funes::tui::sh_word(&store.label())
-                                ),
-                                color
-                            )
-                        );
-                    }
-                    // A transient failure (say, the remote dropped) shouldn't kill the session.
-                    Err(e) => println!("get failed: {e:#}"),
-                }
-                // Back to the picker: the expansion pushed the menu out of view.
-                println!();
-                print!("{menu}");
-                println!("{hint}");
-            }
-        }
-    }
-}
-
 /// A stderr spinner for the wait before results: braille frames plus a phase label, redrawn in
 /// place and erased when dropped — nothing lands in the output. [`Spinner::start`] returns None
 /// when stderr isn't a terminal, so piped and scripted runs stay silent.
@@ -1041,36 +933,6 @@ impl Drop for Spinner {
     }
 }
 
-/// One parsed selection.
-enum Selection {
-    Quit,
-    Help,
-    Expand { ordinal: usize, window: i64 },
-}
-
-/// `""`/`q`/`quit` quit; `N` expands hit N with the default window; `N W` widens it to W.
-fn parse_selection(line: &str, hits: usize) -> Selection {
-    if line.is_empty() || line.eq_ignore_ascii_case("q") || line.eq_ignore_ascii_case("quit") {
-        return Selection::Quit;
-    }
-    let mut parts = line.split_whitespace();
-    let ordinal = match parts.next().and_then(|t| t.parse::<usize>().ok()) {
-        Some(o) if (1..=hits).contains(&o) => o,
-        _ => return Selection::Help,
-    };
-    let window = match parts.next() {
-        None => DEFAULT_WINDOW,
-        Some(t) => match t.parse::<i64>() {
-            Ok(w) if w >= 0 => w,
-            _ => return Selection::Help,
-        },
-    };
-    if parts.next().is_some() {
-        return Selection::Help;
-    }
-    Selection::Expand { ordinal, window }
-}
-
 /// The push confirmation for a store the local index shares no chunks with. Fails closed (returns
 /// false) off a terminal, so an unattended push can't silently publish to the wrong store — there it
 /// must be re-run with `--yes`.
@@ -1096,7 +958,7 @@ fn prompt_new_store(label: &str, chunks: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_confirm, parse_selection, Selection};
+    use super::parse_confirm;
 
     #[test]
     fn parse_confirm_honors_default_and_answers() {
@@ -1110,26 +972,5 @@ mod tests {
         // Anything unrecognized is a conservative no, even under a yes default.
         assert!(!parse_confirm("nope", true));
         assert!(!parse_confirm("maybe", true));
-    }
-
-    #[test]
-    fn parse_selection_grammar() {
-        assert!(matches!(parse_selection("", 8), Selection::Quit));
-        assert!(matches!(parse_selection("q", 8), Selection::Quit));
-        assert!(matches!(parse_selection("QUIT", 8), Selection::Quit));
-        assert!(matches!(
-            parse_selection("3", 8),
-            Selection::Expand { ordinal: 3, window: 3 }
-        ));
-        assert!(matches!(
-            parse_selection("3 10", 8),
-            Selection::Expand { ordinal: 3, window: 10 }
-        ));
-        // Out of range, not a number, negative window, trailing junk.
-        assert!(matches!(parse_selection("9", 8), Selection::Help));
-        assert!(matches!(parse_selection("0", 8), Selection::Help));
-        assert!(matches!(parse_selection("x", 8), Selection::Help));
-        assert!(matches!(parse_selection("3 -1", 8), Selection::Help));
-        assert!(matches!(parse_selection("3 10 zzz", 8), Selection::Help));
     }
 }

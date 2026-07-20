@@ -1,12 +1,11 @@
 //! Rendering for the read commands, over `recall`'s structured results.
 //!
-//! Two layouts over the same hits: [`recall_agent`]/[`get_agent`] are the machine format —
-//! byte-stable, its layout is a published contract (the `→ get` lines are parsed) and must not
-//! change. [`recall_human`]/[`get_human`] render for a terminal: one scannable line per hit, tool
-//! chunks compressed to a deterministic one-liner, scores and UUIDs left out.
+//! [`recall_agent`]/[`get_agent`] are the machine format — byte-stable, its layout is a published
+//! contract (the `→ get` lines are parsed) and must not change. [`get_human`] renders a turn for
+//! a terminal: tool chunks compressed to a deterministic one-liner, prose wrapped, marks
+//! highlighted.
 
 use crate::recall::{Hit, Turn};
-use chrono::{DateTime, Datelike, Utc};
 use std::fmt::Write as _;
 
 /// Longest scent ever built — beyond any line budget, so final truncation is [`ellipsize`]'s job.
@@ -38,86 +37,6 @@ pub fn recall_agent(note: &str, store_arg: &str, hits: &[(Hit, f64)]) -> String 
         let _ = writeln!(out, "---");
     }
     out
-}
-
-/// The human `recall` list: `N  date  agent  workdir  scent`, one line per hit, fitted to
-/// `width`. Metadata dims when `color` is set; `now` anchors the date labels (years show only
-/// when some hit is from another year).
-pub fn recall_human(note: &str, hits: &[(Hit, f64)], color: bool, width: usize, now: DateTime<Utc>) -> String {
-    let mut out = note.to_string();
-    // The ordinal column grows with the hit count; hit_rows budgets around it.
-    let ow = hits.len().to_string().len().max(2);
-    for (i, row) in hit_rows(hits, color, width, now, ow + 2).iter().enumerate() {
-        let _ = writeln!(out, "{:>ow$}  {}", i + 1, row);
-    }
-    out
-}
-
-/// The human list rows without ordinals — one per hit, for a picker whose pointer does the
-/// numbering.
-pub fn recall_rows(hits: &[(Hit, f64)], color: bool, width: usize, now: DateTime<Utc>) -> Vec<String> {
-    hit_rows(hits, color, width, now, 0)
-}
-
-/// One aligned row per hit — dim `date  agent  workdir` columns, then the scent, fitted to
-/// `width` minus `indent` (the caller's own per-line prefix).
-fn hit_rows(hits: &[(Hit, f64)], color: bool, width: usize, now: DateTime<Utc>, indent: usize) -> Vec<String> {
-    let with_year = hits.iter().any(|(h, _)| {
-        DateTime::parse_from_rfc3339(&h.ts)
-            .map(|t| t.year() != now.year())
-            .unwrap_or(false)
-    });
-    let rows: Vec<(String, &str, String)> = hits
-        .iter()
-        .map(|(h, _)| {
-            (
-                date_label(&h.ts, with_year),
-                harness_display(&h.harness),
-                ellipsize(project_display(&h.workdir), 24),
-            )
-        })
-        .collect();
-    let dw = rows.iter().map(|r| r.0.chars().count()).max().unwrap_or(0);
-    let hw = rows.iter().map(|r| r.1.chars().count()).max().unwrap_or(0);
-    let pw = rows.iter().map(|r| r.2.chars().count()).max().unwrap_or(0);
-
-    hits.iter()
-        .zip(&rows)
-        .map(|((h, _), (date, har, proj))| {
-            let meta = format!("{date:<dw$}  {har:<hw$}  {proj:<pw$}");
-            let budget = width.saturating_sub(indent + meta.chars().count() + 2).max(20);
-            let line = ellipsize(&scent(&h.block_type, &h.text), budget);
-            format!("{}  {}", dim(&meta, color), line)
-        })
-        .collect()
-}
-
-/// One row per turn — dim `stamp  role` columns, then a scent of the first block. For a picker's
-/// list pane over a session's turns.
-pub fn turn_rows(turns: &[Turn], color: bool, width: usize) -> Vec<String> {
-    let rw = turns.iter().map(|t| t.role.chars().count()).max().unwrap_or(0);
-    turns
-        .iter()
-        .map(|t| {
-            let stamp: String = t.ts.chars().take(16).collect::<String>().replace('T', " ");
-            let meta = format!("{stamp}  {:<rw$}", t.role);
-            let budget = width.saturating_sub(meta.chars().count() + 4).max(20);
-            let first = t.blocks.first().map(String::as_str).unwrap_or("");
-            let line = ellipsize(&block_scent(first), budget);
-            format!("{}  {}", dim(&meta, color), line)
-        })
-        .collect()
-}
-
-/// Scent for a reassembled block: its type is recovered from the chunk label prefix.
-fn block_scent(b: &str) -> String {
-    if b.starts_with("[tool_use") {
-        scent("tool_use", b)
-    } else if b.starts_with("[tool_result") {
-        scent("tool_result", b)
-    } else {
-        scent("text", b)
-    }
 }
 
 /// The agent `get` format: `[ts] role seqN turn=…` headers over reassembled blocks. Byte-stable.
@@ -401,33 +320,6 @@ fn ellipsize(s: &str, max: usize) -> String {
     format!("{}…", kept.trim_end())
 }
 
-/// `Jun 19`, or `Jun 19 2025` when years matter; an unparseable ts falls back to its date prefix.
-fn date_label(ts: &str, with_year: bool) -> String {
-    match DateTime::parse_from_rfc3339(ts) {
-        Ok(t) if with_year => t.format("%b %e %Y").to_string(),
-        Ok(t) => t.format("%b %e").to_string(),
-        Err(_) => ts.chars().take(10).collect(),
-    }
-}
-
-/// The stored harness facet in its short spelling.
-fn harness_display(h: &str) -> &str {
-    match h {
-        "claude_code" => "claude",
-        other => other,
-    }
-}
-
-/// A munged absolute path (Claude workdir dirs turn `/` into `-`, so they start with `-`) shows
-/// its last segment; any other workdir name shows whole.
-fn project_display(p: &str) -> &str {
-    if p.starts_with('-') {
-        p.rsplit('-').find(|s| !s.is_empty()).unwrap_or(p)
-    } else {
-        p
-    }
-}
-
 /// Write one logical line word-wrapped to `width`, each row prefixed with `indent`; a blank line
 /// stays blank. Lines already within `width` pass through verbatim (indentation intact).
 fn write_wrapped(out: &mut String, line: &str, width: usize, indent: &str) {
@@ -480,7 +372,6 @@ fn write_wrapped(out: &mut String, line: &str, width: usize, indent: &str) {
 mod tests {
     use super::*;
     use crate::recall::Neighbor;
-    use chrono::TimeZone;
 
     fn hit(ts: &str, block_type: &str, text: &str) -> Hit {
         Hit {
@@ -572,30 +463,6 @@ mod tests {
     }
 
     #[test]
-    fn turn_rows_are_one_line_each() {
-        let turns = vec![
-            Turn {
-                seq: 1,
-                turn_uuid: "t1".to_string(),
-                ts: "2026-06-19T01:29:59.000Z".to_string(),
-                role: "assistant".to_string(),
-                blocks: vec!["some reasoning about the mask".to_string()],
-            },
-            Turn {
-                seq: 2,
-                turn_uuid: "t2".to_string(),
-                ts: "2026-06-19T01:30:10.000Z".to_string(),
-                role: "user".to_string(),
-                blocks: vec!["[tool_result Edit] file updated".to_string()],
-            },
-        ];
-        let rows = turn_rows(&turns, false, 100);
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0], "2026-06-19 01:29  assistant  some reasoning about the mask");
-        assert_eq!(rows[1], "2026-06-19 01:30  user       Edit ⇒ file updated");
-    }
-
-    #[test]
     fn get_agent_is_byte_stable() {
         let t = Turn {
             seq: 3,
@@ -668,68 +535,6 @@ mod tests {
     }
 
     #[test]
-    fn human_is_one_line_per_hit_with_columns() {
-        let now = Utc.with_ymd_and_hms(2026, 7, 6, 0, 0, 0).unwrap();
-        let hits = vec![
-            (
-                hit(
-                    "2026-06-19T01:29:59.000Z",
-                    "thinking",
-                    "apply top-k selection per query token",
-                ),
-                0.9,
-            ),
-            (
-                hit(
-                    "2026-06-18T01:00:00.000Z",
-                    "tool_use",
-                    r#"[tool_use Read] {"file_path":"/x/y.rs"}"#,
-                ),
-                0.8,
-            ),
-        ];
-        let out = recall_human("", &hits, false, 100, now);
-        let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines.len(), 2);
-        assert_eq!(
-            lines[0],
-            " 1  Jun 19  claude  funes  apply top-k selection per query token"
-        );
-        assert_eq!(lines[1], " 2  Jun 18  claude  funes  Read x/y.rs");
-        // No agent plumbing in the human list.
-        assert!(!out.contains("score=") && !out.contains("→ get"));
-    }
-
-    #[test]
-    fn human_shows_years_when_hits_span_them() {
-        let now = Utc.with_ymd_and_hms(2026, 7, 6, 0, 0, 0).unwrap();
-        let hits = vec![(hit("2025-12-09T01:00:00.000Z", "text", "old"), 0.5)];
-        let out = recall_human("", &hits, false, 100, now);
-        assert!(out.contains("Dec  9 2025"), "got: {out}");
-    }
-
-    #[test]
-    fn human_dims_metadata_when_colored() {
-        let now = Utc.with_ymd_and_hms(2026, 7, 6, 0, 0, 0).unwrap();
-        let hits = vec![(hit("2026-06-19T01:29:59.000Z", "text", "x"), 0.5)];
-        assert!(recall_human("", &hits, true, 100, now).contains("\x1b[2m"));
-        assert!(!recall_human("", &hits, false, 100, now).contains("\x1b[2m"));
-    }
-
-    #[test]
-    fn human_fits_width() {
-        let now = Utc.with_ymd_and_hms(2026, 7, 6, 0, 0, 0).unwrap();
-        let long = "word ".repeat(100);
-        // 105 hits: the 3-digit ordinals must widen the budget, not overflow it.
-        let hits: Vec<(Hit, f64)> = (0..105)
-            .map(|_| (hit("2026-06-19T01:29:59.000Z", "text", &long), 0.5))
-            .collect();
-        for line in recall_human("", &hits, false, 80, now).lines() {
-            assert!(line.chars().count() <= 80, "overlong: {line}");
-        }
-    }
-
-    #[test]
     fn get_human_compresses_tool_blocks_and_wraps_prose() {
         let t = Turn {
             seq: 3,
@@ -769,12 +574,6 @@ mod tests {
         assert!(out.contains("l6"));
         assert!(!out.contains("l7"));
         assert!(out.contains('…'));
-    }
-
-    #[test]
-    fn project_display_unmangles_claude_dirs() {
-        assert_eq!(project_display("-Users-dcorvoysier-dev-funes"), "funes");
-        assert_eq!(project_display("Fable-5-traces"), "Fable-5-traces");
     }
 
     #[test]
