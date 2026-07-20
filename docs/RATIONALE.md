@@ -8,7 +8,7 @@ and the *how*, see the [README](../README.md).
 
 An LLM agent has the **goldfish problem**: when a session ends or the context window fills,
 everything is gone. It meets your project as a stranger, again and again. The obvious fix is
-to give it memory — but *how* you store and serve that memory is where every design parts
+to give it memory — but *how* you keep and serve that memory is where every design parts
 ways.
 
 ## The choices, and why
@@ -25,7 +25,7 @@ overwritten or "updated". When a fact changes, the old passage stays; the new on
 more recent.
 
 **Why:** this is a problem funes chooses not to *have*, rather than one it solves. A mutable
-store must decide at write time what each new piece of information supersedes — and every
+memory must decide at write time what each new piece of information supersedes — and every
 wrong call loses information *silently*, by overwriting the right answer with a confident
 wrong one. funes makes no write-time decisions at all. Every passage stays, and obsolescence
 is resolved at **read time**: recency weighting, plus a reader (you, or the model) who can
@@ -51,16 +51,16 @@ interpretation quality of *today's* model — whatever it failed to connect or w
 summarized is what you are stuck with. Keeping the raw passages instead means the synthesis is
 done by whichever model reads them, *later* — and models keep getting better at exactly this:
 drawing inferences, and cross-referencing passages that a weaker model would never have linked.
-A raw, append-only log compounds with model progress for free; a pre-distilled store can only
+A raw, append-only log compounds with model progress for free; a pre-distilled memory can only
 decay relative to it.
 
 ### 3. Local-first, model-agnostic, on storage you own
 
 Local embeddings (`BAAI/bge-small-en-v1.5`) and a local cross-encoder reranker. The only
-state is a derived, rebuildable store; the transcripts are the source of truth. Any model
+state is a derived, rebuildable memory; the transcripts are the source of truth. Any model
 can query it — switch models per task; nothing is trained into weights.
 
-By default everything stays on the machine. **Optionally**, the store — a Lance dataset that
+By default everything stays on the machine. **Optionally**, the memory — a Lance dataset that
 still holds the raw passages — can be synced to the **HF Hub**, where `recall` reads it
 over `hf://` — fetching the immutable Lance files a query touches into a local cache pinned to
 the dataset's commit, so a warm recall reads from disk with no network. That hub repo is
@@ -94,12 +94,12 @@ Agent-memory providers are now plentiful — frameworks like [hermes-agent](http
 dozen. We surveyed the field. The specific tools and their feature lists churn monthly, but
 the *paradigm* is remarkably uniform, and it is the opposite of funes on the choices above:
 
-**They distill conversations with an LLM into a mutable store, inject it proactively, and
+**They distill conversations with an LLM into a mutable memory, inject it proactively, and
 typically run as a managed service.** The consequences are structural, not incidental:
 
 - **No provenance.** Because the original passage is distilled into a "fact", there is no
   link back to the verbatim turn it came from — you can't cite or audit the source.
-- **Silent loss on reconcile.** A mutable store has to decide when new information supersedes
+- **Silent loss on reconcile.** A mutable memory has to decide when new information supersedes
   old — when that call is wrong, it overwrites the right answer instead of keeping both.
 - **Always on, never asked.** Recalled snippets are injected into every turn and a memory
   block sits resident in the prompt — the model never chooses when to consult it. The
@@ -127,7 +127,7 @@ abstention thresholds, MMR diversity, near-duplicate collapse, semantic expansio
 candidate pools, stronger rerankers, and a per-chunk *kind* facet, some at query time and
 some computed at index time — was A/B'd against a labeled retrieval anchor; none moved
 recall. The cross-encoder is the ceiling, and it already resolves a query's intent to the
-right *kind* of passage without a stored label.
+right *kind* of passage without a saved label.
 
 ## Where this leaves funes
 

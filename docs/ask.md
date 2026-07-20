@@ -1,12 +1,12 @@
 # Asking
 
-`funes ask <agent> "<question>"` borrows a coding agent to answer one question, grounded in a store —
+`funes ask <agent> "<question>"` borrows a coding agent to answer one question, grounded in a memory —
 nothing installed. It's the read-only sibling of [`funes add`](add.md): where `add` wires an agent
 permanently, `ask` rents it for a single question and leaves no trace.
 
 ```bash
 funes ask claude "why is funes append-only"
-funes ask codex  "what did we decide about the streaming parser" --store acme/kb
+funes ask codex  "what did we decide about the streaming parser" --memory acme/kb
 ```
 
 Use it to put a question to a memory *yourself* — [`funes recall`](recall.md) returns ranked
@@ -33,14 +33,14 @@ parse. Quote the question (or put `--` before it) when it contains flag-like wor
 | Argument | Meaning |
 | --- | --- |
 | `<question>` | the question to answer (free text) |
-| `--store <label>` | the store to ground in — `<org>/<repo>`, an `hf://…` URI, a local path, or `local` (default) |
+| `--memory <label>` | the memory to ground in — `<org>/<repo>`, an `hf://…` URI, a local path, or `local` (default) |
 
 `ask` reuses recall's defaults (`-k 8`, 30 candidates, 30-day half-life, 1 neighbor) and exposes no
 tuning of its own; drop to `funes recall` when you want to adjust retrieval.
 
 ## Failure modes
 
-`ask` errors **before any agent spawns** on: a store that can't be read (missing, empty,
+`ask` errors **before any agent spawns** on: a memory that can't be read (missing, empty,
 unauthorized, no index yet, or unreachable), a missing agent CLI, and — for codex — zero recalled
 passages (there'd be nothing to ground on). A non-zero exit from the agent itself fails `ask`, with
 the child's exit code reported.

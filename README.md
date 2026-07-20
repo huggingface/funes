@@ -14,7 +14,7 @@ or agent can recall from it.
 ## Features at a glance
 
 - **Your agent recalls your past work.** The model spontaneously uses `funes` to recall prior decisions, rationale, and findings mid-task.
-- **One memory across your agents.** Index Claude Code, Codex, and pi into a single store; recall
+- **One memory across your agents.** Index Claude Code, Codex, and pi into a single memory; recall
   spans all of them, and every hit shows which agent it came from.
 - **Your memory is a Hugging Face dataset.** Publish it to the Hugging Face Hub; a teammate,
   another of your machines — or anyone, if you make it public — recalls from it with one flag.
@@ -36,9 +36,9 @@ funes add claude    # or codex, pi, hermes
 
 One command onboards you: your agent gets `recall` and `get` as tools, and — for Claude, Codex, and
 Hermes — funes builds your first index, installs a hook that keeps it current every turn, and (with a
-store bound) publishes at each session boundary. From here you just work. See
-[docs/add.md](docs/add.md) for the agents, store binding, and what a run does; `funes status` tells
-you whether recall is reading your own store yet.
+memory bound) publishes at each session boundary. From here you just work. See
+[docs/add.md](docs/add.md) for the agents, memory binding, and what a run does; `funes status` tells
+you whether recall is reading your own memory yet.
 
 Alternatively, grab a [binary](https://huggingface.co/buckets/huggingface/funes) by hand:
 
@@ -60,9 +60,9 @@ out. To build it yourself, see [Building from source](#building-from-source).
 ## Works across your agents (and models)
 
 Your memory isn't tied to one tool. Because Claude Code, Codex, and pi all index into a single
-store, you can **switch agents without losing anything** — start a task in Claude Code, pick it up
+memory, you can **switch agents without losing anything** — start a task in Claude Code, pick it up
 in Codex next week, and each one recalls the *entire* history, not just its own sessions (every hit
-shows which agent it came from). Any other agent joins the same store via a `.parquet` trace export.
+shows which agent it came from). Any other agent joins the same memory via a `.parquet` trace export.
 
 Models work the same way. funes runs no model of its own, so you reason with whatever your agent
 does — through **pi**, any local model or one served through the Hugging Face router. Switch models
@@ -70,7 +70,7 @@ between sessions and the memory doesn't move.
 
 ## Your memory on the Hub
 
-Your local store is a dataset, and it shares the way one does: publish it to a Hugging Face
+Your local memory is a dataset, and it shares the way one does: publish it to a Hugging Face
 **dataset** repo you own and it becomes an artifact on the Hub like any model or dataset — owned by
 your account or org, gated by your token, readable by whoever you say. Not just the code of a
 project, but the *process* behind it — the decisions, dead ends, and rationale — becomes something
@@ -78,14 +78,14 @@ an agent can recall:
 
 ![pi recalling a past decision from a shared Hugging Face dataset named in the prompt — a project this machine never worked on](docs/img/hub-store.gif)
 
-*A project this machine never worked on: the prompt names `dacorvo/funes-Glint-Research-Fable-5` — ~21.6k chunks on the Hub — and pi recalls the past decision straight from it, one `store` argument on the recall call. Nothing attached, no local index.*
+*A project this machine never worked on: the prompt names `dacorvo/funes-Glint-Research-Fable-5` — ~21.6k chunks on the Hub — and pi recalls the past decision straight from it, one `memory` argument on the recall call. Nothing attached, no local index.*
 
-Bind a store when you add funes to an agent and it recalls from there and keeps it current on its
+Bind a memory when you add funes to an agent and it recalls from there and keeps it current on its
 own; or run the two commands directly:
 
 ```bash
-funes push <user|org>/funes-memory                   # publish your local store's new chunks
-funes recall "..." --store <user|org>/funes-memory   # read any remote store for one call
+funes push <user|org>/funes-memory                    # publish your local memory's new chunks
+funes recall "..." --memory <user|org>/funes-memory   # read any remote memory for one call
 ```
 
 That second form is how you read **someone else's** published memory on a topic, without touching
@@ -94,18 +94,18 @@ always-on gate refuses to push any chunk that still contains a secret. And becau
 is just a dataset, you can try recall **right now**, before indexing anything of your own:
 
 ```bash
-funes recall "why is funes append-only" --store huggingface/funes-memory
+funes recall "why is funes append-only" --memory huggingface/funes-memory
 ```
 
 And to get an **answer** rather than ranked passages, borrow an agent for one question — nothing
 installed:
 
 ```bash
-funes ask claude "why is funes append-only" --store huggingface/funes-memory   # or: funes ask codex
+funes ask claude "why is funes append-only" --memory huggingface/funes-memory   # or: funes ask codex
 ```
 
 See [docs/push.md](docs/push.md) for publishing, the secrets gate, project memories, and inspecting a
-store; [docs/ask.md](docs/ask.md) for grounded answers; [docs/hub-caching.md](docs/hub-caching.md) for
+memory; [docs/ask.md](docs/ask.md) for grounded answers; [docs/hub-caching.md](docs/hub-caching.md) for
 how remote recall caches to local speed.
 
 ## Commands
@@ -114,11 +114,11 @@ how remote recall caches to local speed.
 
 | Command | Docs |
 | --- | --- |
-| `funes add <agent> [store]` | [docs/add.md](docs/add.md) — wire an agent: tools, hooks, store binding |
+| `funes add <agent> [memory]` | [docs/add.md](docs/add.md) — wire an agent: tools, hooks, memory binding |
 | `funes index [path]` | [docs/index.md](docs/index.md) — build/update the memory; sources, incremental, flags |
 | `funes recall "…"` / `funes get …` | [docs/recall.md](docs/recall.md) — recall passages and drill into them |
 | `funes ask <agent> "…"` | [docs/ask.md](docs/ask.md) — borrow an agent for a grounded answer |
-| `funes push <store>` (+ `curate`, `scrub`, `status`) | [docs/push.md](docs/push.md) — publish and share a memory |
+| `funes push <memory>` (+ `curate`, `scrub`, `status`) | [docs/push.md](docs/push.md) — publish and share a memory |
 
 The stable agent-facing output contract for the read commands is specified in [AGENTS.md](AGENTS.md).
 The per-turn indexing and session-boundary publishing the hooks run are detailed in
@@ -128,18 +128,18 @@ The per-turn indexing and session-boundary publishing the hooks run are detailed
 
 `funes add` runs one loop: **index** what you've done, **recall** it when it matters — and index what
 you just did, so it's recallable next time. Both halves are one deterministic pipeline: each source
-is parsed into a generic turn/block shape, chunked, embedded with a pinned local model, and stored in
+is parsed into a generic turn/block shape, chunked, embedded with a pinned local model, and written to
 a local Lance dataset; recall fuses vector + BM25 search, reranks, and reweights by recency. Because
 everything downstream of parsing is source-agnostic, adding an agent means implementing one
 [`TraceSource`](src/source.rs) trait — not touching the indexing or query path.
 
 `funes` shapes its output for agents, not people — so to put a question to a memory yourself, borrow
-an agent: `funes ask` recalls from the store and answers grounded in what it finds, installing
+an agent: `funes ask` recalls from the memory and answers grounded in what it finds, installing
 nothing. `funes recall` prints the raw ranked passages behind an answer, and `funes get` reassembles
 any cited turn in full.
 
 - [docs/index.md](docs/index.md) — the indexing pipeline, tiers, and incremental behavior.
-- [docs/recall.md](docs/recall.md) — retrieval, drill-down with `get`, and reading a shared store.
+- [docs/recall.md](docs/recall.md) — retrieval, drill-down with `get`, and reading a shared memory.
 - [docs/ask.md](docs/ask.md) — borrow an agent for a grounded answer, nothing installed.
 - [docs/automation.md](docs/automation.md) — the per-turn hooks that keep it all fresh.
 
@@ -172,8 +172,8 @@ cargo run --release --features onnx --example bench_backends  # A/B both backend
 
 ## Notes
 
-- **Embedding model is pinned** and stamped into the store; querying with a different embedding
-  model is refused. To change it, rebuild from the transcripts (the store is a disposable derived
+- **Embedding model is pinned** and stamped into the memory; querying with a different embedding
+  model is refused. To change it, rebuild from the transcripts (the memory is a disposable derived
   artifact — the raw text is retained in every row). This is separate from the model you *reason*
   with, which is free to change.
 - **Subagent transcripts** (`.../subagents/agent-*.jsonl`) are indexed too.
