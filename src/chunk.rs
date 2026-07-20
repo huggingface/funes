@@ -34,6 +34,15 @@ impl Tier {
             _ => Tier::Text,
         }
     }
+
+    /// Human label for progress output.
+    pub fn label(self) -> &'static str {
+        match self {
+            Tier::Text => "text",
+            Tier::ToolUse => "tool_use",
+            Tier::ToolResult => "tool_result",
+        }
+    }
 }
 
 #[derive(Clone)]

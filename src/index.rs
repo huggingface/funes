@@ -223,6 +223,9 @@ struct Indexer {
     state_path: PathBuf,
     /// The store didn't exist when this run opened it — the first index.
     first_index: bool,
+    /// A human is watching (stdin is a terminal) — probed once here, so every prompt-or-proceed
+    /// choice in a run agrees.
+    interactive: bool,
     _lock: lock::StoreLock,
     /// The sources and their units, enumerated once at open so the change-stamps are a stable
     /// snapshot; a caller drives them by index via [`Indexer::index_unit`].
@@ -302,6 +305,7 @@ impl Indexer {
             state,
             state_path,
             first_index,
+            interactive: std::io::stdin().is_terminal(),
             _lock,
             sources,
             units,
@@ -316,6 +320,21 @@ impl Indexer {
         self.units.len()
     }
 
+    /// Units still owing work at `tier` — a pure state + signature check, no session read, so a
+    /// caller can plan and estimate a run before touching anything. A signature-less (bulk) unit
+    /// always counts as pending, as [`Indexer::index_unit`] never skips it.
+    fn pending(&self, tier: Tier) -> Vec<usize> {
+        (0..self.units.len())
+            .filter(|&i| {
+                let unit = &self.units[i].1;
+                match &unit.signature {
+                    Some(sig) => !unit_current(self.state.get(&unit.key), sig, tier),
+                    None => true,
+                }
+            })
+            .collect()
+    }
+
     /// Index unit `i` at `tiers` — the one primitive a caller loops over, choosing the tiers and
     /// when to stop. Skips a unit already indexed to the top of `tiers`; a signature-less (bulk)
     /// unit is never skipped — it is re-read every run, and its chunk-id dedup makes that a no-op.
@@ -323,8 +342,8 @@ impl Indexer {
     /// already stored, embeds them in a single append, and stamps the unit's state. Returns the
     /// new-chunk count (0 when skipped, unreadable, or already indexed).
     ///
-    /// `progress` is the caller's label for the per-unit output line — the caller owns the counter
-    /// because only it knows its iteration order and count.
+    /// `progress` is the caller's label for the per-unit output line (e.g. `"text [1/3]"`) — the
+    /// caller owns the counter because only it knows the iteration (which tier, how many owed).
     ///
     /// Add-only-new: a grown session is the same memory — embed and add only its new turns, never
     /// re-embedding or deleting what's unchanged. (A rewritten turn lands under new ids.) A unit's
@@ -506,6 +525,98 @@ pub async fn run_index_remote(uri: &str, no_thinking: bool) -> Result<()> {
     index_sources(vec![src], no_thinking, true).await
 }
 
+/// The wall-clock budget a budgeted run gives itself: it stops at the first whole-session boundary
+/// past this. Deeper tiers and older sessions backfill on later runs.
+const INDEX_BUDGET_SECS: u64 = 60;
+
+/// What a budgeted run does when the budget expires with passes still owed.
+#[derive(Clone, Copy)]
+enum Finish {
+    /// Offer to finish the rest now (interactive only; otherwise stop at the session boundary —
+    /// later runs catch up).
+    Ask,
+    /// Finish everything without asking (`--yes`).
+    All,
+}
+
+/// Build/update the local index from harness session roots, budgeted and tier-major: text across
+/// every session first, then tool_use, then tool_result, stopping at the first whole-session
+/// boundary past the budget. The no-path `funes index` — the per-turn hook advances the backfill
+/// one bounded step per run; an interactive run offers to finish the rest; `yes` finishes it
+/// without asking.
+pub async fn run_index_budgeted(
+    roots: &[(PathBuf, Option<Harness>)],
+    no_thinking: bool,
+    max_sessions: Option<usize>,
+    yes: bool,
+) -> Result<()> {
+    let sources = roots
+        .iter()
+        .map(|(path, harness)| source::open_with_harness(path, max_sessions, *harness))
+        .collect();
+    let finish = if yes { Finish::All } else { Finish::Ask };
+    run_budgeted(sources, no_thinking, &Tier::ALL, finish).await
+}
+
+/// Drive `sources` tier-major — every owed unit at `tiers[0]`, then `tiers[1]`, … — checking the
+/// budget after each whole-session pass; `finish` says what to do when it expires with work left.
+/// The owed passes are computed upfront from state alone (no reading), so the plan and the ETA
+/// reflect what this run actually owes.
+async fn run_budgeted(
+    sources: Vec<Box<dyn source::TraceSource>>,
+    no_thinking: bool,
+    tiers: &[Tier],
+    finish: Finish,
+) -> Result<()> {
+    let mut idx = Indexer::open(sources, no_thinking).await?;
+
+    let owed: Vec<(Tier, Vec<usize>)> = tiers
+        .iter()
+        .map(|&t| (t, idx.pending(t)))
+        .filter(|(_, units)| !units.is_empty())
+        .collect();
+    if owed.is_empty() {
+        return idx.finalize().await;
+    }
+    let report = owed
+        .iter()
+        .map(|(t, u)| format!("{}: {}", t.label(), u.len()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    eprintln!("to index — {report}");
+
+    let start = Instant::now();
+    let budget = Duration::from_secs(INDEX_BUDGET_SECS);
+    let passes: usize = owed.iter().map(|(_, u)| u.len()).sum();
+    let mut done = 0usize;
+    let mut capped = true;
+    'tiers: for (tier, units) in &owed {
+        for (j, &i) in units.iter().enumerate() {
+            let progress = format!("{} [{}/{}]", tier.label(), j + 1, units.len());
+            idx.index_unit(i, &[*tier], &progress).await?;
+            done += 1;
+            if capped && start.elapsed() >= budget {
+                let go_on = match finish {
+                    Finish::All => true,
+                    Finish::Ask if idx.interactive => {
+                        confirm_continue(estimate_remaining(start.elapsed(), done, passes))
+                    }
+                    _ => false,
+                };
+                if !go_on {
+                    eprintln!(
+                        "{} pass(es) left — per-turn indexing (or a `funes index` rerun) picks them up",
+                        passes - done
+                    );
+                    break 'tiers;
+                }
+                capped = false; // finish the rest now
+            }
+        }
+    }
+    idx.finalize().await
+}
+
 /// Index a set of already-opened sources fully — every tier of every unit, one read each — sharing
 /// one embedder, `state.json`, and dataset handle across them (state keyed by absolute path /
 /// `hf://…` shard, so incremental works cross-source). On a first interactive index it estimates
@@ -585,20 +696,54 @@ pub async fn run_index(path: &Path, no_thinking: bool, max_sessions: Option<usiz
 /// A first interactive index estimated at ≥ this many seconds prompts before continuing.
 const FIRST_INDEX_PROMPT_SECS: u64 = 120;
 
+/// Ask `prompt` on stderr and read one stdin line. Enter takes the default; anything but `y`/`yes`
+/// is a no, and EOF or a read error declines — never start long work off a wedged stdin.
+fn confirm(prompt: &str, default_yes: bool) -> bool {
+    eprint!("{prompt} ");
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    match std::io::stdin().read_line(&mut answer) {
+        Ok(n) if n > 0 => match answer.trim().to_ascii_lowercase().as_str() {
+            "" => default_yes,
+            "y" | "yes" => true,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 /// Prompt before a long first index (interactive only): continue all, or bail and re-run with a
 /// `--limit`. Returns whether to proceed.
 fn confirm_full_index(total: usize, est: Duration) -> bool {
-    eprint!(
-        "indexing all {total} sessions is estimated at ~{} (rough, from one session). Continue? [y/N]  \
-         (or re-run with `--limit M` for the most recent M) ",
-        fmt_eta(est)
-    );
-    let _ = std::io::stderr().flush();
-    let mut answer = String::new();
-    if std::io::stdin().read_line(&mut answer).is_err() {
-        return false;
+    confirm(
+        &format!(
+            "indexing all {total} sessions is estimated at ~{} (rough, from one session). Continue? [y/N]  \
+             (or re-run with `--limit M` for the most recent M)",
+            fmt_eta(est)
+        ),
+        false,
+    )
+}
+
+/// After a budgeted pass leaves work unfinished, ask whether to finish the rest now; default yes.
+/// `remaining` is a rough estimate of the time left.
+fn confirm_continue(remaining: Duration) -> bool {
+    confirm(
+        &format!(
+            "more to index (~{} left, rough). Finish it now? [Y/n]  (or let per-turn indexing catch up)",
+            fmt_eta(remaining)
+        ),
+        true,
+    )
+}
+
+/// Extrapolate the time left from the average cost of the passes done so far — cached and cheap
+/// passes count, so the estimate tracks the run's real mix rather than its slowest pass.
+fn estimate_remaining(elapsed: Duration, processed: usize, total: usize) -> Duration {
+    if processed == 0 || processed >= total {
+        return Duration::ZERO;
     }
-    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+    elapsed / processed as u32 * (total - processed) as u32
 }
 
 /// Rough human ETA: "45s", "12 min", "2.3 h".
@@ -639,6 +784,18 @@ mod tests {
         assert!(unit_current(Some(&full), "10:20", Tier::ToolResult));
         // No record → not current.
         assert!(!unit_current(None, "10:20", Tier::Text));
+    }
+
+    #[test]
+    fn estimate_remaining_extrapolates_average_pass_cost() {
+        // 10 of 40 passes done in 20s → 2s/pass, 30 left → 60s.
+        assert_eq!(
+            estimate_remaining(Duration::from_secs(20), 10, 40),
+            Duration::from_secs(60)
+        );
+        // Nothing processed yet, or already done → no estimate.
+        assert_eq!(estimate_remaining(Duration::from_secs(5), 0, 40), Duration::ZERO);
+        assert_eq!(estimate_remaining(Duration::from_secs(5), 40, 40), Duration::ZERO);
     }
 
     #[test]

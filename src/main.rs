@@ -101,8 +101,9 @@ enum Cmd {
         /// Index only the most recent N sessions per source. Omit to index all.
         #[arg(long)]
         limit: Option<usize>,
-        /// Skip the first-index size confirmation, and allow a first index from a non-interactive
-        /// run (a hook/cron) — which is otherwise refused so the long initial build stays manual.
+        /// Don't ask: a budgeted (no-path) run finishes all remaining work instead of offering it;
+        /// an explicit path skips the first-index size confirmation, and a first index is allowed
+        /// from a non-interactive run (otherwise refused so the long initial build stays manual).
         #[arg(long)]
         yes: bool,
     },
@@ -384,6 +385,10 @@ async fn main() -> Result<()> {
             yes,
         } => {
             let harness = harness.map(|h| Harness::parse(&h)).transpose()?;
+            // A harness-dirs refresh (no explicit path — the per-turn hook and the terminal "keep
+            // me fresh" case) is budgeted and text-first; an explicit path or Hub repo is indexed
+            // in full.
+            let budgeted = path.is_none();
             let roots: Vec<(PathBuf, Option<Harness>)> = match path {
                 // An existing local path wins over reading the same string as a repo ref.
                 Some(p) if PathBuf::from(&p).exists() => vec![(PathBuf::from(p), harness)],
@@ -427,7 +432,11 @@ async fn main() -> Result<()> {
                     "no local sessions found — looked in ~/.claude/projects, ~/.codex/sessions, ~/.pi/agent/sessions"
                 ));
             }
-            index::run_index_roots(&roots, no_thinking, limit, yes).await
+            if budgeted {
+                index::run_index_budgeted(&roots, no_thinking, limit, yes).await
+            } else {
+                index::run_index_roots(&roots, no_thinking, limit, yes).await
+            }
         }
         Cmd::Status { store } => {
             print!("{}", recall::status(hub::Store::resolve(store)).await?);
