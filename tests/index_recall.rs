@@ -1,5 +1,5 @@
 //! End-to-end: build a real index from a tiny transcript in a temp dir, then exercise
-//! the read surface (recall / get / list / status). No mocking — this runs the real
+//! the read surface (recall / get / status). No mocking — this runs the real
 //! BGE embedder + reranker (downloaded to the fastembed cache on first run) against a
 //! real Lance store under a temp `$FUNES_HOME`.
 
@@ -39,10 +39,6 @@ async fn index_then_read_surface() {
     let status = funes::recall::status(funes::hub::Store::local()).await.unwrap();
     assert!(status.contains("chunks:"), "status missing chunk count: {status}");
 
-    // list: the session appears under its workdir.
-    let list = funes::recall::list(funes::hub::Store::local(), 50).await.unwrap();
-    assert!(list.contains(&workdir), "list should name the workdir: {list}");
-
     // recall: the parsing turn surfaces, and the `→ get` line carries the full session id.
     let out = funes::recall::recall(
         funes::hub::Store::local(),
@@ -60,6 +56,10 @@ async fn index_then_read_surface() {
     assert!(
         out.contains(&session),
         "recall should surface the indexed session: {out}"
+    );
+    assert!(
+        out.contains(&workdir),
+        "recall provenance should name the workdir: {out}"
     );
 
     // type filter: restrict to tool_use → the Bash call.

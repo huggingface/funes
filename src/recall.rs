@@ -1,4 +1,4 @@
-//! The read surface: `recall`, `list`, `get`, `status` over the existing index.
+//! The read surface: `recall`, `get`, `status` over the existing index.
 //! Recall pipeline: hybrid (vector + BM25, fused by reciprocal rank) → cross-encoder rerank →
 //! recency reweight → neighbor expansion. `recall`/`get` return results rendered in the agent
 //! format; `recall_hits`/`get_turns` return the structured results for other renderings
@@ -602,79 +602,6 @@ async fn attach_neighbors(ds: &Dataset, hits: &mut [&mut Hit], window: i64) -> R
             .collect();
     }
     Ok(())
-}
-
-/// Browse indexed sessions: one line per session, newest activity first.
-pub async fn list(store: Store, limit: usize) -> Result<String> {
-    let read = open_read(&store).await?;
-    let note = read.note.clone().unwrap_or_default();
-    let ds = &read.ds;
-
-    let cols = ["session_id", "workdir", "ts", "role", "text"];
-    let batches = dataset::scan_rows(ds, &cols, None, None).await?;
-
-    struct Sess {
-        workdir: String,
-        chunks: u64,
-        first_ts: String,
-        last_ts: String,
-        first_user: Option<String>,
-    }
-    let mut sessions: BTreeMap<String, Sess> = BTreeMap::new();
-    for batch in batches {
-        let (sess, proj, ts, role, text) = (
-            scol(&batch, "session_id"),
-            scol(&batch, "workdir"),
-            scol(&batch, "ts"),
-            scol(&batch, "role"),
-            scol(&batch, "text"),
-        );
-        for i in 0..batch.num_rows() {
-            let sid = sval(sess, i);
-            let ts_i = sval(ts, i);
-            let s = sessions.entry(sid).or_insert_with(|| Sess {
-                workdir: sval(proj, i),
-                chunks: 0,
-                first_ts: ts_i.clone(),
-                last_ts: ts_i.clone(),
-                first_user: None,
-            });
-            s.chunks += 1;
-            if !ts_i.is_empty() {
-                if s.first_ts.is_empty() || ts_i < s.first_ts {
-                    s.first_ts = ts_i.clone();
-                }
-                if ts_i > s.last_ts {
-                    s.last_ts = ts_i.clone();
-                }
-            }
-            if s.first_user.is_none() && sval(role, i) == "user" {
-                s.first_user = Some(sval(text, i).chars().take(120).collect());
-            }
-        }
-    }
-
-    let mut rows: Vec<(String, Sess)> = sessions.into_iter().collect();
-    rows.sort_by(|a, b| b.1.last_ts.cmp(&a.1.last_ts));
-    rows.truncate(limit);
-
-    let mut out = String::new();
-    for (sid, s) in &rows {
-        let s8 = &sid[..sid.len().min(8)];
-        let _ = writeln!(
-            out,
-            "[{}] {}/{}  chunks={}  {}",
-            s.last_ts,
-            s.workdir,
-            s8,
-            s.chunks,
-            s.first_user.as_deref().unwrap_or("")
-        );
-    }
-    if out.is_empty() {
-        out.push_str("no sessions\n");
-    }
-    Ok(format!("{note}{out}"))
 }
 
 /// Drill down on a recall hit: the named turn plus the turns within `window` of it, rendered in

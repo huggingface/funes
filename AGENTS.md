@@ -75,11 +75,8 @@ recalled passages. A non-zero agent exit fails funes (exit 1, the child's code q
 | --- | --- | --- |
 | `--store` | local store | the store to ground in — `<org>/<repo>`, an `hf://…` URI, a local path, or `local` |
 
-### list / status
+### status
 
-- `funes list [store] [--limit 50]` — sessions, newest activity first:
-  `[<last_ts>] <workdir>/<session8>  chunks=<n>  <first user message, first 120 chars>`.
-  CLI-only; not an MCP tool.
 - `funes status [store]` — store label, table name, chunk count.
 
 ### MCP

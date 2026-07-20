@@ -52,15 +52,6 @@ enum Cmd {
         #[command(flatten)]
         store: StoreOpts,
     },
-    /// List indexed sessions, newest activity first.
-    List {
-        /// Store to read — an `<org>/<repo>` shorthand, an `hf://…` URI, a local path, or `local`.
-        /// Defaults to your local store.
-        store: Option<String>,
-        /// Max sessions to show.
-        #[arg(long, default_value_t = 50)]
-        limit: usize,
-    },
     /// Drill down on a recall hit: a turn plus the turns around it, reassembled.
     Get {
         /// Session id (from a recall hit's `→ get` line).
@@ -329,10 +320,6 @@ async fn main() -> Result<()> {
                     render::recall_agent(&note, &recall::store_hint(store_label.as_deref()), &hits)
                 );
             }
-            Ok(())
-        }
-        Cmd::List { store, limit } => {
-            print!("{}", recall::list(hub::Store::resolve(store), limit).await?);
             Ok(())
         }
         Cmd::Get {
