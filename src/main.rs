@@ -70,22 +70,22 @@ enum Cmd {
         #[command(flatten)]
         store: StoreOpts,
     },
-    /// Ask a coding agent one question, grounded in a store — nothing installed.
+    /// Ask a coding agent one question, grounded in a memory — nothing installed.
     ///
     /// Borrows the agent for a single answer: claude gets funes recall/get as session-only MCP
     /// tools and recalls on its own; codex gets the recalled passages in its prompt (its exec
-    /// mode can't run MCP tools). Name a store with --store to ask against any published memory;
-    /// omit it for your local one.
+    /// mode can't run MCP tools). Name a memory with --memory to ask against any published one;
+    /// omit it for your local memory.
     #[command(
         subcommand_value_name = "AGENT",
         subcommand_help_heading = "Agents",
-        override_usage = "funes ask <AGENT> <QUESTION>... [--store STORE]"
+        override_usage = "funes ask <AGENT> <QUESTION>... [--memory MEMORY]"
     )]
     Ask {
         #[command(subcommand)]
         agent: AskAgent,
     },
-    /// Build or update your local store from session transcripts.
+    /// Build or update your local memory from session transcripts.
     Index {
         /// A transcript tree or `.parquet` file, or a Hub trace repo `<org>/<repo>`. Omit — in a
         /// terminal — to index every known harness dir (~/.claude/projects, ~/.codex/sessions,
@@ -108,15 +108,17 @@ enum Cmd {
     },
     /// Show index statistics.
     Status {
-        /// Store to inspect — an `<org>/<repo>` shorthand, an `hf://…` URI, a local path, or
-        /// `local`. Defaults to your local store.
+        /// Memory to inspect — an `<org>/<repo>` shorthand, an `hf://…` URI, a local path, or
+        /// `local`. Defaults to your local memory.
+        #[arg(value_name = "MEMORY")]
         store: Option<String>,
     },
-    /// Publish your local store's new chunks to a remote store on the HF Hub.
+    /// Publish your local memory's new chunks to a remote memory on the HF Hub.
     Push {
-        /// Store to publish to: `<org>/<repo>` or a full `hf://…` URI.
+        /// Memory to publish to: `<org>/<repo>` or a full `hf://…` URI.
+        #[arg(value_name = "MEMORY")]
         store: String,
-        /// Skip the confirmation when the target shares no chunks with your local store.
+        /// Skip the confirmation when the target shares no chunks with your local memory.
         #[arg(short, long)]
         yes: bool,
         /// Refresh the remote index after pushing (retrying on conflict) even if the unindexed
@@ -124,23 +126,24 @@ enum Cmd {
         #[arg(long)]
         force_reindex: bool,
     },
-    /// Curate a project memory: a store that ships only the sessions you've reviewed and marked
+    /// Curate a project memory: a memory that ships only the sessions you've reviewed and marked
     /// `include`. Your review alone decides what `funes push` ships there.
     Curate {
-        /// The store — the Hub dataset the memory lives in: `<org>/<repo>` or a full `hf://…` URI.
+        /// The memory — the Hub dataset it lives in: `<org>/<repo>` or a full `hf://…` URI.
+        #[arg(value_name = "MEMORY")]
         store: String,
-        /// The project the store is the memory of — the git repo it's about (`huggingface/funes`)
-        /// or a plain label. Give it the first time to name the store; omit to review.
+        /// The project the memory is of — the git repo it's about (`huggingface/funes`) or a plain
+        /// label. Give it the first time to name the memory; omit to review.
         project: Option<String>,
-        /// Mark these sessions `include` — they ship on the next push to this store.
+        /// Mark these sessions `include` — they ship on the next push to this memory.
         #[arg(long, value_name = "SESSION")]
         include: Vec<String>,
-        /// Mark these sessions `exclude` — held back from this store.
+        /// Mark these sessions `exclude` — held back from this memory.
         #[arg(long, value_name = "SESSION")]
         exclude: Vec<String>,
     },
-    /// Redact secrets from your local store in place — for rows indexed before redaction existed (or
-    /// flagged by an updated ruleset); needs no source transcript. Cleans the local store only: it
+    /// Redact secrets from your local memory in place — for rows indexed before redaction existed (or
+    /// flagged by an updated ruleset); needs no source transcript. Cleans the local memory only: it
     /// does NOT scrub an already-published remote, which the push gate can only stop adding to.
     Scrub,
     /// Update funes in place: download the latest release binary for this platform and replace the
@@ -152,20 +155,21 @@ enum Cmd {
     },
     /// Run as an MCP server over stdio (for Claude Code, Cursor, …).
     Mcp {
-        /// Store to serve — an `<org>/<repo>` shorthand, an `hf://…` URI, a local path, or `local`.
-        /// Defaults to your local store.
+        /// Memory to serve — an `<org>/<repo>` shorthand, an `hf://…` URI, a local path, or `local`.
+        /// Defaults to your local memory.
+        #[arg(value_name = "MEMORY")]
         store: Option<String>,
     },
     /// Add funes to a coding agent.
     ///
     /// Installs the `recall`/`get` tools for any agent — and, for claude, codex, and hermes,
-    /// automatic per-turn indexing. Name a store the agent recalls from — and, for claude, codex,
+    /// automatic per-turn indexing. Name a memory the agent recalls from — and, for claude, codex,
     /// and hermes, publishes to — an `<org>/<repo>` shorthand or an `hf://…` URI; omit it to stay
     /// local (the default).
     #[command(
         subcommand_value_name = "AGENT",
         subcommand_help_heading = "Agents",
-        override_usage = "funes add <AGENT> [STORE]"
+        override_usage = "funes add <AGENT> [MEMORY]"
     )]
     Add {
         #[command(subcommand)]
@@ -173,11 +177,12 @@ enum Cmd {
     },
 }
 
-// Flattened into every agent so they share one optional `[STORE]` positional; the user-facing help
+// Flattened into every agent so they share one optional `[MEMORY]` positional; the user-facing help
 // comes from the field doc below.
 #[derive(Args)]
 struct AddStore {
-    /// Store this agent recalls from — `<org>/<repo>`, an `hf://…` URI, or `local` (default).
+    /// Memory this agent recalls from — `<org>/<repo>`, an `hf://…` URI, or `local` (default).
+    #[arg(value_name = "MEMORY")]
     store: Option<String>,
 }
 
@@ -204,8 +209,8 @@ enum AddAgent {
     },
 }
 
-/// The store to bake into an agent's `funes mcp` registration: `None`/blank/`local` → the local
-/// store (a bare `funes mcp`), else the named remote/explicit store (`funes mcp <store>`).
+/// The memory to bake into an agent's `funes mcp` registration: `None`/blank/`local` → the local
+/// memory (a bare `funes mcp`), else the named remote/explicit memory (`funes mcp <memory>`).
 fn baked_store(store: AddStore) -> Option<String> {
     store
         .store
@@ -213,7 +218,7 @@ fn baked_store(store: AddStore) -> Option<String> {
         .filter(|s| !s.is_empty() && s != "local")
 }
 
-// Flattened into every ask agent so they share the question positional and the read `--store`
+// Flattened into every ask agent so they share the question positional and the read `--memory`
 // flag; the user-facing help comes from the field docs.
 #[derive(Args)]
 struct AskArgs {
@@ -236,12 +241,12 @@ enum AskAgent {
     },
 }
 
-/// Which store the read commands act on. Shared by `recall`/`list`/`get`/`status` and `mcp`.
+/// Which memory the read commands act on. Shared by `recall`/`get`/`status`/`ask` and `mcp`.
 #[derive(Args)]
 struct StoreOpts {
-    /// The store to read — an `<org>/<repo>` shorthand, an `hf://…` URI, a local path, or `local`.
-    /// Defaults to your local store.
-    #[arg(long)]
+    /// The memory to read — an `<org>/<repo>` shorthand, an `hf://…` URI, a local path, or `local`.
+    /// Defaults to your local memory.
+    #[arg(long = "memory", value_name = "MEMORY")]
     store: Option<String>,
 }
 
@@ -525,7 +530,7 @@ struct Resolved {
 
 /// Resolve the store `funes add` binds. An explicitly-named store is validated — offer to create it
 /// if it's missing on the Hub (a typo guard). With no store, offer to set one up on the Hub when a
-/// token is present (`<user>/funes-store`); otherwise stay local.
+/// token is present (`<user>/funes-memory`); otherwise stay local.
 async fn resolve_add_store(raw: AddStore) -> Result<Option<Resolved>> {
     match baked_store(raw) {
         Some(store) => {
@@ -694,9 +699,9 @@ async fn ensure_remote_exists(remote: &str) -> Result<bool> {
     }
 }
 
-/// With no store named, offer to set one up on the Hub — but only when a token is present and we can
-/// prompt. Suggests `<user>/funes-store`: use it if it exists, offer to create it if not. Returns the
-/// store to bind (with whether it was just created), or `None` to stay local.
+/// With no memory named, offer to set one up on the Hub — but only when a token is present and we can
+/// prompt. Suggests `<user>/funes-memory`: use it if it exists, offer to create it if not. Returns the
+/// memory to bind (with whether it was just created), or `None` to stay local.
 async fn offer_hub_store() -> Result<Option<Resolved>> {
     let interactive = std::io::stdin().is_terminal();
     if !hub::has_token() {
@@ -705,10 +710,10 @@ async fn offer_hub_store() -> Result<Option<Resolved>> {
         }
         return Ok(None);
     }
-    // A scripted (non-interactive) add can't prompt, so it stays local unless a store was named.
+    // A scripted (non-interactive) add can't prompt, so it stays local unless a memory was named.
     if !interactive
         || !confirm(
-            "Sync your memory to a Hugging Face store, so it follows you across machines? [Y/n] ",
+            "Sync your memory to a Hugging Face dataset, so it follows you across machines? [Y/n] ",
             true,
         )
     {
@@ -721,19 +726,19 @@ async fn offer_hub_store() -> Result<Option<Resolved>> {
             return Ok(None);
         }
     };
-    let store = format!("{user}/funes-store");
+    let store = format!("{user}/funes-memory");
     let uri = format!("hf://datasets/{store}");
     match hub::remote_reachability(&uri).await {
-        hub::Reachability::Ok => {
-            Ok(confirm(&format!("Use your store {store}? [Y/n] "), true).then_some(Resolved { store, created: false }))
-        }
+        hub::Reachability::Ok => Ok(
+            confirm(&format!("Use your memory {store}? [Y/n] "), true).then_some(Resolved { store, created: false })
+        ),
         hub::Reachability::Offline => {
             eprintln!("can't reach the Hub right now — staying local; re-run when you're online.");
             Ok(None)
         }
         hub::Reachability::Missing => {
             if confirm(&format!("Create {store} for your memory? [Y/n] "), true) {
-                hub::create_dataset_repo(&user, "funes-store").await?;
+                hub::create_dataset_repo(&user, "funes-memory").await?;
                 eprintln!("created {store}.");
                 Ok(Some(Resolved { store, created: true }))
             } else {

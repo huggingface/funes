@@ -178,7 +178,7 @@ fn register_claude(root: &Path, has_store: bool, dirty: bool) -> Result<()> {
             let what = if has_store {
                 "indexes each turn and publishes at session boundaries"
             } else {
-                "indexes each turn (local only — pass a store to also publish)"
+                "indexes each turn (local only — pass a memory to also publish)"
             };
             println!("installed the funes hooks plugin into Claude Code — {what} (restart Claude Code if it's running).");
             Ok(())
@@ -226,7 +226,7 @@ fn install_codex(store: Option<&str>) -> Result<()> {
     let what = if store.is_some() {
         "indexes each turn and publishes at session boundaries"
     } else {
-        "indexes each turn (local only — pass a store to also publish)"
+        "indexes each turn (local only — pass a memory to also publish)"
     };
     println!(
         "installed funes hooks into {} ({}) — {what}.",

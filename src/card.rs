@@ -77,22 +77,22 @@ fn render(ctx: &CardCtx) -> String {
     let tags = TAGS.map(|t| format!("  - {t}\n")).concat();
     format!(
         "---\n\
-         pretty_name: funes memory store\n\
+         pretty_name: funes memory\n\
          tags:\n\
          {tags}\
          size_categories:\n  - {band}\n\
          ---\n\
          \n\
-         # funes memory store\n\
+         # funes memory\n\
          \n\
-         A [funes](https://github.com/huggingface/funes) memory store: agent sessions chunked,\n\
-         embedded, and stored as a [Lance](https://lancedb.github.io/lance/) table — a derived\n\
+         A [funes](https://github.com/huggingface/funes) memory: agent sessions chunked,\n\
+         embedded, and written to a [Lance](https://lancedb.github.io/lance/) table — a derived\n\
          index holding verbatim passages with exact provenance, not raw transcripts.\n\
          \n\
          Any agent (or you) can recall from it directly — no local index needed:\n\
          \n\
          ```bash\n\
-         funes recall \"what did we decide about …\" --store {repo}\n\
+         funes recall \"what did we decide about …\" --memory {repo}\n\
          ```\n\
          \n\
          Get funes:\n\
@@ -182,9 +182,9 @@ mod tests {
         assert!(card.contains("\ntags:\n  - funes\n"));
         assert!(card.contains("  - agent-memory\n"));
         assert!(card.contains("\nsize_categories:\n  - 10K<n<100K\n"));
-        assert!(card.contains("\n# funes memory store\n"));
+        assert!(card.contains("\n# funes memory\n"));
         // Body: the recall example names this store; the stats region is marker-delimited.
-        assert!(card.contains("--store acme/kb"));
+        assert!(card.contains("--memory acme/kb"));
         assert!(card.contains(STATS_OPEN) && card.contains(STATS_CLOSE));
         assert!(card.contains("| Chunks | 21,636 |"));
     }

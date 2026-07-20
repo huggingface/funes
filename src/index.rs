@@ -38,14 +38,14 @@ async fn acquire_lock(interactive: bool) -> Result<lock::StoreLock> {
         }
         if attempt < retries {
             eprintln!(
-                "funes: another store operation is in progress; retrying in 5s… ({}/{retries})",
+                "funes: another memory operation is in progress; retrying in 5s… ({}/{retries})",
                 attempt + 1
             );
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
     }
     Err(anyhow!(
-        "another funes store operation is in progress; retry in a moment"
+        "another funes memory operation is in progress; retry in a moment"
     ))
 }
 

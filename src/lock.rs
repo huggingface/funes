@@ -24,7 +24,7 @@ fn open_lockfile() -> Result<File> {
         .write(true)
         .truncate(false)
         .open(&path)
-        .with_context(|| format!("opening the store lock at {}", path.display()))
+        .with_context(|| format!("opening the memory lock at {}", path.display()))
 }
 
 impl StoreLock {
@@ -35,13 +35,13 @@ impl StoreLock {
         match f.try_lock() {
             Ok(()) => Ok(Some(Self(f))),
             Err(TryLockError::WouldBlock) => Ok(None),
-            Err(TryLockError::Error(e)) => Err(e).context("locking the store"),
+            Err(TryLockError::Error(e)) => Err(e).context("locking the memory"),
         }
     }
 
     /// Take the lock, or fail if another store operation holds it. Never blocks.
     pub fn acquire() -> Result<Self> {
         Self::try_acquire()?
-            .ok_or_else(|| anyhow!("another funes store operation is in progress; retry once it finishes"))
+            .ok_or_else(|| anyhow!("another funes memory operation is in progress; retry once it finishes"))
     }
 }

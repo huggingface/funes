@@ -84,7 +84,7 @@ async fn index_then_read_surface() {
     assert!(got.contains("typed blocks"), "get should return the turn text: {got}");
 
     // Every hit names the store it was read from — the default store and an explicit one alike.
-    let default_hint = format!("--store {}", db_dir.path().join("store").display());
+    let default_hint = format!("--memory {}", db_dir.path().join("store").display());
     assert!(
         out.contains(&default_hint),
         "hits should carry the read store `{default_hint}`: {out}"
@@ -103,7 +103,7 @@ async fn index_then_read_surface() {
     )
     .await
     .unwrap();
-    let hint = format!("--store {}", store2.display());
+    let hint = format!("--memory {}", store2.display());
     assert!(
         out2.contains(&hint),
         "explicit-store hits should carry `{hint}`: {out2}"

@@ -23,17 +23,17 @@ pub async fn run() -> Result<()> {
     let _lock = lock::StoreLock::acquire()?;
     let uri = dataset::table_uri(&dataset::local_store_dir());
     let Ok(ds) = dataset::open(&uri, HashMap::new()).await else {
-        println!("no local store to scrub");
+        println!("no local memory to scrub");
         return Ok(());
     };
     let scanner = scan::Trufflehog::find()?;
 
-    eprintln!("loading the local store…");
+    eprintln!("loading the local memory…");
     let batches = dataset::scan_rows(&ds, &[], None, None).await?;
     let chunks = chunk::chunks_from_batches(&batches);
     let total = chunks.len();
     if total == 0 {
-        println!("store is empty");
+        println!("memory is empty");
         return Ok(());
     }
 
@@ -72,7 +72,7 @@ pub async fn run() -> Result<()> {
         }
     }
     if !remove.iter().any(|&r| r) {
-        println!("store is already clean ({total} chunks)");
+        println!("memory is already clean ({total} chunks)");
         return Ok(());
     }
 
@@ -117,7 +117,7 @@ pub async fn run() -> Result<()> {
         base += b.num_rows();
     }
     out.extend(replacement_batch);
-    eprintln!("rewriting the store…");
+    eprintln!("rewriting the memory…");
     let reader = RecordBatchIterator::new(out.into_iter().map(Ok), schema.clone());
     let mut ds = Dataset::write(
         reader,

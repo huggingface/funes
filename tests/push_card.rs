@@ -148,7 +148,7 @@ async fn card_created_refreshed_and_a_hand_card_respected() {
         "the card should count the pushed chunk: {card_created}"
     );
     assert!(
-        card_created.contains(&format!("--store {OWNER}/{name}")),
+        card_created.contains(&format!("--memory {OWNER}/{name}")),
         "the recall example should name this store: {card_created}"
     );
 

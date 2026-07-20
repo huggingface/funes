@@ -239,7 +239,7 @@ async fn degrade_offline(uri: &str) -> Result<Read> {
     match open_for_read(&Store::local()).await? {
         ReadOutcome::Ready(ds) => Ok(Read {
             ds,
-            note: Some(format!("remote {uri} unreachable — recalling from your local store\n")),
+            note: Some(format!("remote {uri} unreachable — recalling from your local memory\n")),
             store_label: Some(Store::local().label()),
         }),
         // No local index either — point at onboarding (a local store is never classified Offline).
@@ -253,7 +253,7 @@ async fn degrade_offline(uri: &str) -> Result<Read> {
 /// hint drills into that store from any context. A hit with no store label yields no suffix.
 pub fn store_hint(read: Option<&str>) -> String {
     match read {
-        Some(label) => format!(" --store {label}"),
+        Some(label) => format!(" --memory {label}"),
         None => String::new(),
     }
 }
@@ -357,7 +357,7 @@ pub async fn recall_hits(
     // with an opaque schema error, so refuse with a clear message instead.
     if harness.is_some() && !has_harness_col(ds) {
         return Err(anyhow!(
-            "this store predates the harness facet — reindex it, or drop --harness"
+            "this memory predates the harness facet — reindex it, or drop --harness"
         ));
     }
     let where_clause = build_where(block_type.as_deref(), harness.as_deref());
@@ -820,7 +820,7 @@ pub async fn status(store: Store) -> Result<String> {
         ReadOutcome::Ready(ds) => {
             let now = Utc::now();
             let rows = ds.count_rows(None).await?;
-            let mut out = format!("store: {}\nchunks: {rows}\n", store.label());
+            let mut out = format!("memory: {}\nchunks: {rows}\n", store.label());
             match &store {
                 Store::Local { .. } => out.push_str(&index_lines(&ds, now).await),
                 Store::Remote { uri } => {
@@ -866,14 +866,14 @@ pub async fn status(store: Store) -> Result<String> {
         ReadOutcome::Offline => {
             let body = Box::pin(status(Store::local())).await?;
             Ok(format!(
-                "remote {} unreachable — showing your local store instead\n{body}",
+                "remote {} unreachable — showing your local memory instead\n{body}",
                 store.label()
             ))
         }
         // No personal index yet: point at the onboarding command instead of erroring. (recall/get/
         // list return a clear "no index" error in the same situation.)
         ReadOutcome::NoIndex => Ok(format!(
-            "store: {}\nno index yet — run `funes add <agent>` to build one (or `funes index`), then recall your own history.\n",
+            "memory: {}\nno index yet — run `funes add <agent>` to build one (or `funes index`), then recall your own history.\n",
             store.label(),
         )),
     }
@@ -951,7 +951,7 @@ mod tests {
     fn store_hint_names_the_read_store() {
         assert_eq!(
             store_hint(Some("hf://datasets/acme/kb")),
-            " --store hf://datasets/acme/kb"
+            " --memory hf://datasets/acme/kb"
         );
         // A hit with no store label yields no suffix.
         assert_eq!(store_hint(None), "");

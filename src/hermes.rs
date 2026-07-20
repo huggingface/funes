@@ -65,7 +65,7 @@ fn install_hooks(store: Option<&str>) -> Result<()> {
         let what = if store.is_some() {
             "indexes each turn and publishes at session boundaries"
         } else {
-            "indexes each turn (local only — pass a store to also publish)"
+            "indexes each turn (local only — pass a memory to also publish)"
         };
         let events: Vec<&str> = entries.iter().map(|(e, _)| *e).collect();
         println!(

@@ -150,7 +150,7 @@ pub async fn run_push(target: Store, force_reindex: bool, confirm: Confirm) -> R
     let uri = match &target {
         Store::Remote { uri } => uri.clone(),
         Store::Local { .. } => {
-            bail!("push target must be a remote `hf://` store — it publishes your local index up to the Hub")
+            bail!("push target must be a remote `hf://` memory — it publishes your local index up to the Hub")
         }
     };
 
@@ -555,7 +555,7 @@ mod tests {
     #[test]
     fn card_file_creates_when_the_remote_has_none() {
         let (body, note) = card_file(Ok(None), &card_ctx(10));
-        assert!(body.expect("a card").contains("--store acme/kb"));
+        assert!(body.expect("a card").contains("--memory acme/kb"));
         assert_eq!(note, "  dataset card created\n");
     }
 

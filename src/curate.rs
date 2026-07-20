@@ -66,7 +66,7 @@ pub async fn name_project(target: &Store, project: &str) -> Result<Named> {
     let uri = match target {
         Store::Remote { uri } => uri.clone(),
         Store::Local { .. } => {
-            bail!("a project memory is a remote store — pass `<org>/<repo>` or an `hf://…` URI")
+            bail!("a project memory must be remote — pass `<org>/<repo>` or an `hf://…` URI")
         }
     };
     match hub::remote_reachability(&uri).await {
@@ -92,7 +92,7 @@ pub async fn name_project(target: &Store, project: &str) -> Result<Named> {
             Ok(Named::Created)
         }
         Err(e) => Err(e.context(format!(
-            "can't read {} to curate it — not treating an unreadable store as absent",
+            "can't read {} to curate it — not treating an unreadable memory as absent",
             target.label()
         ))),
     }
@@ -619,7 +619,7 @@ pub async fn prepare(store: &Store, project: Option<&str>) -> Result<Prepared> {
     let uri = match store {
         Store::Remote { uri } => uri.clone(),
         Store::Local { .. } => {
-            bail!("a project memory is a remote store — pass `<org>/<repo>` or an `hf://…` URI")
+            bail!("a project memory must be remote — pass `<org>/<repo>` or an `hf://…` URI")
         }
     };
     match store.open().await {

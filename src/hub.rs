@@ -55,9 +55,9 @@ impl Store {
         }
     }
 
-    /// Resolve the store the read commands should use: an explicit `spec` (a CLI `--store`), else
-    /// the local index. There is no persisted default — a store binding lives in the caller's
-    /// config (e.g. an agent's `funes mcp --store …` registration), not in funes.
+    /// Resolve the memory the read commands should use: an explicit `spec` (a CLI `--memory`), else
+    /// the local index. There is no persisted default — a memory binding lives in the caller's
+    /// config (e.g. an agent's `funes mcp <memory>` registration), not in funes.
     pub fn resolve(spec: Option<String>) -> Self {
         match spec.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
             Some(s) => Store::parse(&s),
@@ -120,7 +120,9 @@ pub fn is_remote_shorthand(spec: &str) -> bool {
 /// Parse `hf://datasets/<owner>/<name>[/<prefix…>]` into (owner, name, prefix). Empty prefix = repo
 /// root, matching how reads resolve a remote.
 pub fn parse_hf(uri: &str) -> Result<(String, String, String)> {
-    let rest = uri.strip_prefix("hf://").context("remote store must be an hf:// URI")?;
+    let rest = uri
+        .strip_prefix("hf://")
+        .context("remote memory must be an hf:// URI")?;
     let segs: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
     match segs.as_slice() {
         ["datasets", owner, name, prefix @ ..] => Ok((owner.to_string(), name.to_string(), prefix.join("/"))),
@@ -184,7 +186,7 @@ pub fn missing_remote(uri: &str) -> anyhow::Error {
 pub fn empty_remote(uri: &str) -> anyhow::Error {
     anyhow!(
         "{uri} exists on the Hub but holds no index yet — `funes push {uri}` to publish your local \
-         index there, or drop `--store` to read your local index"
+         index there, or drop `--memory` to read your local memory"
     )
 }
 
@@ -305,23 +307,23 @@ fn check_compat(ds: &Dataset) -> Result<()> {
     if let Some(model) = schema.metadata().get("embedding_model") {
         if model != MODEL {
             return Err(anyhow!(
-                "store built with embedding model {model:?}, not funes's {MODEL:?}"
+                "memory built with embedding model {model:?}, not funes's {MODEL:?}"
             ));
         }
     }
 
     let field = schema
         .field_with_name("vector")
-        .map_err(|_| anyhow!("store has no `vector` column"))?;
+        .map_err(|_| anyhow!("memory has no `vector` column"))?;
     if let arrow_schema::DataType::FixedSizeList(_, dim) = field.data_type() {
         if *dim != DIM {
             return Err(anyhow!(
-                "store vector dim {dim} != funes's {DIM}; it was built with a different embedding model"
+                "memory vector dim {dim} != funes's {DIM}; it was built with a different embedding model"
             ));
         }
         Ok(())
     } else {
-        Err(anyhow!("store `vector` column is not a fixed-size list"))
+        Err(anyhow!("memory `vector` column is not a fixed-size list"))
     }
 }
 

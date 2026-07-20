@@ -372,7 +372,7 @@ pub(crate) async fn amend_schema_metadata(
     match send_commit(repo, ops, parent, rev, message).await {
         Ok(_) => Ok(()),
         Err(e) if head_moved(&e) => Err(anyhow::anyhow!(
-            "the store moved while naming it — re-run `funes curate`"
+            "the memory moved while naming it — re-run `funes curate`"
         )),
         Err(e) => Err(anyhow::Error::new(e).context("naming commit failed")),
     }

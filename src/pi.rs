@@ -105,11 +105,11 @@ fn extract(dir: &Path, store: Option<&str>, force: bool) -> Result<()> {
 /// so the extension falls back to the local store.
 fn write_store(path: &Path, store: Option<&str>) -> Result<()> {
     match store {
-        Some(s) => std::fs::write(path, format!("{s}\n")).context("writing the pi store binding"),
+        Some(s) => std::fs::write(path, format!("{s}\n")).context("writing the pi memory binding"),
         None => match std::fs::remove_file(path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(anyhow::Error::new(e).context("clearing the pi store binding")),
+            Err(e) => Err(anyhow::Error::new(e).context("clearing the pi memory binding")),
         },
     }
 }
@@ -171,7 +171,7 @@ mod tests {
     #[test]
     fn embedded_extension_reads_the_store_file() {
         assert!(super::INDEX_TS.contains(r#""store""#));
-        assert!(super::INDEX_TS.contains("FUNES_STORE"));
+        assert!(super::INDEX_TS.contains("FUNES_MEMORY"));
     }
 
     #[test]

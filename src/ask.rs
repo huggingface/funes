@@ -96,7 +96,7 @@ pub async fn codex_grounding(store: Store, question: &str, progress: &(dyn Fn(&s
     .await?;
     if !note.is_empty() {
         // A note despite the check above: the remote dropped mid-recall.
-        bail!("the named store went unreachable during recall — try again once you're back online");
+        bail!("the named memory went unreachable during recall — try again once you're back online");
     }
     if hits.is_empty() {
         bail!("nothing recalled for that question — no passages to ground an answer in");
