@@ -35,7 +35,7 @@ fell back to; the built-in guide has no store to name and keeps a bare hint).
 | `--half-life` | 30 | recency decay in days (a hit this old keeps half its weight); 0 disables |
 | `--neighbors` | 1 | adjacent chunks (by seq) attached per hit; 0 disables |
 | `--type` | — | restrict to `text \| thinking \| tool_use \| tool_result` |
-| `--harness` | — | restrict to `claude \| codex \| pi` (the stored facet `claude_code` also parses) |
+| `--harness` | — | restrict to `claude \| codex \| pi \| hermes` (the stored facet `claude_code` also parses) |
 | `--store` | local store | the store to read — `<org>/<repo>`, an `hf://…` URI, a local path, or `local` |
 
 ### get
@@ -63,8 +63,8 @@ Agent format, per turn:
 
 ### MCP
 
-`funes mcp [store]` serves stdio; `funes add claude|codex|pi|hermes|opencode` registers it (and for
-claude/codex also installs the automation hooks — see [docs/automation.md](docs/automation.md)). A
+`funes mcp [store]` serves stdio; `funes add claude|codex|pi|hermes` registers it (and for
+claude/codex/hermes also installs the automation hooks — see [docs/automation.md](docs/automation.md)). A
 positional `store` binds the server to a store; `funes add <agent> <store>` bakes it into the
 registration. Tools: `recall` (query, k, block_type/harness filters, store), `get`
 (session_id, turn_uuid, window, store), `status` (store) — each returns the corresponding

@@ -62,7 +62,7 @@ To build it yourself instead, see [Building from source](#building-from-source).
 **1. Index — one store for every agent on the machine.**
 
 ```bash
-funes index      # a fast, text-first pass over ~/.claude/projects, ~/.codex/sessions, ~/.pi/agent/sessions
+funes index      # a fast, text-first pass over ~/.claude/projects, ~/.codex/sessions, ~/.pi/agent/sessions, ~/.hermes/state.db
 ```
 
 Run with no arguments and `funes` does a fast, text-first pass over every supported agent's sessions
@@ -71,7 +71,7 @@ it finds, into one store, offering to finish the rest. It's incremental — only
 runs ~2.3 KB/chunk and grows ~6 MB on a heavy day ([storage growth](docs/storage.md)). Point it at a
 path to index one place in full, or scope to a single agent with `--harness codex`.
 
-`funes` can index sessions from: Claude, Codex, Pi
+`funes` can index sessions from: Claude, Codex, Pi, and Hermes — Hermes indexing is **beta**.
 
 **2. Add funes to your agent.**
 
@@ -80,14 +80,14 @@ funes add claude                 # local
 funes add claude acme/kb         # …backed by a shared store you own (sync across machines/team)
 ```
 
-Your agent gets `recall` and `get` as tools, plus instructions on when to use them. For **Claude
-and Codex**, `funes add` also wires the automation: it builds your first index — a fast, text-first
-pass (about a minute, after asking), with deeper content backfilling as you work — installs a hook
-that indexes every turn, and — when you name a shared store — publishes at each
+Your agent gets `recall` and `get` as tools, plus instructions on when to use them. For **Claude,
+Codex, and Hermes**, `funes add` also wires the automation: it builds your first index — a fast,
+text-first pass (about a minute, after asking), with deeper content backfilling as you work —
+installs a hook that indexes every turn, and — when you name a shared store — publishes at each
 session boundary (and does the first push for you). Nothing is left to run by hand; see
 [docs/automation.md](docs/automation.md).
 
-`funes` can be added to: Claude, Codex, Pi, Hermes, OpenCode
+`funes` can be added to: Claude, Codex, Pi, Hermes
 
 **3. Ask your agent — and let it recall.**
 
@@ -97,7 +97,7 @@ small models: every model we tested — down to Gemma 4 E4B — invoked recall *
 than needing to be told to.
 
 That closes the loop: the work you just did becomes recallable the next time you index — and for
-Claude and Codex, `funes add` already installed the hooks that [keep it current](#automate-it) on
+Claude, Codex, and Hermes, `funes add` already installed the hooks that [keep it current](#automate-it) on
 their own.
 
 ## Works across your agents (and models)
@@ -165,15 +165,15 @@ $ echo $?
 
 ## Automate it
 
-`funes index` is incremental and cheap, but you still have to remember to run it — so for Claude and
-Codex, `funes add` already wired it up: every turn indexes automatically, and with a shared store
-bound, each session publishes. See [docs/automation.md](docs/automation.md) for what it installs and
-how it behaves.
+`funes index` is incremental and cheap, but you still have to remember to run it — so for Claude,
+Codex, and Hermes, `funes add` already wired it up: every turn indexes automatically, and with a
+shared store bound, each session publishes. See [docs/automation.md](docs/automation.md) for what it
+installs and how it behaves.
 
 ## How it works
 
 ```
-~/.claude/projects, ~/.codex/sessions, ~/.pi/agent/sessions   (or a .parquet trace)
+~/.claude/projects, ~/.codex/sessions, ~/.pi/agent/sessions, ~/.hermes/state.db   (or a .parquet trace)
    │  parse        deterministic — turns (text / thinking / tool_use / tool_result), tagged by agent
    │  chunk        one chunk per content block, tight provenance
    │  embed        pinned local model (BAAI/bge-small-en-v1.5)

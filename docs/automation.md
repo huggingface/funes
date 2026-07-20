@@ -7,15 +7,16 @@ it behaves; you rarely need to touch any of it by hand.
 
 ## What `funes add` sets up
 
-`funes add claude` and `funes add codex` install, beyond the `recall`/`get` tools:
+`funes add claude`, `funes add codex`, and `funes add hermes` install, beyond the `recall`/`get`
+tools:
 
-- **Per-turn indexing.** A `Stop` hook runs `funes index` after every turn, so your local store
-  tracks the session as it grows — a session killed mid-flight is already indexed up to its last
-  completed turn. Each run is time-boxed (text first, ~60s), so a large backlog fills in a bounded
-  step per turn instead of one long sweep.
-- **Publishing at session boundaries.** Bind a shared store — `funes add claude <org>/<repo>` — and
-  `SessionStart`/`SessionEnd` hooks run `funes push` to publish there. Without a store, indexing is
-  local-only and nothing is published.
+- **Per-turn indexing.** A per-turn hook runs `funes index` after every completed turn, so your
+  local store tracks the session as it grows — a session killed mid-flight is already indexed up to
+  its last completed turn. Each run is time-boxed (text first, ~60s), so a large backlog fills in a
+  bounded step per turn instead of one long sweep.
+- **Publishing at session boundaries.** Bind a shared store — `funes add <agent> <org>/<repo>` — and
+  session-boundary hooks run `funes push` to publish there. Without a store, indexing is local-only
+  and nothing is published.
 
 It also performs the one-time bootstrap steps, so nothing is left to run by hand after it:
 
@@ -28,7 +29,7 @@ It also performs the one-time bootstrap steps, so nothing is left to run by hand
   your local store shares no chunks with is refused off a terminal (the wrong-store guard, below),
   so it must be interactive — `funes add` handles it.
 
-Re-run `funes add claude <org>/<repo>` any time to change the store or refresh the setup — it's
+Re-run `funes add <agent> <org>/<repo>` any time to change the store or refresh the setup — it's
 idempotent.
 
 ## How it's wired
@@ -46,9 +47,16 @@ when they're indexed, and `funes index` re-embeds nothing already stored. Keepin
   dedicated to hooks, not your `config.toml`. The merge is append-or-replace keyed by funes's own
   scripts, so any hooks you added yourself are left untouched. Codex has no session-end event, so it
   publishes on `SessionStart` only.
+- **Hermes** (indexing is **beta**) declares shell hooks in `~/.hermes/config.yaml`. funes merges a `post_llm_call` index
+  hook (fired once per completed turn) and, with a store, `on_session_finalize` + `on_session_start`
+  publish hooks into that file — remove-then-add keyed by funes's own scripts, so your other hooks
+  and config keys are left untouched (comments aren't preserved, as hermes' own `memory setup`
+  rewrites the file the same way). Hermes gates shell hooks behind a consent allowlist
+  (`~/.hermes/shell-hooks-allowlist.json`); funes pre-writes its own approvals so the hooks run from
+  the first turn.
 
-Both agents drive the same two scripts, installed alongside: `funes-index.sh` (the per-turn local
-index) and `funes-push.sh` (the network publish). Each drains the hook payload and re-execs a
+All three agents drive the same two scripts, installed alongside: `funes-index.sh` (the per-turn
+local index) and `funes-push.sh` (the network publish). Each drains the hook payload and re-execs a
 detached worker, so the hook returns in well under a second and never blocks the turn or trips a
 timeout.
 
@@ -60,8 +68,9 @@ timeout.
   re-sweep is cheap.
 - **Published at the boundaries you have.** Claude publishes on `SessionEnd` and again on
   `SessionStart` (catching up anything a missed `SessionEnd` left behind — a disconnect, a closed
-  window). Codex has no session-end event, so it publishes at `SessionStart` only; its last turns
-  publish no sooner than the next Codex session's start.
+  window). Hermes publishes on `on_session_finalize` (its true session end) and again on
+  `on_session_start` (the same catch-up). Codex has no session-end event, so it publishes at
+  `SessionStart` only; its last turns publish no sooner than the next Codex session's start.
 - **Serialized in the binary.** funes holds an advisory lock while it mutates the local store, so
   only one writer touches it at a time, whatever launched it (a hook, a manual `funes index`, `funes
   scrub`). A run that hits the lock fails loudly and re-sweeps next turn (indexing is idempotent).
@@ -81,12 +90,8 @@ timeout.
   machine retired without starting another session keeps its last unpushed turns local. Run `funes
   push <org>/<repo>` by hand before stepping away if that matters.
 
-## pi, and other agents
+## pi
 
 **pi** is trace-only: funes ingests pi sessions by parsing their exported traces, and pi has no hook
-system — so there's no per-turn automation for it. Index its traces directly with `funes index
-<path-or-repo>`.
-
-**hermes** and **opencode** recall from a store, but funes doesn't index them, so `funes add hermes`
-/ `funes add opencode` register recall only. Point them at a shared store to read from —
-`funes add hermes <org>/<repo>`.
+system — so there's no per-turn automation for it. `funes index` sweeps `~/.pi/agent/sessions`
+(re-run it to keep recall fresh), or index a trace directly with `funes index <path-or-repo>`.

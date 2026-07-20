@@ -6,7 +6,7 @@
 
 use funes::harness::Harness;
 use funes::recall::Hit;
-use funes::{claude, codex, curate, hello, hermes, hub, index, mcp, opencode, pi, push, recall, render, scrub, update};
+use funes::{claude, codex, curate, hello, hermes, hub, index, mcp, pi, push, recall, render, scrub, update};
 
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -49,7 +49,7 @@ enum Cmd {
         /// Restrict to a block type: text | thinking | tool_use | tool_result.
         #[arg(long = "type", value_name = "BLOCK_TYPE")]
         block_type: Option<String>,
-        /// Restrict to a harness: claude | codex | pi.
+        /// Restrict to a harness: claude | codex | pi | hermes.
         #[arg(long)]
         harness: Option<String>,
         /// Output format. Default: human in a terminal, agent when piped.
@@ -92,7 +92,7 @@ enum Cmd {
         /// ~/.pi/agent/sessions); `--harness <name>` alone targets one. An automated (non-terminal)
         /// run must name a target.
         path: Option<String>,
-        /// Override harness auto-detection for PATH: claude | codex | pi.
+        /// Override harness auto-detection for PATH: claude | codex | pi | hermes.
         #[arg(long)]
         harness: Option<String>,
         /// Exclude thinking blocks.
@@ -158,10 +158,10 @@ enum Cmd {
     },
     /// Add funes to a coding agent.
     ///
-    /// Installs the `recall`/`get` tools for any agent — and, for claude and codex, automatic
-    /// per-turn indexing. Name a store the agent recalls from — and, for claude and codex,
-    /// publishes to — an `<org>/<repo>` shorthand or an `hf://…` URI; omit it to stay local
-    /// (the default).
+    /// Installs the `recall`/`get` tools for any agent — and, for claude, codex, and hermes,
+    /// automatic per-turn indexing. Name a store the agent recalls from — and, for claude, codex,
+    /// and hermes, publishes to — an `<org>/<repo>` shorthand or an `hf://…` URI; omit it to stay
+    /// local (the default).
     #[command(
         subcommand_value_name = "AGENT",
         subcommand_help_heading = "Agents",
@@ -199,10 +199,6 @@ enum AddAgent {
         force: bool,
     },
     Hermes {
-        #[command(flatten)]
-        store: AddStore,
-    },
-    Opencode {
         #[command(flatten)]
         store: AddStore,
     },
@@ -416,7 +412,7 @@ async fn main() -> Result<()> {
                 None => {
                     if !std::io::stdin().is_terminal() {
                         return Err(anyhow!(
-                            "automated `funes index` needs a target — pass a path or `--harness <claude|codex|pi>`; \
+                            "automated `funes index` needs a target — pass a path or `--harness <claude|codex|pi|hermes>`; \
                              refusing to index all harness roots unattended"
                         ));
                     }
@@ -428,7 +424,7 @@ async fn main() -> Result<()> {
             };
             if roots.is_empty() {
                 return Err(anyhow!(
-                    "no local sessions found — looked in ~/.claude/projects, ~/.codex/sessions, ~/.pi/agent/sessions"
+                    "no local sessions found — looked in ~/.claude/projects, ~/.codex/sessions, ~/.pi/agent/sessions, ~/.hermes/state.db"
                 ));
             }
             if budgeted {
@@ -508,7 +504,7 @@ async fn main() -> Result<()> {
         Cmd::Update { force } => update::run(force).await,
         Cmd::Mcp { store } => mcp::run(store).await,
         Cmd::Add { agent } => match agent {
-            // Claude and Codex have the full local pipeline (index + hooks + push), so `add`
+            // Claude, Codex, and Hermes have the full local pipeline (index + hooks + push), so `add`
             // bootstraps it: build the first index and do the first push — the two one-time steps
             // the hooks can't do unattended — so nothing is left to run by hand.
             AddAgent::Claude { store } => {
@@ -517,11 +513,12 @@ async fn main() -> Result<()> {
             AddAgent::Codex { store } => {
                 bootstrap_add(Harness::Codex, resolve_add_store(store).await?, codex::install).await
             }
+            AddAgent::Hermes { store } => {
+                bootstrap_add(Harness::Hermes, resolve_add_store(store).await?, hermes::install).await
+            }
             // The rest register a read-side integration only (no local pipeline to bootstrap), so
             // they just take the resolved store — the `created` flag only matters to the first push.
             AddAgent::Pi { store, force } => pi::install(resolve_add_store(store).await?.map(|r| r.store), force),
-            AddAgent::Hermes { store } => hermes::install(resolve_add_store(store).await?.map(|r| r.store)),
-            AddAgent::Opencode { store } => opencode::install(resolve_add_store(store).await?.map(|r| r.store)),
         },
     }
 }

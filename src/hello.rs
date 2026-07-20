@@ -29,8 +29,8 @@ pub const PASSAGES: &[(&str, &str)] = &[
     (
         "assistant",
         "Build your store first: run `funes index`. It walks ~/.claude/projects, \
-         ~/.codex/sessions, and ~/.pi/agent/sessions, parses each session, and embeds the turns \
-         into a local store at ~/.funes. It's incremental — \
+         ~/.codex/sessions, ~/.pi/agent/sessions, and ~/.hermes/state.db, parses each session, and \
+         embeds the turns into a local store at ~/.funes. It's incremental — \
          re-running it only adds new turns — so it's cheap to run often.",
     ),
     (
@@ -89,11 +89,11 @@ rationale, and findings mid-task — the exact passages, with provenance, all on
 Getting started
 
   1. Index your sessions       funes index
-     Sweeps ~/.claude/projects, ~/.codex/sessions, and ~/.pi/agent/sessions into one local
-     store. It's incremental, so it's cheap to re-run as you work.
+     Sweeps ~/.claude/projects, ~/.codex/sessions, ~/.pi/agent/sessions, and ~/.hermes/state.db
+     into one local store. It's incremental, so it's cheap to re-run as you work.
 
   2. Add funes to your agent    funes add <agent>
-     Works with claude, codex, pi, hermes, and opencode. Your agent gains `recall` and
+     Works with claude, codex, pi, and hermes. Your agent gains `recall` and
      `get` as tools and reaches for them on its own — no pasting context back in.
 
   3. Just work.
