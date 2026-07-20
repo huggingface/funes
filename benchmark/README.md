@@ -111,10 +111,9 @@ hf download Glint-Research/Fable-5-traces --repo-type dataset \
 FUNES_HOME=./bench-home funes index ./traces/pi_agent/train/0000.parquet
 
 # 3. publish to a Hub dataset repo you own (create it first; funes won't), which re-materializes a
-#    clean, compact dataset on the remote
+#    clean, compact dataset on the remote (--yes accepts the first push to an empty repo)
 hf repo create <org>/<repo> --repo-type dataset
-FUNES_HOME=./bench-home funes use <org>/<repo>
-FUNES_HOME=./bench-home funes push
+FUNES_HOME=./bench-home funes push <org>/<repo> --yes
 ```
 
 `funes index <file>.parquet` indexes the whole file as a bulk import (one append, so the memory stays
