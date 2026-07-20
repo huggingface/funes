@@ -161,8 +161,10 @@ async fn open_for_read(store: &Store) -> Result<ReadOutcome> {
     }
     match store.open().await {
         Ok(ds) => Ok(ReadOutcome::Ready(ds)),
-        // The default local store with no index yet → NoIndex (a clear "run funes add" error below).
-        Err(_) if store.is_default_local() => Ok(ReadOutcome::NoIndex),
+        // The default local store with no dataset yet → NoIndex (a clear "run funes add" error
+        // below). Gated on `is_missing_dataset` so a real open failure (permissions, corruption, an
+        // incompatible schema) isn't masked as "no index" — it falls through to surface as itself.
+        Err(e) if store.is_default_local() && is_missing_dataset(&e) => Ok(ReadOutcome::NoIndex),
         // The Hub refused the read on auth (401/403): a clear message beats lance's opendal dump.
         Err(e) if is_auth_error(&e) => match store {
             Store::Remote { uri } => Err(hub::unauthorized_remote(uri)),
