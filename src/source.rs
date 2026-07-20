@@ -149,6 +149,9 @@ impl TraceSource for JsonlTree {
             Harness::Claude => claude_traces::turns_from_jsonl_file(p, &jsonl::session_id_of(p), &fallback)?,
             Harness::Codex => codex_traces::turns_from_jsonl_file(p, &fallback)?,
             Harness::Pi => pi_traces::turns_from_jsonl_file(p, &jsonl::session_id_of(p), &fallback)?,
+            // hermes keeps its sessions in a SQLite state.db, not a JSONL tree, so it's read by a
+            // dedicated source and never reaches here.
+            Harness::Hermes => anyhow::bail!("hermes sessions are read from state.db, not a JSONL tree"),
         };
         Ok(turns)
     }

@@ -26,6 +26,7 @@ pub mod fetch_store;
 pub mod harness;
 pub mod hello;
 pub mod hermes;
+pub mod hermes_traces;
 pub mod hf_dataset;
 pub mod hf_traces;
 pub mod hooks;

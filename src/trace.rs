@@ -20,6 +20,6 @@ pub struct Turn {
     pub role: String,
     pub blocks: Vec<Block>,
     pub source_path: String,
-    /// Which coding agent produced this session: `claude_code` | `codex` | `pi`.
+    /// Which coding agent produced this session: `claude_code` | `codex` | `pi` | `hermes`.
     pub harness: String,
 }

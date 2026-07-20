@@ -13,6 +13,7 @@ pub enum Harness {
     Claude,
     Codex,
     Pi,
+    Hermes,
 }
 
 /// Session-dir tails funes recognizes, each with its harness. Order also fixes the no-arg scan
@@ -30,26 +31,32 @@ impl Harness {
             Harness::Claude => "claude_code",
             Harness::Codex => "codex",
             Harness::Pi => "pi",
+            Harness::Hermes => "hermes",
         }
     }
 
-    /// The `--harness` spelling `index` accepts and shows in `--help` (`claude`/`codex`/`pi`).
-    /// Differs from [`Harness::as_str`], the stored facet, only for Claude (facet `claude_code`).
+    /// The `--harness` spelling `index` accepts and shows in `--help`
+    /// (`claude`/`codex`/`pi`/`hermes`). Differs from [`Harness::as_str`], the stored facet, only
+    /// for Claude (facet `claude_code`).
     pub fn cli_name(&self) -> &'static str {
         match self {
             Harness::Claude => "claude",
             Harness::Codex => "codex",
             Harness::Pi => "pi",
+            Harness::Hermes => "hermes",
         }
     }
 
-    /// Parse a `--harness` override: `claude`/`claude_code`, `codex`, or `pi`.
+    /// Parse a `--harness` override: `claude`/`claude_code`, `codex`, `pi`, or `hermes`.
     pub fn parse(s: &str) -> Result<Harness> {
         match s {
             "claude" | "claude_code" => Ok(Harness::Claude),
             "codex" => Ok(Harness::Codex),
             "pi" => Ok(Harness::Pi),
-            other => Err(anyhow!("unknown harness {other:?} (expected claude, codex, or pi)")),
+            "hermes" => Ok(Harness::Hermes),
+            other => Err(anyhow!(
+                "unknown harness {other:?} (expected claude, codex, pi, or hermes)"
+            )),
         }
     }
 
@@ -125,6 +132,7 @@ mod tests {
         assert_eq!(Harness::parse("claude_code").unwrap(), Harness::Claude);
         assert_eq!(Harness::parse("codex").unwrap(), Harness::Codex);
         assert_eq!(Harness::parse("pi").unwrap(), Harness::Pi);
+        assert_eq!(Harness::parse("hermes").unwrap(), Harness::Hermes);
         assert!(Harness::parse("gpt").is_err());
     }
 }
