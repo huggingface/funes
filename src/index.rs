@@ -532,8 +532,9 @@ const INDEX_BUDGET_SECS: u64 = 60;
 /// What a budgeted run does when the budget expires with passes still owed.
 #[derive(Clone, Copy)]
 enum Finish {
-    /// Offer to finish the rest now (interactive only; otherwise stop at the session boundary —
-    /// later runs catch up).
+    /// Stop at the session boundary — later runs catch up.
+    Stop,
+    /// Offer to finish the rest now (interactive only; otherwise stop).
     Ask,
     /// Finish everything without asking (`--yes`).
     All,
@@ -556,6 +557,15 @@ pub async fn run_index_budgeted(
         .collect();
     let finish = if yes { Finish::All } else { Finish::Ask };
     run_budgeted(sources, no_thinking, &Tier::ALL, finish).await
+}
+
+/// The `funes add` first index: `root`'s sessions, text tier only, newest first, one whole session
+/// at a time, stopping at the first boundary past the budget — recall works in about a minute.
+/// Deeper tiers and older sessions backfill on later (budgeted) runs. Never prompts: the caller
+/// already asked, and the per-turn drip owns the rest.
+pub async fn run_index_seed(root: &Path, harness: Harness) -> Result<()> {
+    let sources = vec![source::open_with_harness(root, None, Some(harness))];
+    run_budgeted(sources, false, &[Tier::Text], Finish::Stop).await
 }
 
 /// Drive `sources` tier-major — every owed unit at `tiers[0]`, then `tiers[1]`, … — checking the
