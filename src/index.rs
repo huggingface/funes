@@ -154,7 +154,7 @@ async fn stored_ids(ds: &Dataset) -> Result<HashSet<String>> {
 
 /// Redact secrets from a session's turns *before* chunking — so a long key that chunking would
 /// split across pieces is whole when scanned, and never reaches the embedding, the local memory, or
-/// (via push) the Hub. Scans exactly the blocks the pass will memory ([`chunk::block_selected`]), so
+/// (via push) the Hub. Scans exactly the blocks the pass will store ([`chunk::block_selected`]), so
 /// deferred tiers aren't scanned now and a tier-major backfill doesn't re-scan each session per
 /// tier. Best-effort: removes a secret whose value byte-matches the stored text (the common case,
 /// real newlines); anything that resists is caught downstream by the fail-closed push gate.

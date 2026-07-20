@@ -1,4 +1,4 @@
-//! Parse hermes sessions from its SQLite state memory (`~/.hermes/state.db`) into the shared
+//! Parse hermes sessions from its SQLite state store (`~/.hermes/state.db`) into the shared
 //! [`crate::trace`] turn/block model. Unlike Claude/Codex/pi (one JSONL file per session), hermes
 //! keeps every session's messages in one WAL SQLite DB: a `sessions` table (one row per session,
 //! carrying `cwd`) and a `messages` table (one row per message, ordered by the `id` autoincrement).
@@ -31,7 +31,7 @@ pub struct SessionUnit {
     pub watermark: i64,
 }
 
-/// Open the state DB read-only — funes never writes hermes' memory, and a reader takes no lock, so
+/// Open the state DB read-only — funes never writes hermes' store, and a reader takes no lock, so
 /// this is safe while hermes is running (WAL).
 fn open_ro(db: &Path) -> Result<Connection> {
     Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)

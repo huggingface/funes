@@ -22,17 +22,17 @@
 //!
 //! # Why this shape
 //!
-//! **Intercept at the object-memory layer.** Every file an append or optimize produces — data
+//! **Intercept at the object-store layer.** Every file an append or optimize produces — data
 //! fragment, manifest, transaction, index — is written through `object_store`, so it is the one
 //! hook that captures the *whole* write set with no knowledge of Lance's on-disk layout. A
 //! narrower seam can't do it: a custom `CommitHandler` only governs the final manifest commit and
 //! never sees the data fragments, which are written earlier.
 //!
-//! **Decorate Lance's memory rather than inject our own.** Lance does support dependency injection
+//! **Decorate Lance's object store rather than inject our own.** Lance does support dependency injection
 //! (`DatasetBuilder::with_object_store`, now deprecated, or an `ObjectStoreProvider`), but both
-//! make *us* construct the HF memory — reproducing Lance's OpenDAL-hf setup, XET wiring, and
+//! make *us* construct the HF object store — reproducing Lance's OpenDAL-hf setup, XET wiring, and
 //! token/revision plumbing, and keeping it in lockstep. [`WrappingObjectStore`] instead hands us
-//! the memory Lance already built (`wrap`'s `original`), so we decorate it and never reconstruct
+//! the object store Lance already built (`wrap`'s `original`), so we decorate it and never reconstruct
 //! anything. It is also the non-deprecated seam.
 
 use std::collections::{BTreeMap, HashMap};

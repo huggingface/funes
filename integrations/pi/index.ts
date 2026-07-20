@@ -32,18 +32,12 @@ import { dirname, join } from "node:path";
 const FUNES_BIN = process.env.FUNES_BIN || "funes";
 
 // The memory `funes add pi <memory>` wrote beside this extension, or "" if none (local).
-// `store` is the pre-rename filename — read it as a fallback so an install predating the rename
-// keeps its binding until the next `funes add pi` rewrites it.
 function boundMemory(): string {
-  const here = dirname(fileURLToPath(import.meta.url));
-  for (const name of ["memory", "store"]) {
-    try {
-      return readFileSync(join(here, name), "utf8").trim();
-    } catch {
-      /* try the next name */
-    }
+  try {
+    return readFileSync(join(dirname(fileURLToPath(import.meta.url)), "memory"), "utf8").trim();
+  } catch {
+    return "";
   }
-  return "";
 }
 
 const memory = (process.env.FUNES_MEMORY || boundMemory()).trim();
