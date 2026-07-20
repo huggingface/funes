@@ -25,7 +25,7 @@ use std::time::Instant;
 use walkdir::WalkDir;
 
 #[derive(Parser)]
-#[command(about = "Benchmark index build: time, throughput, store compactness")]
+#[command(about = "Benchmark index build: time, throughput, memory compactness")]
 struct Args {
     /// Source to index: a `.parquet` trace dataset or a directory of JSONL transcripts.
     source: PathBuf,
@@ -91,7 +91,7 @@ async fn main() -> Result<()> {
     println!("sessions:         {sessions}");
     println!("chunks:           {chunks}");
     println!("throughput:       {:.0} chunks/s", chunks as f64 / secs.max(0.001));
-    println!("store size:       {mb:.0} MB");
+    println!("memory size:      {mb:.0} MB");
     println!("lance fragments:  {fragments}");
     Ok(())
 }

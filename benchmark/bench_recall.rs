@@ -35,7 +35,7 @@ struct Args {
     /// Dataset to benchmark (`org/repo` or `hf://…`), used for BOTH legs.
     #[arg(long, default_value = "dacorvo/funes-Glint-Research-Fable-5")]
     remote: String,
-    /// Warm iterations timed per store (after the one cold call).
+    /// Warm iterations timed per memory (after the one cold call).
     #[arg(long, default_value_t = 5)]
     iters: usize,
     /// Give the remote leg a throwaway temp HF cache so its cold call is a true download — your real
@@ -173,7 +173,7 @@ async fn main() -> Result<()> {
     );
     println!(
         "{:<8} {:>9} {:>9} {:>9} {:>9} {:>5}",
-        "store", "cold(ms)", "warm_lo", "warm_med", "warm_hi", "hits"
+        "memory", "cold(ms)", "warm_lo", "warm_med", "warm_hi", "hits"
     );
 
     let l = bench_store("local", &local, &a).await?;
