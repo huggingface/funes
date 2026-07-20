@@ -612,31 +612,26 @@ pub async fn run_index_budgeted(
         .map(|(path, harness)| source::open_with_harness(path, max_sessions, *harness))
         .collect();
     let finish = if yes { Finish::All } else { Finish::Ask };
-    run_budgeted(sources, no_thinking, &Tier::ALL, finish).await
+    run_budgeted(sources, no_thinking, finish).await
 }
 
-/// The `funes add` first index: `root`'s sessions, text tier only, newest first, one whole session
-/// at a time, stopping at the first boundary past the budget — recall works in about a minute.
-/// Deeper tiers and older sessions backfill on later (budgeted) runs. Never prompts: the caller
-/// already asked, and the per-turn drip owns the rest.
+/// The `funes add` first index: the budgeted drain with no finish prompt — the add flow already
+/// asked, and the per-turn drip owns whatever the budget defers. Tier-major order spends the
+/// budget on text (decisions, rationale) first, so recall works in about a minute; a small history
+/// simply finishes whole.
 pub async fn run_index_seed(root: &Path, harness: Harness) -> Result<()> {
     let sources = vec![source::open_with_harness(root, None, Some(harness))];
-    run_budgeted(sources, false, &[Tier::Text], Finish::Stop).await
+    run_budgeted(sources, false, Finish::Stop).await
 }
 
-/// Drive `sources` tier-major — every owed unit at `tiers[0]`, then `tiers[1]`, … — checking the
-/// budget after each whole-session pass; `finish` says what to do when it expires with work left.
-/// The owed passes are computed upfront from state alone (no reading), so the plan and the ETA
-/// reflect what this run actually owes.
-async fn run_budgeted(
-    sources: Vec<Box<dyn source::TraceSource>>,
-    no_thinking: bool,
-    tiers: &[Tier],
-    finish: Finish,
-) -> Result<()> {
+/// Drive `sources` tier-major — every owed unit at text, then at tool_use, then at tool_result —
+/// checking the budget after each whole-session pass; `finish` says what to do when it expires
+/// with work left. The owed passes are computed upfront from state alone (no reading), so the plan
+/// and the ETA reflect what this run actually owes.
+async fn run_budgeted(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: bool, finish: Finish) -> Result<()> {
     let mut idx = Indexer::open(sources, no_thinking).await?;
 
-    let owed: Vec<(Tier, Vec<usize>)> = tiers
+    let owed: Vec<(Tier, Vec<usize>)> = Tier::ALL
         .iter()
         .map(|&t| (t, idx.pending(t)))
         .filter(|(_, units)| !units.is_empty())
