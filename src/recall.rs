@@ -180,6 +180,21 @@ async fn open_for_read(store: &Store) -> Result<ReadOutcome> {
     }
 }
 
+/// Pre-flight a store some other process will read on funes's behalf: surface the errors
+/// [`open_for_read`] would (missing/empty/unauthorized remote, no index anywhere), and refuse an
+/// unreachable remote rather than degrading — a caller that named a store must not end up
+/// silently reading a different one.
+pub async fn check_readable(store: &Store) -> Result<()> {
+    match open_for_read(store).await? {
+        ReadOutcome::Ready(_) => Ok(()),
+        ReadOutcome::NoIndex => Err(no_index_error()),
+        ReadOutcome::Offline => Err(anyhow!(
+            "{} is unreachable right now — try again once you're back online",
+            store.label()
+        )),
+    }
+}
+
 /// True if `e` is lance reporting the `chunks.lance` dataset isn't there — the store opened to no
 /// index (an empty or never-pushed remote, or a path with no dataset). Lets reads report an empty
 /// store instead of leaking lance's internal path/`_versions` error.
