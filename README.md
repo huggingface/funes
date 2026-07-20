@@ -71,7 +71,7 @@ it finds, into one store, offering to finish the rest. It's incremental — only
 runs ~2.3 KB/chunk and grows ~6 MB on a heavy day ([storage growth](docs/storage.md)). Point it at a
 path to index one place in full, or scope to a single agent with `--harness codex`.
 
-`funes` can index sessions from: Claude, Codex, Pi, Hermes
+`funes` can index sessions from: Claude, Codex, Pi, and Hermes — Hermes indexing is **beta**.
 
 **2. Add funes to your agent.**
 

@@ -69,7 +69,7 @@ fn install_hooks(store: Option<&str>) -> Result<()> {
         };
         let events: Vec<&str> = entries.iter().map(|(e, _)| *e).collect();
         println!(
-            "installed funes hooks into {} ({}) — {what}.",
+            "installed funes hooks into {} ({}) — {what}. Hermes indexing is beta.",
             config.display(),
             events.join(", ")
         );

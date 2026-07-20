@@ -47,7 +47,7 @@ when they're indexed, and `funes index` re-embeds nothing already stored. Keepin
   dedicated to hooks, not your `config.toml`. The merge is append-or-replace keyed by funes's own
   scripts, so any hooks you added yourself are left untouched. Codex has no session-end event, so it
   publishes on `SessionStart` only.
-- **Hermes** declares shell hooks in `~/.hermes/config.yaml`. funes merges a `post_llm_call` index
+- **Hermes** (indexing is **beta**) declares shell hooks in `~/.hermes/config.yaml`. funes merges a `post_llm_call` index
   hook (fired once per completed turn) and, with a store, `on_session_finalize` + `on_session_start`
   publish hooks into that file — remove-then-add keyed by funes's own scripts, so your other hooks
   and config keys are left untouched (comments aren't preserved, as hermes' own `memory setup`
