@@ -205,60 +205,207 @@ fn unit_current(entry: Option<&UnitState>, sig: &str, target: Tier) -> bool {
     entry.is_some_and(|e| e.sig == sig && e.level >= target)
 }
 
-/// The run-wide indexing state: the local store uri, the dataset (created on the first write), the
-/// embedder, and the optional redaction scanner. Bundling it lets each unit be indexed by a method
-/// instead of threading the same handles through every call.
-struct Indexer<'a> {
-    uri: &'a str,
+/// A set-up indexer: it holds the store lock, embedder, dataset, redaction scanner, and incremental
+/// state, so a caller can index units in whatever batches it likes — one at a time to check the
+/// clock between them, or all at once — without reloading the model. Build the indexes once at the
+/// end with [`Indexer::finalize`].
+struct Indexer {
+    uri: String,
     ds: Option<Dataset>,
+    /// [`stored_ids`] at open plus everything appended this run — the dedup baseline for new chunks.
+    existing: HashSet<String>,
     embedder: Box<dyn Embedder>,
-    scanner: Option<&'a dyn scan::SecretScanner>,
+    scanner: Option<scan::Trufflehog>,
     include_thinking: bool,
     /// cwd → resolved `repo` value, so each distinct checkout runs `git` once across the run.
     repo_cache: HashMap<String, String>,
+    state: HashMap<String, UnitState>,
+    state_path: PathBuf,
+    /// The store didn't exist when this run opened it — the first index.
+    first_index: bool,
+    _lock: lock::StoreLock,
+    /// The sources and their units, enumerated once at open so the change-stamps are a stable
+    /// snapshot; a caller drives them by index via [`Indexer::index_unit`].
+    sources: Vec<Box<dyn source::TraceSource>>,
+    units: Vec<(usize, source::Unit)>,
+    n_sessions: u64,
+    n_skipped: u64,
+    n_chunks: u64,
 }
 
-impl Indexer<'_> {
-    /// Index one unit's turns: redact, chunk, keep only chunks whose id isn't already stored, and
-    /// embed those in a single append. Returns `(sessions read, new chunks added)`. `key` names the
-    /// unit in logs (and is the label when the unit has no sessions).
+impl Indexer {
+    /// Acquire the store lock, open (or plan to create) the dataset, load incremental state, bring
+    /// up the embedder and secret scanner, and enumerate `sources`' units.
+    async fn open(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: bool) -> Result<Indexer> {
+        let dir = dataset::funes_dir();
+        std::fs::create_dir_all(&dir)?;
+        // Held for the whole run so the stored-id read and the appends see one stable version.
+        let _lock = lock::StoreLock::acquire()?;
+
+        let uri = dataset::table_uri(&dataset::local_store_dir());
+        let ds = dataset::open(&uri, HashMap::new()).await.ok();
+
+        // Model-pin: refuse to add to a store built with a different embedding model. The id rides
+        // in the dataset's schema metadata; a pre-metadata store (no id) is tolerated and guarded
+        // only by the dimension check until it is reindexed.
+        if let Some(ds) = &ds {
+            let schema = arrow_schema::Schema::from(ds.schema());
+            if let Some(em) = schema.metadata().get("embedding_model") {
+                if em != MODEL {
+                    return Err(anyhow!("index built with model {em:?}, refusing to mix with {MODEL:?}"));
+                }
+            }
+        }
+
+        let first_index = ds.is_none();
+
+        // Incremental state: path -> {size:mtime stamp, tier}; an unreadable or old-schema file → empty.
+        let state_path = dir.join("state.json");
+        let state = std::fs::read_to_string(&state_path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+
+        let embedder: Box<dyn Embedder> = inference::embedder()?;
+        // Best-effort secret redaction: if the scanner isn't installed, indexing continues
+        // unredacted — the push gate still scans, fail-closed, before any upload, so a secret can't
+        // reach the Hub.
+        let scanner = match scan::Trufflehog::find() {
+            Ok(s) => Some(s),
+            Err(e) => {
+                eprintln!("note: secret redaction disabled — {e}");
+                None
+            }
+        };
+
+        let existing = match &ds {
+            Some(d) => stored_ids(d).await?,
+            None => HashSet::new(),
+        };
+
+        // Each source orders its own units (recency-desc, subagents last); tag each with its source.
+        let mut units = Vec::new();
+        for (i, src) in sources.iter().enumerate() {
+            for unit in src.units()? {
+                units.push((i, unit));
+            }
+        }
+
+        Ok(Indexer {
+            uri,
+            ds,
+            existing,
+            embedder,
+            scanner,
+            include_thinking: !no_thinking,
+            repo_cache: HashMap::new(),
+            state,
+            state_path,
+            first_index,
+            _lock,
+            sources,
+            units,
+            n_sessions: 0,
+            n_skipped: 0,
+            n_chunks: 0,
+        })
+    }
+
+    /// Number of units this run will consider.
+    fn unit_count(&self) -> usize {
+        self.units.len()
+    }
+
+    /// Index unit `i` at `tiers` — the one primitive a caller loops over, choosing the tiers and
+    /// when to stop. Skips a unit already indexed to the top of `tiers`; a signature-less (bulk)
+    /// unit is never skipped — it is re-read every run, and its chunk-id dedup makes that a no-op.
+    /// Otherwise reads the unit, redacts, chunks those tiers, keeps only chunks whose id isn't
+    /// already stored, embeds them in a single append, and stamps the unit's state. Returns the
+    /// new-chunk count (0 when skipped, unreadable, or already indexed).
+    ///
+    /// `progress` is the caller's label for the per-unit output line — the caller owns the counter
+    /// because only it knows its iteration order and count.
     ///
     /// Add-only-new: a grown session is the same memory — embed and add only its new turns, never
     /// re-embedding or deleting what's unchanged. (A rewritten turn lands under new ids.) A unit's
-    /// turns are written in one append, so a bulk source (many sessions in one unit) stays a
-    /// single Lance fragment rather than one per session.
-    async fn index_unit(&mut self, progress: &str, key: &str, mut turns: Vec<trace::Turn>) -> Result<(u64, u64)> {
-        let (sessions, label) = unit_summary(&turns, key);
+    /// turns are written in one append, so a bulk source (many sessions in one unit) stays a single
+    /// Lance fragment rather than one per session.
+    async fn index_unit(&mut self, i: usize, tiers: &[Tier], progress: &str) -> Result<u64> {
+        let target = *tiers.iter().max().expect("a pass covers at least one tier");
+        let (src_i, key, sig) = {
+            let (si, unit) = &self.units[i];
+            (*si, unit.key.clone(), unit.signature.clone())
+        };
 
-        if let Some(scanner) = self.scanner {
-            redact_turns(&mut turns, scanner, &chunk::Tier::ALL, self.include_thinking)?;
+        if let Some(sig) = &sig {
+            if unit_current(self.state.get(&key), sig, target) {
+                self.n_skipped += 1;
+                return Ok(0);
+            }
         }
-        let mut chunks = chunk::chunks_from_turns(&turns, &chunk::Tier::ALL, self.include_thinking);
-        let repo = self.repo_for(key);
+
+        // Best-effort sources retry a failed read next run (no state recorded); a fatal source
+        // aborts rather than silently dropping data.
+        let mut turns = {
+            let src = &self.sources[src_i];
+            match src.read(&self.units[i].1) {
+                Ok(t) => t,
+                Err(e) if !src.fatal_on_read_error() => {
+                    eprintln!("{progress} {key} — read failed, skipping: {e}");
+                    return Ok(0);
+                }
+                Err(e) => return Err(e),
+            }
+        };
+
+        let (sessions, label) = unit_summary(&turns, &key);
+        let first_time = !self.state.contains_key(&key);
+        if let Some(scanner) = &self.scanner {
+            redact_turns(&mut turns, scanner, tiers, self.include_thinking)?;
+        }
+        let mut chunks = chunk::chunks_from_turns(&turns, tiers, self.include_thinking);
+        let repo = self.repo_for(&key);
         if !repo.is_empty() {
             for c in &mut chunks {
                 c.repo.clone_from(&repo);
             }
         }
         let total_chunks = chunks.len();
-        if total_chunks == 0 {
+        let added = if total_chunks == 0 {
             eprintln!("{progress} {label} — no indexable content");
-            return Ok((sessions, 0));
-        }
-
-        let existing = match &self.ds {
-            Some(d) => stored_ids(d).await?,
-            None => HashSet::new(),
+            0
+        } else {
+            let new_chunks: Vec<chunk::Chunk> = chunks.into_iter().filter(|c| !self.existing.contains(&c.id)).collect();
+            if new_chunks.is_empty() {
+                eprintln!("{progress} {label} — {total_chunks} chunks, all already indexed");
+                0
+            } else {
+                eprintln!("{progress} {label} — {} new of {total_chunks} chunks", new_chunks.len());
+                let n = self.embed_and_write(&new_chunks).await?;
+                self.existing.extend(new_chunks.into_iter().map(|c| c.id));
+                n
+            }
         };
-        let new_chunks: Vec<chunk::Chunk> = chunks.into_iter().filter(|c| !existing.contains(&c.id)).collect();
-        if new_chunks.is_empty() {
-            eprintln!("{progress} {label} — {total_chunks} chunks, all already indexed");
-            return Ok((sessions, 0));
-        }
 
-        eprintln!("{progress} {label} — {} new of {total_chunks} chunks", new_chunks.len());
-        let added = self.embed_and_write(&new_chunks).await?;
-        Ok((sessions, added))
+        // Record state only for signed units, even when they produced no chunks ("remembered when
+        // empty"), and persist after each so an interrupted run is resumable.
+        if let Some(sig) = &sig {
+            self.state.insert(
+                key.clone(),
+                UnitState {
+                    sig: sig.clone(),
+                    level: target,
+                },
+            );
+            std::fs::write(&self.state_path, serde_json::to_string_pretty(&self.state)?)?;
+        }
+        // Count a unit's sessions once — the first time it's indexed; later tier passes only add
+        // chunks to sessions already counted.
+        if first_time {
+            self.n_sessions += sessions;
+        }
+        self.n_chunks += added;
+        Ok(added)
     }
 
     /// The session's repo(s) for the unit at `key`, resolved from its transcript's cwd and cached
@@ -292,16 +439,42 @@ impl Indexer<'_> {
 
         let batch = build_batch(new_chunks, &vectors)?;
         let reader = RecordBatchIterator::new(vec![Ok(batch)], schema());
-        let uri = self.uri;
+        let uri = self.uri.clone();
         match &mut self.ds {
             Some(d) => {
                 d.append(reader, None).await?;
             }
             None => {
-                self.ds = Some(Dataset::write(reader, uri, Some(WriteParams::default())).await?);
+                self.ds = Some(Dataset::write(reader, &uri, Some(WriteParams::default())).await?);
             }
         }
         Ok(n as u64)
+    }
+
+    /// Build the FTS + IVF_PQ indexes (best-effort), reap superseded versions, and print the run
+    /// summary. Consumes the indexer, releasing the store lock. The vector index bounds how much a
+    /// query reads — what makes recall over a remote (hf://) tier lazy rather than a full scan; lance
+    /// enforces its own training minimum (256 rows) and skips below it, falling back to brute force.
+    async fn finalize(mut self) -> Result<()> {
+        if let Some(d) = &mut self.ds {
+            dataset::build_indexes(d, |phase| eprintln!("building {phase}…")).await;
+
+            // Reap superseded versions — best-effort; on failure the reap waits for next run.
+            match d.cleanup_old_versions(chrono::Duration::minutes(10), None, None).await {
+                Ok(stats) if stats.bytes_removed > 0 => eprintln!(
+                    "reclaimed {:.1} MB from {} old version(s)",
+                    stats.bytes_removed as f64 / 1e6,
+                    stats.old_versions
+                ),
+                Ok(_) => {}
+                Err(e) => eprintln!("note: version cleanup skipped — {e}"),
+            }
+        }
+        println!(
+            "indexed sessions={} skipped={} chunks={}",
+            self.n_sessions, self.n_skipped, self.n_chunks
+        );
+        Ok(())
     }
 }
 
@@ -333,179 +506,73 @@ pub async fn run_index_remote(uri: &str, no_thinking: bool) -> Result<()> {
     index_sources(vec![src], no_thinking, true).await
 }
 
-/// Index a set of already-opened sources into the local store, sharing one embedder, `state.json`,
-/// and dataset handle across them (state keyed by absolute path / `hf://…` shard, so incremental
-/// works cross-source). The wrappers above open the sources; this drives the
-/// units→skip→read→embed→write loop and builds the indexes once.
+/// Index a set of already-opened sources fully — every tier of every unit, one read each — sharing
+/// one embedder, `state.json`, and dataset handle across them (state keyed by absolute path /
+/// `hf://…` shard, so incremental works cross-source). On a first interactive index it estimates
+/// the run after the first session and asks before the long haul.
 async fn index_sources(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: bool, yes: bool) -> Result<()> {
-    let include_thinking = !no_thinking;
-    let dir = dataset::funes_dir();
-    std::fs::create_dir_all(&dir)?;
-
-    // Held for the whole run so the stored-id read and the appends below see one stable version.
-    let _lock = lock::StoreLock::acquire()?;
-
-    let uri = dataset::table_uri(&dataset::local_store_dir());
-    let ds = dataset::open(&uri, HashMap::new()).await.ok();
-
-    // Model-pin: refuse to add to a store built with a different embedding model. The id rides
-    // in the dataset's schema metadata; a pre-metadata store (no id) is tolerated and guarded only
-    // by the dimension check until it is reindexed.
-    if let Some(ds) = &ds {
-        let schema = arrow_schema::Schema::from(ds.schema());
-        if let Some(em) = schema.metadata().get("embedding_model") {
-            if em != MODEL {
-                return Err(anyhow!("index built with model {em:?}, refusing to mix with {MODEL:?}"));
-            }
-        }
-    }
-
-    let first_index = ds.is_none();
     let interactive = std::io::stdin().is_terminal();
 
     // A first index can take a long time; never let an automated run (no TTY — a hook, cron) trigger
     // it. Fail closed like push's new-store guard: require a manual `funes index` first, or --yes to
     // force. Exit 0 so a session-end hook isn't treated as failed.
-    if first_index && !yes && !interactive {
-        eprintln!(
-            "funes: no index yet — run `funes index` in a terminal first to build the initial index \
-             (one-time; it can take a while), or pass --yes to force it here. Skipping."
-        );
-        return Ok(());
+    if !yes && !interactive {
+        let uri = dataset::table_uri(&dataset::local_store_dir());
+        if dataset::open(&uri, HashMap::new()).await.is_err() {
+            eprintln!(
+                "funes: no index yet — run `funes index` in a terminal first to build the initial index \
+                 (one-time; it can take a while), or pass --yes to force it here. Skipping."
+            );
+            return Ok(());
+        }
     }
 
-    // Incremental state: path -> {size:mtime stamp, tier}; an unreadable or old-schema file → empty.
-    let state_path = dir.join("state.json");
-    let mut state: HashMap<String, UnitState> = std::fs::read_to_string(&state_path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
-    // This run indexes every tier, so a unit counts as current only once it has reached the highest.
+    let mut indexer = Indexer::open(sources, no_thinking).await?;
+    let total = indexer.unit_count();
+
+    // Per-source tally. This run indexes every tier, so a unit counts as cached only once it has
+    // reached the highest.
     let target = *Tier::ALL.iter().max().expect("Tier::ALL is non-empty");
-
-    let embedder: Box<dyn Embedder> = inference::embedder()?;
-    // Best-effort secret redaction: if the scanner isn't installed, indexing continues unredacted —
-    // the push gate still scans, fail-closed, before any upload, so a secret can't reach the Hub.
-    let scanner = match scan::Trufflehog::find() {
-        Ok(s) => Some(s),
-        Err(e) => {
-            eprintln!("note: secret redaction disabled — {e}");
-            None
+    for (si, src) in indexer.sources.iter().enumerate() {
+        let units = indexer.units.iter().filter(|(i, _)| *i == si);
+        let (mut n, mut cached) = (0usize, 0usize);
+        for (_, u) in units {
+            n += 1;
+            if u.signature
+                .as_ref()
+                .is_some_and(|s| unit_current(indexer.state.get(&u.key), s, target))
+            {
+                cached += 1;
+            }
         }
-    };
-    let scanner = scanner.as_ref().map(|s| s as &dyn scan::SecretScanner);
+        eprintln!("{} — {} to index, {cached} cached", src.describe(), n - cached);
+    }
 
-    let mut indexer = Indexer {
-        uri: &uri,
-        ds,
-        embedder,
-        scanner,
-        include_thinking,
-        repo_cache: HashMap::new(),
-    };
     // First interactive index: after the first session lands, estimate the whole run from its time
     // and — if it looks long — ask whether to continue or bail and re-run with --limit.
-    let mut probe_pending = first_index && !yes && interactive;
-    // Only that estimate needs the grand total up front (a cheap stat-only pass); an incremental run
-    // skips it and enumerates each source lazily in the loop, holding nothing for the whole run.
-    let total_units: usize = if probe_pending {
-        sources.iter().map(|s| s.units().map(|u| u.len()).unwrap_or(0)).sum()
-    } else {
-        0
-    };
+    let mut probe_pending = indexer.first_index && !yes && interactive;
 
-    let (mut n_sessions, mut n_skipped, mut n_chunks) = (0u64, 0u64, 0u64);
-    'sources: for src in &sources {
-        let units = src.units()?;
-        let total = units.len();
-        let cached = units
-            .iter()
-            .filter(|u| {
-                u.signature
-                    .as_ref()
-                    .is_some_and(|s| unit_current(state.get(&u.key), s, target))
-            })
-            .count();
-        eprintln!("{} — {} to index, {cached} cached", src.describe(), total - cached);
+    for i in 0..total {
+        // Time from before the read so a first-index estimate covers parse + I/O, not just embedding.
+        let t_unit = Instant::now();
+        let progress = format!("[{}/{}]", i + 1, total);
+        let added = indexer.index_unit(i, &Tier::ALL, &progress).await?;
 
-        for (idx, unit) in units.iter().enumerate() {
-            // Skip a unit only if it carries a signature that still matches what's recorded; a
-            // signature-less (bulk) unit has none, so it's never skipped here — always re-read (its
-            // chunk-id dedup makes a re-run a no-op).
-            if let Some(sig) = &unit.signature {
-                if unit_current(state.get(&unit.key), sig, target) {
-                    n_skipped += 1;
-                    continue;
-                }
-            }
-            let progress = format!("[{}/{}]", idx + 1, total);
-            // Time from before the read so a first-index estimate covers parse + I/O, not just embedding.
-            let t_unit = Instant::now();
-            let turns = match src.read(unit) {
-                Ok(t) => t,
-                // Best-effort sources retry a failed read next run (no state recorded); a fatal
-                // source aborts rather than silently dropping data.
-                Err(e) if !src.fatal_on_read_error() => {
-                    eprintln!("{progress} {} — read failed, skipping: {e}", unit.key);
-                    continue;
-                }
-                Err(e) => return Err(e),
-            };
-            let (sessions, added) = indexer.index_unit(&progress, &unit.key, turns).await?;
-            n_sessions += sessions;
-            n_chunks += added;
-
-            // Record state only for signed units, even when they produced no chunks ("remembered
-            // when empty"), and persist after each so an interrupted run is resumable.
-            // Signature-less (bulk) units are never recorded: a re-run re-reads and dedups to a no-op.
-            if let Some(sig) = &unit.signature {
-                state.insert(
-                    unit.key.clone(),
-                    UnitState {
-                        sig: sig.clone(),
-                        level: target,
-                    },
+        // Estimate off the first session that actually embedded, and ask before a long haul.
+        if probe_pending && added > 0 {
+            probe_pending = false;
+            let est = t_unit.elapsed().mul_f64(total as f64);
+            if est >= Duration::from_secs(FIRST_INDEX_PROMPT_SECS) && !confirm_full_index(total, est) {
+                eprintln!(
+                    "stopped after 1 session (kept — the index is resumable). Re-run \
+                     `funes index --limit M` for the most recent M, or `funes index` to do all."
                 );
-                std::fs::write(&state_path, serde_json::to_string_pretty(&state)?)?;
-            }
-
-            // Estimate off the first session that actually embedded, and ask before a long haul.
-            if probe_pending && added > 0 {
-                probe_pending = false;
-                let est = t_unit.elapsed().mul_f64(total_units as f64);
-                if est >= Duration::from_secs(FIRST_INDEX_PROMPT_SECS) && !confirm_full_index(total_units, est) {
-                    eprintln!(
-                        "stopped after 1 session (kept — the index is resumable). Re-run \
-                         `funes index --limit M` for the most recent M, or `funes index` to do all."
-                    );
-                    break 'sources;
-                }
+                break;
             }
         }
     }
 
-    // Build the FTS + IVF_PQ indexes (best-effort). The vector index bounds how much a query reads,
-    // which is what makes recall over a remote (hf://) tier lazy instead of a full-column scan; lance
-    // enforces its own training minimum (256 rows for default IVF_PQ) and skips below it, so recall
-    // falls back to brute-force vector search.
-    if let Some(d) = &mut indexer.ds {
-        dataset::build_indexes(d, |phase| eprintln!("building {phase}…")).await;
-
-        // Reap superseded versions — best-effort; on failure the reap waits for next run.
-        match d.cleanup_old_versions(chrono::Duration::minutes(10), None, None).await {
-            Ok(stats) if stats.bytes_removed > 0 => eprintln!(
-                "reclaimed {:.1} MB from {} old version(s)",
-                stats.bytes_removed as f64 / 1e6,
-                stats.old_versions
-            ),
-            Ok(_) => {}
-            Err(e) => eprintln!("note: version cleanup skipped — {e}"),
-        }
-    }
-
-    println!("indexed sessions={n_sessions} skipped={n_skipped} chunks={n_chunks}");
-
-    Ok(())
+    indexer.finalize().await
 }
 
 /// Build/update the local index from a single source root, auto-detecting its harness — a thin
