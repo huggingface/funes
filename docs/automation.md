@@ -17,13 +17,13 @@ it behaves; you rarely need to touch any of it by hand.
   `SessionStart`/`SessionEnd` hooks run `funes push` to publish there. Without a store, indexing is
   local-only and nothing is published.
 
-It also performs the one-time bootstrap the hooks are forbidden to do unattended, so nothing is left
-to run by hand after it:
+It also performs the one-time bootstrap steps, so nothing is left to run by hand after it:
 
 - **Builds your first index** (from that agent's sessions) if you don't have one yet — a fast,
   text-first pass that gets recall working in about a minute, after asking. Deeper content and older
-  sessions backfill on later turns. The hooks never trigger a first index; `funes add` does, once you
-  accept.
+  sessions backfill on later turns. The hooks alone would also fill a cold store, one bounded step
+  per turn; `funes add` builds the most valuable part upfront so recall works from your first
+  session.
 - **Does the first push** to a freshly-bound store. The push hook can't: a first publish to a store
   your local store shares no chunks with is refused off a terminal (the wrong-store guard, below),
   so it must be interactive — `funes add` handles it.
