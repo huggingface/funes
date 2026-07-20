@@ -55,8 +55,9 @@ fn session_workdir(conn: &Connection, session_id: &str) -> Result<Option<String>
 /// unchanged since the last index is skipped.
 pub fn sessions_with_watermark(db: &Path) -> Result<Vec<SessionUnit>> {
     let conn = open_ro(db)?;
-    // LEFT of the join would include empty sessions; an inner join drops them — there's nothing to
-    // index. `sessions.cwd` may be absent for a message's session (no FK row), so coalesce to ''.
+    // `messages` drives the query, so a session with no messages is already excluded (nothing to
+    // index) whatever the join. The join is LEFT to tolerate a message whose `session_id` has no
+    // `sessions` row: `sessions.cwd` is then NULL, coalesced to '' (workdir falls back).
     let mut stmt = conn.prepare(
         "SELECT m.session_id, COALESCE(s.cwd, ''), MAX(m.id) \
          FROM messages m LEFT JOIN sessions s ON s.id = m.session_id \

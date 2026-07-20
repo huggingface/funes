@@ -61,9 +61,17 @@ struct Desired {
 
 /// `bash "<script>" "<arg>"` — the hook command line. `script` is a path or a `${CLAUDE_PLUGIN_ROOT}`
 /// expression (Claude expands the latter before the shell runs it); double-quoted so a space
-/// survives. Also used by hermes' YAML hook install.
+/// survives. Also used by hermes' YAML hook install. `"`/`\` in either field are escaped so a value
+/// with a quote can't break out of the double-quotes (`$` is left intact so `${CLAUDE_PLUGIN_ROOT}`
+/// still expands).
 pub fn command(script: &str, arg: &str) -> String {
-    format!("bash \"{script}\" \"{arg}\"")
+    format!("bash \"{}\" \"{}\"", dquote_escape(script), dquote_escape(arg))
+}
+
+/// Escape a value for embedding inside a double-quoted shell string: backslash then double-quote.
+/// A no-op for ordinary paths and harness/store names.
+fn dquote_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 /// The funes hook set: a per-turn index (always) and, with a bound `store`, a publish on each
@@ -331,6 +339,19 @@ mod tests {
             command: command("/h/funes-index.sh", harness),
             status: "idx",
         }
+    }
+
+    #[test]
+    fn command_escapes_quotes_but_keeps_dollar() {
+        // Ordinary paths/args are untouched.
+        assert_eq!(command("/h/x.sh", "claude"), "bash \"/h/x.sh\" \"claude\"");
+        // A quote in a value is escaped, so it can't break out of the double-quotes.
+        assert_eq!(command("/h/a\"b.sh", "s"), "bash \"/h/a\\\"b.sh\" \"s\"");
+        // `$` is left intact so Claude still expands ${CLAUDE_PLUGIN_ROOT}.
+        assert_eq!(
+            command("${CLAUDE_PLUGIN_ROOT}/x.sh", "claude"),
+            "bash \"${CLAUDE_PLUGIN_ROOT}/x.sh\" \"claude\""
+        );
     }
 
     fn push(event: &'static str, store: &str) -> Desired {
