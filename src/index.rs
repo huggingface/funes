@@ -248,6 +248,9 @@ struct Indexer {
     /// A human is watching (stdin is a terminal) — probed once here, so every prompt-or-proceed
     /// choice in a run agrees.
     interactive: bool,
+    /// The caller stopped early with passes still owed, so the summary must not claim the store is
+    /// up to date.
+    work_remaining: bool,
     _lock: lock::StoreLock,
     /// The sources and their units, enumerated once at open so the change-stamps are a stable
     /// snapshot; a caller drives them by index via [`Indexer::index_unit`].
@@ -335,6 +338,7 @@ impl Indexer {
             state_path,
             first_index,
             interactive,
+            work_remaining: false,
             _lock,
             sources,
             units,
@@ -504,25 +508,46 @@ impl Indexer {
     /// query reads — what makes recall over a remote (hf://) tier lazy rather than a full scan; lance
     /// enforces its own training minimum (256 rows) and skips below it, falling back to brute force.
     async fn finalize(mut self) -> Result<()> {
-        if let Some(d) = &mut self.ds {
-            dataset::build_indexes(d, |phase| eprintln!("building {phase}…")).await;
+        // Nothing written → the store is unchanged since it opened; skip the rebuild and its
+        // version churn.
+        if self.n_chunks > 0 {
+            if let Some(d) = &mut self.ds {
+                dataset::build_indexes(d, |phase| eprintln!("building {phase}…")).await;
 
-            // Reap superseded versions — best-effort; on failure the reap waits for next run.
-            match d.cleanup_old_versions(chrono::Duration::minutes(10), None, None).await {
-                Ok(stats) if stats.bytes_removed > 0 => eprintln!(
-                    "reclaimed {:.1} MB from {} old version(s)",
-                    stats.bytes_removed as f64 / 1e6,
-                    stats.old_versions
-                ),
-                Ok(_) => {}
-                Err(e) => eprintln!("note: version cleanup skipped — {e}"),
+                // Reap superseded versions — best-effort; on failure the reap waits for next run.
+                match d.cleanup_old_versions(chrono::Duration::minutes(10), None, None).await {
+                    Ok(stats) if stats.bytes_removed > 0 => eprintln!(
+                        "reclaimed {:.1} MB from {} old version(s)",
+                        stats.bytes_removed as f64 / 1e6,
+                        stats.old_versions
+                    ),
+                    Ok(_) => {}
+                    Err(e) => eprintln!("note: version cleanup skipped — {e}"),
+                }
             }
         }
         println!(
-            "indexed sessions={} skipped={} chunks={}",
-            self.n_sessions, self.n_skipped, self.n_chunks
+            "{}",
+            run_summary(
+                self.interactive && !self.work_remaining,
+                self.n_sessions,
+                self.n_skipped,
+                self.n_chunks,
+                self.units.len(),
+            )
         );
         Ok(())
+    }
+}
+
+/// The run summary line. An interactive rerun that added nothing — and left nothing owed — gets a
+/// friendly "up to date" instead of a zero-count tally; an automated run (no reader) or any run
+/// that indexed or still owes something gets the tally.
+fn run_summary(done: bool, sessions: u64, skipped: u64, chunks: u64, units: usize) -> String {
+    if done && chunks == 0 {
+        format!("up to date ({units} sessions, all tiers)")
+    } else {
+        format!("indexed sessions={sessions} skipped={skipped} chunks={chunks}")
     }
 }
 
@@ -647,6 +672,7 @@ async fn run_budgeted(
                         "{} pass(es) left — per-turn indexing (or a `funes index` rerun) picks them up",
                         passes - done
                     );
+                    idx.work_remaining = true;
                     break 'tiers;
                 }
                 capped = false; // finish the rest now
@@ -702,6 +728,7 @@ async fn index_sources(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: 
                     "stopped after 1 session (kept — the index is resumable). Re-run \
                      `funes index --limit M` for the most recent M, or `funes index` to do all."
                 );
+                indexer.work_remaining = true;
                 break;
             }
         }
@@ -808,6 +835,22 @@ mod tests {
         assert!(unit_current(Some(&full), "10:20", Tier::ToolResult));
         // No record → not current.
         assert!(!unit_current(None, "10:20", Tier::Text));
+    }
+
+    #[test]
+    fn run_summary_says_up_to_date_only_on_a_done_no_op() {
+        // Interactive rerun that added nothing and owes nothing → the friendly no-op.
+        assert_eq!(run_summary(true, 0, 30, 0, 30), "up to date (30 sessions, all tiers)");
+        // A run that indexed something → the tally, not "up to date".
+        assert_eq!(
+            run_summary(true, 2, 28, 57, 30),
+            "indexed sessions=2 skipped=28 chunks=57"
+        );
+        // Stopped early (or no reader at all) → the tally, even with nothing added: work is owed.
+        assert_eq!(
+            run_summary(false, 0, 30, 0, 30),
+            "indexed sessions=0 skipped=30 chunks=0"
+        );
     }
 
     #[test]
