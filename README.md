@@ -119,7 +119,12 @@ funes recall "..." --store <user|org>/funes-memory   # read any remote store for
 ```
 
 That second form is how the demo above reads **someone else's** published memories on a topic —
-`funes recall "..." --store other-org/subject-kb` — without touching your own setup.
+`funes recall "..." --store other-org/subject-kb` — without touching your own setup. And to get an
+**answer** rather than ranked passages, borrow an agent for one question — nothing installed:
+
+```bash
+funes ask claude "..." --store other-org/subject-kb   # or: funes ask codex
+```
 
 On its first publish, `funes push` also writes the repo's **dataset card** — what a funes store
 is, how to recall from it, live stats — tagged `funes`, so every shared store is recognizable
@@ -192,11 +197,18 @@ agent means implementing one trait, not touching the indexing or query path.
 Run recall in a terminal, though, and it notices — and switches to an interactive mode for inspecting a store by hand:
 
 ```bash
-funes recall "why must sparse attention mask future keys before top-k selection" --store dacorvo/funes-Glint-Research-Fable-5
+funes recall "why is funes append-only" --store huggingface/funes-memory
 ```
 
 Browse the hits, filter as you type, and press enter on any of them to read its full surrounding
 turns — a built-in browser, no extra tools to install.
+
+When you want an **answer** to the same question rather than the passages, `funes ask` borrows a
+coding agent for it — it recalls from the store and answers grounded in what it finds:
+
+```bash
+funes ask claude "why is funes append-only" --store huggingface/funes-memory
+```
 
 The full interface — output formats, flags, defaults — is specified in [AGENTS.md](AGENTS.md).
 
