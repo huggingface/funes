@@ -1,4 +1,4 @@
-//! Gated end-to-end: a secret planted in a transcript is redacted out of the store at index time,
+//! Gated end-to-end: a secret planted in a transcript is redacted out of the memory at index time,
 //! so it never reaches recall — or, via push, the Hub. Skipped unless trufflehog (the scanner) and
 //! ssh-keygen (to mint a throwaway key) are both available.
 
@@ -29,7 +29,7 @@ async fn planted_key_is_redacted_at_index_time() {
     }
     let key = std::fs::read_to_string(&keyfile).unwrap();
     std::fs::remove_file(&keyfile).unwrap();
-    // A distinctive slice of the key body — must not survive into the store.
+    // A distinctive slice of the key body — must not survive into the memory.
     let key_body = key.lines().nth(1).unwrap().to_string();
     assert!(key_body.len() > 20);
 
@@ -52,12 +52,12 @@ async fn planted_key_is_redacted_at_index_time() {
     funes::index::run_index(source.path(), false, None).await.unwrap();
 
     // Read the stored turn back: the marker is present, the key body is gone.
-    let got = funes::recall::get(funes::hub::Store::local(), session.into(), "t1".into(), 3)
+    let got = funes::recall::get(funes::hub::Memory::local(), session.into(), "t1".into(), 3)
         .await
         .unwrap();
     assert!(
         got.contains("[REDACTED:PrivateKey]"),
         "expected a redaction marker, got: {got}"
     );
-    assert!(!got.contains(&key_body), "key body leaked into the store: {got}");
+    assert!(!got.contains(&key_body), "key body leaked into the memory: {got}");
 }

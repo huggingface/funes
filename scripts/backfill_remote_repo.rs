@@ -1,12 +1,12 @@
-//! One-off backfill: add the `repo` column to a remote store on the Hub via `add_columns`, landing
+//! One-off backfill: add the `repo` column to a remote memory on the Hub via `add_columns`, landing
 //! it in one head-guarded commit. Each row's value is resolved per session from its transcript's
 //! cwd using the **local** transcripts (the remote mirrors this machine), with the same resolver
-//! the indexer uses. Additive: no data rewrite, no re-embed, no reindex. Skips a store already
+//! the indexer uses. Additive: no data rewrite, no re-embed, no reindex. Skips a memory already
 //! carrying `repo`. Run with no concurrent writers (a single guarded attempt).
 //!
 //!   cargo run --example backfill_remote_repo -- <org/repo> [<org/repo>…]
 //!
-//! Disposable: delete this file (and `backfill_repo`, `hf_dataset::add_column`) once every store
+//! Disposable: delete this file (and `backfill_repo`, `hf_dataset::add_column`) once every memory
 //! carries `repo`.
 
 use anyhow::{bail, Context, Result};
@@ -38,15 +38,15 @@ async fn main() -> Result<()> {
         }
     }
     if failures > 0 {
-        bail!("{failures} store(s) failed — rerun them after fixing the cause");
+        bail!("{failures} memory(s) failed — rerun them after fixing the cause");
     }
     Ok(())
 }
 
 async fn backfill_one(spec: &str, token: &str) -> Result<String> {
-    let uri = match hub::Store::parse(spec) {
-        hub::Store::Remote { uri } => uri,
-        hub::Store::Local { .. } => bail!("not a remote store — use `backfill_repo` for the local store"),
+    let uri = match hub::Memory::parse(spec) {
+        hub::Memory::Remote { uri } => uri,
+        hub::Memory::Local { .. } => bail!("not a remote memory — use `backfill_repo` for the local memory"),
     };
     let (owner, name, _prefix) = hub::parse_hf(&uri)?;
     let dataset_uri = format!("{uri}/{}.lance", dataset::TABLE);
@@ -115,7 +115,7 @@ async fn backfill_one(spec: &str, token: &str) -> Result<String> {
 
 /// session_id → resolved repo, from a scan of `(session_id, source_path)`. A session's rows share
 /// one transcript, so resolve once per session; `git` runs once per distinct cwd. `source_path`
-/// values are local paths (the store was indexed here), so a still-present checkout resolves.
+/// values are local paths (the memory was indexed here), so a still-present checkout resolves.
 async fn session_repos(ds: &Dataset) -> Result<HashMap<String, String>> {
     let batches = dataset::scan_rows(ds, &["session_id", "source_path"], None, None).await?;
     let mut source_of: HashMap<String, String> = HashMap::new();
@@ -146,7 +146,7 @@ async fn session_repos(ds: &Dataset) -> Result<HashMap<String, String>> {
 /// A named Utf8 column of `b`, or an error naming what's missing.
 fn col<'a>(b: &'a RecordBatch, name: &str) -> Result<&'a StringArray> {
     b.column_by_name(name)
-        .with_context(|| format!("store has no `{name}` column"))?
+        .with_context(|| format!("memory has no `{name}` column"))?
         .as_any()
         .downcast_ref::<StringArray>()
         .with_context(|| format!("`{name}` column is not utf8"))

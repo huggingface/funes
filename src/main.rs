@@ -50,7 +50,7 @@ enum Cmd {
         #[arg(long)]
         harness: Option<String>,
         #[command(flatten)]
-        store: StoreOpts,
+        memory: MemoryOpts,
     },
     /// Drill down on a recall hit: a turn plus the turns around it, reassembled.
     Get {
@@ -68,7 +68,7 @@ enum Cmd {
         #[arg(long)]
         highlight: Option<String>,
         #[command(flatten)]
-        store: StoreOpts,
+        memory: MemoryOpts,
     },
     /// Ask a coding agent one question, grounded in a memory — nothing installed.
     ///
@@ -111,13 +111,13 @@ enum Cmd {
         /// Memory to inspect — an `<org>/<repo>` shorthand, an `hf://…` URI, a local path, or
         /// `local`. Defaults to your local memory.
         #[arg(value_name = "MEMORY")]
-        store: Option<String>,
+        memory: Option<String>,
     },
     /// Publish your local memory's new chunks to a remote memory on the HF Hub.
     Push {
         /// Memory to publish to: `<org>/<repo>` or a full `hf://…` URI.
         #[arg(value_name = "MEMORY")]
-        store: String,
+        memory: String,
         /// Skip the confirmation when the target shares no chunks with your local memory.
         #[arg(short, long)]
         yes: bool,
@@ -131,7 +131,7 @@ enum Cmd {
     Curate {
         /// The memory — the Hub dataset it lives in: `<org>/<repo>` or a full `hf://…` URI.
         #[arg(value_name = "MEMORY")]
-        store: String,
+        memory: String,
         /// The project the memory is of — the git repo it's about (`huggingface/funes`) or a plain
         /// label. Give it the first time to name the memory; omit to review.
         project: Option<String>,
@@ -158,7 +158,7 @@ enum Cmd {
         /// Memory to serve — an `<org>/<repo>` shorthand, an `hf://…` URI, a local path, or `local`.
         /// Defaults to your local memory.
         #[arg(value_name = "MEMORY")]
-        store: Option<String>,
+        memory: Option<String>,
     },
     /// Add funes to a coding agent.
     ///
@@ -180,40 +180,40 @@ enum Cmd {
 // Flattened into every agent so they share one optional `[MEMORY]` positional; the user-facing help
 // comes from the field doc below.
 #[derive(Args)]
-struct AddStore {
+struct AddMemory {
     /// Memory this agent recalls from — `<org>/<repo>`, an `hf://…` URI, or `local` (default).
     #[arg(value_name = "MEMORY")]
-    store: Option<String>,
+    memory: Option<String>,
 }
 
 #[derive(Subcommand)]
 enum AddAgent {
     Claude {
         #[command(flatten)]
-        store: AddStore,
+        memory: AddMemory,
     },
     Codex {
         #[command(flatten)]
-        store: AddStore,
+        memory: AddMemory,
     },
     Pi {
         #[command(flatten)]
-        store: AddStore,
+        memory: AddMemory,
         /// Reinstall even if the on-disk copy is already up to date.
         #[arg(long)]
         force: bool,
     },
     Hermes {
         #[command(flatten)]
-        store: AddStore,
+        memory: AddMemory,
     },
 }
 
 /// The memory to bake into an agent's `funes mcp` registration: `None`/blank/`local` → the local
 /// memory (a bare `funes mcp`), else the named remote/explicit memory (`funes mcp <memory>`).
-fn baked_store(store: AddStore) -> Option<String> {
-    store
-        .store
+fn baked_memory(memory: AddMemory) -> Option<String> {
+    memory
+        .memory
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty() && s != "local")
 }
@@ -226,7 +226,7 @@ struct AskArgs {
     #[arg(required = true, num_args = 1..)]
     question: Vec<String>,
     #[command(flatten)]
-    store: StoreOpts,
+    memory: MemoryOpts,
 }
 
 #[derive(Subcommand)]
@@ -243,16 +243,16 @@ enum AskAgent {
 
 /// Which memory the read commands act on. Shared by `recall`/`get`/`status`/`ask` and `mcp`.
 #[derive(Args)]
-struct StoreOpts {
+struct MemoryOpts {
     /// The memory to read — an `<org>/<repo>` shorthand, an `hf://…` URI, a local path, or `local`.
     /// Defaults to your local memory.
     #[arg(long = "memory", value_name = "MEMORY")]
-    store: Option<String>,
+    memory: Option<String>,
 }
 
-impl StoreOpts {
-    fn resolve(self) -> hub::Store {
-        hub::Store::resolve(self.store)
+impl MemoryOpts {
+    fn resolve(self) -> hub::Memory {
+        hub::Memory::resolve(self.memory)
     }
 }
 
@@ -302,9 +302,9 @@ async fn main() -> Result<()> {
             neighbors,
             block_type,
             harness,
-            store,
+            memory,
         } => {
-            let store = store.resolve();
+            let memory = memory.resolve();
             let query = query.join(" ");
             let spinner = Spinner::start("recalling…");
             let progress = |label: &str| {
@@ -312,8 +312,8 @@ async fn main() -> Result<()> {
                     s.set(label);
                 }
             };
-            let (note, store_label, hits) = recall::recall_hits(
-                store, query, k, candidates, half_life, neighbors, block_type, harness, &progress,
+            let (note, memory_label, hits) = recall::recall_hits(
+                memory, query, k, candidates, half_life, neighbors, block_type, harness, &progress,
             )
             .await?;
             drop(spinner);
@@ -322,7 +322,7 @@ async fn main() -> Result<()> {
             } else {
                 print!(
                     "{}",
-                    render::recall_agent(&note, &recall::store_hint(store_label.as_deref()), &hits)
+                    render::recall_agent(&note, &recall::memory_hint(memory_label.as_deref()), &hits)
                 );
             }
             Ok(())
@@ -333,11 +333,11 @@ async fn main() -> Result<()> {
             window,
             format,
             highlight,
-            store,
+            memory,
         } => {
             let format = OutputFormat::resolve(format);
             let (note, turns) =
-                recall::get_turns(store.resolve(), session_id.clone(), turn_uuid.clone(), window).await?;
+                recall::get_turns(memory.resolve(), session_id.clone(), turn_uuid.clone(), window).await?;
             if turns.is_empty() {
                 print!("{note}");
                 println!("turn {turn_uuid} not found in session {session_id}");
@@ -353,7 +353,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Ask { agent } => match agent {
-            AskAgent::Claude { args } => ask::claude(args.question.join(" "), args.store.store).await,
+            AskAgent::Claude { args } => ask::claude(args.question.join(" "), args.memory.memory).await,
             AskAgent::Codex { args } => {
                 // The binary probe comes first — grounding pays for a model load.
                 ask::preflight("codex")?;
@@ -364,7 +364,7 @@ async fn main() -> Result<()> {
                         s.set(label);
                     }
                 };
-                let prompt = ask::codex_grounding(args.store.resolve(), &question, &progress).await?;
+                let prompt = ask::codex_grounding(args.memory.resolve(), &question, &progress).await?;
                 drop(spinner);
                 ask::run_codex(&prompt)
             }
@@ -387,7 +387,7 @@ async fn main() -> Result<()> {
                 Some(p) if p.starts_with("hf://") || hub::is_remote_shorthand(&p) => {
                     // A Hub trace dataset: resolve to `hf://datasets/<owner>/<name>` and index its
                     // auto-converted parquet.
-                    let hub::Store::Remote { uri } = hub::Store::parse(&p) else {
+                    let hub::Memory::Remote { uri } = hub::Memory::parse(&p) else {
                         return Err(anyhow!("expected a Hub repo, got {p:?}"));
                     };
                     return index::run_index_remote(&uri, no_thinking).await;
@@ -430,8 +430,8 @@ async fn main() -> Result<()> {
                 index::run_index_roots(&roots, no_thinking, limit, yes).await
             }
         }
-        Cmd::Status { store } => {
-            print!("{}", recall::status(hub::Store::resolve(store)).await?);
+        Cmd::Status { memory } => {
+            print!("{}", recall::status(hub::Memory::resolve(memory)).await?);
             // Show the status body before the (bounded, best-effort) update check, so a slow or
             // offline Hub can't delay the useful output.
             std::io::stdout().flush().ok();
@@ -441,16 +441,16 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Push {
-            store: remote,
+            memory: remote,
             yes,
             force_reindex,
         } => {
             let confirm = if yes {
                 push::Confirm::Yes
             } else {
-                push::Confirm::Ask(prompt_new_store)
+                push::Confirm::Ask(prompt_new_memory)
             };
-            match push::run_push(hub::Store::parse(&remote), force_reindex, confirm).await {
+            match push::run_push(hub::Memory::parse(&remote), force_reindex, confirm).await {
                 Ok(pushed) => {
                     print!("{}", pushed.report);
                     // Secrets held back everything — surface a non-zero exit so automation can react.
@@ -466,12 +466,12 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Curate {
-            store,
+            memory,
             project,
             include,
             exclude,
         } => {
-            let store = hub::Store::parse(&store);
+            let memory = hub::Memory::parse(&memory);
             // A project memory is of a git repo — funes attributes sessions to it by their
             // checkout's remotes, so the project must be a repo identity (`owner/name`). A bare
             // name gets a "did you mean", inferring the owner from local repos with that name.
@@ -481,7 +481,7 @@ async fn main() -> Result<()> {
                         [] => anyhow!("a project is a repo, like `huggingface/transformers` — got `{project}`"),
                         [one] => anyhow!(
                             "a project is a repo — did you mean `{one}`?  run: funes curate {} {one}",
-                            store.label()
+                            memory.label()
                         ),
                         many => anyhow!("a project is a repo — did you mean one of: {}", many.join(", ")),
                     });
@@ -491,74 +491,77 @@ async fn main() -> Result<()> {
             // (and the FUNES_NO_TUI opt-out) get the plain text listing.
             let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
             if include.is_empty() && exclude.is_empty() && interactive && std::env::var_os("FUNES_NO_TUI").is_none() {
-                curate_review(&store, project.as_deref()).await
+                curate_review(&memory, project.as_deref()).await
             } else {
-                print!("{}", curate::run(&store, project.as_deref(), &include, &exclude).await?);
+                print!(
+                    "{}",
+                    curate::run(&memory, project.as_deref(), &include, &exclude).await?
+                );
                 Ok(())
             }
         }
         Cmd::Scrub => scrub::run().await,
         Cmd::Update { force } => update::run(force).await,
-        Cmd::Mcp { store } => mcp::run(store).await,
+        Cmd::Mcp { memory } => mcp::run(memory).await,
         Cmd::Add { agent } => match agent {
             // Claude, Codex, and Hermes have the full local pipeline (index + hooks + push), so `add`
             // bootstraps it: build the first index and do the first push — the two one-time steps
             // the hooks can't do unattended — so nothing is left to run by hand.
-            AddAgent::Claude { store } => {
-                bootstrap_add(Harness::Claude, resolve_add_store(store).await?, claude::install).await
+            AddAgent::Claude { memory } => {
+                bootstrap_add(Harness::Claude, resolve_add_memory(memory).await?, claude::install).await
             }
-            AddAgent::Codex { store } => {
-                bootstrap_add(Harness::Codex, resolve_add_store(store).await?, codex::install).await
+            AddAgent::Codex { memory } => {
+                bootstrap_add(Harness::Codex, resolve_add_memory(memory).await?, codex::install).await
             }
-            AddAgent::Hermes { store } => {
-                bootstrap_add(Harness::Hermes, resolve_add_store(store).await?, hermes::install).await
+            AddAgent::Hermes { memory } => {
+                bootstrap_add(Harness::Hermes, resolve_add_memory(memory).await?, hermes::install).await
             }
             // The rest register a read-side integration only (no local pipeline to bootstrap), so
-            // they just take the resolved store — the `created` flag only matters to the first push.
-            AddAgent::Pi { store, force } => pi::install(resolve_add_store(store).await?.map(|r| r.store), force),
+            // they just take the resolved memory — the `created` flag only matters to the first push.
+            AddAgent::Pi { memory, force } => pi::install(resolve_add_memory(memory).await?.map(|r| r.memory), force),
         },
     }
 }
 
-/// A resolved store binding: the store spec, and whether funes just created the repo this run — the
-/// signal the first push uses to skip the wrong-store guard (an empty repo funes made for the user
-/// is plainly not "the wrong store").
+/// A resolved memory binding: the memory spec, and whether funes just created the repo this run — the
+/// signal the first push uses to skip the wrong-memory guard (an empty repo funes made for the user
+/// is plainly not "the wrong memory").
 struct Resolved {
-    store: String,
+    memory: String,
     created: bool,
 }
 
-/// Resolve the store `funes add` binds. An explicitly-named store is validated — offer to create it
-/// if it's missing on the Hub (a typo guard). With no store, offer to set one up on the Hub when a
+/// Resolve the memory `funes add` binds. An explicitly-named memory is validated — offer to create it
+/// if it's missing on the Hub (a typo guard). With no memory, offer to set one up on the Hub when a
 /// token is present (`<user>/funes-memory`); otherwise stay local.
-async fn resolve_add_store(raw: AddStore) -> Result<Option<Resolved>> {
-    match baked_store(raw) {
-        Some(store) => {
-            let created = ensure_remote_exists(&store).await?;
-            Ok(Some(Resolved { store, created }))
+async fn resolve_add_memory(raw: AddMemory) -> Result<Option<Resolved>> {
+    match baked_memory(raw) {
+        Some(memory) => {
+            let created = ensure_remote_exists(&memory).await?;
+            Ok(Some(Resolved { memory, created }))
         }
-        None => offer_hub_store().await,
+        None => offer_hub_memory().await,
     }
 }
 
 /// The deferred creation the interactive review runs once you've included sessions: materialize
-/// `store` as the project memory of `project`, with consent. `create_repo` makes the Hub repo first
-/// (the store was absent); otherwise it exists (a personal memory) and we only stamp it. Returns
+/// `memory` as the project memory of `project`, with consent. `create_repo` makes the Hub repo first
+/// (the memory was absent); otherwise it exists (a personal memory) and we only stamp it. Returns
 /// whether it happened — declining stops cleanly, publishing nothing.
-/// The interactive review behind `funes curate <store>` in a terminal: the project's candidate
+/// The interactive review behind `funes curate <memory>` in a terminal: the project's candidate
 /// sessions in the in-process [`funes::tui`] picker where `→` includes a session and `←` excludes it
 /// (the same arrow again clears to pending), the preview showing each session's user prompts.
 /// Decisions persist as they're made; leaving summarizes, and — once something is included — offers
-/// the push, materializing the store as the project memory first when it isn't one yet.
-async fn curate_review(store: &hub::Store, project: Option<&str>) -> Result<()> {
-    // Resolve without creating: `materialize` is None when the store is already the project memory,
+/// the push, materializing the memory as the project memory first when it isn't one yet.
+async fn curate_review(memory: &hub::Memory, project: Option<&str>) -> Result<()> {
+    // Resolve without creating: `materialize` is None when the memory is already the project memory,
     // else Some(create_repo) — the deferred creation to run at the close if anything is included.
-    let (uri, project, materialize) = match curate::prepare(store, project).await? {
+    let (uri, project, materialize) = match curate::prepare(memory, project).await? {
         curate::Prepared::Ready { uri, project } => (uri, project, None),
         curate::Prepared::Absent { uri, project } => (uri, project, Some(true)),
         curate::Prepared::Personal { uri, project } => (uri, project, Some(false)),
     };
-    let found = curate::candidates(store, &uri, &project, true).await?;
+    let found = curate::candidates(memory, &uri, &project, true).await?;
     if found.matched.is_empty() {
         let skipped = found.other.len() + found.unresolvable.len();
         if skipped > 0 {
@@ -573,7 +576,7 @@ async fn curate_review(store: &hub::Store, project: Option<&str>) -> Result<()> 
     // Pre-render each candidate's user prompts (scaffolding dropped) — the preview pane, and
     // (whitespace-collapsed) the surface the fuzzy filter searches beyond the visible row.
     let ids: Vec<String> = found.matched.iter().map(|s| s.session_id.clone()).collect();
-    let mut previews = recall::session_prompts(&hub::Store::local(), &ids).await?;
+    let mut previews = recall::session_prompts(&hub::Memory::local(), &ids).await?;
     for turns in previews.values_mut() {
         for turn in turns.iter_mut() {
             turn.blocks.retain(|b| !curate::is_scaffolding(b));
@@ -628,21 +631,21 @@ async fn curate_review(store: &hub::Store, project: Option<&str>) -> Result<()> 
         found.matched.len() - inc - exc
     );
     if inc == 0 {
-        return Ok(()); // nothing included — nothing to publish, and no store created
+        return Ok(()); // nothing included — nothing to publish, and no memory created
     }
-    // Now there's something to publish. A store that already exists just needs the push; a missing
+    // Now there's something to publish. A memory that already exists just needs the push; a missing
     // or personal one is materialized as the project memory first (its consent doubles as the
     // publish consent). Either way, ship on a yes.
     let publish = match materialize {
-        None => confirm(&format!("push {} now? [Y/n] ", store.label()), true),
-        Some(create_repo) => create_project_memory(store, &project, create_repo, inc).await?,
+        None => confirm(&format!("push {} now? [Y/n] ", memory.label()), true),
+        Some(create_repo) => create_project_memory(memory, &project, create_repo, inc).await?,
     };
     if publish {
-        match push::run_push(store.clone(), false, push::Confirm::Yes).await {
+        match push::run_push(memory.clone(), false, push::Confirm::Yes).await {
             Ok(pushed) => print!("{}", pushed.report),
             Err(e) if push::is_read_only(&e) => eprintln!(
                 "{} is read-only for your token — recall can read it, but publishing needs write access.",
-                store.label()
+                memory.label()
             ),
             Err(e) => return Err(e),
         }
@@ -650,32 +653,37 @@ async fn curate_review(store: &hub::Store, project: Option<&str>) -> Result<()> 
     Ok(())
 }
 
-async fn create_project_memory(store: &hub::Store, project: &str, create_repo: bool, includes: usize) -> Result<bool> {
-    let hub::Store::Remote { uri } = store else {
+async fn create_project_memory(
+    memory: &hub::Memory,
+    project: &str,
+    create_repo: bool,
+    includes: usize,
+) -> Result<bool> {
+    let hub::Memory::Remote { uri } = memory else {
         return Ok(false);
     };
     let prompt = format!(
         "publish {includes} session(s) to {} as the project memory of {project}? [Y/n] ",
-        store.label()
+        memory.label()
     );
     if !confirm(&prompt, true) {
-        eprintln!("nothing published; {} left as is.", store.label());
+        eprintln!("nothing published; {} left as is.", memory.label());
         return Ok(false);
     }
     if create_repo {
         let (owner, name, _) = hub::parse_hf(uri)?;
         hub::create_dataset_repo(&owner, &name).await?;
     }
-    curate::name_project(store, project).await?;
-    eprintln!("{} is now the project memory of {project}.", store.label());
+    curate::name_project(memory, project).await?;
+    eprintln!("{} is now the project memory of {project}.", memory.label());
     Ok(true)
 }
 
-/// Validate an explicitly-named store: fine if it exists; offer to create it if missing (default
+/// Validate an explicitly-named memory: fine if it exists; offer to create it if missing (default
 /// **no**, to catch typos); warn but proceed if the Hub is unreachable. Returns whether it created
 /// the repo.
 async fn ensure_remote_exists(remote: &str) -> Result<bool> {
-    let hub::Store::Remote { uri } = hub::Store::parse(remote) else {
+    let hub::Memory::Remote { uri } = hub::Memory::parse(remote) else {
         return Ok(false); // a local path — nothing to check on the Hub
     };
     match hub::remote_reachability(&uri).await {
@@ -702,7 +710,7 @@ async fn ensure_remote_exists(remote: &str) -> Result<bool> {
 /// With no memory named, offer to set one up on the Hub — but only when a token is present and we can
 /// prompt. Suggests `<user>/funes-memory`: use it if it exists, offer to create it if not. Returns the
 /// memory to bind (with whether it was just created), or `None` to stay local.
-async fn offer_hub_store() -> Result<Option<Resolved>> {
+async fn offer_hub_memory() -> Result<Option<Resolved>> {
     let interactive = std::io::stdin().is_terminal();
     if !hub::has_token() {
         if interactive {
@@ -726,21 +734,22 @@ async fn offer_hub_store() -> Result<Option<Resolved>> {
             return Ok(None);
         }
     };
-    let store = format!("{user}/funes-memory");
-    let uri = format!("hf://datasets/{store}");
+    let memory = format!("{user}/funes-memory");
+    let uri = format!("hf://datasets/{memory}");
     match hub::remote_reachability(&uri).await {
-        hub::Reachability::Ok => Ok(
-            confirm(&format!("Use your memory {store}? [Y/n] "), true).then_some(Resolved { store, created: false })
-        ),
+        hub::Reachability::Ok => {
+            Ok(confirm(&format!("Use your memory {memory}? [Y/n] "), true)
+                .then_some(Resolved { memory, created: false }))
+        }
         hub::Reachability::Offline => {
             eprintln!("can't reach the Hub right now — staying local; re-run when you're online.");
             Ok(None)
         }
         hub::Reachability::Missing => {
-            if confirm(&format!("Create {store} for your memory? [Y/n] "), true) {
+            if confirm(&format!("Create {memory} for your memory? [Y/n] "), true) {
                 hub::create_dataset_repo(&user, "funes-memory").await?;
-                eprintln!("created {store}.");
-                Ok(Some(Resolved { store, created: true }))
+                eprintln!("created {memory}.");
+                Ok(Some(Resolved { memory, created: true }))
             } else {
                 Ok(None)
             }
@@ -770,13 +779,13 @@ fn parse_confirm(input: &str, default_yes: bool) -> bool {
     }
 }
 
-/// `funes add claude|codex [store]` for the agents with a full local pipeline: bootstrap the
+/// `funes add claude|codex [memory]` for the agents with a full local pipeline: bootstrap the
 /// one-time steps the hooks can't do unattended, around the per-agent `install` (hooks + MCP).
 ///
-/// 1. ask, then build the first index if the local store is missing (so recall/push have content);
+/// 1. ask, then build the first index if the local memory is missing (so recall/push have content);
 ///    declining aborts the add — nothing is installed;
-/// 2. `install` — register hooks + MCP (bakes the store);
-/// 3. first push if a store is bound — clears the overlap guard so the push hook works thereafter.
+/// 2. `install` — register hooks + MCP (bakes the memory);
+/// 3. first push if a memory is bound — clears the overlap guard so the push hook works thereafter.
 async fn bootstrap_add(
     harness: Harness,
     resolved: Option<Resolved>,
@@ -789,27 +798,27 @@ async fn bootstrap_add(
         );
         return Ok(());
     }
-    install(resolved.as_ref().map(|r| r.store.clone()))?;
+    install(resolved.as_ref().map(|r| r.memory.clone()))?;
     // First push only when there's actually a local index to publish. Without one (a failed first
     // build, or no sessions yet) there's nothing to push, and running it would just error on the
-    // absent store.
-    if let Some(Resolved { store, created }) = resolved {
-        if hub::Store::local().open().await.is_ok() {
-            first_push(&store, created).await?;
+    // absent memory.
+    if let Some(Resolved { memory, created }) = resolved {
+        if hub::Memory::local().open().await.is_ok() {
+            first_push(&memory, created).await?;
         } else {
-            eprintln!("funes: nothing indexed yet — nothing to publish to {store} yet. Run `funes index`, and the hooks keep it current from there.");
+            eprintln!("funes: nothing indexed yet — nothing to publish to {memory} yet. Run `funes index`, and the hooks keep it current from there.");
         }
     }
     Ok(())
 }
 
-/// Build the first index from `harness`'s sessions when the local store is missing — asking first,
+/// Build the first index from `harness`'s sessions when the local memory is missing — asking first,
 /// since it's about a minute of work. Returns whether `add` should proceed: declining (or EOF — a
 /// no-TTY run reads none) returns `false`, so the caller installs nothing. An empty/absent session
 /// dir or a build error is a note, not a decline: the hooks still go in and `funes index` builds
 /// it later.
 async fn ensure_local_index(harness: Harness) -> bool {
-    if hub::Store::local().open().await.is_ok() {
+    if hub::Memory::local().open().await.is_ok() {
         return true; // already have a local index
     }
     let Some(root) = funes::harness::known_harness_roots()
@@ -840,18 +849,18 @@ async fn ensure_local_index(harness: Harness) -> bool {
     true
 }
 
-/// The one-time first publish `add` performs when a store is bound (the push hook can't, off a
-/// terminal — the overlap guard fails closed there). The guard prompts before publishing to a store
-/// this host shares no chunks with — unless funes just `created` the store this run, which is
+/// The one-time first publish `add` performs when a memory is bound (the push hook can't, off a
+/// terminal — the overlap guard fails closed there). The guard prompts before publishing to a memory
+/// this host shares no chunks with — unless funes just `created` the memory this run, which is
 /// plainly the user's own empty repo, so the push proceeds without re-asking. Errors that aren't
 /// fatal to the install (a read-only token, held-back secrets) are reported without failing `add`.
 async fn first_push(remote: &str, created: bool) -> Result<()> {
     let confirm = if created {
         push::Confirm::Yes
     } else {
-        push::Confirm::Ask(prompt_new_store)
+        push::Confirm::Ask(prompt_new_memory)
     };
-    match push::run_push(hub::Store::parse(remote), false, confirm).await {
+    match push::run_push(hub::Memory::parse(remote), false, confirm).await {
         Ok(pushed) => {
             print!("{}", pushed.report);
             Ok(())
@@ -925,20 +934,20 @@ impl Drop for Spinner {
     }
 }
 
-/// The push confirmation for a store the local index shares no chunks with. Fails closed (returns
-/// false) off a terminal, so an unattended push can't silently publish to the wrong store — there it
+/// The push confirmation for a memory the local index shares no chunks with. Fails closed (returns
+/// false) off a terminal, so an unattended push can't silently publish to the wrong memory — there it
 /// must be re-run with `--yes`.
-fn prompt_new_store(label: &str, chunks: usize) -> bool {
+fn prompt_new_memory(label: &str, chunks: usize) -> bool {
     if !std::io::stdin().is_terminal() {
         eprintln!(
-            "refusing to push {chunks} chunk(s) to {label}: your local store shares no chunks with it \
-             (a first push, a new host, or the wrong store) — re-run with `--yes` to confirm."
+            "refusing to push {chunks} chunk(s) to {label}: your local memory shares no chunks with it \
+             (a first push, a new host, or the wrong memory) — re-run with `--yes` to confirm."
         );
         return false;
     }
     eprint!(
-        "{label}: your local store shares no chunks with it — a first push here, a new host of yours, \
-         or the wrong store. Publish {chunks} chunk(s) anyway? [y/N] "
+        "{label}: your local memory shares no chunks with it — a first push here, a new host of yours, \
+         or the wrong memory. Publish {chunks} chunk(s) anyway? [y/N] "
     );
     let _ = std::io::stderr().flush();
     let mut answer = String::new();

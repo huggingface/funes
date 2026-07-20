@@ -8,7 +8,7 @@ use crate::chunk;
 use crate::curate;
 use crate::dataset;
 use crate::harness::Harness;
-use crate::hub::{self, Reachability, Store};
+use crate::hub::{self, Memory, Reachability};
 use crate::inference::{self, Embedder, Reranker};
 use anyhow::{anyhow, Context, Result};
 use arrow_array::{Float32Array, Int64Array, RecordBatch, StringArray, UInt64Array};
@@ -124,16 +124,16 @@ fn recency_weight(ts: &str, now: DateTime<Utc>, half_life: f64) -> f64 {
 struct Read {
     ds: Dataset,
     /// A degradation note to prepend to the command's output (e.g. the remote was unreachable);
-    /// `None` when the requested store opened normally.
+    /// `None` when the requested memory opened normally.
     note: Option<String>,
-    /// Label of the store the dataset actually came from (the requested one, or the local store
+    /// Label of the memory the dataset actually came from (the requested one, or the local memory
     /// after an offline degrade).
-    store_label: Option<String>,
+    memory_label: Option<String>,
 }
 
-/// The outcome of resolving a store for reading. `Offline` degrades to the local index (this
+/// The outcome of resolving a memory for reading. `Offline` degrades to the local index (this
 /// module's to apply); a missing or empty remote is a hard error with a clear message; `NoIndex`
-/// (the default local store, unbuilt) is a clear error from the read verbs and a friendly note in
+/// (the default local memory, unbuilt) is a clear error from the read verbs and a friendly note in
 /// `status`.
 // A transient return value, never stored en masse, so the `Ready(Dataset)`/unit size gap is fine —
 // boxing would only add indirection.
@@ -143,59 +143,59 @@ enum ReadOutcome {
     Ready(Dataset),
     /// The remote is unreachable — recall from the local index instead.
     Offline,
-    /// The default local store has no index yet.
+    /// The default local memory has no index yet.
     NoIndex,
 }
 
-/// Resolve a store for reading — the one place every source state is handled. An offline remote
+/// Resolve a memory for reading — the one place every source state is handled. An offline remote
 /// degrades (`Offline`); a missing or empty remote errors with a clear message; an absent default
-/// local index degrades (`NoIndex`); a present store opens (`Ready`). All read verbs route through
+/// local index degrades (`NoIndex`); a present memory opens (`Ready`). All read verbs route through
 /// this; the remote-state classification and messages come from `hub`.
-async fn open_for_read(store: &Store) -> Result<ReadOutcome> {
-    if let Store::Remote { uri } = store {
+async fn open_for_read(memory: &Memory) -> Result<ReadOutcome> {
+    if let Memory::Remote { uri } = memory {
         match hub::remote_reachability(uri).await {
             Reachability::Offline => return Ok(ReadOutcome::Offline),
             Reachability::Missing => return Err(hub::missing_remote(uri)),
             Reachability::Ok => {}
         }
     }
-    match store.open().await {
+    match memory.open().await {
         Ok(ds) => Ok(ReadOutcome::Ready(ds)),
-        // The default local store with no dataset yet → NoIndex (a clear "run funes add" error
+        // The default local memory with no dataset yet → NoIndex (a clear "run funes add" error
         // below). Gated on `is_missing_dataset` so a real open failure (permissions, corruption, an
         // incompatible schema) isn't masked as "no index" — it falls through to surface as itself.
-        Err(e) if store.is_default_local() && is_missing_dataset(&e) => Ok(ReadOutcome::NoIndex),
+        Err(e) if memory.is_default_local() && is_missing_dataset(&e) => Ok(ReadOutcome::NoIndex),
         // The Hub refused the read on auth (401/403): a clear message beats lance's opendal dump.
-        Err(e) if is_auth_error(&e) => match store {
-            Store::Remote { uri } => Err(hub::unauthorized_remote(uri)),
-            Store::Local { .. } => Err(e),
+        Err(e) if is_auth_error(&e) => match memory {
+            Memory::Remote { uri } => Err(hub::unauthorized_remote(uri)),
+            Memory::Local { .. } => Err(e),
         },
         // Opened to nothing: a reachable remote never pushed to, or a local path with no dataset.
         // Either way, a clear message beats lance's internal path error.
-        Err(e) if is_missing_dataset(&e) => match store {
-            Store::Remote { uri } => Err(hub::empty_remote(uri)),
-            Store::Local { path } => Err(anyhow::anyhow!("no index found at {}", path.display())),
+        Err(e) if is_missing_dataset(&e) => match memory {
+            Memory::Remote { uri } => Err(hub::empty_remote(uri)),
+            Memory::Local { path } => Err(anyhow::anyhow!("no index found at {}", path.display())),
         },
         Err(e) => Err(e),
     }
 }
 
-/// A caller that named a store must never silently read a different one: surfaces the errors
+/// A caller that named a memory must never silently read a different one: surfaces the errors
 /// [`open_for_read`] would, and refuses the offline degrade the read verbs apply.
-pub async fn check_readable(store: &Store) -> Result<()> {
-    match open_for_read(store).await? {
+pub async fn check_readable(memory: &Memory) -> Result<()> {
+    match open_for_read(memory).await? {
         ReadOutcome::Ready(_) => Ok(()),
         ReadOutcome::NoIndex => Err(no_index_error()),
         ReadOutcome::Offline => Err(anyhow!(
             "{} is unreachable right now — try again once you're back online",
-            store.label()
+            memory.label()
         )),
     }
 }
 
-/// True if `e` is lance reporting the `chunks.lance` dataset isn't there — the store opened to no
+/// True if `e` is lance reporting the `chunks.lance` dataset isn't there — the memory opened to no
 /// index (an empty or never-pushed remote, or a path with no dataset). Lets reads report an empty
-/// store instead of leaking lance's internal path/`_versions` error.
+/// memory instead of leaking lance's internal path/`_versions` error.
 fn is_missing_dataset(e: &anyhow::Error) -> bool {
     e.chain()
         .any(|c| matches!(c.downcast_ref::<LanceError>(), Some(LanceError::DatasetNotFound { .. })))
@@ -211,22 +211,22 @@ fn is_auth_error(e: &anyhow::Error) -> bool {
     })
 }
 
-/// Open a store for reading, applying the fallback [`open_for_read`] leaves to the caller: an
+/// Open a memory for reading, applying the fallback [`open_for_read`] leaves to the caller: an
 /// unreachable remote degrades to the local index, so recall keeps working offline. A missing or
 /// empty remote, and a fresh install with no local index, surface as clear errors.
-async fn open_read(store: &Store) -> Result<Read> {
-    match open_for_read(store).await? {
+async fn open_read(memory: &Memory) -> Result<Read> {
+    match open_for_read(memory).await? {
         ReadOutcome::Ready(ds) => Ok(Read {
             ds,
             note: None,
-            store_label: Some(store.label()),
+            memory_label: Some(memory.label()),
         }),
-        ReadOutcome::Offline => degrade_offline(&store.label()).await,
+        ReadOutcome::Offline => degrade_offline(&memory.label()).await,
         ReadOutcome::NoIndex => Err(no_index_error()),
     }
 }
 
-/// The error a read verb returns when the default local store has no index yet — points at the
+/// The error a read verb returns when the default local memory has no index yet — points at the
 /// onboarding command instead of leaking lance's internals.
 fn no_index_error() -> anyhow::Error {
     anyhow!("no index yet — run `funes add <agent>` to build one (or `funes index`), then recall your own history")
@@ -236,22 +236,22 @@ fn no_index_error() -> anyhow::Error {
 /// with no local index either there's nothing to read, so it errors.
 async fn degrade_offline(uri: &str) -> Result<Read> {
     // `?` propagates a real local-open failure rather than folding it into "no local index".
-    match open_for_read(&Store::local()).await? {
+    match open_for_read(&Memory::local()).await? {
         ReadOutcome::Ready(ds) => Ok(Read {
             ds,
             note: Some(format!("remote {uri} unreachable — recalling from your local memory\n")),
-            store_label: Some(Store::local().label()),
+            memory_label: Some(Memory::local().label()),
         }),
-        // No local index either — point at onboarding (a local store is never classified Offline).
+        // No local index either — point at onboarding (a local memory is never classified Offline).
         _ => Err(anyhow!(
             "remote {uri} unreachable and no local index yet — run `funes add <agent>` (or `funes index`) to build one"
         )),
     }
 }
 
-/// The store suffix for a hit's `→ get` hint: every hit names the store it was read from, so the
-/// hint drills into that store from any context. A hit with no store label yields no suffix.
-pub fn store_hint(read: Option<&str>) -> String {
+/// The memory suffix for a hit's `→ get` hint: every hit names the memory it was read from, so the
+/// hint drills into that memory from any context. A hit with no memory label yields no suffix.
+pub fn memory_hint(read: Option<&str>) -> String {
     match read {
         Some(label) => format!(" --memory {label}"),
         None => String::new(),
@@ -280,10 +280,10 @@ async fn models() -> Result<&'static Mutex<Models>> {
         .await
 }
 
-/// Run the recall pipeline over one store and return the results rendered in the agent format.
+/// Run the recall pipeline over one memory and return the results rendered in the agent format.
 #[allow(clippy::too_many_arguments)]
 pub async fn recall(
-    store: Store,
+    memory: Memory,
     query: String,
     k: usize,
     candidates: usize,
@@ -292,8 +292,8 @@ pub async fn recall(
     block_type: Option<String>,
     harness: Option<String>,
 ) -> Result<String> {
-    let (note, store_label, hits) = recall_hits(
-        store,
+    let (note, memory_label, hits) = recall_hits(
+        memory,
         query,
         k,
         candidates,
@@ -309,19 +309,19 @@ pub async fn recall(
     }
     Ok(crate::render::recall_agent(
         &note,
-        &store_hint(store_label.as_deref()),
+        &memory_hint(memory_label.as_deref()),
         &hits,
     ))
 }
 
-/// Run the recall pipeline over one store: hybrid retrieval → rerank → recency reweight →
-/// neighbor expansion. Returns the degradation note (empty when the store opened normally), the
-/// label of the store actually read, and the scored hits, best
+/// Run the recall pipeline over one memory: hybrid retrieval → rerank → recency reweight →
+/// neighbor expansion. Returns the degradation note (empty when the memory opened normally), the
+/// label of the memory actually read, and the scored hits, best
 /// first — rendering is the caller's choice. `progress` hears a short label as each slow phase
 /// starts (model load, search, rerank); pass a no-op to run silently.
 #[allow(clippy::too_many_arguments)]
 pub async fn recall_hits(
-    store: Store,
+    memory: Memory,
     query: String,
     k: usize,
     candidates: usize,
@@ -349,11 +349,11 @@ pub async fn recall_hits(
         .next()
         .context("empty embedding")?;
 
-    progress(&format!("searching {}…", store.label()));
-    let read = open_read(&store).await?;
+    progress(&format!("searching {}…", memory.label()));
+    let read = open_read(&memory).await?;
     let note = read.note.clone().unwrap_or_default();
     let ds = &read.ds;
-    // A `--harness` filter needs the column; on an un-migrated store it would fail deep inside Lance
+    // A `--harness` filter needs the column; on an un-migrated memory it would fail deep inside Lance
     // with an opaque schema error, so refuse with a clear message instead.
     if harness.is_some() && !has_harness_col(ds) {
         return Err(anyhow!(
@@ -367,7 +367,7 @@ pub async fn recall_hits(
     // recall then falls back to vector-only.
     let hits = hybrid_candidates(ds, &qv, &query, candidates, where_clause.as_deref()).await?;
     if hits.is_empty() {
-        return Ok((note, read.store_label.clone(), Vec::new()));
+        return Ok((note, read.memory_label.clone(), Vec::new()));
     }
 
     let docs: Vec<&str> = hits.iter().map(|h| h.text.as_str()).collect();
@@ -401,11 +401,11 @@ pub async fn recall_hits(
         attach_neighbors(ds, &mut refs, neighbors).await?;
     }
 
-    Ok((note, read.store_label.clone(), top))
+    Ok((note, read.memory_label.clone(), top))
 }
 
 /// Vector ANN + BM25 candidates fused by reciprocal rank, top `candidates`. The FTS leg is
-/// best-effort: a store with no FTS index makes that scan error, and we fall back to vector-only.
+/// best-effort: a memory with no FTS index makes that scan error, and we fall back to vector-only.
 async fn hybrid_candidates(
     ds: &Dataset,
     qv: &[f32],
@@ -435,7 +435,7 @@ async fn vector_candidates(ds: &Dataset, qv: &[f32], limit: usize, filter: Optio
     collect_hits(scan).await
 }
 
-/// Top-`limit` rows by BM25 score, each with its `_rowid`. Errors if the store has no FTS index.
+/// Top-`limit` rows by BM25 score, each with its `_rowid`. Errors if the memory has no FTS index.
 async fn fts_candidates(ds: &Dataset, query: &str, limit: usize, filter: Option<&str>) -> Result<Vec<(u64, Hit)>> {
     let mut scan = ds.scan();
     scan.full_text_search(FullTextSearchQuery::new(query.to_string()))?;
@@ -450,15 +450,15 @@ async fn fts_candidates(ds: &Dataset, query: &str, limit: usize, filter: Option<
     collect_hits(scan).await
 }
 
-/// Whether the store carries the `harness` column — false for one built before the facet existed
-/// (an un-migrated store).
+/// Whether the memory carries the `harness` column — false for one built before the facet existed
+/// (an un-migrated memory).
 fn has_harness_col(ds: &Dataset) -> bool {
     arrow_schema::Schema::from(ds.schema())
         .column_with_name("harness")
         .is_some()
 }
 
-/// `HIT_COLS`, minus `harness` on an un-migrated store: projecting a column the dataset lacks errors,
+/// `HIT_COLS`, minus `harness` on an un-migrated memory: projecting a column the dataset lacks errors,
 /// so drop it and let `collect_hits` default the field to "".
 fn hit_cols(ds: &Dataset) -> Vec<&'static str> {
     let has_harness = has_harness_col(ds);
@@ -606,8 +606,8 @@ async fn attach_neighbors(ds: &Dataset, hits: &mut [&mut Hit], window: i64) -> R
 
 /// Drill down on a recall hit: the named turn plus the turns within `window` of it, rendered in
 /// the agent format.
-pub async fn get(store: Store, session_id: String, turn_uuid: String, window: i64) -> Result<String> {
-    let (note, turns) = get_turns(store, session_id.clone(), turn_uuid.clone(), window).await?;
+pub async fn get(memory: Memory, session_id: String, turn_uuid: String, window: i64) -> Result<String> {
+    let (note, turns) = get_turns(memory, session_id.clone(), turn_uuid.clone(), window).await?;
     if turns.is_empty() {
         return Ok(format!("{note}turn {turn_uuid} not found in session {session_id}\n"));
     }
@@ -618,12 +618,12 @@ pub async fn get(store: Store, session_id: String, turn_uuid: String, window: i6
 /// (blocks in order, splits de-overlapped). Returns the degradation note and the turns — empty
 /// when the turn isn't in the session; rendering is the caller's choice.
 pub async fn get_turns(
-    store: Store,
+    memory: Memory,
     session_id: String,
     turn_uuid: String,
     window: i64,
 ) -> Result<(String, Vec<Turn>)> {
-    let read = open_read(&store).await?;
+    let read = open_read(&memory).await?;
     let note = read.note.clone().unwrap_or_default();
     let ds = &read.ds;
 
@@ -714,11 +714,11 @@ fn turns_from_rows<'a>(rows: impl Iterator<Item = &'a TurnRow>) -> Vec<Turn> {
 /// session id — one scan, for previewing candidates before a curation decision. Only user turns
 /// carry the human's judgment; assistant replies and tool results are left out. Sessions with no
 /// prompts (or an empty `ids`) are simply absent from the map.
-pub async fn session_prompts(store: &Store, ids: &[String]) -> Result<HashMap<String, Vec<Turn>>> {
+pub async fn session_prompts(memory: &Memory, ids: &[String]) -> Result<HashMap<String, Vec<Turn>>> {
     if ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let read = open_read(store).await?;
+    let read = open_read(memory).await?;
     let cols = [
         "session_id",
         "turn_uuid",
@@ -784,7 +784,7 @@ fn age(t: DateTime<Utc>, now: DateTime<Utc>) -> String {
     format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
 }
 
-/// Distinct sessions in the store — the human-scale size of the index. Best-effort: a failed
+/// Distinct sessions in the memory — the human-scale size of the index. Best-effort: a failed
 /// scan omits the line rather than failing status.
 async fn session_count(ds: &Dataset) -> Option<usize> {
     let batches = dataset::scan_rows(ds, &["session_id"], None, None).await.ok()?;
@@ -801,7 +801,7 @@ async fn session_count(ds: &Dataset) -> Option<usize> {
     Some(sessions.len())
 }
 
-/// The indexation lines of a local store: how many sessions it holds and when it was last
+/// The indexation lines of a local memory: how many sessions it holds and when it was last
 /// written to (an `index` or `scrub` run). A version with no recorded timestamp is omitted.
 async fn index_lines(ds: &Dataset, now: DateTime<Utc>) -> String {
     let mut out = String::new();
@@ -815,24 +815,24 @@ async fn index_lines(ds: &Dataset, now: DateTime<Utc>) -> String {
     out
 }
 
-pub async fn status(store: Store) -> Result<String> {
-    match open_for_read(&store).await? {
+pub async fn status(memory: Memory) -> Result<String> {
+    match open_for_read(&memory).await? {
         ReadOutcome::Ready(ds) => {
             let now = Utc::now();
             let rows = ds.count_rows(None).await?;
-            let mut out = format!("memory: {}\nchunks: {rows}\n", store.label());
-            match &store {
-                Store::Local { .. } => out.push_str(&index_lines(&ds, now).await),
-                Store::Remote { uri } => {
+            let mut out = format!("memory: {}\nchunks: {rows}\n", memory.label());
+            match &memory {
+                Memory::Local { .. } => out.push_str(&index_lines(&ds, now).await),
+                Memory::Remote { uri } => {
                     // A project memory announces itself and this machine's review backlog.
                     if let Some(project) = curate::project(&ds) {
                         let _ = writeln!(out, "project memory of {project}");
                         let pending = curate::pending_count(&ds, uri).await?;
                         if pending > 0 {
-                            let _ = writeln!(out, "pending review: {pending} session(s) — run `funes curate {}`", store.label());
+                            let _ = writeln!(out, "pending review: {pending} session(s) — run `funes curate {}`", memory.label());
                         }
                     }
-                    // Every write to a remote store is a `funes push` (data or reindex commit),
+                    // Every write to a remote memory is a `funes push` (data or reindex commit),
                     // so the head version's timestamp is when it was last pushed to.
                     let t = ds.version().timestamp;
                     if t.timestamp() > 0 {
@@ -847,9 +847,9 @@ pub async fn status(store: Store) -> Result<String> {
                     }
                     // The local index is what pushes here — show it alongside, so one status
                     // answers both "what's published" and "what's indexed on this machine".
-                    if let Ok(local) = Store::local().open().await {
+                    if let Ok(local) = Memory::local().open().await {
                         let local_rows = local.count_rows(None).await?;
-                        let _ = write!(out, "\nlocal index: {}\nchunks: {local_rows}", Store::local().label());
+                        let _ = write!(out, "\nlocal index: {}\nchunks: {local_rows}", Memory::local().label());
                         // A count difference only approximates the push delta (scrub-held
                         // rows and other hosts' pushes also move it).
                         if local_rows > rows {
@@ -864,17 +864,17 @@ pub async fn status(store: Store) -> Result<String> {
         }
         // An unreachable remote shows the local index's status instead, like the read commands.
         ReadOutcome::Offline => {
-            let body = Box::pin(status(Store::local())).await?;
+            let body = Box::pin(status(Memory::local())).await?;
             Ok(format!(
                 "remote {} unreachable — showing your local memory instead\n{body}",
-                store.label()
+                memory.label()
             ))
         }
         // No personal index yet: point at the onboarding command instead of erroring. (recall/get/
         // list return a clear "no index" error in the same situation.)
         ReadOutcome::NoIndex => Ok(format!(
             "memory: {}\nno index yet — run `funes add <agent>` to build one (or `funes index`), then recall your own history.\n",
-            store.label(),
+            memory.label(),
         )),
     }
 }
@@ -911,7 +911,7 @@ mod tests {
     #[tokio::test]
     async fn missing_dataset_is_detected() {
         // Opening a path with no dataset is lance's DatasetNotFound — the empty/absent case.
-        let err = dataset::open("/nonexistent/funes-empty-store/chunks.lance", HashMap::new())
+        let err = dataset::open("/nonexistent/funes-empty-memory/chunks.lance", HashMap::new())
             .await
             .unwrap_err();
         assert!(is_missing_dataset(&err));
@@ -948,13 +948,13 @@ mod tests {
     }
 
     #[test]
-    fn store_hint_names_the_read_store() {
+    fn memory_hint_names_the_read_memory() {
         assert_eq!(
-            store_hint(Some("hf://datasets/acme/kb")),
+            memory_hint(Some("hf://datasets/acme/kb")),
             " --memory hf://datasets/acme/kb"
         );
-        // A hit with no store label yields no suffix.
-        assert_eq!(store_hint(None), "");
+        // A hit with no memory label yields no suffix.
+        assert_eq!(memory_hint(None), "");
     }
 
     #[test]

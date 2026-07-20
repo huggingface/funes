@@ -1,24 +1,24 @@
-//! Project memories, and the session curation that feeds them. A store is **named** the project
+//! Project memories, and the session curation that feeds them. A memory is **named** the project
 //! memory of a `project` — a repo identity like `huggingface/funes`, or a bare label — carried
 //! in the dataset's own schema metadata beside the `embedding_model` pin. (The per-chunk
 //! `workdir` column — the munged session working directory — is provenance, not policy.)
 //! Pushing to a project memory ships only the sessions this host has marked `include`; a
 //! session with no decision yet stays local until it's reviewed, so neither a new session nor
-//! an early push can leak one. Any other store is your **personal memory**, hosted: it
+//! an early push can leak one. Any other memory is your **personal memory**, hosted: it
 //! receives everything, as ever.
 //!
 //! Decisions are per-host facts (each host can only ever publish its own sessions), recorded
-//! in `<funes-home>/curation/<store>`, one per line, `#` for comments:
+//! in `<funes-home>/curation/<memory>`, one per line, `#` for comments:
 //!
 //! ```text
-//! include adc42fa9-8b40-4f84-9a4e-035d2188c15f   # add-store-hooks review
+//! include adc42fa9-8b40-4f84-9a4e-035d2188c15f   # add-memory-hooks review
 //! exclude d93c7cc5-c165-4198-af8e-bd5cdc397120   # internal pitch — stays private
 //! ```
 //!
 //! Human- and agent-editable. A decision flipped to `exclude` later does not retract what
 //! already shipped — the remote is append-only; curation prevents, it does not undo.
 
-use crate::hub::{self, Store};
+use crate::hub::{self, Memory};
 use crate::{dataset, hf_dataset, index, jsonl};
 use anyhow::{bail, Context, Result};
 use arrow_array::{Int64Array, RecordBatch, RecordBatchIterator, StringArray};
@@ -31,9 +31,9 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// The project a store is the memory of — the `project` schema-metadata key, carried beside the
+/// The project a memory is the memory of — the `project` schema-metadata key, carried beside the
 /// `embedding_model` pin: a repo identity (`huggingface/funes`) or a bare label. Its presence is
-/// what makes the store a project memory; a store without one is a personal memory and receives
+/// what makes the memory a project memory; a memory without one is a personal memory and receives
 /// everything, as ever. Distinct from the per-chunk `workdir` column (provenance, not policy).
 pub fn project(ds: &Dataset) -> Option<String> {
     ds.schema().metadata.get("project").cloned()
@@ -59,13 +59,13 @@ pub enum Named {
 }
 
 /// Name `target` the project memory of `project`. The repo itself must already exist — funes
-/// creates repos only on explicit interactive consent, which is the CLI's job. Refuses a store
+/// creates repos only on explicit interactive consent, which is the CLI's job. Refuses a memory
 /// already named for a different project (widening is a future, explicit affordance), and never
 /// mistakes an unreadable dataset for an absent one.
-pub async fn name_project(target: &Store, project: &str) -> Result<Named> {
+pub async fn name_project(target: &Memory, project: &str) -> Result<Named> {
     let uri = match target {
-        Store::Remote { uri } => uri.clone(),
-        Store::Local { .. } => {
+        Memory::Remote { uri } => uri.clone(),
+        Memory::Local { .. } => {
             bail!("a project memory must be remote — pass `<org>/<repo>` or an `hf://…` URI")
         }
     };
@@ -163,7 +163,7 @@ async fn promote(uri: &str, project: &str) -> Result<()> {
     .await
 }
 
-/// A store's curation decisions.
+/// A memory's curation decisions.
 #[derive(Debug, Default)]
 pub struct Curation {
     pub include: HashSet<String>,
@@ -188,12 +188,12 @@ impl Curation {
     }
 }
 
-/// The curation file for `store_uri`: `<funes-home>/curation/<sanitized-uri>`.
-pub fn file_for(store_uri: &str) -> PathBuf {
-    dataset::funes_dir().join("curation").join(sanitize(store_uri))
+/// The curation file for `memory_uri`: `<funes-home>/curation/<sanitized-uri>`.
+pub fn file_for(memory_uri: &str) -> PathBuf {
+    dataset::funes_dir().join("curation").join(sanitize(memory_uri))
 }
 
-/// A store URI as a filename — every path-hostile byte becomes `_`, deterministically, so the
+/// A memory URI as a filename — every path-hostile byte becomes `_`, deterministically, so the
 /// canonical `hf://…` URI always maps to the same file.
 fn sanitize(uri: &str) -> String {
     uri.chars()
@@ -207,9 +207,9 @@ fn sanitize(uri: &str) -> String {
         .collect()
 }
 
-/// The store's curation, or None when it has no file (nothing decided — push holds everything).
-pub fn load(store_uri: &str) -> Result<Option<Curation>> {
-    let path = file_for(store_uri);
+/// The memory's curation, or None when it has no file (nothing decided — push holds everything).
+pub fn load(memory_uri: &str) -> Result<Option<Curation>> {
+    let path = file_for(memory_uri);
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -361,19 +361,19 @@ fn decision_line(decision: Decision, session: &str, chunks: usize, comment: &str
     }
 }
 
-/// Rewrite the store's curation file so `session` carries exactly `decision` (None = pending):
+/// Rewrite the memory's curation file so `session` carries exactly `decision` (None = pending):
 /// every existing line naming `session` is dropped, then the new decision line (with `comment`, and
 /// `chunks` as the reviewed-at watermark for an `include`) is appended if any. Other sessions'
 /// lines — comments and all — are preserved verbatim. Rewriting rather than appending lets a
 /// decision be cleared, flipped, or (for an `include`) refreshed to a new watermark.
 pub fn set_decision(
-    store_uri: &str,
+    memory_uri: &str,
     session: &str,
     decision: Option<Decision>,
     chunks: usize,
     comment: &str,
 ) -> Result<()> {
-    let path = file_for(store_uri);
+    let path = file_for(memory_uri);
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -541,14 +541,14 @@ async fn flat_ids(ds: &Dataset) -> Result<HashSet<String>> {
     Ok(ids_by_session(ds).await?.into_values().flatten().collect())
 }
 
-/// This machine's count of sessions pending review for the project memory at `store_uri` (its
-/// already-open `remote` dataset). The caller has confirmed the store is a project memory.
-pub async fn pending_count(remote: &Dataset, store_uri: &str) -> Result<usize> {
-    let Ok(local) = Store::local().open().await else {
+/// This machine's count of sessions pending review for the project memory at `memory_uri` (its
+/// already-open `remote` dataset). The caller has confirmed the memory is a project memory.
+pub async fn pending_count(remote: &Dataset, memory_uri: &str) -> Result<usize> {
+    let Ok(local) = Memory::local().open().await else {
         return Ok(0);
     };
     let by_session = candidate_sessions(&local).await?;
-    let decisions = load(store_uri)?.unwrap_or_default();
+    let decisions = load(memory_uri)?.unwrap_or_default();
     let remote_ids = flat_ids(remote).await?;
     Ok(partition(&by_session, &decisions, &remote_ids).1.len())
 }
@@ -584,15 +584,15 @@ pub fn discover(sessions: Vec<SessionSummary>, project: &str) -> Discovered {
     found
 }
 
-/// What curating `store` for a project would entail — resolved without touching the store, so a
-/// review can run against local sessions before the store is created.
+/// What curating `memory` for a project would entail — resolved without touching the memory, so a
+/// review can run against local sessions before the memory is created.
 pub enum Prepared {
-    /// The store is already the project memory of `project` — ready to review and record.
+    /// The memory is already the project memory of `project` — ready to review and record.
     Ready { uri: String, project: String },
-    /// The store doesn't exist. Creating it as the project memory of `project` is deferred until
+    /// The memory doesn't exist. Creating it as the project memory of `project` is deferred until
     /// there's something to publish (an interactive review with an include).
     Absent { uri: String, project: String },
-    /// The store is a personal memory. Promoting it to the project memory of `project` is deferred
+    /// The memory is a personal memory. Promoting it to the project memory of `project` is deferred
     /// likewise.
     Personal { uri: String, project: String },
 }
@@ -612,42 +612,42 @@ impl Prepared {
     }
 }
 
-/// Resolve what curating `store` for `project` entails — reading the store's state, creating
-/// nothing. A given `project` must match the store's (if it's already a project memory) or names
-/// the one to give it; omitted requires the store to already be a project memory.
-pub async fn prepare(store: &Store, project: Option<&str>) -> Result<Prepared> {
-    let uri = match store {
-        Store::Remote { uri } => uri.clone(),
-        Store::Local { .. } => {
+/// Resolve what curating `memory` for `project` entails — reading the memory's state, creating
+/// nothing. A given `project` must match the memory's (if it's already a project memory) or names
+/// the one to give it; omitted requires the memory to already be a project memory.
+pub async fn prepare(memory: &Memory, project: Option<&str>) -> Result<Prepared> {
+    let uri = match memory {
+        Memory::Remote { uri } => uri.clone(),
+        Memory::Local { .. } => {
             bail!("a project memory must be remote — pass `<org>/<repo>` or an `hf://…` URI")
         }
     };
-    match store.open().await {
+    match memory.open().await {
         Ok(ds) => match (self::project(&ds), project) {
             (Some(existing), Some(given)) if existing != given => bail!(
                 "{} is already the project memory of {existing} — refusing to rename it to {given}",
-                store.label()
+                memory.label()
             ),
             (Some(existing), _) => Ok(Prepared::Ready { uri, project: existing }),
             (None, Some(given)) => Ok(Prepared::Personal { uri, project: given.to_string() }),
             (None, None) => bail!(
                 "{0} isn't a project memory (push sends it everything) — name its project: `funes curate {0} <project>`",
-                store.label()
+                memory.label()
             ),
         },
         Err(e) if hub::dataset_absent(&e) => match project {
             Some(given) => Ok(Prepared::Absent { uri, project: given.to_string() }),
-            None => bail!("{} doesn't exist", store.label()),
+            None => bail!("{} doesn't exist", memory.label()),
         },
-        Err(e) => Err(e.context(format!("can't read {}", store.label()))),
+        Err(e) => Err(e.context(format!("can't read {}", memory.label()))),
     }
 }
 
 /// Local repo identities whose name (the segment after `/`) is `label` — to suggest the owner when
 /// a project is given as a bare name (`transformers` → `huggingface/transformers`). Distinct,
-/// sorted; empty when there's no local store or no match.
+/// sorted; empty when there's no local memory or no match.
 pub async fn projects_named(label: &str) -> Result<Vec<String>> {
-    let Ok(local) = Store::local().open().await else {
+    let Ok(local) = Memory::local().open().await else {
         return Ok(Vec::new());
     };
     let suffix = format!("/{label}");
@@ -673,18 +673,18 @@ pub async fn projects_named(label: &str) -> Result<Vec<String>> {
 /// against it (matched / other / unresolvable). `all_reviewable` chooses the set: `true` — every
 /// session with a chunk not yet on the remote, whatever its decision, so a decision stays visible
 /// and reversible in the review; `false` — only the pending (undecided) ones, the to-do the text
-/// listing reports. Empty when there's no local store or the set is empty.
-pub async fn candidates(store: &Store, uri: &str, project: &str, all_reviewable: bool) -> Result<Discovered> {
+/// listing reports. Empty when there's no local memory or the set is empty.
+pub async fn candidates(memory: &Memory, uri: &str, project: &str, all_reviewable: bool) -> Result<Discovered> {
     let empty = || Discovered {
         matched: Vec::new(),
         other: Vec::new(),
         unresolvable: Vec::new(),
     };
-    let Ok(local) = Store::local().open().await else {
+    let Ok(local) = Memory::local().open().await else {
         return Ok(empty());
     };
     let by_session = candidate_sessions(&local).await?;
-    let remote_ids = match store.open().await {
+    let remote_ids = match memory.open().await {
         Ok(ds) => flat_ids(&ds).await?,
         Err(_) => HashSet::new(),
     };
@@ -706,10 +706,10 @@ pub async fn candidates(store: &Store, uri: &str, project: &str, all_reviewable:
 }
 
 /// Record `include`/`exclude` decisions for `sessions`, auto-commenting each with its session's
-/// date and first real prompt (pulled from the local store). Returns the `recorded N include,
+/// date and first real prompt (pulled from the local memory). Returns the `recorded N include,
 /// M exclude` report line.
 pub async fn record_decisions(uri: &str, project: &str, include: &[String], exclude: &[String]) -> Result<String> {
-    let local = Store::local().open().await?;
+    let local = Memory::local().open().await?;
     let touched: HashSet<String> = include.iter().chain(exclude).cloned().collect();
     let by_id: HashMap<String, SessionSummary> = summaries(&local, Some(&touched))
         .await?
@@ -742,17 +742,17 @@ pub async fn record_decisions(uri: &str, project: &str, include: &[String], excl
 }
 
 /// Non-interactive `funes curate`: record `--include`/`--exclude` decisions, or list the sessions
-/// pending review. The text path never creates a store — creating a project memory needs the
-/// interactive review's consent — so it requires the store to already be the project memory. The
+/// pending review. The text path never creates a memory — creating a project memory needs the
+/// interactive review's consent — so it requires the memory to already be the project memory. The
 /// interactive review wraps these same pieces (and deferred creation) in the CLI layer.
-pub async fn run(store: &Store, project: Option<&str>, include: &[String], exclude: &[String]) -> Result<String> {
-    let (uri, project) = match prepare(store, project).await? {
+pub async fn run(memory: &Memory, project: Option<&str>, include: &[String], exclude: &[String]) -> Result<String> {
+    let (uri, project) = match prepare(memory, project).await? {
         Prepared::Ready { uri, project } => (uri, project),
-        Prepared::Absent { .. } => bail!("{} doesn't exist", store.label()),
+        Prepared::Absent { .. } => bail!("{} doesn't exist", memory.label()),
         Prepared::Personal { .. } => {
             bail!(
                 "{} is a personal memory, not the project memory of a repo",
-                store.label()
+                memory.label()
             )
         }
     };
@@ -765,7 +765,7 @@ pub async fn run(store: &Store, project: Option<&str>, include: &[String], exclu
     }
 
     // Otherwise list the sessions pending review.
-    let found = candidates(store, &uri, &project, false).await?;
+    let found = candidates(memory, &uri, &project, false).await?;
     let skipped = found.other.len() + found.unresolvable.len();
     let line = |out: &mut String, s: &SessionSummary| {
         let sid = &s.session_id[..s.session_id.len().min(8)];
@@ -814,7 +814,7 @@ pub async fn run(store: &Store, project: Option<&str>, include: &[String], exclu
     let _ = writeln!(
         out,
         "\nmark with: funes curate {0} --include <session>…   (or --exclude)",
-        store.label()
+        memory.label()
     );
     Ok(out)
 }
@@ -933,7 +933,7 @@ exclude ddd # later";
 
         let personal = tempfile::tempdir().unwrap();
         let ds = empty_ds(personal.path(), index::schema()).await;
-        assert!(project(&ds).is_none(), "a plain store is a personal memory");
+        assert!(project(&ds).is_none(), "a plain memory is a personal memory");
     }
 
     #[test]

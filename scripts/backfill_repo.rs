@@ -1,12 +1,12 @@
-//! One-off backfill: add the `repo` column to a local store in place via Lance `add_columns` —
+//! One-off backfill: add the `repo` column to a local memory in place via Lance `add_columns` —
 //! each row's value resolved per session from its transcript's cwd (the same resolver the indexer
 //! uses). Additive: no data rewrite, no re-embed, no reindex — one column-append commit, vectors
-//! and indexes untouched. Skips a store that already carries `repo`. Local store only
+//! and indexes untouched. Skips a memory that already carries `repo`. Local memory only
 //! (`$FUNES_HOME` selects which).
 //!
 //!   cargo run --example backfill_repo
 //!
-//! Disposable: delete this file and its `[[example]]` entry once every store carries `repo`.
+//! Disposable: delete this file and its `[[example]]` entry once every memory carries `repo`.
 
 use anyhow::{Context, Result};
 use arrow_array::{RecordBatch, StringArray};
@@ -19,11 +19,11 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // add_columns is a schema-evolution commit — hold the store lock to be the sole writer.
-    let _lock = lock::StoreLock::acquire()?;
-    let uri = dataset::table_uri(&dataset::local_store_dir());
+    // add_columns is a schema-evolution commit — hold the memory lock to be the sole writer.
+    let _lock = lock::MemoryLock::acquire()?;
+    let uri = dataset::table_uri(&dataset::local_memory_dir());
     let Ok(mut ds) = dataset::open(&uri, HashMap::new()).await else {
-        println!("no local store to backfill");
+        println!("no local memory to backfill");
         return Ok(());
     };
     if arrow_schema::Schema::from(ds.schema())
@@ -101,7 +101,7 @@ async fn session_repos(ds: &Dataset) -> Result<HashMap<String, String>> {
 /// A named Utf8 column of `b`, or an error naming what's missing.
 fn col<'a>(b: &'a RecordBatch, name: &str) -> Result<&'a StringArray> {
     b.column_by_name(name)
-        .with_context(|| format!("store has no `{name}` column"))?
+        .with_context(|| format!("memory has no `{name}` column"))?
         .as_any()
         .downcast_ref::<StringArray>()
         .with_context(|| format!("`{name}` column is not utf8"))

@@ -1,6 +1,6 @@
-//! The `scrub` command: redact secrets from the existing local store, in place. Works on the stored
+//! The `scrub` command: redact secrets from the existing local memory, in place. Works on the stored
 //! rows themselves — so it cleans sessions whose source transcripts are already gone, which
-//! re-indexing cannot. Operates only on the local store; it does not touch a published remote.
+//! re-indexing cannot. Operates only on the local memory; it does not touch a published remote.
 
 use crate::index::{build_batch, embed_batched, schema};
 use crate::inference::{self, Embedder};
@@ -19,9 +19,9 @@ use std::time::Instant;
 /// (e.g. a key stored with escaped `\n`) — drop the block whole. Fail-closed on the scanner:
 /// scrubbing is the whole point.
 pub async fn run() -> Result<()> {
-    // scrub rewrites the whole table, so hold the store lock to be the sole writer.
-    let _lock = lock::StoreLock::acquire()?;
-    let uri = dataset::table_uri(&dataset::local_store_dir());
+    // scrub rewrites the whole table, so hold the memory lock to be the sole writer.
+    let _lock = lock::MemoryLock::acquire()?;
+    let uri = dataset::table_uri(&dataset::local_memory_dir());
     let Ok(ds) = dataset::open(&uri, HashMap::new()).await else {
         println!("no local memory to scrub");
         return Ok(());
@@ -98,7 +98,7 @@ pub async fn run() -> Result<()> {
         Some(build_batch(&replacements, &vectors)?)
     };
 
-    // Rewrite the store in a single Overwrite commit: every clean row (with its existing vector) plus
+    // Rewrite the memory in a single Overwrite commit: every clean row (with its existing vector) plus
     // the re-chunked redacted blocks. One commit is deliberate — a delete-then-append is two commits,
     // and an interrupt between them would drop the secret rows without writing their replacements,
     // which for a source-gone session is permanent loss. Append-first isn't a safe alternative either:

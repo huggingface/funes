@@ -19,7 +19,7 @@
 //
 // The memory this extension recalls from is resolved once, in order:
 //   1. FUNES_MEMORY in the environment (a per-run override, set by whatever host)
-//   2. the memory bound at install by `funes add pi <memory>`, saved in a `store`
+//   2. the memory bound at install by `funes add pi <memory>`, saved in a `memory`
 //      file next to this extension (absent = the local memory)
 // The result is forwarded as the `funes mcp <memory>` positional; empty forwards a
 // bare `funes mcp` (the local memory).
@@ -32,16 +32,22 @@ import { dirname, join } from "node:path";
 const FUNES_BIN = process.env.FUNES_BIN || "funes";
 
 // The memory `funes add pi <memory>` wrote beside this extension, or "" if none (local).
-function boundStore(): string {
-  try {
-    return readFileSync(join(dirname(fileURLToPath(import.meta.url)), "store"), "utf8").trim();
-  } catch {
-    return "";
+// `store` is the pre-rename filename — read it as a fallback so an install predating the rename
+// keeps its binding until the next `funes add pi` rewrites it.
+function boundMemory(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  for (const name of ["memory", "store"]) {
+    try {
+      return readFileSync(join(here, name), "utf8").trim();
+    } catch {
+      /* try the next name */
+    }
   }
+  return "";
 }
 
-const store = (process.env.FUNES_MEMORY || boundStore()).trim();
-const FUNES_ARGS = store ? ["mcp", store] : ["mcp"];
+const memory = (process.env.FUNES_MEMORY || boundMemory()).trim();
+const FUNES_ARGS = memory ? ["mcp", memory] : ["mcp"];
 const PROTOCOL_VERSION = "2024-11-05"; // matches funes' rmcp server
 const CALL_TIMEOUT_MS = 120_000;
 

@@ -27,13 +27,13 @@ pub const MODEL: &str = "BAAI/bge-small-en-v1.5";
 pub const DIM: i32 = 384;
 const EMBED_BATCH: usize = 256;
 
-/// Take the store lock. An interactive caller (a human at `funes index`/`funes add`) waits out a
-/// brief contention — up to 3 retries, 5s apart — since a store operation rarely runs long; an
+/// Take the memory lock. An interactive caller (a human at `funes index`/`funes add`) waits out a
+/// brief contention — up to 3 retries, 5s apart — since a memory operation rarely runs long; an
 /// automated run (a hook) bails at once and re-sweeps next turn.
-async fn acquire_lock(interactive: bool) -> Result<lock::StoreLock> {
+async fn acquire_lock(interactive: bool) -> Result<lock::MemoryLock> {
     let retries = if interactive { 3 } else { 0 };
     for attempt in 0..=retries {
-        if let Some(l) = lock::StoreLock::try_acquire()? {
+        if let Some(l) = lock::MemoryLock::try_acquire()? {
             return Ok(l);
         }
         if attempt < retries {
@@ -75,7 +75,7 @@ pub(crate) fn schema() -> Arc<Schema> {
                 true,
             ),
             // After `vector`: `add_columns` appends a migrated column at the end, so a
-            // freshly-built store must match that order (the tripwire test pins it). `harness`
+            // freshly-built memory must match that order (the tripwire test pins it). `harness`
             // came first, then `repo` — each appended in turn.
             utf8("harness"),
             utf8("repo"),
@@ -153,8 +153,8 @@ async fn stored_ids(ds: &Dataset) -> Result<HashSet<String>> {
 }
 
 /// Redact secrets from a session's turns *before* chunking — so a long key that chunking would
-/// split across pieces is whole when scanned, and never reaches the embedding, the local store, or
-/// (via push) the Hub. Scans exactly the blocks the pass will store ([`chunk::block_selected`]), so
+/// split across pieces is whole when scanned, and never reaches the embedding, the local memory, or
+/// (via push) the Hub. Scans exactly the blocks the pass will memory ([`chunk::block_selected`]), so
 /// deferred tiers aren't scanned now and a tier-major backfill doesn't re-scan each session per
 /// tier. Best-effort: removes a secret whose value byte-matches the stored text (the common case,
 /// real newlines); anything that resists is caught downstream by the fail-closed push gate.
@@ -227,7 +227,7 @@ fn unit_current(entry: Option<&UnitState>, sig: &str, target: Tier) -> bool {
     entry.is_some_and(|e| e.sig == sig && e.level >= target)
 }
 
-/// A set-up indexer: it holds the store lock, embedder, dataset, redaction scanner, and incremental
+/// A set-up indexer: it holds the memory lock, embedder, dataset, redaction scanner, and incremental
 /// state, so a caller can index units in whatever batches it likes — one at a time to check the
 /// clock between them, or all at once — without reloading the model. Build the indexes once at the
 /// end with [`Indexer::finalize`].
@@ -243,18 +243,18 @@ struct Indexer {
     repo_cache: HashMap<String, String>,
     state: HashMap<String, UnitState>,
     state_path: PathBuf,
-    /// The store didn't exist when this run opened it — the first index.
+    /// The memory didn't exist when this run opened it — the first index.
     first_index: bool,
     /// A human is watching (stdin is a terminal) — probed once here, so every prompt-or-proceed
     /// choice in a run agrees.
     interactive: bool,
-    /// The caller stopped early with passes still owed, so the summary must not claim the store is
+    /// The caller stopped early with passes still owed, so the summary must not claim the memory is
     /// up to date.
     work_remaining: bool,
     /// Units (by index) already counted in `n_sessions` this run, so a tier-major caller's repeat
     /// passes over one unit don't recount its sessions.
     counted: HashSet<usize>,
-    _lock: lock::StoreLock,
+    _lock: lock::MemoryLock,
     /// The sources and their units, enumerated once at open so the change-stamps are a stable
     /// snapshot; a caller drives them by index via [`Indexer::index_unit`].
     sources: Vec<Box<dyn source::TraceSource>>,
@@ -265,7 +265,7 @@ struct Indexer {
 }
 
 impl Indexer {
-    /// Acquire the store lock, open (or plan to create) the dataset, load incremental state, bring
+    /// Acquire the memory lock, open (or plan to create) the dataset, load incremental state, bring
     /// up the embedder and secret scanner, and enumerate `sources`' units.
     async fn open(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: bool) -> Result<Indexer> {
         let dir = dataset::funes_dir();
@@ -274,11 +274,11 @@ impl Indexer {
         // Held for the whole run so the stored-id read and the appends see one stable version.
         let _lock = acquire_lock(interactive).await?;
 
-        let uri = dataset::table_uri(&dataset::local_store_dir());
+        let uri = dataset::table_uri(&dataset::local_memory_dir());
         let ds = dataset::open(&uri, HashMap::new()).await.ok();
 
-        // Model-pin: refuse to add to a store built with a different embedding model. The id rides
-        // in the dataset's schema metadata; a pre-metadata store (no id) is tolerated and guarded
+        // Model-pin: refuse to add to a memory built with a different embedding model. The id rides
+        // in the dataset's schema metadata; a pre-metadata memory (no id) is tolerated and guarded
         // only by the dimension check until it is reindexed.
         if let Some(ds) = &ds {
             let schema = arrow_schema::Schema::from(ds.schema());
@@ -292,8 +292,8 @@ impl Indexer {
         let first_index = ds.is_none();
 
         // Incremental state: path -> {size:mtime stamp, tier}; an unreadable or old-schema file →
-        // empty. A first index (store missing) owes everything, whatever an old state.json says — a
-        // stale one would silently skip every unit against the empty store.
+        // empty. A first index (memory missing) owes everything, whatever an old state.json says — a
+        // stale one would silently skip every unit against the empty memory.
         let state_path = dir.join("state.json");
         let state = if first_index {
             HashMap::new()
@@ -506,11 +506,11 @@ impl Indexer {
     }
 
     /// Build the FTS + IVF_PQ indexes (best-effort), reap superseded versions, and print the run
-    /// summary. Consumes the indexer, releasing the store lock. The vector index bounds how much a
+    /// summary. Consumes the indexer, releasing the memory lock. The vector index bounds how much a
     /// query reads — what makes recall over a remote (hf://) tier lazy rather than a full scan; lance
     /// enforces its own training minimum (256 rows) and skips below it, falling back to brute force.
     async fn finalize(mut self) -> Result<()> {
-        // Nothing written → the store is unchanged since it opened; skip the rebuild and its
+        // Nothing written → the memory is unchanged since it opened; skip the rebuild and its
         // version churn.
         if self.n_chunks > 0 {
             if let Some(d) = &mut self.ds {
@@ -554,7 +554,7 @@ fn run_summary(done: bool, sessions: u64, skipped: u64, chunks: u64, units: usiz
 }
 
 /// Build/update the local index from one or more source roots — each `(path, harness override)`
-/// where `None` auto-detects. All roots share one store, embedder, and `state.json` (keyed by
+/// where `None` auto-detects. All roots share one memory, embedder, and `state.json` (keyed by
 /// absolute file path, so cross-root incremental works). Writes only locally — publishing is the
 /// separate `push`. `max_sessions` caps sessions *per root* to the most recent N (`None` = all).
 /// `yes` skips the first-index confirmation (`--yes`).
@@ -986,7 +986,7 @@ mod tests {
             source_path: String::new(),
             harness: "claude_code".into(),
         }];
-        // A text-only pass redacts the text block but leaves the tool_result it won't store untouched.
+        // A text-only pass redacts the text block but leaves the tool_result it won't memory untouched.
         redact_turns(&mut turns, &Fake, &[chunk::Tier::Text], true).unwrap();
         assert!(
             turns[0].blocks[0].text.contains("[REDACTED:PrivateKey]"),

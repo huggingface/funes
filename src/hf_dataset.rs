@@ -7,7 +7,7 @@
 //! retries against the new head.
 //!
 //! The result goes up as a *single* `create_commit` because Lance, left to write straight to
-//! `hf://`, would commit each file on its own: that store is OpenDAL's HuggingFace service, where
+//! `hf://`, would commit each file on its own: that memory is OpenDAL's HuggingFace service, where
 //! every `put` is its own git commit.
 //!
 //! ```text
@@ -22,17 +22,17 @@
 //!
 //! # Why this shape
 //!
-//! **Intercept at the object-store layer.** Every file an append or optimize produces — data
+//! **Intercept at the object-memory layer.** Every file an append or optimize produces — data
 //! fragment, manifest, transaction, index — is written through `object_store`, so it is the one
 //! hook that captures the *whole* write set with no knowledge of Lance's on-disk layout. A
 //! narrower seam can't do it: a custom `CommitHandler` only governs the final manifest commit and
 //! never sees the data fragments, which are written earlier.
 //!
-//! **Decorate Lance's store rather than inject our own.** Lance does support dependency injection
+//! **Decorate Lance's memory rather than inject our own.** Lance does support dependency injection
 //! (`DatasetBuilder::with_object_store`, now deprecated, or an `ObjectStoreProvider`), but both
-//! make *us* construct the HF store — reproducing Lance's OpenDAL-hf setup, XET wiring, and
+//! make *us* construct the HF memory — reproducing Lance's OpenDAL-hf setup, XET wiring, and
 //! token/revision plumbing, and keeping it in lockstep. [`WrappingObjectStore`] instead hands us
-//! the store Lance already built (`wrap`'s `original`), so we decorate it and never reconstruct
+//! the memory Lance already built (`wrap`'s `original`), so we decorate it and never reconstruct
 //! anything. It is also the non-deprecated seam.
 
 use std::collections::{BTreeMap, HashMap};
@@ -345,7 +345,7 @@ fn write_ops(files: &BTreeMap<String, Bytes>) -> Result<(Vec<CommitOperation>, t
 }
 
 /// Stamp `updates` into the remote dataset's schema metadata in one guarded commit — how an
-/// existing store is named a project memory. The full merged map is written (lance's amend
+/// existing memory is named a project memory. The full merged map is written (lance's amend
 /// replaces the metadata wholesale). Single attempt: naming is a rare, interactive act, so a
 /// moved head is an error to re-run, not a retry loop.
 pub(crate) async fn amend_schema_metadata(
@@ -491,7 +491,7 @@ fn human_bytes(n: u64) -> String {
     }
 }
 
-/// Installs a [`CaptureStore`] in front of the store Lance built for the dataset URI, and holds the
+/// Installs a [`CaptureStore`] in front of the memory Lance built for the dataset URI, and holds the
 /// shared capture map so the operation that created it can read the files back once Lance is done.
 #[derive(Debug)]
 struct CaptureWrapper {
@@ -526,9 +526,9 @@ impl FileFetcher for HubFetcher {
     }
 }
 
-/// Installs a [`FetchStore`] backed by a [`HubFetcher`] in front of the store Lance built for a
+/// Installs a [`FetchStore`] backed by a [`HubFetcher`] in front of the memory Lance built for a
 /// remote read. The read mirror of [`CaptureWrapper`]; built by the caller, where the repo handle
-/// and head SHA are known, because `wrap` is handed only the built store and an opendal-internal
+/// and head SHA are known, because `wrap` is handed only the built memory and an opendal-internal
 /// prefix.
 #[derive(Debug)]
 pub(crate) struct FetchWrapper {

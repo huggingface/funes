@@ -8,8 +8,8 @@ use anyhow::{anyhow, bail, Result};
 use serde_json::json;
 use std::process::{Command, Stdio};
 
-use crate::hub::Store;
-use crate::recall::{check_readable, recall_hits, store_hint};
+use crate::hub::Memory;
+use crate::recall::{check_readable, memory_hint, recall_hits};
 use crate::render;
 
 // Recall's CLI defaults; ask exposes no tuning of its own.
@@ -20,9 +20,9 @@ const NEIGHBORS: i64 = 1;
 
 /// The prompt must precede the variadic flags, which would otherwise swallow it; both tools are
 /// pre-allowed because print mode cannot prompt for permissions.
-fn claude_args(funes: &str, store: Option<&str>, prompt: &str) -> Vec<String> {
+fn claude_args(funes: &str, memory: Option<&str>, prompt: &str) -> Vec<String> {
     let mut server = vec!["mcp".to_string()];
-    if let Some(s) = store {
+    if let Some(s) = memory {
         server.push(s.to_string());
     }
     let config = json!({ "mcpServers": { "funes": { "command": funes, "args": server } } });
@@ -68,22 +68,22 @@ fn codex_prompt(question: &str, passages: &str) -> String {
 }
 
 /// `funes ask claude`: mount funes as a session-only MCP server and let claude recall on its own.
-pub async fn claude(question: String, store: Option<String>) -> Result<()> {
-    // A bad store must fail as a funes error — in-session it becomes an LLM apology with exit 0.
-    if let Some(spec) = store.as_deref() {
-        check_readable(&Store::parse(spec)).await?;
+pub async fn claude(question: String, memory: Option<String>) -> Result<()> {
+    // A bad memory must fail as a funes error — in-session it becomes an LLM apology with exit 0.
+    if let Some(spec) = memory.as_deref() {
+        check_readable(&Memory::parse(spec)).await?;
     }
     let funes = funes_bin()?;
-    let args = claude_args(&funes, store.as_deref(), &claude_prompt(&question));
+    let args = claude_args(&funes, memory.as_deref(), &claude_prompt(&question));
     run_agent("claude", &args)
 }
 
-/// The grounding for a codex ask. The store is checked first: one that can't be read must fail
+/// The grounding for a codex ask. The memory is checked first: one that can't be read must fail
 /// rather than silently answer from another corpus.
-pub async fn codex_grounding(store: Store, question: &str, progress: &(dyn Fn(&str) + Sync)) -> Result<String> {
-    check_readable(&store).await?;
+pub async fn codex_grounding(memory: Memory, question: &str, progress: &(dyn Fn(&str) + Sync)) -> Result<String> {
+    check_readable(&memory).await?;
     let (note, label, hits) = recall_hits(
-        store,
+        memory,
         question.to_string(),
         K,
         CANDIDATES,
@@ -101,7 +101,7 @@ pub async fn codex_grounding(store: Store, question: &str, progress: &(dyn Fn(&s
     if hits.is_empty() {
         bail!("nothing recalled for that question — no passages to ground an answer in");
     }
-    let passages = render::recall_agent("", &store_hint(label.as_deref()), &hits);
+    let passages = render::recall_agent("", &memory_hint(label.as_deref()), &hits);
     Ok(codex_prompt(question, &passages))
 }
 
@@ -161,7 +161,7 @@ mod tests {
     use super::{claude_args, claude_prompt, codex_args, codex_prompt};
 
     #[test]
-    fn bakes_the_store_only_when_present() {
+    fn bakes_the_memory_only_when_present() {
         assert_eq!(
             claude_args("funes", None, "p"),
             [

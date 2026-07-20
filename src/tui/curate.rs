@@ -1,7 +1,7 @@
 //! The `funes curate` interactive review over the generic [`crate::tui`] engine: a fuzzy-filterable
 //! list of the project's candidate sessions, each carrying a decision glyph, where `→` includes a
 //! session and `←` excludes it (the same arrow again clears to pending). The preview shows the
-//! session's user prompts. Decisions persist to the store's curation file as they're made; Enter or
+//! session's user prompts. Decisions persist to the memory's curation file as they're made; Enter or
 //! Esc ends the review — the caller then summarizes and offers the push.
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
@@ -26,7 +26,7 @@ pub struct Candidate {
     pub preview: Text<'static>,
 }
 
-/// Run the arrow review for `project`'s `items` against the store at `uri`, seeding each row from
+/// Run the arrow review for `project`'s `items` against the memory at `uri`, seeding each row from
 /// the curation file's current decision. Writes persist as decisions are made; returns when the
 /// user ends the review, propagating the first write error if any.
 pub fn run(uri: String, project: String, items: Vec<Candidate>) -> anyhow::Result<()> {

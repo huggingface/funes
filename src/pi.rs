@@ -26,15 +26,15 @@ const MIN_PI: (u32, u32, u32) = (0, 74, 2);
 /// Install the embedded pi extension at `~/.funes/integrations/pi` and register it with pi.
 /// That path is fixed — independent of the cwd and of `FUNES_HOME` — because pi records the
 /// install location permanently, so it must outlive any session or demo. A copy that differs
-/// from this binary's embedded extension (e.g. after an upgrade, or a different bound `store`) is
+/// from this binary's embedded extension (e.g. after an upgrade, or a different bound `memory`) is
 /// refreshed automatically; `force` rewrites even when it matches.
-pub fn install(store: Option<String>, force: bool) -> Result<()> {
+pub fn install(memory: Option<String>, force: bool) -> Result<()> {
     // Fixed at `~/.funes/integrations/pi`, deliberately not `dataset::funes_dir()`: pi stores
     // the install path by reference, so it can't follow a per-session FUNES_HOME (a demo points
     // that elsewhere and the dir may not outlive the install).
     let home = std::env::var_os("HOME").context("resolving $HOME for the pi install dir")?;
     let dir = PathBuf::from(home).join(".funes/integrations/pi");
-    extract(&dir, store.as_deref(), force)?;
+    extract(&dir, memory.as_deref(), force)?;
     let dir = dir.to_string_lossy().into_owned();
 
     // Probe pi: this confirms it's on PATH (else extract-and-instruct) and lets us flag a
@@ -81,15 +81,15 @@ fn file_matches(path: &Path, want: &str) -> bool {
     std::fs::read_to_string(path).map(|got| got == want).unwrap_or(false)
 }
 
-/// Write the embedded extension (index.ts + package.json) into `dir`, plus the `store` file that
+/// Write the embedded extension (index.ts + package.json) into `dir`, plus the `memory` file that
 /// binds this install's recall (the extension reads it at startup; `None` = local, so the file is
 /// absent). A copy that drifts from what this install would write — a newer embedded version, or a
-/// different bound store — is refreshed; `force` rewrites even when it matches.
-fn extract(dir: &Path, store: Option<&str>, force: bool) -> Result<()> {
+/// different bound memory — is refreshed; `force` rewrites even when it matches.
+fn extract(dir: &Path, memory: Option<&str>, force: bool) -> Result<()> {
     let current = !force
         && file_matches(&dir.join("index.ts"), INDEX_TS)
         && file_matches(&dir.join("package.json"), PACKAGE_JSON)
-        && store_matches(&dir.join("store"), store);
+        && memory_matches(&dir.join("memory"), memory);
     if current {
         println!("funes pi extension already current at {}", dir.display());
         return Ok(());
@@ -97,14 +97,14 @@ fn extract(dir: &Path, store: Option<&str>, force: bool) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     std::fs::write(dir.join("index.ts"), INDEX_TS).context("writing index.ts")?;
     std::fs::write(dir.join("package.json"), PACKAGE_JSON).context("writing package.json")?;
-    write_store(&dir.join("store"), store)?;
+    write_memory(&dir.join("memory"), memory)?;
     Ok(())
 }
 
-/// Write the `store` binding file (the store on its own line), or remove it when `store` is `None`
-/// so the extension falls back to the local store.
-fn write_store(path: &Path, store: Option<&str>) -> Result<()> {
-    match store {
+/// Write the `memory` binding file (the memory on its own line), or remove it when `memory` is `None`
+/// so the extension falls back to the local memory.
+fn write_memory(path: &Path, memory: Option<&str>) -> Result<()> {
+    match memory {
         Some(s) => std::fs::write(path, format!("{s}\n")).context("writing the pi memory binding"),
         None => match std::fs::remove_file(path) {
             Ok(()) => Ok(()),
@@ -114,11 +114,11 @@ fn write_store(path: &Path, store: Option<&str>) -> Result<()> {
     }
 }
 
-/// True if the `store` file at `path` already reflects `store`: absent for `None` (local), else its
-/// trimmed contents equal the wanted store. Mirrors how the extension reads it.
-fn store_matches(path: &Path, store: Option<&str>) -> bool {
+/// True if the `memory` file at `path` already reflects `memory`: absent for `None` (local), else its
+/// trimmed contents equal the wanted memory. Mirrors how the extension reads it.
+fn memory_matches(path: &Path, memory: Option<&str>) -> bool {
     let current = std::fs::read_to_string(path).ok().map(|s| s.trim().to_string());
-    match store {
+    match memory {
         Some(s) => current.as_deref() == Some(s),
         None => current.is_none(),
     }
@@ -126,7 +126,7 @@ fn store_matches(path: &Path, store: Option<&str>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{file_matches, parse_semver, store_matches, write_store, MIN_PI};
+    use super::{file_matches, memory_matches, parse_semver, write_memory, MIN_PI};
 
     #[test]
     fn parses_versions_and_compares_to_min() {
@@ -145,32 +145,32 @@ mod tests {
     }
 
     #[test]
-    fn store_file_reflects_the_binding() {
+    fn memory_file_reflects_the_binding() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("store");
+        let path = dir.path().join("memory");
 
         // Local (None): the file is absent, and that is "current".
-        assert!(store_matches(&path, None));
-        assert!(!store_matches(&path, Some("acme/kb")));
+        assert!(memory_matches(&path, None));
+        assert!(!memory_matches(&path, Some("acme/kb")));
 
-        // Binding a store writes it; then it matches that store and no longer matches local.
-        write_store(&path, Some("acme/kb")).unwrap();
+        // Binding a memory writes it; then it matches that memory and no longer matches local.
+        write_memory(&path, Some("acme/kb")).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "acme/kb\n");
-        assert!(store_matches(&path, Some("acme/kb")));
-        assert!(!store_matches(&path, Some("other/kb")));
-        assert!(!store_matches(&path, None));
+        assert!(memory_matches(&path, Some("acme/kb")));
+        assert!(!memory_matches(&path, Some("other/kb")));
+        assert!(!memory_matches(&path, None));
 
         // Rebinding to local removes the file (idempotent — removing an absent file is fine).
-        write_store(&path, None).unwrap();
-        assert!(store_matches(&path, None));
-        write_store(&path, None).unwrap();
+        write_memory(&path, None).unwrap();
+        assert!(memory_matches(&path, None));
+        write_memory(&path, None).unwrap();
     }
 
-    /// The extension resolves its store from a `store` file next to index.ts — so the embedded
+    /// The extension resolves its memory from a `memory` file next to index.ts — so the embedded
     /// source must actually read that file (guards against the two drifting apart).
     #[test]
-    fn embedded_extension_reads_the_store_file() {
-        assert!(super::INDEX_TS.contains(r#""store""#));
+    fn embedded_extension_reads_the_memory_file() {
+        assert!(super::INDEX_TS.contains(r#""memory""#));
         assert!(super::INDEX_TS.contains("FUNES_MEMORY"));
     }
 

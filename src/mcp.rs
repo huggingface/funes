@@ -2,7 +2,7 @@
 //! so any MCP client (Claude Code, Cursor, …) can call funes as a first-class tool.
 //! stdout is the JSON-RPC channel — logs must go to stderr.
 
-use crate::hub::Store;
+use crate::hub::Memory;
 use crate::recall;
 use anyhow::Result;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -53,24 +53,24 @@ pub struct StatusRequest {
 pub(crate) struct Funes {
     /// Explicit memory spec (`funes mcp --memory`), pinned for the server's lifetime. `None` reads
     /// the local memory unless a call passes its own `memory`.
-    store: Option<String>,
+    memory: Option<String>,
     #[allow(dead_code)]
     tool_router: ToolRouter<Funes>,
 }
 
 #[tool_router]
 impl Funes {
-    fn new(store: Option<String>) -> Self {
+    fn new(memory: Option<String>) -> Self {
         Self {
-            store,
+            memory,
             tool_router: Self::tool_router(),
         }
     }
 
     /// The memory a call reads: its explicit `memory` argument wins over the server's `--memory`,
     /// else the local memory.
-    fn store(&self, spec: Option<String>) -> Store {
-        Store::resolve(spec.filter(|s| !s.trim().is_empty()).or_else(|| self.store.clone()))
+    fn memory(&self, spec: Option<String>) -> Memory {
+        Memory::resolve(spec.filter(|s| !s.trim().is_empty()).or_else(|| self.memory.clone()))
     }
 
     #[tool(
@@ -87,7 +87,7 @@ impl Funes {
         }): Parameters<RecallRequest>,
     ) -> String {
         match recall::recall(
-            self.store(memory),
+            self.memory(memory),
             query,
             k.unwrap_or(8),
             30,
@@ -116,7 +116,7 @@ impl Funes {
             memory,
         }): Parameters<GetRequest>,
     ) -> String {
-        match recall::get(self.store(memory), session_id, turn_uuid, window.unwrap_or(3)).await {
+        match recall::get(self.memory(memory), session_id, turn_uuid, window.unwrap_or(3)).await {
             Ok(s) if !s.is_empty() => s,
             Ok(_) => "no results".to_string(),
             Err(e) => format!("get error: {e}"),
@@ -129,7 +129,7 @@ impl Funes {
     async fn status(&self, Parameters(StatusRequest { memory }): Parameters<StatusRequest>) -> String {
         // No update check here: it needs the network, and the "update available" notice belongs
         // on the human-facing CLI `funes status`, not on this hot, otherwise-local tool path.
-        recall::status(self.store(memory))
+        recall::status(self.memory(memory))
             .await
             .unwrap_or_else(|e| format!("status error: {e}"))
     }
@@ -159,8 +159,8 @@ impl ServerHandler for Funes {
     }
 }
 
-pub async fn run(store: Option<String>) -> Result<()> {
-    let service = Funes::new(store).serve(stdio()).await?;
+pub async fn run(memory: Option<String>) -> Result<()> {
+    let service = Funes::new(memory).serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
 }

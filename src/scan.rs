@@ -216,7 +216,7 @@ pub struct Redaction {
     /// Whether *every* finding was excised. `false` means a secret survives — either it was found
     /// inside an encoded region (a non-PLAIN decoder, e.g. base64) [`excise`] won't reconstruct, or
     /// none of the byte forms it tries (canonical or JSON-escaped) matched — so the caller must drop
-    /// the text rather than store it. Not derivable from `removed_detectors.len()` vs `findings.len()`:
+    /// the text rather than memory it. Not derivable from `removed_detectors.len()` vs `findings.len()`:
     /// the detectors are deduplicated by value, so repeated findings collapse and the lengths
     /// legitimately differ even when nothing survived.
     pub fully_redacted: bool,

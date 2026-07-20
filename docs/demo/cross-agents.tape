@@ -6,7 +6,7 @@
 #
 # FUNES_HOME points at this repo's docs/demo, so the memory lives here, off your
 # real ~/.funes — a public GIF then only ever surfaces demo content. gitignore
-# docs/demo/{store,funes.json,.cache} so they aren't committed.
+# docs/demo/{memory,funes.json,.cache} so they aren't committed.
 #
 # Prerequisites on the render box:
 #   - Claude Code + Codex installed, authenticated, and funes added at USER scope.

@@ -1,6 +1,6 @@
 //! The parsed-trace model. A transcript becomes a sequence of [`Turn`]s, each carrying typed
 //! [`Block`]s. Every source parser produces this shape, and everything downstream —
-//! chunk → embed → store → recall — operates on it, so the model is source-agnostic and lives on
+//! chunk → embed → memory → recall — operates on it, so the model is source-agnostic and lives on
 //! its own here.
 
 pub struct Block {

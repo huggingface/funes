@@ -84,7 +84,7 @@ impl Harness {
     }
 }
 
-/// hermes' session store — a single SQLite file under `$HOME`, not a session dir like the others.
+/// hermes' session memory — a single SQLite file under `$HOME`, not a session dir like the others.
 pub const HERMES_DB: &str = ".hermes/state.db";
 
 /// The `(root, harness)` pairs present under `$HOME` — drives a no-arg `funes index`. The JSONL

@@ -1,5 +1,5 @@
 //! The `funes add` seed drives the budgeted drain end to end: a small history finishes whole
-//! within the budget, a rerun is a no-op, and a deleted store self-heals. Own test binary so its
+//! within the budget, a rerun is a no-op, and a deleted memory self-heals. Own test binary so its
 //! `$FUNES_HOME` can't race the other integration tests'.
 
 use std::io::Write;
@@ -20,7 +20,7 @@ fn write_session(source: &std::path::Path) {
 }
 
 async fn chunk_count() -> usize {
-    let s = funes::recall::status(funes::hub::Store::local()).await.unwrap();
+    let s = funes::recall::status(funes::hub::Memory::local()).await.unwrap();
     s.lines()
         .find_map(|l| l.strip_prefix("chunks: "))
         .and_then(|n| n.trim().parse().ok())
@@ -64,11 +64,11 @@ async fn seed_finishes_a_small_history_and_a_rerun_is_a_noop() {
         .unwrap();
     assert_eq!(chunk_count().await, full, "rerun adds nothing");
 
-    // A deleted store self-heals: the store dir is gone but state.json survived — the next run
-    // must re-index everything, not trust the stale state and skip against an empty store.
-    std::fs::remove_dir_all(home.path().join("store")).unwrap();
+    // A deleted memory self-heals: the memory dir is gone but state.json survived — the next run
+    // must re-index everything, not trust the stale state and skip against an empty memory.
+    std::fs::remove_dir_all(home.path().join("memory")).unwrap();
     funes::index::run_index_budgeted(&roots, false, None, false)
         .await
         .unwrap();
-    assert_eq!(chunk_count().await, full, "deleted store rebuilt in full");
+    assert_eq!(chunk_count().await, full, "deleted memory rebuilt in full");
 }

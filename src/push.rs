@@ -1,6 +1,6 @@
-//! `push`: publish the local store's not-yet-remote chunks into a remote store on the HF Hub.
+//! `push`: publish the local memory's not-yet-remote chunks into a remote memory on the HF Hub.
 //!
-//! Streamed, never a full mirror. "What's already there" is the store's own chunk ids, so the
+//! Streamed, never a full mirror. "What's already there" is the memory's own chunk ids, so the
 //! delta is `local_ids − remote_ids` — the same primitive `index` uses. `push` is orchestration:
 //! it computes the delta, holds back any row that still contains a secret (redaction happens at
 //! index time; this is the egress backstop — the rows wait for `funes scrub`), and drives the HF
@@ -16,13 +16,13 @@
 //!   crosses [`REINDEX_THRESHOLD`] (best-effort: a head-moved conflict is a warning, the next push
 //!   retries), or eagerly with `--force-reindex` (retried until it lands).
 //!
-//! A **project memory** — a store whose schema metadata names its project (see
-//! [`crate::curate`]) — ships only the sessions marked include; any other store is a **personal
+//! A **project memory** — a memory whose schema metadata names its project (see
+//! [`crate::curate`]) — ships only the sessions marked include; any other memory is a **personal
 //! memory** and takes everything, as ever.
 
 use crate::card::{self, CardAction, CardCtx};
 use crate::hf_dataset::{self, Appended, Reindexed};
-use crate::hub::{self, Store};
+use crate::hub::{self, Memory};
 use crate::{chunk, curate, dataset, scan};
 use anyhow::{bail, Context, Result};
 use arrow_array::{BooleanArray, RecordBatch, StringArray};
@@ -44,10 +44,10 @@ const REINDEX_THRESHOLD: u64 = 500;
 /// moving under us, so a busy remote can't spin forever.
 const MAX_COMMIT_RETRIES: u32 = 10;
 
-/// Every chunk id in a store, or empty if it can't be opened (absent local index, not-yet-created
+/// Every chunk id in a memory, or empty if it can't be opened (absent local index, not-yet-created
 /// or inaccessible remote).
-pub async fn store_ids(store: &Store) -> HashSet<String> {
-    match store.open().await {
+pub async fn memory_ids(memory: &Memory) -> HashSet<String> {
+    match memory.open().await {
         Ok(ds) => all_ids(&ds).await.unwrap_or_default(),
         Err(_) => HashSet::new(),
     }
@@ -63,7 +63,7 @@ pub fn is_read_only(err: &anyhow::Error) -> bool {
     })
 }
 
-/// Every chunk id in a store (a plain `id`-column scan; plain scans aren't limit-capped).
+/// Every chunk id in a memory (a plain `id`-column scan; plain scans aren't limit-capped).
 async fn all_ids(ds: &Dataset) -> Result<HashSet<String>> {
     let batches = dataset::scan_rows(ds, &["id"], None, None).await?;
     let mut ids = HashSet::new();
@@ -80,7 +80,7 @@ async fn all_ids(ds: &Dataset) -> Result<HashSet<String>> {
     Ok(ids)
 }
 
-/// The to-push rows (all columns) from the local store. An append reads just the missing ids via an
+/// The to-push rows (all columns) from the local memory. An append reads just the missing ids via an
 /// `id IN (…)` predicate (already decision-scoped, since `to_push` is). A personal memory's first
 /// publish reads everything — a project memory is never first-published (it is born empty).
 async fn rows_to_push(local: &Dataset, to_push: &HashSet<String>, first_publish: bool) -> Result<Vec<RecordBatch>> {
@@ -96,11 +96,11 @@ async fn rows_to_push(local: &Dataset, to_push: &HashSet<String>, first_publish:
 }
 
 /// The hold-back line a report carries when sessions are pending review — empty when none are.
-fn pending_note(pending: usize, store: &str) -> String {
+fn pending_note(pending: usize, memory: &str) -> String {
     if pending == 0 {
         return String::new();
     }
-    format!("  {pending} session(s) on this machine pending review — run `funes curate {store}`\n")
+    format!("  {pending} session(s) on this machine pending review — run `funes curate {memory}`\n")
 }
 
 /// The outcome of a [`run_push`]: the report to print, and `blocked` — true when the secret gate
@@ -137,19 +137,19 @@ impl Confirm {
 }
 
 /// Whether a push must be confirmed first: there are rows to publish and the local index shares
-/// no chunk with the remote — a first publish, a new host of yours, or the wrong store.
+/// no chunk with the remote — a first publish, a new host of yours, or the wrong memory.
 fn must_confirm(local: usize, to_push: usize) -> bool {
     to_push > 0 && to_push == local
 }
 
-/// Publish the local store's new chunks to `target` (a remote store on the HF Hub). With
+/// Publish the local memory's new chunks to `target` (a remote memory on the HF Hub). With
 /// `force_reindex`, refresh the remote index after the data commit (retrying until it lands) even
 /// if the unindexed backlog is below [`REINDEX_THRESHOLD`]; with no new chunks pending it's a pure
-/// index refresh. `confirm` gates a publish to a store the local index shares no chunks with.
-pub async fn run_push(target: Store, force_reindex: bool, confirm: Confirm) -> Result<Pushed> {
+/// index refresh. `confirm` gates a publish to a memory the local index shares no chunks with.
+pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm) -> Result<Pushed> {
     let uri = match &target {
-        Store::Remote { uri } => uri.clone(),
-        Store::Local { .. } => {
+        Memory::Remote { uri } => uri.clone(),
+        Memory::Local { .. } => {
             bail!("push target must be a remote `hf://` memory — it publishes your local index up to the Hub")
         }
     };
@@ -170,7 +170,7 @@ pub async fn run_push(target: Store, force_reindex: bool, confirm: Confirm) -> R
     // teammate must stop, not clobber). A missing dataset is a personal memory's first publish;
     // a project memory always exists (born empty when named).
     eprintln!("comparing local and remote indexes…");
-    let local = Store::local().open().await?;
+    let local = Memory::local().open().await?;
     let remote = match target.open().await {
         Ok(ds) => Some(ds),
         Err(e) if hub::dataset_absent(&e) => None,
@@ -264,7 +264,7 @@ pub async fn run_push(target: Store, force_reindex: bool, confirm: Confirm) -> R
         .collect::<std::result::Result<_, _>>()?;
 
     // Drop any row whose text still holds a secret — hold it back from the Hub rather than block the
-    // whole push. `funes scrub` redacts it in the local store; the next push then ships it.
+    // whole push. `funes scrub` redacts it in the local memory; the next push then ships it.
     let n_scanning: usize = batches.iter().map(|b| b.num_rows()).sum();
     eprintln!("scanning {n_scanning} chunk(s) for secrets…");
     let (batches, skipped) = drop_secret_rows(batches)?;
@@ -285,7 +285,7 @@ pub async fn run_push(target: Store, force_reindex: bool, confirm: Confirm) -> R
 
     // The dataset card rides the data commit — created when the repo has none, refreshed when it
     // carries the funes markers, a hand-written card left alone (see `card_file`). Root stores
-    // only: the root README describes the whole repo, which a prefixed store is only part of
+    // only: the root README describes the whole repo, which a prefixed memory is only part of
     // (and two stores sharing a repo would fight over one card's stats) — under a prefix it's
     // the owner's. The chunk count is the post-push total — best-effort: rows another writer
     // lands concurrently are missed until the next push refreshes the card.
@@ -377,8 +377,8 @@ pub async fn run_push(target: Store, force_reindex: bool, confirm: Confirm) -> R
     Ok(out.into())
 }
 
-/// The store's pinned embedding model, from the schema metadata `index` stamps. A pre-metadata
-/// store has no id to show.
+/// The memory's pinned embedding model, from the schema metadata `index` stamps. A pre-metadata
+/// memory has no id to show.
 fn embedding_model(schema: &arrow_schema::Schema) -> &str {
     schema
         .metadata()
@@ -526,7 +526,7 @@ mod tests {
         // First publish / fully disjoint (every local chunk is new to the remote) → confirm.
         assert!(must_confirm(5, 5));
         assert!(must_confirm(1, 1));
-        // Some overlap (fewer to push than the local total) → no prompt, it's a store you add to.
+        // Some overlap (fewer to push than the local total) → no prompt, it's a memory you add to.
         assert!(!must_confirm(5, 3));
         // Nothing to push (up to date, or a reindex-only run) → never prompt, even with 0 overlap.
         assert!(!must_confirm(5, 0));
@@ -571,7 +571,7 @@ mod tests {
 
     #[test]
     fn card_file_never_touches_a_hand_written_card() {
-        let (body, note) = card_file(Ok(Some("# my store\n".into())), &card_ctx(10));
+        let (body, note) = card_file(Ok(Some("# my memory\n".into())), &card_ctx(10));
         assert!(body.is_none() && note.is_empty());
     }
 
@@ -629,7 +629,7 @@ mod tests {
         }
     }
 
-    /// Build a to-push batch the way the store stores it: chunk the turns, stamp zero vectors.
+    /// Build a to-push batch the way the memory stores it: chunk the turns, stamp zero vectors.
     fn batch(turns: &[Turn]) -> (RecordBatch, Vec<chunk::Chunk>) {
         let chunks = chunk::chunks_from_turns(turns, &chunk::Tier::ALL, true);
         let vectors = vec![vec![0.0f32; index::DIM as usize]; chunks.len()];

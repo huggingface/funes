@@ -54,7 +54,7 @@ pub trait TraceSource {
 }
 
 /// Pick the source for `path`: a `*.parquet` file is a parquet trace dataset, a hermes `state.db`
-/// (or the `~/.hermes` dir holding it) is its SQLite session store, and anything else is a JSONL
+/// (or the `~/.hermes` dir holding it) is its SQLite session memory, and anything else is a JSONL
 /// transcript tree whose harness is auto-detected. `limit` caps how many sessions are read
 /// (`None` = all) — used to bound a benchmark's build time.
 pub fn open(path: &Path, limit: Option<usize>) -> Box<dyn TraceSource> {
@@ -88,7 +88,7 @@ pub fn open_with_harness(path: &Path, limit: Option<usize>, harness: Option<Harn
     }
 }
 
-/// Whether `path` addresses hermes' SQLite store — the `state.db` file itself, or the `~/.hermes`
+/// Whether `path` addresses hermes' SQLite memory — the `state.db` file itself, or the `~/.hermes`
 /// dir that holds it. (`--harness hermes` also forces the hermes source regardless of the path.)
 fn is_hermes_path(path: &Path) -> bool {
     matches!(
@@ -223,7 +223,7 @@ impl TraceSource for HermesDb {
 
 /// A parquet agent-trace dataset — many sessions in one file, indexed as a single bulk import.
 /// `signature: None` so it's never skipped on stats and never recorded: a re-run always re-reads
-/// and dedups by chunk id to a no-op, which also means a wiped store is never silently skipped.
+/// and dedups by chunk id to a no-op, which also means a wiped memory is never silently skipped.
 /// `limit` caps how many of its sessions (rows) are read.
 struct ParquetDataset {
     path: PathBuf,
