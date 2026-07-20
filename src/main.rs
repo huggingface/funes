@@ -6,7 +6,7 @@
 
 use funes::harness::Harness;
 use funes::recall::Hit;
-use funes::{claude, codex, curate, hello, hermes, hub, index, mcp, opencode, pi, push, recall, render, scrub, update};
+use funes::{claude, codex, curate, hello, hermes, hub, index, mcp, pi, push, recall, render, scrub, update};
 
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -199,10 +199,6 @@ enum AddAgent {
         force: bool,
     },
     Hermes {
-        #[command(flatten)]
-        store: AddStore,
-    },
-    Opencode {
         #[command(flatten)]
         store: AddStore,
     },
@@ -523,7 +519,6 @@ async fn main() -> Result<()> {
             // The rest register a read-side integration only (no local pipeline to bootstrap), so
             // they just take the resolved store — the `created` flag only matters to the first push.
             AddAgent::Pi { store, force } => pi::install(resolve_add_store(store).await?.map(|r| r.store), force),
-            AddAgent::Opencode { store } => opencode::install(resolve_add_store(store).await?.map(|r| r.store)),
         },
     }
 }

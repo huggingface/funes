@@ -93,7 +93,7 @@ Getting started
      store. It's incremental, so it's cheap to re-run as you work.
 
   2. Add funes to your agent    funes add <agent>
-     Works with claude, codex, pi, hermes, and opencode. Your agent gains `recall` and
+     Works with claude, codex, pi, and hermes. Your agent gains `recall` and
      `get` as tools and reaches for them on its own — no pasting context back in.
 
   3. Just work.

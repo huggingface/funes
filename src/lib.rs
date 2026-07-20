@@ -36,7 +36,6 @@ pub mod inference;
 pub mod jsonl;
 pub mod lock;
 pub mod mcp;
-pub mod opencode;
 pub mod pi;
 pub mod pi_traces;
 pub mod push;
