@@ -11,16 +11,19 @@ it behaves; you rarely need to touch any of it by hand.
 
 - **Per-turn indexing.** A `Stop` hook runs `funes index` after every turn, so your local store
   tracks the session as it grows — a session killed mid-flight is already indexed up to its last
-  completed turn.
+  completed turn. Each run is time-boxed (text first, ~60s), so a large backlog fills in a bounded
+  step per turn instead of one long sweep.
 - **Publishing at session boundaries.** Bind a shared store — `funes add claude <org>/<repo>` — and
   `SessionStart`/`SessionEnd` hooks run `funes push` to publish there. Without a store, indexing is
   local-only and nothing is published.
 
-It also performs the one-time bootstrap the hooks are forbidden to do unattended, so nothing is left
-to run by hand after it:
+It also performs the one-time bootstrap steps, so nothing is left to run by hand after it:
 
-- **Builds your first index** (from that agent's sessions) if you don't have one yet. A first build
-  can take a while, so the hooks never trigger it — `funes add` does, interactively.
+- **Builds your first index** (from that agent's sessions) if you don't have one yet — a fast,
+  text-first pass that gets recall working in about a minute, after asking. Deeper content and older
+  sessions backfill on later turns. The hooks alone would also fill a cold store, one bounded step
+  per turn; `funes add` builds the most valuable part upfront so recall works from your first
+  session.
 - **Does the first push** to a freshly-bound store. The push hook can't: a first publish to a store
   your local store shares no chunks with is refused off a terminal (the wrong-store guard, below),
   so it must be interactive — `funes add` handles it.

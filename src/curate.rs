@@ -19,7 +19,7 @@
 //! already shipped — the remote is append-only; curation prevents, it does not undo.
 
 use crate::hub::{self, Store};
-use crate::{dataset, hf_dataset, index};
+use crate::{dataset, hf_dataset, index, jsonl};
 use anyhow::{bail, Context, Result};
 use arrow_array::{Int64Array, RecordBatch, RecordBatchIterator, StringArray};
 use arrow_schema::Schema;
@@ -299,18 +299,12 @@ pub(crate) async fn ids_by_session(ds: &Dataset) -> Result<HashMap<String, Vec<S
     Ok(by_session)
 }
 
-/// A Claude Code sub-agent session: Claude writes each to its own `agent-<hash>.jsonl`, and funes
-/// keys sessions by transcript file stem.
-pub fn is_subagent(session_id: &str) -> bool {
-    session_id.starts_with("agent-")
-}
-
 /// The local sessions curation may offer — [`ids_by_session`] minus sub-agents. Project memories
 /// and the review both draw from this; a personal memory's `all_ids` push is unaffected (it keeps
 /// everything).
 pub(crate) async fn candidate_sessions(local: &Dataset) -> Result<HashMap<String, Vec<String>>> {
     let mut by_session = ids_by_session(local).await?;
-    by_session.retain(|session, _| !is_subagent(session));
+    by_session.retain(|session, _| !jsonl::is_subagent(session));
     Ok(by_session)
 }
 
@@ -1074,15 +1068,5 @@ exclude ddd # later";
             HashSet::from(["mine".to_string(), "fork".to_string()]),
             "only sessions whose repo names the project are scoped in — others aren't its pending"
         );
-    }
-
-    #[test]
-    fn is_subagent_matches_the_agent_prefix() {
-        assert!(is_subagent("agent-a90670a3067db59ca"));
-        assert!(
-            !is_subagent("72e856b6-9214-47ed-ab2d-0a1905093f45"),
-            "a uuid is a top-level session"
-        );
-        assert!(!is_subagent("agentic-refactor"), "the prefix is `agent-`, not `agent`");
     }
 }
