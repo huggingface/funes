@@ -8,7 +8,6 @@ use crate::chunk;
 use crate::curate;
 use crate::dataset;
 use crate::harness::Harness;
-use crate::hello;
 use crate::hub::{self, Reachability, Store};
 use crate::inference::{self, Embedder, Reranker};
 use anyhow::{anyhow, Context, Result};
@@ -121,22 +120,21 @@ fn recency_weight(ts: &str, now: DateTime<Utc>, half_life: f64) -> f64 {
     }
 }
 
-/// A dataset opened for reading, plus an optional temp dir keeping a built-in fallback alive.
+/// A dataset opened for reading.
 struct Read {
-    /// Keeps the hello-world temp dir alive for the dataset's lifetime; `None` for a real store.
-    _hello: Option<tempfile::TempDir>,
     ds: Dataset,
     /// A degradation note to prepend to the command's output (e.g. the remote was unreachable);
     /// `None` when the requested store opened normally.
     note: Option<String>,
     /// Label of the store the dataset actually came from (the requested one, or the local store
-    /// after an offline degrade); `None` for the built-in guide.
+    /// after an offline degrade).
     store_label: Option<String>,
 }
 
-/// The outcome of resolving a store for reading. The embedder-backed fallbacks (`Offline` → the
-/// local index, `NoIndex` → the built-in guide) are this module's to apply, so the resolver stays
-/// free of model/`hello` concerns; a missing or empty remote is a hard error with a clear message.
+/// The outcome of resolving a store for reading. `Offline` degrades to the local index (this
+/// module's to apply); a missing or empty remote is a hard error with a clear message; `NoIndex`
+/// (the default local store, unbuilt) is a clear error from the read verbs and a friendly note in
+/// `status`.
 // A transient return value, never stored en masse, so the `Ready(Dataset)`/unit size gap is fine —
 // boxing would only add indirection.
 #[allow(clippy::large_enum_variant)]
@@ -145,7 +143,7 @@ enum ReadOutcome {
     Ready(Dataset),
     /// The remote is unreachable — recall from the local index instead.
     Offline,
-    /// No local index yet — show the built-in guide.
+    /// The default local store has no index yet.
     NoIndex,
 }
 
@@ -163,8 +161,10 @@ async fn open_for_read(store: &Store) -> Result<ReadOutcome> {
     }
     match store.open().await {
         Ok(ds) => Ok(ReadOutcome::Ready(ds)),
-        // The default local store with no index yet → the built-in guide (built below).
-        Err(_) if store.is_default_local() => Ok(ReadOutcome::NoIndex),
+        // The default local store with no dataset yet → NoIndex (a clear "run funes add" error
+        // below). Gated on `is_missing_dataset` so a real open failure (permissions, corruption, an
+        // incompatible schema) isn't masked as "no index" — it falls through to surface as itself.
+        Err(e) if store.is_default_local() && is_missing_dataset(&e) => Ok(ReadOutcome::NoIndex),
         // The Hub refused the read on auth (401/403): a clear message beats lance's opendal dump.
         Err(e) if is_auth_error(&e) => match store {
             Store::Remote { uri } => Err(hub::unauthorized_remote(uri)),
@@ -198,58 +198,46 @@ fn is_auth_error(e: &anyhow::Error) -> bool {
     })
 }
 
-/// Open a store for reading, applying the embedder-backed fallbacks [`open_for_read`] leaves to
-/// the caller: an unreachable remote degrades to the local index (then the built-in guide), and an
-/// absent local index serves the guide — so recall keeps working offline and on a fresh install. A
-/// missing or empty remote surfaces as an error from the helper. Passing `embedder` gives the
-/// built-in corpus real vectors for search (recall); `None` suits `get`/`list`.
-async fn open_read(store: &Store, embedder: Option<&mut dyn Embedder>) -> Result<Read> {
+/// Open a store for reading, applying the fallback [`open_for_read`] leaves to the caller: an
+/// unreachable remote degrades to the local index, so recall keeps working offline. A missing or
+/// empty remote, and a fresh install with no local index, surface as clear errors.
+async fn open_read(store: &Store) -> Result<Read> {
     match open_for_read(store).await? {
         ReadOutcome::Ready(ds) => Ok(Read {
-            _hello: None,
             ds,
             note: None,
             store_label: Some(store.label()),
         }),
-        ReadOutcome::Offline => degrade_offline(&store.label(), embedder).await,
-        ReadOutcome::NoIndex => {
-            let (dir, ds) = hello::dataset(embedder).await?;
-            Ok(Read {
-                _hello: Some(dir),
-                ds,
-                note: None,
-                store_label: None,
-            })
-        }
+        ReadOutcome::Offline => degrade_offline(&store.label()).await,
+        ReadOutcome::NoIndex => Err(no_index_error()),
     }
 }
 
-/// An unreachable remote degrades to the local index, or to the built-in guide if there's no local
-/// index either, carrying a note that explains what happened.
-async fn degrade_offline(uri: &str, embedder: Option<&mut dyn Embedder>) -> Result<Read> {
-    match open_for_read(&Store::local()).await {
-        Ok(ReadOutcome::Ready(ds)) => Ok(Read {
-            _hello: None,
+/// The error a read verb returns when the default local store has no index yet — points at the
+/// onboarding command instead of leaking lance's internals.
+fn no_index_error() -> anyhow::Error {
+    anyhow!("no index yet — run `funes add <agent>` to build one (or `funes index`), then recall your own history")
+}
+
+/// An unreachable remote degrades to the local index, carrying a note that explains what happened;
+/// with no local index either there's nothing to read, so it errors.
+async fn degrade_offline(uri: &str) -> Result<Read> {
+    // `?` propagates a real local-open failure rather than folding it into "no local index".
+    match open_for_read(&Store::local()).await? {
+        ReadOutcome::Ready(ds) => Ok(Read {
             ds,
             note: Some(format!("remote {uri} unreachable — recalling from your local store\n")),
             store_label: Some(Store::local().label()),
         }),
-        _ => {
-            let (dir, ds) = hello::dataset(embedder).await?;
-            Ok(Read {
-                _hello: Some(dir),
-                ds,
-                note: Some(format!(
-                    "remote {uri} unreachable and no local store yet — showing the built-in guide\n"
-                )),
-                store_label: None,
-            })
-        }
+        // No local index either — point at onboarding (a local store is never classified Offline).
+        _ => Err(anyhow!(
+            "remote {uri} unreachable and no local index yet — run `funes add <agent>` (or `funes index`) to build one"
+        )),
     }
 }
 
 /// The store suffix for a hit's `→ get` hint: every hit names the store it was read from, so the
-/// hint drills into that store from any context. The built-in guide has no store to name.
+/// hint drills into that store from any context. A hit with no store label yields no suffix.
 pub fn store_hint(read: Option<&str>) -> String {
     match read {
         Some(label) => format!(" --store {label}"),
@@ -315,7 +303,7 @@ pub async fn recall(
 
 /// Run the recall pipeline over one store: hybrid retrieval → rerank → recency reweight →
 /// neighbor expansion. Returns the degradation note (empty when the store opened normally), the
-/// label of the store actually read (`None` for the built-in guide), and the scored hits, best
+/// label of the store actually read, and the scored hits, best
 /// first — rendering is the caller's choice. `progress` hears a short label as each slow phase
 /// starts (model load, search, rerank); pass a no-op to run silently.
 #[allow(clippy::too_many_arguments)]
@@ -349,7 +337,7 @@ pub async fn recall_hits(
         .context("empty embedding")?;
 
     progress(&format!("searching {}…", store.label()));
-    let read = open_read(&store, Some(embedder.as_mut())).await?;
+    let read = open_read(&store).await?;
     let note = read.note.clone().unwrap_or_default();
     let ds = &read.ds;
     // A `--harness` filter needs the column; on an un-migrated store it would fail deep inside Lance
@@ -605,7 +593,7 @@ async fn attach_neighbors(ds: &Dataset, hits: &mut [&mut Hit], window: i64) -> R
 
 /// Browse indexed sessions: one line per session, newest activity first.
 pub async fn list(store: Store, limit: usize) -> Result<String> {
-    let read = open_read(&store, None).await?;
+    let read = open_read(&store).await?;
     let note = read.note.clone().unwrap_or_default();
     let ds = &read.ds;
 
@@ -695,7 +683,7 @@ pub async fn get_turns(
     turn_uuid: String,
     window: i64,
 ) -> Result<(String, Vec<Turn>)> {
-    let read = open_read(&store, None).await?;
+    let read = open_read(&store).await?;
     let note = read.note.clone().unwrap_or_default();
     let ds = &read.ds;
 
@@ -790,7 +778,7 @@ pub async fn session_prompts(store: &Store, ids: &[String]) -> Result<HashMap<St
     if ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let read = open_read(store, None).await?;
+    let read = open_read(store).await?;
     let cols = [
         "session_id",
         "turn_uuid",
@@ -942,12 +930,11 @@ pub async fn status(store: Store) -> Result<String> {
                 store.label()
             ))
         }
-        // No personal index yet: point at `funes index` instead of erroring. (recall/get/list
-        // quietly serve the built-in guide in the same situation.)
+        // No personal index yet: point at the onboarding command instead of erroring. (recall/get/
+        // list return a clear "no index" error in the same situation.)
         ReadOutcome::NoIndex => Ok(format!(
-            "store: {}\nno personal store yet — showing the built-in guide ({} passages).\nrun `funes index` to index ~/.claude/projects, then recall your own history.\n",
+            "store: {}\nno index yet — run `funes add <agent>` to build one (or `funes index`), then recall your own history.\n",
             store.label(),
-            hello::PASSAGES.len()
         )),
     }
 }
@@ -1026,7 +1013,7 @@ mod tests {
             store_hint(Some("hf://datasets/acme/kb")),
             " --store hf://datasets/acme/kb"
         );
-        // The built-in guide has no store to name.
+        // A hit with no store label yields no suffix.
         assert_eq!(store_hint(None), "");
     }
 

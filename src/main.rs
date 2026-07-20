@@ -6,7 +6,7 @@
 
 use funes::harness::Harness;
 use funes::recall::Hit;
-use funes::{claude, codex, curate, hello, hermes, hub, index, mcp, pi, push, recall, render, scrub, update};
+use funes::{claude, codex, curate, hermes, hub, index, mcp, pi, push, recall, render, scrub, update};
 
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -27,8 +27,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Print a short, human-readable guide to funes — the friendly first run (no index needed).
-    Guide,
     /// Recall passages from past sessions (hybrid → rerank → recency → neighbors).
     Recall {
         /// What to recall (free text).
@@ -266,10 +264,6 @@ fn human_io() -> (bool, usize) {
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().cmd {
-        Cmd::Guide => {
-            print!("{}", hello::guide());
-            Ok(())
-        }
         Cmd::Recall {
             query,
             k,

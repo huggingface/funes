@@ -1,7 +1,9 @@
 # funes
 
 **Durable memory for your AI coding agents.** `funes` indexes your past sessions across Claude
-Code, Codex, and pi and lets any agent recall the past decisions, rationale, and findings.
+Code, Codex, and pi and lets any agent recall the past decisions, rationale, and findings. Your
+memory is a dataset you can publish to the Hugging Face Hub — then any machine, teammate,
+or agent can recall from it.
 
 ![Choosing an embedding model in Claude Code, then Codex recalling that decision in a separate session](docs/img/cross-agents.gif)
 
@@ -14,8 +16,8 @@ Code, Codex, and pi and lets any agent recall the past decisions, rationale, and
 - **Your agent recalls your past work.** The model spontaneously uses `funes` to recall prior decisions, rationale, and findings mid-task.
 - **One memory across your agents.** Index Claude Code, Codex, and pi into a single store; recall
   spans all of them, and every hit shows which agent it came from.
-- **Share across machines or a team.** Publish your store to a Hugging Face dataset you own; a
-  teammate or another host recalls it.
+- **Your memory is a Hugging Face dataset.** Publish it to the Hugging Face Hub; a teammate,
+  another of your machines — or anyone, if you make it public — recalls from it with one flag.
 
 ## Get funes
 
@@ -26,10 +28,10 @@ and puts it on your PATH (`~/.local/bin` by default):
 curl -fsSL https://huggingface.co/buckets/huggingface/funes/resolve/install.sh | sh
 ```
 
-Then try it:
+Then add it to your agent:
 
 ```bash
-funes guide
+funes add claude    # or codex, pi, hermes
 ```
 
 Alternatively, grab a [binary](https://huggingface.co/buckets/huggingface/funes) by hand:
@@ -42,11 +44,12 @@ Alternatively, grab a [binary](https://huggingface.co/buckets/huggingface/funes)
 
 ```bash
 curl -fsSL https://huggingface.co/buckets/huggingface/funes/resolve/funes-x86_64-linux -o funes
-chmod +x funes && ./funes guide
+chmod +x funes && ./funes add claude
 ```
 
-`funes` works the moment it lands: **`funes guide`** walks you through it before you've indexed
-anything, and `funes status` tells you whether recall is reading your own store yet.
+`funes` works the moment it lands: **`funes add`** onboards you — see
+[Add funes to your agent](#add-funes-to-your-agent) below — and `funes status` tells you whether
+recall is reading your own store yet.
 
 Already installed? **`funes update`** replaces the binary in place with the latest build for your
 platform (`--force` reinstalls the current one); `funes status` tells you when a newer release is
@@ -54,51 +57,27 @@ out.
 
 To build it yourself instead, see [Building from source](#building-from-source).
 
-## The memory loop
-
-`funes` fits into one loop: **index** your past sessions, **add** `funes` to your agent, then just
-**ask your agent** — and let it recall on its own.
-
-**1. Index — one store for every agent on the machine.**
+## Add funes to your agent
 
 ```bash
-funes index      # a fast, text-first pass over ~/.claude/projects, ~/.codex/sessions, ~/.pi/agent/sessions, ~/.hermes/state.db
+funes add claude                           # local
+funes add claude <user|org>/funes-memory   # …backed by a store you own (sync across machines/team)
 ```
 
-Run with no arguments and `funes` does a fast, text-first pass over every supported agent's sessions
-it finds, into one store, offering to finish the rest. It's incremental — only new turns are embedded
-— so re-running (and the per-turn hooks) fill in the deeper content a bounded step at a time — a store
-runs ~2.3 KB/chunk and grows ~6 MB on a heavy day ([storage growth](docs/storage.md)). Point it at a
-path to index one place in full, or scope to a single agent with `--harness codex`.
+One command sets everything up. Your agent gets `recall` and `get` as tools, plus instructions on
+when to use them — and for **Claude, Codex, and Hermes**, `funes add` wires the memory itself: it
+builds your first index — a fast, text-first pass (about a minute, after asking), with deeper
+content backfilling as you work — installs a hook that keeps it current every turn, and — when you
+name a remote store — publishes at each session boundary (and does the first push for you). Nothing
+is left to run by hand.
 
-`funes` can index sessions from: Claude, Codex, Pi, and Hermes — Hermes indexing is **beta**.
-
-**2. Add funes to your agent.**
-
-```bash
-funes add claude                 # local
-funes add claude acme/kb         # …backed by a shared store you own (sync across machines/team)
-```
-
-Your agent gets `recall` and `get` as tools, plus instructions on when to use them. For **Claude,
-Codex, and Hermes**, `funes add` also wires the automation: it builds your first index — a fast,
-text-first pass (about a minute, after asking), with deeper content backfilling as you work —
-installs a hook that indexes every turn, and — when you name a shared store — publishes at each
-session boundary (and does the first push for you). Nothing is left to run by hand; see
-[docs/automation.md](docs/automation.md).
-
-`funes` can be added to: Claude, Codex, Pi, Hermes
-
-**3. Ask your agent — and let it recall.**
+`funes` can be added to: Claude, Codex, Pi, and Hermes — pi has no hook system, so one manual
+command keeps its recall current ([How it works](#how-it-works)).
 
 From here you just work. When something touches a past decision, its rationale, or an earlier
 finding, the agent reaches for `recall` itself — no pasting context back in. This holds even for
 small models: every model we tested — down to Gemma 4 E4B — invoked recall *spontaneously*, rather
 than needing to be told to.
-
-That closes the loop: the work you just did becomes recallable the next time you index — and for
-Claude, Codex, and Hermes, `funes add` already installed the hooks that [keep it current](#automate-it) on
-their own.
 
 ## Works across your agents (and models)
 
@@ -111,31 +90,36 @@ Models work the same way. funes runs no model of its own, so you reason with wha
 does — through **pi**, any local model or one served through the Hugging Face router. Switch models
 between sessions and the memory doesn't move.
 
-## Share across machines or a team
+## Your memory on the Hub
 
-Your local store is a dataset — publish it to a Hugging Face **dataset** repo you own to share it
-across machines or a team. Bind the store when you add funes to an agent, and it recalls from there
-and keeps it current on its own:
+Your local store is a dataset, and it shares the way one does: publish it to a Hugging Face
+**dataset** repo you own and it becomes an artifact on the Hub like any model or dataset — owned by
+your account or org, gated by your token, readable by whoever you say. Not just the code of a
+project, but the *process* behind it — the decisions, dead ends, and rationale — becomes something
+an agent can recall:
+
+![pi recalling a past decision from a shared Hugging Face dataset named in the prompt — a project this machine never worked on](docs/img/hub-store.gif)
+
+*A project this machine never worked on: the prompt names `dacorvo/funes-Glint-Research-Fable-5` — ~21.6k chunks on the Hub — and pi recalls the past decision straight from it, one `store` argument on the recall call. Nothing attached, no local index.*
+
+To share your own memory across machines or a team, bind the store when you add funes to an agent,
+and it recalls from there and keeps it current on its own:
 
 ```bash
-funes add claude acme/kb   # recall reads acme/kb; the hooks publish there
-                           # (builds your first index and does the first push for you)
+funes add claude <user|org>/funes-memory   # recall reads it; the hooks publish there
+                                           # (builds your first index and does the first push for you)
 ```
 
 The binding lives in the agent's own config — there's no hidden global default. Under the hood it's
 two commands you can also run directly:
 
 ```bash
-funes push acme/kb                   # publish your local store's new chunks to acme/kb
-funes recall "..." --store acme/kb   # read any remote store for one call (no binding needed)
+funes push <user|org>/funes-memory                   # publish your local store's new chunks there
+funes recall "..." --store <user|org>/funes-memory   # read any remote store for one call (no binding needed)
 ```
 
-That second form is also how you query **someone else's** published memories on a topic —
+That second form is how the demo above reads **someone else's** published memories on a topic —
 `funes recall "..." --store other-org/subject-kb` — without touching your own setup.
-
-![pi recalling a past decision from a shared Hugging Face dataset named in the prompt — a project this machine never worked on](docs/img/hub-store.gif)
-
-*A project this machine never worked on: the prompt names `dacorvo/funes-Glint-Research-Fable-5` — ~21.6k chunks on the Hub — and pi recalls the past decision straight from it, one `store` argument on the recall call. Nothing attached, no local index.*
 
 On its first publish, `funes push` also writes the repo's **dataset card** — what a funes store
 is, how to recall from it, live stats — tagged `funes`, so every shared store is recognizable
@@ -156,21 +140,37 @@ only; the rest is published as-is.
 For example, when the gate holds back every dirty row, nothing ships and the push exits non-zero:
 
 ```console
-$ funes push acme/kb
+$ funes push <user|org>/funes-memory
 scanning 512 chunk(s) for secrets…
-hf://datasets/acme/kb: nothing published — held back 3 row(s) with secrets (AWS×2, PrivateKey×1); run `funes scrub`, then push again
+hf://datasets/<user|org>/funes-memory: nothing published — held back 3 row(s) with secrets (AWS×2, PrivateKey×1); run `funes scrub`, then push again
 $ echo $?
 2
 ```
 
-## Automate it
-
-`funes index` is incremental and cheap, but you still have to remember to run it — so for Claude,
-Codex, and Hermes, `funes add` already wired it up: every turn indexes automatically, and with a
-shared store bound, each session publishes. See [docs/automation.md](docs/automation.md) for what it
-installs and how it behaves.
-
 ## How it works
+
+Underneath `funes add` runs one loop: **index** what you've done, **recall** it when it matters —
+and index what you just did, so it's recallable next time.
+
+**Indexing is one command:**
+
+```bash
+funes index      # a fast, text-first pass over ~/.claude/projects, ~/.codex/sessions, ~/.pi/agent/sessions, ~/.hermes/state.db
+```
+
+Run with no arguments and `funes` does a fast, text-first pass over every supported agent's sessions
+it finds, into one store, offering to finish the rest. It's incremental — only new turns are embedded
+— so re-running (and the per-turn hooks) fill in the deeper content a bounded step at a time — a store
+runs ~2.3 KB/chunk and grows ~6 MB on a heavy day ([storage growth](docs/storage.md)). Point it at a
+path to index one place in full, or scope to a single agent with `--harness codex`.
+
+**The automation keeps the loop closed.** For Claude, Codex, and Hermes, the hooks `funes add`
+installed index every turn as it completes, and — with a shared store bound — publish at session
+boundaries; [docs/automation.md](docs/automation.md) covers exactly what is installed and how it
+behaves. For pi (no hook system), re-run `funes index` yourself to keep recall fresh. Hermes
+indexing is **beta**.
+
+**Under the hood**, indexing and recall are one deterministic pipeline:
 
 ```
 ~/.claude/projects, ~/.codex/sessions, ~/.pi/agent/sessions, ~/.hermes/state.db   (or a .parquet trace)

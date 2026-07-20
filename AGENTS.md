@@ -26,7 +26,7 @@ rank) → cross-encoder rerank → recency reweight → neighbor expansion. Agen
 
 `no results` when nothing matched. The `→ get` line carries exactly the arguments `get` wants —
 including the store the hits were actually read from (an offline degrade names the local store it
-fell back to; the built-in guide has no store to name and keeps a bare hint).
+fell back to).
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
