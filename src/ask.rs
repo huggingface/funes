@@ -1,11 +1,8 @@
 //! `funes ask <agent>`: one grounded answer from a coding agent, nothing installed.
 //!
 //! `ask` is `add`'s read-only sibling — borrow the agent for a single question instead of wiring
-//! it permanently. Claude gets funes recall/get as session-only MCP tools (`--strict-mcp-config`
-//! keeps every persistent registration out). Codex cannot run MCP tools headless — its exec mode
-//! auto-cancels the tool-approval elicitation — so recall runs in-process here and the passages
-//! ride in the prompt. Neither child reads stdin: the grounding must be exactly what was built
-//! here, and codex would otherwise block appending a piped stdin to its prompt.
+//! it permanently. Claude mounts funes as session-only MCP tools and recalls on its own; codex
+//! cannot run MCP tools headless, so recall runs in-process and the passages ride in the prompt.
 
 use anyhow::{anyhow, bail, Result};
 use serde_json::json;
@@ -15,15 +12,14 @@ use crate::hub::Store;
 use crate::recall::{check_readable, recall_hits, store_hint};
 use crate::render;
 
-// Recall's CLI defaults (main.rs clap attributes); ask exposes no tuning of its own.
+// Recall's CLI defaults; ask exposes no tuning of its own.
 const K: usize = 8;
 const CANDIDATES: usize = 30;
 const HALF_LIFE: f64 = 30.0;
 const NEIGHBORS: i64 = 1;
 
-/// The claude one-shot argument vector: print mode with the prompt bound first (claude's variadic
-/// flags would otherwise swallow it), funes mounted as the session's only MCP server, and both
-/// tools pre-allowed so print mode never stalls on a permission prompt.
+/// The prompt must precede the variadic flags, which would otherwise swallow it; both tools are
+/// pre-allowed because print mode cannot prompt for permissions.
 fn claude_args(funes: &str, store: Option<&str>, prompt: &str) -> Vec<String> {
     let mut server = vec!["mcp".to_string()];
     if let Some(s) = store {
@@ -41,9 +37,8 @@ fn claude_args(funes: &str, store: Option<&str>, prompt: &str) -> Vec<String> {
     ]
 }
 
-/// The codex one-shot argument vector. No server is mounted (exec can't run MCP tools) and
-/// `mcp_servers={}` empties any registered ones — their tools would only dangle. `--` guards a
-/// dash-leading prompt; `--skip-git-repo-check` lets ask run outside a trusted repo.
+/// codex exec cannot run MCP tools, so `mcp_servers={}` silences any registered ones; `--`
+/// guards a dash-leading prompt; `--skip-git-repo-check` lets ask run outside a trusted repo.
 fn codex_args(prompt: &str) -> Vec<String> {
     ["exec", "--skip-git-repo-check", "-c", "mcp_servers={}", "--", prompt]
         .into_iter()
@@ -51,8 +46,8 @@ fn codex_args(prompt: &str) -> Vec<String> {
         .collect()
 }
 
-/// Both prompts lead with the instruction and put the question after it — a question must never
-/// be the argv token's first byte (a dash-leading one would parse as a flag).
+/// Instruction first, question after: a question must never lead the argv token, where a dash
+/// would parse as a flag.
 fn claude_prompt(question: &str) -> String {
     format!(
         "Answer the question below using your funes recall tool; drill into hits with get when \
@@ -61,8 +56,8 @@ fn claude_prompt(question: &str) -> String {
     )
 }
 
-/// The codex prompt carries the grounding inline: the passages are the session's complete
-/// context, and the `→ get` hints inside them belong to tools this session doesn't have.
+/// Warns the model off the `→ get` hints in the passages — they name tools this session
+/// doesn't have.
 fn codex_prompt(question: &str, passages: &str) -> String {
     format!(
         "Answer the question below from the recalled memory passages that follow. The passages \
@@ -72,12 +67,9 @@ fn codex_prompt(question: &str, passages: &str) -> String {
     )
 }
 
-/// `funes ask claude`: mount funes as a session-only MCP server and let claude answer, recalling
-/// and drilling down on its own.
+/// `funes ask claude`: mount funes as a session-only MCP server and let claude recall on its own.
 pub async fn claude(question: String, store: Option<String>) -> Result<()> {
-    // A store the child can't read must fail here as a funes error — inside the session it only
-    // surfaces as a failed tool call, ending as an LLM apology with exit 0. The open also warms
-    // the read cache the child's server is about to use.
+    // A bad store must fail as a funes error — in-session it becomes an LLM apology with exit 0.
     if let Some(spec) = store.as_deref() {
         check_readable(&Store::parse(spec)).await?;
     }
@@ -86,10 +78,8 @@ pub async fn claude(question: String, store: Option<String>) -> Result<()> {
     run_agent("claude", &args)
 }
 
-/// The grounding for a codex ask: recall over `store`, rendered agent-shaped, wrapped in the
-/// prompt. The store is checked up front — one that can't be read (or reached) must fail rather
-/// than silently answer from another corpus. Callers probe the codex binary first ([`preflight`])
-/// so a missing CLI doesn't cost the model load, and own any spinner around this call.
+/// The grounding for a codex ask. The store is checked first: one that can't be read must fail
+/// rather than silently answer from another corpus.
 pub async fn codex_grounding(store: Store, question: &str, progress: &(dyn Fn(&str) + Sync)) -> Result<String> {
     check_readable(&store).await?;
     let (note, label, hits) = recall_hits(
@@ -105,8 +95,7 @@ pub async fn codex_grounding(store: Store, question: &str, progress: &(dyn Fn(&s
     )
     .await?;
     if !note.is_empty() {
-        // Only a named remote degrades (the default local store has nothing to degrade to), and
-        // check_readable passed just above — the connection dropped in between.
+        // A note despite the check above: the remote dropped mid-recall.
         bail!("the named store went unreachable during recall — try again once you're back online");
     }
     if hits.is_empty() {
@@ -116,13 +105,12 @@ pub async fn codex_grounding(store: Store, question: &str, progress: &(dyn Fn(&s
     Ok(codex_prompt(question, &passages))
 }
 
-/// Spawn codex on an assembled prompt and stream its answer.
+/// Spawn codex on an assembled prompt.
 pub fn run_codex(prompt: &str) -> Result<()> {
     run_agent("codex", &codex_args(prompt))
 }
 
-/// Probe that an agent CLI exists before doing any expensive work on its behalf — a codex ask
-/// pays for a full recall (model load included) before its spawn would notice.
+/// Probe that an agent CLI exists before any expensive work is done on its behalf.
 pub fn preflight(agent: &str) -> Result<()> {
     match Command::new(agent)
         .arg("--version")
@@ -136,9 +124,8 @@ pub fn preflight(agent: &str) -> Result<()> {
     }
 }
 
-/// The funes binary the child session serves recall with: `FUNES_BIN`, else this very executable.
-/// Ask's wiring lives for one process, so the exact running binary is the right default — the
-/// PATH-name convention in the add modules exists for registrations that must survive updates.
+/// `FUNES_BIN`, else this very executable — ask's wiring lives for one process, so the exact
+/// running binary is the right default (a persistent registration wants a PATH name instead).
 fn funes_bin() -> Result<String> {
     if let Ok(bin) = std::env::var("FUNES_BIN") {
         return Ok(bin);
@@ -146,8 +133,8 @@ fn funes_bin() -> Result<String> {
     Ok(std::env::current_exe()?.display().to_string())
 }
 
-/// Spawn the agent with the prompt in argv, stdin closed, and the answer streaming to the
-/// terminal. The error never quotes the argv — it embeds the full prompt.
+/// stdin is closed — an open pipe would feed the child's prompt — and the error never quotes the
+/// argv, which embeds the full prompt.
 fn run_agent(agent: &str, args: &[String]) -> Result<()> {
     let status = match Command::new(agent).args(args).stdin(Stdio::null()).status() {
         Ok(s) => s,

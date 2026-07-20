@@ -180,10 +180,8 @@ async fn open_for_read(store: &Store) -> Result<ReadOutcome> {
     }
 }
 
-/// Pre-flight a store some other process will read on funes's behalf: surface the errors
-/// [`open_for_read`] would (missing/empty/unauthorized remote, no index anywhere), and refuse an
-/// unreachable remote rather than degrading — a caller that named a store must not end up
-/// silently reading a different one.
+/// A caller that named a store must never silently read a different one: surfaces the errors
+/// [`open_for_read`] would, and refuses the offline degrade the read verbs apply.
 pub async fn check_readable(store: &Store) -> Result<()> {
     match open_for_read(store).await? {
         ReadOutcome::Ready(_) => Ok(()),
