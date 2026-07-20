@@ -49,7 +49,7 @@ enum Cmd {
         /// Restrict to a block type: text | thinking | tool_use | tool_result.
         #[arg(long = "type", value_name = "BLOCK_TYPE")]
         block_type: Option<String>,
-        /// Restrict to a harness: claude | codex | pi.
+        /// Restrict to a harness: claude | codex | pi | hermes.
         #[arg(long)]
         harness: Option<String>,
         /// Output format. Default: human in a terminal, agent when piped.
@@ -92,7 +92,7 @@ enum Cmd {
         /// ~/.pi/agent/sessions); `--harness <name>` alone targets one. An automated (non-terminal)
         /// run must name a target.
         path: Option<String>,
-        /// Override harness auto-detection for PATH: claude | codex | pi.
+        /// Override harness auto-detection for PATH: claude | codex | pi | hermes.
         #[arg(long)]
         harness: Option<String>,
         /// Exclude thinking blocks.
@@ -158,10 +158,10 @@ enum Cmd {
     },
     /// Add funes to a coding agent.
     ///
-    /// Installs the `recall`/`get` tools for any agent — and, for claude and codex, automatic
-    /// per-turn indexing. Name a store the agent recalls from — and, for claude and codex,
-    /// publishes to — an `<org>/<repo>` shorthand or an `hf://…` URI; omit it to stay local
-    /// (the default).
+    /// Installs the `recall`/`get` tools for any agent — and, for claude, codex, and hermes,
+    /// automatic per-turn indexing. Name a store the agent recalls from — and, for claude, codex,
+    /// and hermes, publishes to — an `<org>/<repo>` shorthand or an `hf://…` URI; omit it to stay
+    /// local (the default).
     #[command(
         subcommand_value_name = "AGENT",
         subcommand_help_heading = "Agents",

@@ -17,7 +17,7 @@ on **how much traction they have** — so the comparison is grounded, not abstra
 | Retrieval | vector + BM25 → RRF → **cross-encoder rerank** → recency → neighbors | FTS5 + Chroma hybrid; progressive disclosure (search → timeline → get) | semantic + BM25 + entity, fused + temporal reasoning (no rerank noted) |
 | Delivery | **Pulled only** — never injected | Injected via hooks + queryable | Pulled via SDK/API; the app decides when to inject |
 | Data location / ownership | Local-first; optional sync to an **HF dataset you own** — no third-party model ever runs on your data | Local SQLite + worker; optional cloud sync to cmem.ai | Library / self-host / managed cloud (app.mem0.ai); default ingest uses OpenAI, so data leaves unless self-hosted with local models |
-| Integrations | MCP (`recall`/`get`) — add to Claude, Codex, pi, Hermes, OpenCode | Hooks + MCP + plugin — Claude Code, Codex, Gemini, Hermes, Copilot, OpenCode… | SDK + Agent Skills — Claude, Cursor, Codex…; bundled by Hermes |
+| Integrations | MCP (`recall`/`get`) — add to Claude, Codex, pi, Hermes | Hooks + MCP + plugin — Claude Code, Codex, Gemini, Hermes, Copilot, OpenCode… | SDK + Agent Skills — Claude, Cursor, Codex…; bundled by Hermes |
 
 The through-line matches [RATIONALE.md](RATIONALE.md): funes keeps the **raw passage** with exact
 provenance and serves it **only when asked**; the others **distill with an LLM** and lean on
