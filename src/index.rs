@@ -251,6 +251,9 @@ struct Indexer {
     /// The caller stopped early with passes still owed, so the summary must not claim the store is
     /// up to date.
     work_remaining: bool,
+    /// Units (by index) already counted in `n_sessions` this run, so a tier-major caller's repeat
+    /// passes over one unit don't recount its sessions.
+    counted: HashSet<usize>,
     _lock: lock::StoreLock,
     /// The sources and their units, enumerated once at open so the change-stamps are a stable
     /// snapshot; a caller drives them by index via [`Indexer::index_unit`].
@@ -339,6 +342,7 @@ impl Indexer {
             first_index,
             interactive,
             work_remaining: false,
+            counted: HashSet::new(),
             _lock,
             sources,
             units,
@@ -411,7 +415,6 @@ impl Indexer {
         };
 
         let (sessions, label) = unit_summary(&turns, &key);
-        let first_time = !self.state.contains_key(&key);
         if let Some(scanner) = &self.scanner {
             redact_turns(&mut turns, scanner, tiers, self.include_thinking)?;
         }
@@ -451,9 +454,8 @@ impl Indexer {
             );
             std::fs::write(&self.state_path, serde_json::to_string_pretty(&self.state)?)?;
         }
-        // Count a unit's sessions once — the first time it's indexed; later tier passes only add
-        // chunks to sessions already counted.
-        if first_time {
+        // Count a unit's sessions once per run — later tier passes over it only add chunks.
+        if self.counted.insert(i) {
             self.n_sessions += sessions;
         }
         self.n_chunks += added;
