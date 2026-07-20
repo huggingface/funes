@@ -5,11 +5,13 @@
 //!
 //! A unit is both the incremental-tracking granule (skipped when its [`Unit::signature`] still
 //! matches `state.json`) and the single-append granule (all of a unit's turns are written in one
-//! commit). JSONL is one session per file; a parquet dataset is many sessions in one file.
+//! commit). JSONL is one session per file; a parquet dataset — or a hermes `state.db` — is many
+//! sessions in one file.
 
 use crate::claude_traces;
 use crate::codex_traces;
 use crate::harness::Harness;
+use crate::hermes_traces;
 use crate::hf_dataset;
 use crate::hf_traces;
 use crate::hub;
@@ -51,8 +53,9 @@ pub trait TraceSource {
     }
 }
 
-/// Pick the source for `path`: a `*.parquet` file is a parquet trace dataset; anything else is a
-/// JSONL transcript tree whose harness is auto-detected. `limit` caps how many sessions are read
+/// Pick the source for `path`: a `*.parquet` file is a parquet trace dataset, a hermes `state.db`
+/// (or the `~/.hermes` dir holding it) is its SQLite session store, and anything else is a JSONL
+/// transcript tree whose harness is auto-detected. `limit` caps how many sessions are read
 /// (`None` = all) — used to bound a benchmark's build time.
 pub fn open(path: &Path, limit: Option<usize>) -> Box<dyn TraceSource> {
     open_with_harness(path, limit, None)
@@ -70,6 +73,11 @@ pub fn open_with_harness(path: &Path, limit: Option<usize>, harness: Option<Harn
             path: path.to_path_buf(),
             limit,
         })
+    } else if harness == Some(Harness::Hermes) || is_hermes_path(path) {
+        Box::new(HermesDb {
+            path: hermes_db_path(path),
+            limit,
+        })
     } else {
         let harness = harness.unwrap_or_else(|| detect_harness(path));
         Box::new(JsonlTree {
@@ -77,6 +85,25 @@ pub fn open_with_harness(path: &Path, limit: Option<usize>, harness: Option<Harn
             limit,
             harness,
         })
+    }
+}
+
+/// Whether `path` addresses hermes' SQLite store — the `state.db` file itself, or the `~/.hermes`
+/// dir that holds it. (`--harness hermes` also forces the hermes source regardless of the path.)
+fn is_hermes_path(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|n| n.to_str()),
+        Some("state.db") | Some(".hermes")
+    )
+}
+
+/// The `state.db` file for a hermes path: the file itself, or `<dir>/state.db` when handed the
+/// `~/.hermes` directory.
+fn hermes_db_path(path: &Path) -> PathBuf {
+    if path.file_name().and_then(|n| n.to_str()) == Some("state.db") {
+        path.to_path_buf()
+    } else {
+        path.join("state.db")
     }
 }
 
@@ -154,6 +181,43 @@ impl TraceSource for JsonlTree {
             Harness::Hermes => anyhow::bail!("hermes sessions are read from state.db, not a JSONL tree"),
         };
         Ok(turns)
+    }
+}
+
+/// hermes' single SQLite `state.db` — many sessions in one file. Each session is a unit signed by
+/// its high-water `messages.id`, so an unchanged session is skipped and a grown one is re-read
+/// (chunk-id dedup keeps already-stored turns a no-op). `limit` keeps the most-recently-active N.
+struct HermesDb {
+    path: PathBuf,
+    limit: Option<usize>,
+}
+
+impl TraceSource for HermesDb {
+    fn describe(&self) -> String {
+        format!("scanning hermes sessions in {}", self.path.display())
+    }
+
+    fn units(&self) -> Result<Vec<Unit>> {
+        let mut sessions = hermes_traces::sessions_with_watermark(&self.path)?;
+        // Most-recently-active first (highest high-water id); `--limit` then keeps the recent N.
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.watermark));
+        if let Some(n) = self.limit {
+            sessions.truncate(n);
+        }
+        Ok(sessions
+            .into_iter()
+            .map(|s| Unit {
+                key: s.session_id,
+                signature: Some(s.watermark.to_string()),
+                is_subagent: false,
+            })
+            .collect())
+    }
+
+    fn read(&self, unit: &Unit) -> Result<Vec<Turn>> {
+        // The workdir is derived from the session's recorded cwd inside the parser; "hermes" is only
+        // the fallback for a session that never recorded one.
+        hermes_traces::turns_from_state_db(&self.path, &unit.key, "hermes")
     }
 }
 
@@ -376,5 +440,50 @@ mod tests {
         }
         assert_eq!(open(dir.path(), Some(2)).units().unwrap().len(), 2);
         assert_eq!(open(dir.path(), None).units().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn open_routes_hermes_state_db_and_dir() {
+        // The state.db file, and the ~/.hermes dir that holds it, both route to the hermes source.
+        assert!(open(Path::new("/x/.hermes/state.db"), None)
+            .describe()
+            .contains("hermes"));
+        assert!(open(Path::new("/x/.hermes"), None).describe().contains("state.db"));
+        // `--harness hermes` forces the hermes source even for an unrelated-looking path.
+        assert!(open_with_harness(Path::new("/x/whatever"), None, Some(Harness::Hermes))
+            .describe()
+            .contains("hermes"));
+    }
+
+    #[test]
+    fn hermes_units_are_sessions_signed_by_watermark() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("state.db");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, cwd TEXT);
+             CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, \
+                content TEXT, tool_call_id TEXT, tool_calls TEXT, tool_name TEXT, timestamp REAL NOT NULL, \
+                reasoning TEXT, reasoning_content TEXT);
+             INSERT INTO sessions (id, cwd) VALUES ('s1','/w'),('s2','/w');
+             INSERT INTO messages (session_id, role, content, timestamp) VALUES
+                ('s1','user','a',1.0),('s2','user','b',2.0),('s1','assistant','c',3.0);",
+        )
+        .unwrap();
+
+        let src = open(&db, None);
+        let units = src.units().unwrap();
+        assert_eq!(units.len(), 2);
+        // Most-recent-activity first: s1's high-water id is 3 (ids 1,3) > s2's 2.
+        assert_eq!(units[0].key, "s1");
+        assert_eq!(units[0].signature.as_deref(), Some("3"));
+        assert_eq!(units[1].key, "s2");
+        assert_eq!(units[1].signature.as_deref(), Some("2"));
+        // read wires through to the parser (s1 has two turns).
+        let turns = src.read(&units[0]).unwrap();
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].harness, "hermes");
+        // --limit keeps the recent N sessions.
+        assert_eq!(open(&db, Some(1)).units().unwrap().len(), 1);
     }
 }

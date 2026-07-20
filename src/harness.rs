@@ -84,17 +84,26 @@ impl Harness {
     }
 }
 
-/// The `(dir, harness)` pairs present under `$HOME` — drives a no-arg `funes index`.
+/// hermes' session store — a single SQLite file under `$HOME`, not a session dir like the others.
+pub const HERMES_DB: &str = ".hermes/state.db";
+
+/// The `(root, harness)` pairs present under `$HOME` — drives a no-arg `funes index`. The JSONL
+/// agents contribute a session dir each; hermes contributes its `state.db` file.
 pub fn known_harness_roots() -> Vec<(PathBuf, Harness)> {
     let home = match std::env::var_os("HOME") {
         Some(h) => PathBuf::from(h),
         None => return Vec::new(),
     };
-    KNOWN_DIRS
+    let mut roots: Vec<(PathBuf, Harness)> = KNOWN_DIRS
         .iter()
         .map(|(tail, h)| (home.join(tail), *h))
         .filter(|(dir, _)| dir.is_dir())
-        .collect()
+        .collect();
+    let hermes_db = home.join(HERMES_DB);
+    if hermes_db.is_file() {
+        roots.push((hermes_db, Harness::Hermes));
+    }
+    roots
 }
 
 #[cfg(test)]

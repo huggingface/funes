@@ -416,7 +416,7 @@ async fn main() -> Result<()> {
                 None => {
                     if !std::io::stdin().is_terminal() {
                         return Err(anyhow!(
-                            "automated `funes index` needs a target — pass a path or `--harness <claude|codex|pi>`; \
+                            "automated `funes index` needs a target — pass a path or `--harness <claude|codex|pi|hermes>`; \
                              refusing to index all harness roots unattended"
                         ));
                     }
@@ -428,7 +428,7 @@ async fn main() -> Result<()> {
             };
             if roots.is_empty() {
                 return Err(anyhow!(
-                    "no local sessions found — looked in ~/.claude/projects, ~/.codex/sessions, ~/.pi/agent/sessions"
+                    "no local sessions found — looked in ~/.claude/projects, ~/.codex/sessions, ~/.pi/agent/sessions, ~/.hermes/state.db"
                 ));
             }
             if budgeted {
