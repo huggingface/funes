@@ -1,15 +1,13 @@
 //! An in-process list+preview picker: a filterable list on the left, a live preview on the right,
 //! a query line at the bottom. It is generic over a [`PickerModel`] the caller implements, so a
 //! screen supplies its own rows, preview, and custom key handling without the engine knowing
-//! anything about the domain. Recall drives two models (a hit picker that drills into a turn
-//! browser); other commands can drive their own.
+//! anything about the domain. The curate review drives it; other commands can drive their own.
 //!
 //! The engine owns all *view* state — the live query, the ranked survivor list, the cursor and its
 //! scroll, the preview scroll. The model owns only *domain* state. That split is what lets a
 //! model's [`PickerModel::on_key`] take `&mut self` and mutate itself (and any caller state it
 //! holds) each keypress with no aliasing, and stay open across those mutations.
 
-pub mod browser;
 pub mod curate;
 
 use std::io::{Stdout, Write};
@@ -67,24 +65,18 @@ pub enum Flow {
     Accept(usize),
     /// Pop this screen: `run` returns `Back` to its caller (an outer picker, or the top).
     Back,
-    /// Tear the whole picker down; propagates up through nested [`Ctx::drill`] calls.
+    /// Tear the whole picker down.
     Quit,
 }
 
-/// Handed to [`PickerModel::on_key`] so a model can drill into a nested screen, copy to the
-/// clipboard, or flash a transient frame — without ever touching engine view state.
+/// Handed to [`PickerModel::on_key`] so a model can copy to the clipboard or flash a transient
+/// frame — without ever touching engine view state.
 pub struct Ctx<'t> {
     term: &'t mut Term,
     clipboard: Option<&'static str>,
 }
 
 impl Ctx<'_> {
-    /// Run a nested picker on the same terminal (a drill-down). Returns when the nested model
-    /// yields `Back`/`Accept`/`Quit`; the caller should propagate a `Quit`.
-    pub fn drill<M: PickerModel>(&mut self, model: &mut M, opts: RunOpts) -> Result<Flow> {
-        run(&mut *self.term, model, opts, self.clipboard)
-    }
-
     /// Copy `text` to the system clipboard via the discovered writer (pbcopy/wl-copy/xclip/xsel);
     /// false when the box has none or the writer fails. Spawns the writer directly — no shell.
     pub fn copy(&self, text: &str) -> bool {
@@ -473,34 +465,6 @@ pub fn ansi_to_text(s: &str) -> Text<'static> {
     Text::from(lines)
 }
 
-/// Single-line variant for list rows (one line each).
-pub fn ansi_line(s: &str) -> Line<'static> {
-    ansi_to_text(s).lines.into_iter().next().unwrap_or_default()
-}
-
-// --- shell / clipboard helpers (shared by the picker and the plain line selector) ---
-
-/// The `funes get` command a copy binding puts on the clipboard.
-pub fn copy_cmd(store_label: &str, session_id: &str, turn_uuid: &str) -> String {
-    format!("funes get {session_id} {turn_uuid} --store {}", sh_word(store_label))
-}
-
-/// `s` single-quoted for a shell command line.
-pub fn sh_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-/// `s` quoted only when a shell would mangle it bare — for commands shown to be copy-pasted, where
-/// quoting the common clean label is just noise.
-pub fn sh_word(s: &str) -> String {
-    let clean = |c: char| c.is_ascii_alphanumeric() || "/:.@_+=%,~-".contains(c);
-    if !s.is_empty() && s.chars().all(clean) {
-        s.to_string()
-    } else {
-        sh_quote(s)
-    }
-}
-
 /// The first clipboard writer on PATH, as a command string; None when the box has none.
 pub fn clipboard_pipe() -> Option<&'static str> {
     const WRITERS: [(&str, &str); 4] = [
@@ -530,8 +494,8 @@ mod tests {
         assert_eq!(spans[1].content, " tail");
         assert!(!spans[1].style.add_modifier.contains(Modifier::DIM));
 
-        let r = ansi_line("a \x1b[7mhit\x1b[0m b");
-        assert!(r
+        let r = ansi_to_text("a \x1b[7mhit\x1b[0m b");
+        assert!(r.lines[0]
             .spans
             .iter()
             .any(|s| s.content == "hit" && s.style.add_modifier.contains(Modifier::REVERSED)));
@@ -571,17 +535,6 @@ mod tests {
         assert!(f.rank("zzzzz", keys.iter().copied().enumerate()).is_empty());
     }
 
-    #[test]
-    fn copy_cmd_quotes_awkward_labels() {
-        assert_eq!(copy_cmd("local", "sid", "tid"), "funes get sid tid --store local");
-        assert_eq!(
-            copy_cmd("hf://datasets/acme/kb", "s", "t"),
-            "funes get s t --store hf://datasets/acme/kb"
-        );
-        // A label with a space gets quoted.
-        assert_eq!(sh_word("a b"), "'a b'");
-    }
-
     /// A minimal model for exercising the render path with `TestBackend`.
     struct Mock {
         rows: Vec<String>,
@@ -594,7 +547,7 @@ mod tests {
             &self.rows[i]
         }
         fn row(&self, i: usize) -> Line<'static> {
-            ansi_line(&self.rows[i])
+            Line::raw(self.rows[i].clone())
         }
         fn preview(&self, i: usize) -> Text<'static> {
             Text::raw(format!("preview of {}", self.rows[i]))
