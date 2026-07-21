@@ -31,10 +31,10 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// The project a memory is the memory of — the `project` schema-metadata key, carried beside the
-/// `embedding_model` pin: a repo identity (`huggingface/funes`) or a bare label. Its presence is
-/// what makes the memory a project memory; a memory without one is a personal memory and receives
-/// everything, as ever. Distinct from the per-chunk `workdir` column (provenance, not policy).
+/// The project this memory is *of* — the `project` schema-metadata key, carried beside the
+/// `embedding_model` pin: a repo identity (`huggingface/funes`) or a bare label. Its presence
+/// marks a *project* memory; without it, a *personal* one — which receives everything, as ever.
+/// Distinct from the per-chunk `workdir` column (provenance, not policy).
 pub fn project(ds: &Dataset) -> Option<String> {
     ds.schema().metadata.get("project").cloned()
 }
@@ -612,9 +612,9 @@ impl Prepared {
     }
 }
 
-/// Resolve what curating `memory` for `project` entails — reading the memory's state, creating
-/// nothing. A given `project` must match the memory's (if it's already a project memory) or names
-/// the one to give it; omitted requires the memory to already be a project memory.
+/// Resolve what curating `memory` for `project` entails — reading its state, creating nothing.
+/// A given `project` must match the one already recorded, or names the one to assign; omitting it
+/// requires `memory` to already be a project memory.
 pub async fn prepare(memory: &Memory, project: Option<&str>) -> Result<Prepared> {
     let uri = match memory {
         Memory::Remote { uri } => uri.clone(),
@@ -742,9 +742,9 @@ pub async fn record_decisions(uri: &str, project: &str, include: &[String], excl
 }
 
 /// Non-interactive `funes curate`: record `--include`/`--exclude` decisions, or list the sessions
-/// pending review. The text path never creates a memory — creating a project memory needs the
-/// interactive review's consent — so it requires the memory to already be the project memory. The
-/// interactive review wraps these same pieces (and deferred creation) in the CLI layer.
+/// pending review. The text path never creates one — standing up a project memory needs the
+/// interactive review's consent — so `memory` must already be one. The interactive review wraps
+/// these same pieces (and deferred creation) in the CLI layer.
 pub async fn run(memory: &Memory, project: Option<&str>, include: &[String], exclude: &[String]) -> Result<String> {
     let (uri, project) = match prepare(memory, project).await? {
         Prepared::Ready { uri, project } => (uri, project),

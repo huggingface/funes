@@ -7,7 +7,7 @@
 //! retries against the new head.
 //!
 //! The result goes up as a *single* `create_commit` because Lance, left to write straight to
-//! `hf://`, would commit each file on its own: that memory is OpenDAL's HuggingFace service, where
+//! `hf://`, would commit each file on its own: that store is OpenDAL's HuggingFace service, where
 //! every `put` is its own git commit.
 //!
 //! ```text
@@ -491,7 +491,7 @@ fn human_bytes(n: u64) -> String {
     }
 }
 
-/// Installs a [`CaptureStore`] in front of the memory Lance built for the dataset URI, and holds the
+/// Installs a [`CaptureStore`] in front of the store Lance built for the dataset URI, and holds the
 /// shared capture map so the operation that created it can read the files back once Lance is done.
 #[derive(Debug)]
 struct CaptureWrapper {
@@ -526,9 +526,9 @@ impl FileFetcher for HubFetcher {
     }
 }
 
-/// Installs a [`FetchStore`] backed by a [`HubFetcher`] in front of the memory Lance built for a
+/// Installs a [`FetchStore`] backed by a [`HubFetcher`] in front of the store Lance built for a
 /// remote read. The read mirror of [`CaptureWrapper`]; built by the caller, where the repo handle
-/// and head SHA are known, because `wrap` is handed only the built memory and an opendal-internal
+/// and head SHA are known, because `wrap` is handed only the built store and an opendal-internal
 /// prefix.
 #[derive(Debug)]
 pub(crate) struct FetchWrapper {

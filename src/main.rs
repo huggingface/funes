@@ -721,7 +721,7 @@ async fn offer_hub_memory() -> Result<Option<Resolved>> {
     // A scripted (non-interactive) add can't prompt, so it stays local unless a memory was named.
     if !interactive
         || !confirm(
-            "Sync your memory to a Hugging Face dataset, so it follows you across machines? [Y/n] ",
+            "Push your memory to a Hugging Face dataset, so it follows you across machines? [Y/n] ",
             true,
         )
     {
