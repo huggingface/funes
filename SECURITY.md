@@ -33,7 +33,9 @@ Three layers keep credentials out of a memory and off the Hub:
 - **At publish time**, an always-on gate scans every outgoing chunk (via
   [trufflehog](https://github.com/trufflesecurity/trufflehog)) and *withholds* any row that
   still contains a secret, exiting non-zero rather than uploading it. The gate is fail-closed:
-  if the scanner is missing or crashes, nothing is published.
+  if the scanner is missing, crashes, emits an unrecognized result, or cannot attribute a finding,
+  nothing is published. Funes currently requires trufflehog 3.95.5, matching the version pinned in
+  CI; a different detected version is rejected rather than trusted as schema-compatible.
 - **`funes scrub`** removes secrets from rows already in your local memory, so a subsequent
   push goes through clean.
 
