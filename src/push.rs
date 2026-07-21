@@ -32,6 +32,7 @@ use chrono::Utc;
 use hf_hub::{HFError, HFRepository, RepoTypeDataset};
 use lance::Dataset;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs::File;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -103,6 +104,22 @@ fn load_pushed(memory_uri: &str) -> Option<HashSet<String>> {
 }
 
 fn record_pushed_at<'a>(path: &Path, ids: impl IntoIterator<Item = &'a String>) -> Result<()> {
+    let dir = path.parent().context("push receipt has no parent directory")?;
+    std::fs::create_dir_all(dir).context("creating the push receipt directory")?;
+
+    // Lock a stable sibling rather than the receipt itself: the receipt is atomically replaced,
+    // so locking its inode would let a second writer lock the replacement and race the first.
+    let lock_dir = dir.join(".locks");
+    std::fs::create_dir_all(&lock_dir).context("creating the push receipt lock directory")?;
+    let lock_path = lock_dir.join(path.file_name().context("push receipt has no file name")?);
+    let lock = File::options()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("opening push receipt lock at {}", lock_path.display()))?;
+    lock.lock().context("locking the push receipt")?;
+
     let mut pushed = load_pushed_from(path).unwrap_or_default();
     let before = pushed.len();
     pushed.extend(ids.into_iter().cloned());
@@ -110,8 +127,6 @@ fn record_pushed_at<'a>(path: &Path, ids: impl IntoIterator<Item = &'a String>) 
         return Ok(());
     }
 
-    let dir = path.parent().context("push receipt has no parent directory")?;
-    std::fs::create_dir_all(dir).context("creating the push receipt directory")?;
     let mut ids: Vec<_> = pushed.into_iter().collect();
     ids.sort_unstable();
     let mut temp = tempfile::NamedTempFile::new_in(dir).context("creating a push receipt")?;
@@ -883,6 +898,33 @@ mod tests {
             ["a", "b", "c"].into_iter().map(str::to_string).collect()
         );
         assert_eq!(std::fs::read_to_string(path).unwrap(), "a\nb\nc\n");
+    }
+
+    #[test]
+    fn concurrent_push_receipt_updates_do_not_lose_ids() {
+        use std::sync::{Arc, Barrier};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = Arc::new(dir.path().join("receipt"));
+        let writers = 16;
+        let barrier = Arc::new(Barrier::new(writers));
+        let threads: Vec<_> = (0..writers)
+            .map(|i| {
+                let path = Arc::clone(&path);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let id = format!("id-{i}");
+                    barrier.wait();
+                    record_pushed_at(&path, [&id]).unwrap();
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        let expected: HashSet<_> = (0..writers).map(|i| format!("id-{i}")).collect();
+        assert_eq!(load_pushed_from(&path).unwrap(), expected);
     }
 
     #[tokio::test]
