@@ -19,6 +19,10 @@ use std::process::Command;
 /// trufflehog's exit code (under `--fail`) when at least one result was found.
 const FOUND: i32 = 183;
 
+/// The trufflehog release whose JSON output schema this module parses. CI installs the same
+/// version; accepting a moving CLI contract would make fail-closed parsing impossible.
+const SUPPORTED_TRUFFLEHOG_VERSION: &str = "3.95.5";
+
 /// trufflehog's decoder name for a secret found directly in the text (not inside base64/UTF-16/…).
 /// Only these are redacted in place; an encoded match can't be reconstructed, so its block is dropped.
 const PLAIN: &str = "PLAIN";
@@ -50,16 +54,42 @@ pub trait SecretScanner {
 }
 
 /// The default engine: trufflehog, run offline (no verification) over the text.
+#[derive(Debug)]
 pub struct Trufflehog {
     bin: PathBuf,
+    version: String,
 }
 
 impl Trufflehog {
-    /// Locate the trufflehog binary; fail-closed if none is found.
+    /// Locate the trufflehog binary and verify the output contract it implements. A different
+    /// version is treated like a missing scanner: callers must not assume its output means clean.
     pub fn find() -> Result<Self> {
-        Ok(Self {
-            bin: find_in(|k| std::env::var_os(k), |p| p.is_file())?,
-        })
+        let bin = find_in(|k| std::env::var_os(k), |p| p.is_file())?;
+        Self::from_path(bin)
+    }
+
+    fn from_path(bin: PathBuf) -> Result<Self> {
+        let out = Command::new(&bin)
+            .arg("--version")
+            .output()
+            .with_context(|| format!("checking trufflehog version at {}", bin.display()))?;
+        if !out.status.success() {
+            bail!(
+                "trufflehog at {} could not report its version ({:?}); supported version is {}",
+                bin.display(),
+                out.status.code(),
+                SUPPORTED_TRUFFLEHOG_VERSION
+            );
+        }
+        let version = parse_version(&out.stdout).with_context(|| {
+            format!(
+                "checking trufflehog at {}; supported version is {}",
+                bin.display(),
+                SUPPORTED_TRUFFLEHOG_VERSION
+            )
+        })?;
+        require_supported_version(&version, &bin)?;
+        Ok(Self { bin, version })
     }
 }
 
@@ -80,41 +110,99 @@ impl SecretScanner for Trufflehog {
             .output()
             .with_context(|| format!("running trufflehog at {}", self.bin.display()))?;
 
-        match out.status.code() {
-            Some(0) => Ok(Vec::new()),
-            Some(FOUND) => Ok(String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .filter_map(parse_finding)
-                .collect()),
-            other => bail!(
-                "trufflehog exited abnormally ({other:?}); refusing to treat the text as clean:\n{}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            ),
-        }
+        interpret_scan_output(out.status.code(), &out.stdout, &out.stderr, &self.version)
     }
+}
+
+fn interpret_scan_output(status: Option<i32>, stdout: &[u8], stderr: &[u8], version: &str) -> Result<Vec<Finding>> {
+    match status {
+        Some(0) => Ok(Vec::new()),
+        Some(FOUND) => parse_findings(stdout, version),
+        other => bail!(
+            "trufflehog exited abnormally ({other:?}); refusing to treat the text as clean:\n{}",
+            String::from_utf8_lossy(stderr).trim()
+        ),
+    }
+}
+
+fn parse_version(stdout: &[u8]) -> Result<String> {
+    let text = std::str::from_utf8(stdout).context("trufflehog --version emitted non-UTF-8 output")?;
+    let version = text
+        .trim()
+        .strip_prefix("trufflehog ")
+        .filter(|v| !v.is_empty() && !v.chars().any(char::is_whitespace))
+        .ok_or_else(|| anyhow!("unrecognized trufflehog --version output"))?;
+    Ok(version.to_string())
+}
+
+fn require_supported_version(version: &str, bin: &Path) -> Result<()> {
+    if version != SUPPORTED_TRUFFLEHOG_VERSION {
+        bail!(
+            "unsupported trufflehog version {version} at {}; funes requires {}",
+            bin.display(),
+            SUPPORTED_TRUFFLEHOG_VERSION
+        );
+    }
+    Ok(())
+}
+
+/// Parse all result records from a `--fail` exit. Every non-empty stdout line must be a supported
+/// finding, and exit 183 must produce at least one. Errors deliberately identify only the scanner
+/// version and record number — never the record bytes, which can contain the secret itself.
+fn parse_findings(stdout: &[u8], version: &str) -> Result<Vec<Finding>> {
+    let text = std::str::from_utf8(stdout).map_err(|e| {
+        anyhow!(
+            "trufflehog {version} emitted non-UTF-8 result data near byte {}; refusing to treat the text as clean",
+            e.valid_up_to()
+        )
+    })?;
+    let mut findings = Vec::new();
+    for (record, line) in text.lines().filter(|line| !line.trim().is_empty()).enumerate() {
+        findings.push(parse_finding(line).with_context(|| {
+            format!(
+                "trufflehog {version} result record {} does not match the supported schema; refusing to treat the text as clean",
+                record + 1
+            )
+        })?);
+    }
+    if findings.is_empty() {
+        bail!("trufflehog {version} exited {FOUND} but emitted no valid findings; refusing to treat the text as clean");
+    }
+    Ok(findings)
 }
 
 /// Parse one trufflehog JSON result line into a [`Finding`], pulling the detector, the raw match,
 /// the filesystem line number (`SourceMetadata.Data.Filesystem.line`), and the decoder
-/// (`DecoderName`). Non-result lines (no `DetectorName`) and unparseable lines are dropped.
-fn parse_finding(line: &str) -> Option<Finding> {
-    let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
-    let detector = v.get("DetectorName")?.as_str()?.to_string();
-    if detector.is_empty() {
-        return None;
-    }
-    Some(Finding {
-        detector,
-        raw: v.get("Raw").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
-        line: v
-            .pointer("/SourceMetadata/Data/Filesystem/line")
-            .and_then(|x| x.as_u64())
-            .map(|n| n as usize),
-        decoder: v
-            .get("DecoderName")
+/// (`DecoderName`). Missing or malformed fields are contract errors, never dropped records.
+fn parse_finding(line: &str) -> Result<Finding> {
+    let v: serde_json::Value = serde_json::from_str(line.trim()).context("invalid JSON result record")?;
+    let required_string = |field: &str| -> Result<String> {
+        v.get(field)
             .and_then(|x| x.as_str())
-            .unwrap_or_default()
-            .to_string(),
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("missing or non-string {field}"))
+    };
+    let detector = required_string("DetectorName")?;
+    if detector.is_empty() {
+        bail!("empty DetectorName");
+    }
+    let line = v
+        .pointer("/SourceMetadata/Data/Filesystem/line")
+        .and_then(|x| x.as_u64())
+        .ok_or_else(|| anyhow!("missing or invalid SourceMetadata.Data.Filesystem.line"))?;
+    let line = usize::try_from(line).context("filesystem line does not fit this platform")?;
+    if line == 0 {
+        bail!("filesystem line must be 1-based");
+    }
+    let decoder = required_string("DecoderName")?;
+    if decoder.is_empty() {
+        bail!("empty DecoderName");
+    }
+    Ok(Finding {
+        detector,
+        raw: required_string("Raw")?,
+        line: Some(line),
+        decoder,
     })
 }
 
@@ -181,24 +269,41 @@ pub fn scan_blocks(texts: &[&str], scanner: &dyn SecretScanner) -> Result<Vec<Ve
         cursor += lines;
     }
 
-    for f in findings {
+    for (finding, f) in findings.into_iter().enumerate() {
         match f.line {
             // Primary: map the reported line to the text whose span contains it.
             Some(line) => {
-                if let Some(i) = spans.iter().position(|&(s, e)| line >= s && line < e) {
-                    out[i].push(f);
-                }
+                let i = spans.iter().position(|&(s, e)| line >= s && line < e).ok_or_else(|| {
+                    anyhow!(
+                        "secret-scanner finding {} reports line {line} outside the scanned text; refusing to continue",
+                        finding + 1
+                    )
+                })?;
+                out[i].push(f);
             }
             // Fallback for a scanner that reports no line: best-effort `raw` containment, so an
-            // engine without line info still flags *something* rather than silently passing.
+            // engine without line info still flags *something*. No match is an error, never a
+            // silently discarded finding.
             None => {
                 let needle = f.raw.trim().to_string();
-                if !needle.is_empty() {
-                    for (i, t) in texts.iter().enumerate() {
-                        if t.contains(&needle) {
-                            out[i].push(f.clone());
-                        }
+                if needle.is_empty() {
+                    bail!(
+                        "secret-scanner finding {} has neither a line nor a usable match; refusing to continue",
+                        finding + 1
+                    );
+                }
+                let mut mapped = false;
+                for (i, t) in texts.iter().enumerate() {
+                    if t.contains(&needle) {
+                        out[i].push(f.clone());
+                        mapped = true;
                     }
+                }
+                if !mapped {
+                    bail!(
+                        "secret-scanner finding {} could not be attributed to scanned text; refusing to continue",
+                        finding + 1
+                    );
                 }
             }
         }
@@ -361,6 +466,47 @@ mod tests {
         assert!(err.contains("not found") && err.contains("FUNES_TRUFFLEHOG"), "{err}");
     }
 
+    #[test]
+    fn scanner_contract_rejects_exit_183_without_records() {
+        let err = interpret_scan_output(Some(FOUND), b"", b"", SUPPORTED_TRUFFLEHOG_VERSION)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(SUPPORTED_TRUFFLEHOG_VERSION), "{err}");
+        assert!(err.contains("no valid findings"), "{err}");
+    }
+
+    #[test]
+    fn scanner_contract_rejects_malformed_json_without_echoing_it() {
+        let secret = "DO_NOT_ECHO";
+        let malformed = format!("{{\"DetectorName\":\"Test\",\"Raw\":\"{secret}\"");
+        let err = interpret_scan_output(Some(FOUND), malformed.as_bytes(), b"", SUPPORTED_TRUFFLEHOG_VERSION)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(SUPPORTED_TRUFFLEHOG_VERSION), "{err}");
+        assert!(err.contains("record 1"), "{err}");
+        assert!(!err.contains(secret), "scanner output leaked in error: {err}");
+    }
+
+    #[test]
+    fn scanner_contract_rejects_an_unknown_json_schema() {
+        let output = br#"{"DetectorName":"Test","Raw":"DO_NOT_ECHO","DecoderName":"PLAIN"}"#;
+        let err = interpret_scan_output(Some(FOUND), output, b"", SUPPORTED_TRUFFLEHOG_VERSION)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(SUPPORTED_TRUFFLEHOG_VERSION), "{err}");
+        assert!(err.contains("record 1"), "{err}");
+        assert!(!err.contains("DO_NOT_ECHO"), "scanner output leaked in error: {err}");
+    }
+
+    #[test]
+    fn scanner_contract_rejects_an_unsupported_version() {
+        let err = require_supported_version("3.95.4", Path::new("/fake/trufflehog"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("3.95.4"), "{err}");
+        assert!(err.contains(SUPPORTED_TRUFFLEHOG_VERSION), "{err}");
+    }
+
     /// Detectors located in each text — the view `scan_blocks` callers derive for "which texts are
     /// dirty, with what".
     fn detectors(texts: &[&str], scanner: &dyn SecretScanner) -> Vec<Vec<String>> {
@@ -478,6 +624,13 @@ mod tests {
         let hits = detectors(&["nothing here", "contains SEKRET inline"], &scanner);
         assert!(hits[0].is_empty());
         assert_eq!(hits[1], vec!["AWS".to_string()]);
+    }
+
+    #[test]
+    fn scan_blocks_rejects_an_unmappable_finding() {
+        let scanner = FakeScanner(vec![finding_at("PrivateKey", 99)]);
+        let err = scan_blocks(&["only one line"], &scanner).unwrap_err().to_string();
+        assert!(err.contains("outside the scanned text"), "{err}");
     }
 
     #[test]
