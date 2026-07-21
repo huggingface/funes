@@ -69,10 +69,11 @@ fn grounded_prompt(question: &str, passages: &str) -> String {
     format!(
         "Answer the question below from the recalled memory passages that follow. The passages \
          are your complete context — you have no recall tools in this session, and the `→ get` \
-         lines inside them are hints for other tools, not commands you can run. Answer directly \
-         and concisely, and name the sessions you drew from. If the passages don't answer the \
-         question, say so plainly and suggest rephrasing it — or wiring this agent to funes with \
-         `funes add`, which gives it recall tools to search the memory itself.\n\n\
+         lines inside them are hints for other tools, not commands you can run. Keep the answer \
+         short: a few sentences of plain prose, no preamble and no headings, then a final line \
+         naming the sessions you drew from. If the passages don't answer the question, say so \
+         plainly and suggest rephrasing it — or wiring this agent to funes with `funes add`, \
+         which gives it recall tools to search the memory itself.\n\n\
          Question: {question}\n\n== RECALLED PASSAGES ==\n{passages}"
     )
 }
