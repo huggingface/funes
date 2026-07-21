@@ -17,6 +17,10 @@ or agent can recall from it.
 - **Your memory is a Hugging Face dataset.** Publish it to the Hugging Face Hub; a teammate,
   another of your machines — or anyone, if you make it public — recalls from it with one flag.
 
+![A coding agent, mid-task, reaches for funes on its own and recalls from the public huggingface/funes-memory dataset, then answers grounded, naming the session it drew from](docs/img/recall.gif)
+
+*And it happens on its own: with funes added, your agent reaches for `recall` mid-conversation — no command to run. Here it recalls to answer a question about funes's own design, grounded, naming the session it drew from.*
+
 ## Get funes
 
 The [installer](scripts/install.sh) detects your platform, downloads the matching prebuilt binary,
