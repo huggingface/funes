@@ -258,8 +258,17 @@ fn run_streaming(
         .take()
         .ok_or_else(|| anyhow!("no stdout pipe on `{agent}`"))?;
     let (mut answer, mut output) = (None, String::new());
+    // A read error mid-stream must still reap the child and join the drain below, or we'd leave
+    // the child unwaited and leak the stderr thread — so capture it and break, don't `?` out here.
+    let mut read_err = None;
     for line in BufReader::new(stdout).lines() {
-        let line = line?;
+        let line = match line {
+            Ok(line) => line,
+            Err(e) => {
+                read_err = Some(e);
+                break;
+            }
+        };
         match event(&line) {
             Event::Status(s) => progress(&s),
             Event::Answer(a) => answer = Some(a),
@@ -268,9 +277,12 @@ fn run_streaming(
         output.push_str(&line);
         output.push('\n');
     }
-    let status = child.wait()?;
+    let status = child.wait();
     output.push_str(&drain.join().unwrap_or_default());
-    Ok(Run { answer, output, status })
+    if let Some(e) = read_err {
+        return Err(anyhow::Error::new(e).context(format!("reading `{agent}` output")));
+    }
+    Ok(Run { answer, output, status: status? })
 }
 
 /// Past the animation: print the answer, or replay the captured output so the failure stays
