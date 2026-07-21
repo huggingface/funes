@@ -10,8 +10,6 @@ use super::{canvas_rows, Animation, Palette};
 
 /// Canvas rows of the strip; braille packs 4 dots of vertical resolution into each.
 const ROWS: u16 = 2;
-/// The strip's ideal width; it uses fewer columns when the terminal is narrower.
-const WAVE_W: usize = 48;
 /// Drifting dots, spread over the three parallax layers.
 const DOTS: usize = 36;
 /// Event bursts kept alive at once; the eldest die first.
@@ -71,7 +69,8 @@ impl Animation for Drift {
     }
 
     fn render(&self, width: usize, palette: Palette) -> Vec<String> {
-        let cells = WAVE_W.min(width);
+        // The harness caps the band width; use all of what it gives.
+        let cells = width;
         let span = (cells + 8) as f64;
         let mut layers: [Vec<(f64, f64)>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         for seed in 0..DOTS {

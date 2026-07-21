@@ -2,12 +2,15 @@
 //! band of stderr while the agent works, then erases it without trace once the answer is ready.
 //!
 //! The harness is animation-agnostic — it owns the thread, the live status line, palette
-//! detection, the TTY gating, the compact fallbacks, and the erase. The visual itself lives
-//! behind the [`Animation`] trait (see [`drift`]); to change it, implement the trait in a new
-//! module and point [`animation`] at it. Drawing is plain ANSI on the normal screen — no raw
-//! mode, no alternate screen — so an interrupt mid-ask can't wedge the terminal.
+//! detection, the TTY gating, the compact fallbacks, and the erase. Each visual lives behind the
+//! [`Animation`] trait in its own module ([`drift`], [`emoji`], [`sine`]); [`animation`] picks
+//! one per run. To add another, implement the trait in a new module and fold it into that
+//! choice. Drawing is plain ANSI on the normal screen — no raw mode, no alternate screen — so an
+//! interrupt mid-ask can't wedge the terminal.
 
 mod drift;
+mod emoji;
+mod sine;
 
 use std::io::{IsTerminal, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,15 +29,27 @@ const FRAME: std::time::Duration = std::time::Duration::from_millis(80);
 const SPIN: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 /// The band's left indent, shared by every animation row and the status line.
 const INDENT: &str = "  ";
+/// The widest the animation band grows, however wide the terminal — a compact strip, not a
+/// full-width sprawl. Every animation is handed at most this many columns.
+const BAND_W: usize = 48;
 /// Below this terminal width the frame degrades to the one-line spinner.
 const MIN_FULL_W: usize = 24;
 /// The status line's spinner/elapsed accent.
 const GOLD: (u8, u8, u8) = (255, 221, 105);
 
-/// The animation the banner plays. Swap the body to change the visual — the harness is agnostic
-/// to which [`Animation`] it drives.
+/// The animation this run plays — one of the four at random, so none is the fixed face of the
+/// wait. The draw comes from the OS-seeded `RandomState` (no rng dependency); the wall clock
+/// won't do, as its low bits are stuck under macOS's microsecond granularity. The harness is
+/// agnostic to which [`Animation`] it drives.
 fn animation() -> Box<dyn Animation> {
-    Box::new(drift::Drift::new())
+    use std::hash::{BuildHasher, Hasher};
+    let draw = std::collections::hash_map::RandomState::new().build_hasher().finish();
+    match draw % 4 {
+        0 => Box::new(drift::Drift::new()),
+        1 => Box::new(emoji::Emoji::new()),
+        2 => Box::new(sine::Sine::single()),
+        _ => Box::new(sine::Sine::triple()),
+    }
 }
 
 /// A wait animation, isolated from the terminal plumbing: pure state advanced by wall-clock
@@ -121,7 +136,7 @@ fn compose(anim: &dyn Animation, t: f64, width: usize, palette: Palette, label: 
     if palette == Palette::Mono || width < MIN_FULL_W {
         return vec![status_line(t, palette, width, label)];
     }
-    let cw = width - INDENT.len() - 2;
+    let cw = (width - INDENT.len() - 2).min(BAND_W);
     let mut lines: Vec<String> = anim
         .render(cw, palette)
         .into_iter()
