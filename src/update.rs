@@ -103,7 +103,9 @@ pub async fn run(force: bool) -> Result<()> {
 
     let release_version = read_release_version(&tagged_version).with_context(|| format!("validating {tag}/VERSION"))?;
     if release_version != latest {
-        bail!("release metadata for {tag} reports version {release_version} — nothing changed");
+        bail!(
+            "release metadata mismatch: {tag}/VERSION reports {release_version}, expected {latest}; update aborted and the installed binary was left unchanged"
+        );
     }
 
     let installed = install_verified(&staged, &exe, &manifest, asset, &latest)?;
