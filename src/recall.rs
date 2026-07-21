@@ -804,10 +804,13 @@ async fn session_count(ds: &Dataset) -> Option<usize> {
 
 fn index_coverage_line() -> Option<String> {
     let coverage = crate::index::local_index_coverage()?;
-    Some(format!(
-        "native sessions pending index: {}/{}\n",
-        coverage.pending, coverage.total
-    ))
+    (coverage.pending > 0).then(|| {
+        format!(
+            "pending indexing: {} source session{} — run `funes index`\n",
+            coverage.pending,
+            if coverage.pending == 1 { "" } else { "s" }
+        )
+    })
 }
 
 /// The indexation lines of a local memory: how many sessions it holds and when it was last
@@ -880,16 +883,23 @@ pub async fn status(memory: Memory) -> Result<String> {
                         if project.is_none() {
                             if let Some(coverage) = crate::push::local_push_coverage(&local, uri).await
                             {
-                                let _ = writeln!(
-                                    out,
-                                    "local sessions fully pushed: {}/{}",
-                                    coverage.pushed, coverage.total
-                                );
-                                let _ = writeln!(
-                                    out,
-                                    "local sessions pending push: {}",
-                                    coverage.pending
-                                );
+                                if coverage.pending == 0 {
+                                    let _ = writeln!(
+                                        out,
+                                        "local push: up to date ({} session{})",
+                                        coverage.total,
+                                        if coverage.total == 1 { "" } else { "s" }
+                                    );
+                                } else {
+                                    let _ = writeln!(
+                                        out,
+                                        "local push: {} of {} session{} pending — run `funes push {}`",
+                                        coverage.pending,
+                                        coverage.total,
+                                        if coverage.total == 1 { "" } else { "s" },
+                                        memory.label()
+                                    );
+                                }
                             } else {
                                 let _ = writeln!(
                                     out,

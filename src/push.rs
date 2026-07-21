@@ -133,7 +133,6 @@ fn record_pushed<'a>(memory_uri: &str, ids: impl IntoIterator<Item = &'a String>
 /// `pending` until its new chunks are pushed.
 pub(crate) struct PushCoverage {
     pub total: usize,
-    pub pushed: usize,
     pub pending: usize,
 }
 
@@ -156,7 +155,6 @@ fn push_coverage(batches: &[RecordBatch], pushed_ids: &HashSet<String>) -> Optio
     let pushed = complete.values().filter(|&&all| all).count();
     Some(PushCoverage {
         total: complete.len(),
-        pushed,
         pending: complete.len() - pushed,
     })
 }
@@ -869,7 +867,6 @@ mod tests {
             .unwrap();
         let coverage = push_coverage(&batches, &pushed).unwrap();
         assert_eq!(coverage.total, 2);
-        assert_eq!(coverage.pushed, 1);
         assert_eq!(coverage.pending, 1);
     }
 

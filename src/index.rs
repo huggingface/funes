@@ -230,7 +230,6 @@ fn unit_current(entry: Option<&UnitState>, sig: &str, target: Tier) -> bool {
 /// Lightweight coverage of the native session sources present on this host. This uses only unit
 /// enumeration/stat signatures plus `state.json`; it never parses transcripts or starts inference.
 pub(crate) struct IndexCoverage {
-    pub total: usize,
     pub pending: usize,
 }
 
@@ -244,10 +243,7 @@ fn index_coverage(units: &[source::Unit], state: &HashMap<String, UnitState>) ->
                 .is_none_or(|sig| !unit_current(state.get(&unit.key), sig, target))
         })
         .count();
-    IndexCoverage {
-        total: units.len(),
-        pending,
-    }
+    IndexCoverage { pending }
 }
 
 /// Current native sessions that have not reached every indexing tier. `None` means the local
@@ -1040,7 +1036,6 @@ mod tests {
             ),
         ]);
         let coverage = index_coverage(&units, &state);
-        assert_eq!(coverage.total, 5);
         assert_eq!(coverage.pending, 4);
     }
 
