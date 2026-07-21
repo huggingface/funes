@@ -72,10 +72,9 @@ enum Cmd {
     },
     /// Ask a coding agent one question, grounded in a memory — nothing installed.
     ///
-    /// Borrows the agent for a single answer: claude gets funes recall/get as session-only MCP
-    /// tools and recalls on its own; codex gets the recalled passages in its prompt (its exec
-    /// mode can't run MCP tools). Name a memory with --memory to ask against any published one;
-    /// omit it for your local memory.
+    /// Borrows the agent for a single answer: funes recalls from the memory and hands the agent
+    /// the passages in its prompt, so the answer comes back in one turn. Name a memory with
+    /// --memory to ask against any published one; omit it for your local memory.
     #[command(
         subcommand_value_name = "AGENT",
         subcommand_help_heading = "Agents",
@@ -353,21 +352,8 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Ask { agent } => match agent {
-            AskAgent::Claude { args } => ask::claude(args.question.join(" "), args.memory.memory).await,
-            AskAgent::Codex { args } => {
-                // The binary probe comes first — grounding pays for a model load.
-                ask::preflight("codex")?;
-                let question = args.question.join(" ");
-                let spinner = Spinner::start("recalling…");
-                let progress = |label: &str| {
-                    if let Some(s) = &spinner {
-                        s.set(label);
-                    }
-                };
-                let prompt = ask::codex_grounding(args.memory.resolve(), &question, &progress).await?;
-                drop(spinner);
-                ask::run_codex(&prompt)
-            }
+            AskAgent::Claude { args } => ask::claude(args.question.join(" "), args.memory.resolve()).await,
+            AskAgent::Codex { args } => ask::codex(args.question.join(" "), args.memory.resolve()).await,
         },
         Cmd::Index {
             path,
