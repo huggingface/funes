@@ -10,10 +10,10 @@
 
 use anyhow::{anyhow, bail, Result};
 use serde_json::Value;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, IsTerminal, Read};
 use std::process::{Command, ExitStatus, Stdio};
 
-use crate::banner::Banner;
+use crate::banner::{accent, band_width, Banner};
 use crate::hub::Memory;
 use crate::recall::{check_readable, memory_hint, recall_hits};
 use crate::render;
@@ -294,7 +294,25 @@ fn run_streaming(
 fn conclude(agent: &str, run: Run) -> Result<()> {
     if run.status.success() {
         if let Some(answer) = &run.answer {
-            println!("{}", answer.trim_end());
+            let answer = answer.trim_end();
+            // Set the answer off from the command line above it — but only for a human at the
+            // terminal; a redirected or piped answer must stay plain text.
+            if std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none() {
+                println!("{}", accent(&"─".repeat(band_width())));
+                // Dim the trailing provenance line, but never a lone single-line answer.
+                let mut lines = answer.lines().peekable();
+                let mut first = true;
+                while let Some(line) = lines.next() {
+                    if lines.peek().is_none() && !first {
+                        println!("{}", render::dim(line, true));
+                    } else {
+                        println!("{line}");
+                    }
+                    first = false;
+                }
+            } else {
+                println!("{answer}");
+            }
             return Ok(());
         }
     }

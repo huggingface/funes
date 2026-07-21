@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "funes": {
+      "command": "funes",
+      "args": ["mcp", "huggingface/funes-memory"]
+    }
+  }
+}

@@ -136,7 +136,7 @@ fn compose(anim: &dyn Animation, t: f64, width: usize, palette: Palette, label: 
     if palette == Palette::Mono || width < MIN_FULL_W {
         return vec![status_line(t, palette, width, label)];
     }
-    let cw = (width - INDENT.len() - 2).min(BAND_W);
+    let cw = band_cols(width);
     let mut lines: Vec<String> = anim
         .render(cw, palette)
         .into_iter()
@@ -163,6 +163,18 @@ fn term_width() -> usize {
         Ok((w, _)) if w > 0 => w as usize,
         _ => 80,
     }
+}
+
+/// The animation band's content width for terminal `width`. Shared by [`compose`] and
+/// [`band_width`] so the rule and the frames stay one width.
+fn band_cols(width: usize) -> usize {
+    width.saturating_sub(INDENT.len() + 2).min(BAND_W)
+}
+
+/// The band width for the live terminal — `funes ask` sizes its answer rule to it, matching the
+/// wait animation's band.
+pub(crate) fn band_width() -> usize {
+    band_cols(term_width())
 }
 
 /// Truncate to `max` display chars, marking the cut.
@@ -239,6 +251,17 @@ impl Palette {
             }
             Palette::Mono => String::new(),
         }
+    }
+}
+
+/// `s` wrapped in the GOLD banner accent. Shared with `funes ask` so its answer rule matches the
+/// wait spinner.
+pub(crate) fn accent(s: &str) -> String {
+    let fg = Palette::detect().fg(GOLD);
+    if fg.is_empty() {
+        s.to_string()
+    } else {
+        format!("{fg}{s}\x1b[0m")
     }
 }
 
