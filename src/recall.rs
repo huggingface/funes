@@ -784,8 +784,9 @@ fn age(t: DateTime<Utc>, now: DateTime<Utc>) -> String {
     format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
 }
 
-/// Distinct sessions in the memory — the human-scale size of the index. Best-effort: a failed
-/// scan omits the line rather than failing status.
+/// Distinct sessions in a local memory — the human-scale size of the index. Best-effort: a failed
+/// scan omits the line rather than failing status. Never call this for a remote: even a projected
+/// column scan can download an enormous published memory.
 async fn session_count(ds: &Dataset) -> Option<usize> {
     let batches = dataset::scan_rows(ds, &["session_id"], None, None).await.ok()?;
     let mut sessions = HashSet::new();
@@ -825,7 +826,8 @@ pub async fn status(memory: Memory) -> Result<String> {
                 Memory::Local { .. } => out.push_str(&index_lines(&ds, now).await),
                 Memory::Remote { uri } => {
                     // A project memory announces itself and this machine's review backlog.
-                    if let Some(project) = curate::project(&ds) {
+                    let project = curate::project(&ds);
+                    if let Some(project) = &project {
                         let _ = writeln!(out, "project memory of {project}");
                         let pending = curate::pending_count(&ds, uri).await?;
                         if pending > 0 {
@@ -849,14 +851,43 @@ pub async fn status(memory: Memory) -> Result<String> {
                     // answers both "what's published" and "what's indexed on this machine".
                     if let Ok(local) = Memory::local().open().await {
                         let local_rows = local.count_rows(None).await?;
-                        let _ = write!(out, "\nlocal index: {}\nchunks: {local_rows}", Memory::local().label());
-                        // A count difference only approximates the push delta (scrub-held
-                        // rows and other hosts' pushes also move it).
-                        if local_rows > rows {
-                            let _ = write!(out, " (≈{} not yet pushed)", local_rows - rows);
+                        let _ = writeln!(
+                            out,
+                            "\nlocal index: {}\nchunks: {local_rows}",
+                            Memory::local().label()
+                        );
+                        let local_sessions = session_count(&local).await;
+                        if let Some(n) = local_sessions {
+                            let _ = writeln!(out, "sessions: {n}");
                         }
-                        out.push('\n');
-                        out.push_str(&index_lines(&local, now).await);
+                        // A shared remote's total says nothing about this host's backlog. Personal
+                        // memories use the local receipt maintained by push; project memories have
+                        // their decision-aware pending-review report above.
+                        if project.is_none() {
+                            if let Some(coverage) = crate::push::local_push_coverage(&local, uri).await
+                            {
+                                let _ = writeln!(
+                                    out,
+                                    "local sessions fully pushed: {}/{}",
+                                    coverage.pushed, coverage.total
+                                );
+                                let _ = writeln!(
+                                    out,
+                                    "local sessions pending push: {}",
+                                    coverage.pending
+                                );
+                            } else {
+                                let _ = writeln!(
+                                    out,
+                                    "local push coverage: unknown — run `funes push {}` once",
+                                    memory.label()
+                                );
+                            }
+                        }
+                        let t = local.version().timestamp;
+                        if t.timestamp() > 0 {
+                            let _ = writeln!(out, "last indexed: {}", stamp(t, now));
+                        }
                     }
                 }
             }
