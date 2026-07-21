@@ -282,7 +282,11 @@ fn run_streaming(
     if let Some(e) = read_err {
         return Err(anyhow::Error::new(e).context(format!("reading `{agent}` output")));
     }
-    Ok(Run { answer, output, status: status? })
+    Ok(Run {
+        answer,
+        output,
+        status: status?,
+    })
 }
 
 /// Past the animation: print the answer, or replay the captured output so the failure stays
