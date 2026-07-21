@@ -295,19 +295,20 @@ fn conclude(agent: &str, run: Run) -> Result<()> {
     if run.status.success() {
         if let Some(answer) = &run.answer {
             let answer = answer.trim_end();
-            // A gold rule — the width of the wait animation's band — sets the answer off from the
-            // command line above, with the trailing provenance line dimmed. Terminal-only, and off
-            // under NO_COLOR — a redirected or piped answer stays plain text.
+            // Set the answer off from the command line above it — but only for a human at the
+            // terminal; a redirected or piped answer must stay plain text.
             if std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none() {
                 println!("{}", accent(&"─".repeat(band_width())));
-                let lines: Vec<&str> = answer.split('\n').collect();
-                let last = lines.len().saturating_sub(1);
-                for (i, line) in lines.iter().enumerate() {
-                    if i == last && lines.len() > 1 {
+                // Dim the trailing provenance line, but never a lone single-line answer.
+                let mut lines = answer.lines().peekable();
+                let mut first = true;
+                while let Some(line) = lines.next() {
+                    if lines.peek().is_none() && !first {
                         println!("{}", render::dim(line, true));
                     } else {
                         println!("{line}");
                     }
+                    first = false;
                 }
             } else {
                 println!("{answer}");

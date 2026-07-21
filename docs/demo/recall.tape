@@ -11,7 +11,7 @@
 #     recording starts warm and the recall lands inside the budget.
 #
 # Regenerate from the repo root:
-#   vhs docs/demo/recall-remote.tape
+#   vhs docs/demo/recall.tape
 
 Output docs/img/recall.gif
 

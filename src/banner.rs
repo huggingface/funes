@@ -165,15 +165,15 @@ fn term_width() -> usize {
     }
 }
 
-/// The animation band's content width for terminal `width`: indent and margins removed, capped at
-/// [`BAND_W`]. Shared by [`compose`] and [`band_width`] so the rule and the frames agree.
+/// The animation band's content width for terminal `width`. Shared by [`compose`] and
+/// [`band_width`] so the rule and the frames stay one width.
 fn band_cols(width: usize) -> usize {
     width.saturating_sub(INDENT.len() + 2).min(BAND_W)
 }
 
-/// The band width for the live terminal — what `funes ask` sizes its answer rule to, so the rule
-/// spans the same columns the wait animation drew in.
-pub fn band_width() -> usize {
+/// The band width for the live terminal — `funes ask` sizes its answer rule to it, matching the
+/// wait animation's band.
+pub(crate) fn band_width() -> usize {
     band_cols(term_width())
 }
 
@@ -254,9 +254,9 @@ impl Palette {
     }
 }
 
-/// `s` wrapped in the GOLD banner accent for the current terminal (truecolor → 256-color cube,
-/// plain under NO_COLOR). Shared with `funes ask` so its answer rule matches the wait spinner.
-pub fn accent(s: &str) -> String {
+/// `s` wrapped in the GOLD banner accent. Shared with `funes ask` so its answer rule matches the
+/// wait spinner.
+pub(crate) fn accent(s: &str) -> String {
     let fg = Palette::detect().fg(GOLD);
     if fg.is_empty() {
         s.to_string()

@@ -4,9 +4,8 @@
 # one turn, grounded, naming the sessions it drew from. While it waits, funes plays its wait
 # animation (one of drift / emoji / sine, picked at random per run).
 #
-# Deliberately narrow and large-typed so it stays legible embedded in the README: FontSize 22,
-# Width 820 (the other demos are 16 / 1200). The animation band caps at ~48 columns, so it sits
-# comfortably inside the frame.
+# More compact than the full-TUI demos so it embeds legibly in the README. The wait animation
+# caps its own width, so it sits comfortably inside the frame.
 #
 # Prerequisites on the render box:
 #   - claude installed and authenticated to a model.
