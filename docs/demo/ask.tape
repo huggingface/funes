@@ -27,9 +27,9 @@
 
 Output docs/img/ask.gif
 
-Set FontSize 22
-Set Width 820
-Set Height 700
+Set FontSize 16
+Set Width 800
+Set Height 500
 Set Theme "Catppuccin Mocha"
 Set TypingSpeed 40ms
 
