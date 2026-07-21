@@ -16,7 +16,7 @@ async fn recall_tolerates_a_memory_without_the_harness_column() {
     let source = tempfile::tempdir().unwrap();
     std::env::set_var("FUNES_HOME", db_dir.path());
 
-    // A minimal Claude transcript so parse → chunk → embed → memory produces a real recallable row.
+    // A minimal Claude transcript so parse → chunk → embed → store produces a real recallable row.
     let session = "test-session-0001";
     let dir = source.path().join("projects").join("-home-u-dev-demo");
     std::fs::create_dir_all(&dir).unwrap();

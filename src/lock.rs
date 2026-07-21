@@ -17,8 +17,11 @@ pub struct MemoryLock(#[allow(dead_code)] File);
 fn open_lockfile() -> Result<File> {
     let dir = dataset::funes_dir();
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    // A sibling of memory/, not inside the Lance dataset, so version cleanup never reaps it.
-    let path = dir.join("memory.lock");
+    // A sibling of memory/, not inside the Lance dataset, so version cleanup never reaps it. The
+    // filename stays `store.lock` (the pre-rename name) deliberately: during a `funes update` a
+    // pre-rename binary may still be writing under this home, and both must contend on the *same*
+    // lock file — renaming it would let old and new writers proceed concurrently and corrupt rows.
+    let path = dir.join("store.lock");
     File::options()
         .create(true)
         .write(true)

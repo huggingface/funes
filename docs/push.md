@@ -39,8 +39,9 @@ The hooks [`funes add`](add.md) installs run this at session boundaries automati
 ## Keeping secrets out: the gate and `funes scrub`
 
 funes redacts credentials from each session *before* it's written. On push, a separate, **always-on
-gate** withholds any chunk that still contains a secret and exits non-zero (code `2`), rather than
-upload it:
+gate** withholds any chunk that still contains a secret rather than upload it — the clean rows still
+publish, with a warning about what was held back. Only when that leaves *nothing* to publish does the
+push exit non-zero (code `2`):
 
 ```console
 $ funes push <user|org>/funes-memory
@@ -85,7 +86,7 @@ funes curate <memory> --include <session> --exclude <session>
 `local`); with none it acts on your local memory.
 
 ```bash
-funes status                 # memory label, table name, chunk count (and an update check)
+funes status                 # memory label, chunk/session counts, last indexed (and an update check)
 funes status <org>/<repo>    # …for a remote memory
 ```
 

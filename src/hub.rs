@@ -79,7 +79,7 @@ impl Memory {
         }
     }
 
-    /// Open the `chunks` dataset for this memory; remote stores stream lazily over `hf://`.
+    /// Open the `chunks` dataset for this memory; remote memories stream lazily over `hf://`.
     /// Rejects a memory whose `vector` dimension isn't funes's `DIM` — a coarse guard, since a
     /// matching dimension doesn't prove a matching embedding model.
     pub async fn open(&self) -> Result<Dataset> {

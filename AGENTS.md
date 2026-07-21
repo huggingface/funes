@@ -77,7 +77,7 @@ recalled passages. A non-zero agent exit fails funes (exit 1, the child's code q
 
 ### status
 
-- `funes status [memory]` — memory label, table name, chunk count.
+- `funes status [memory]` — memory label, chunk and session counts, and when it was last indexed (for a remote, the last push).
 
 ### MCP
 

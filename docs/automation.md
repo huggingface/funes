@@ -77,8 +77,8 @@ timeout.
   Reads take no lock. `funes push` is commit-guarded on the remote, so overlapping publishes — and a
   publish overlapping an index — are safe.
 - **Secrets held back.** funes redacts credentials at index time; on push, a separate always-on gate
-  withholds any chunk that still contains one and exits non-zero (code `2`). Run `funes scrub`, then
-  the next push publishes it.
+  withholds any chunk that still contains one — the clean rows publish, and the push exits non-zero
+  (code `2`) only if that leaves nothing to publish. Run `funes scrub`, then the next push includes it.
 - **The card rides along.** A push to a memory at the repo root creates the repo's dataset card
   (tagged `funes`) and keeps its stats fresh — in the same commit as the data. A hand-written
   card is never touched.

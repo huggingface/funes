@@ -64,7 +64,7 @@ or Hub repo skips the budget and indexes all tiers in one pass.
 | Flag | Meaning |
 | --- | --- |
 | `--harness <name>` | Override auto-detection for a path, or (with no path) target one harness's dir: `claude \| codex \| pi \| hermes`. |
-| `--limit <N>` | Index only the most recent N sessions per source (for a Hub trace, N shards). Omit to index all. |
+| `--limit <N>` | Index only the most recent N sessions per source. Omit to index all. A Hub repo ignores it and indexes every shard. |
 | `--no-thinking` | Exclude thinking blocks. |
 | `--yes` | Don't ask: a budgeted (no-path) run finishes all remaining work; an explicit path skips the first-index size confirmation. |
 
@@ -77,7 +77,7 @@ Indexing and recall are one deterministic pipeline:
    │  parse        deterministic — turns (text / thinking / tool_use / tool_result), tagged by agent
    │  chunk        one chunk per content block, tight provenance
    │  embed        pinned local model (BAAI/bge-small-en-v1.5)
-   ▼  write        a local Lance dataset (vector + BM25)
+   ▼  store        a local Lance dataset (vector + BM25)
 ```
 
 The embedding model is **pinned and stamped into the memory**; querying with a different one is

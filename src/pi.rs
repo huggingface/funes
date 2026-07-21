@@ -86,10 +86,9 @@ fn file_matches(path: &Path, want: &str) -> bool {
 /// absent). A copy that drifts from what this install would write — a newer embedded version, or a
 /// different bound memory — is refreshed; `force` rewrites even when it matches.
 fn extract(dir: &Path, memory: Option<&str>, force: bool) -> Result<()> {
-    // A pre-rename install bound recall through a `store` file. The `memory` file is now the sole
-    // authority, so drop any legacy `store` — else a re-add to local (which removes `memory` but
-    // not `store`) would leave the stale binding in place. Best-effort, before the `current` check
-    // so it runs even when nothing else needs rewriting.
+    // Tidy up a pre-rename install: the extension now reads only the `memory` file, so a leftover
+    // `store` binding is already inert — remove it anyway so nothing stale lingers on disk.
+    // Best-effort, before the `current` check so it runs even when nothing else needs rewriting.
     let _ = std::fs::remove_file(dir.join("store"));
     let current = !force
         && file_matches(&dir.join("index.ts"), INDEX_TS)
