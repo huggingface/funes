@@ -57,11 +57,14 @@ Agent format, per turn:
 ### ask
 
 `funes ask claude|codex "<question>" [--memory <label>]` — one grounded answer from a coding
-agent, nothing installed. claude runs with funes mounted as a session-only MCP server
-(`claude -p <prompt> --strict-mcp-config --mcp-config <funes mcp [memory]> --allowedTools
-mcp__funes__recall,mcp__funes__get`) and recalls on its own; codex exec can't run MCP tools (its
-tool-approval elicitation is auto-cancelled headless), so funes recalls in-process and embeds the
-passages in the prompt (`codex exec --skip-git-repo-check -c mcp_servers={} -- <prompt>`).
+agent, nothing installed. Both agents get the same forced grounding: funes recalls in-process and
+embeds the passages in the prompt, so the answer comes back in one turn with no tools — an A/B
+against agent-driven recall showed the agentic loop pays only on a first-retrieval miss, at
+several times the latency and cost. The session runs with any registered MCP servers silenced
+(`claude -p <prompt> --strict-mcp-config --mcp-config {"mcpServers":{}}`; `codex exec
+--skip-git-repo-check -c mcp_servers={} -- <prompt>`). A miss is not papered over: the answer says
+the passages fall short and points at rephrasing or `funes add` (which wires the agent to funes
+with recall tools of its own).
 
 stdout is the agent's free-text answer — unlike the read commands, there is nothing stable to
 parse. ask reads no stdin. Quote the question (or put `--` before it) when it contains flag-like

@@ -5,11 +5,9 @@ Code, Codex, and pi and lets any agent recall the past decisions, rationale, and
 memory is a dataset you can publish to the Hugging Face Hub — then any machine, teammate,
 or agent can recall from it.
 
-![Choosing an embedding model in Claude Code, then Codex recalling that decision in a separate session](docs/img/cross-agents.gif)
+![Asking a published memory why funes is append-only; funes recalls the relevant sessions and a coding agent answers, grounded, naming its sources](docs/img/ask.gif)
 
-*Different agents, one memory: Claude picks an embedding model; a session-end hook indexes it on its own; Codex — a separate agent — uses funes to recall the decision.*
-
-*Look closely at Codex's hits: some timestamps predate this recording. Those are earlier takes of this very demo — funes had already memorized the rehearsals. An append-only memory has no clean take, so we kept the Droste effect rather than pretend otherwise.*
+*Put a question to a memory and borrow a coding agent to answer it: funes recalls the relevant sessions, hands them over, and you get one grounded answer that names the sessions it drew from — nothing installed. Here it reads the public `huggingface/funes-memory` dataset named right in the command.*
 
 ## Features at a glance
 
@@ -74,11 +72,7 @@ Your local memory is a dataset, and it shares the way one does: publish it to a 
 **dataset** repo you own and it becomes an artifact on the Hub like any model or dataset — owned by
 your account or org, gated by your token, readable by whoever you say. Not just the code of a
 project, but the *process* behind it — the decisions, dead ends, and rationale — becomes something
-an agent can recall:
-
-![pi recalling a past decision from a shared Hugging Face dataset named in the prompt — a project this machine never worked on](docs/img/hub-store.gif)
-
-*A project this machine never worked on: the prompt names `dacorvo/funes-Glint-Research-Fable-5` — ~21.6k chunks on the Hub — and pi recalls the past decision straight from it, one `memory` argument on the recall call. Nothing attached, no local index.*
+an agent can recall.
 
 Bind a memory when you add funes to an agent and it recalls from there and keeps it current on its
 own; or run the two commands directly:

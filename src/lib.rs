@@ -12,6 +12,7 @@
 compile_error!("funes is unix-only (Linux/macOS)");
 
 pub mod ask;
+pub mod banner;
 #[cfg(feature = "blas")]
 pub mod blas;
 pub mod capture_store;

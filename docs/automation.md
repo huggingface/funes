@@ -5,6 +5,12 @@ wires the indexing — and, with a shared memory, the publishing — into your a
 captured automatically with no manual step. This document explains what `funes add` sets up and how
 it behaves; you rarely need to touch any of it by hand.
 
+![Choosing an embedding model in Claude Code, then Codex recalling that decision in a separate session](img/cross-agents.gif)
+
+*Different agents, one memory: Claude picks an embedding model; a session-end hook indexes it on its own; Codex — a separate agent — uses funes to recall the decision. No `funes` command in sight — the hooks do the capturing.*
+
+*Look closely at Codex's hits: some timestamps predate this recording. Those are earlier takes of this very demo — funes had already memorized the rehearsals. An append-only memory has no clean take, so we kept the Droste effect rather than pretend otherwise.*
+
 ## What `funes add` sets up
 
 `funes add claude`, `funes add codex`, and `funes add hermes` install, beyond the `recall`/`get`

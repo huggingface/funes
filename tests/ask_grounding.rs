@@ -1,5 +1,5 @@
-//! `funes ask codex` grounding: a real temp memory's passages land in the prompt handed to the
-//! agent, wrapped in the ask instruction. Its own binary because it sets the process-global
+//! `funes ask` grounding: a real temp memory's passages land in the prompt handed to the agent,
+//! wrapped in the ask instruction. Its own binary because it sets the process-global
 //! `FUNES_HOME`, and cargo runs a file's tests concurrently — two such tests would clobber each
 //! other's memory.
 
@@ -30,7 +30,7 @@ async fn grounding_embeds_memory_passages_in_the_prompt() {
     let session = write_transcript(source.path());
     funes::index::run_index(source.path(), false, None).await.unwrap();
 
-    let prompt = funes::ask::codex_grounding(funes::hub::Memory::local(), "why reciprocal rank fusion", &|_| ())
+    let prompt = funes::ask::grounding(funes::hub::Memory::local(), "why reciprocal rank fusion", &|_| ())
         .await
         .unwrap();
 
