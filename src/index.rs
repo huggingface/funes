@@ -268,16 +268,29 @@ struct Indexer {
 /// tagged with the source index. When several sources are indexed at once (e.g. every known
 /// harness), one that fails to enumerate — say a hermes state.db this build can't read — is warned
 /// and skipped instead of aborting the rest; a lone source stays fatal, since its failure is then
-/// the whole result.
+/// the whole result. But if the skips left nothing to index and at least one source errored, that's
+/// a failure, not a silent success — whereas an all-empty run with no errors is a legitimate no-op.
 fn collect_units(sources: &[Box<dyn source::TraceSource>]) -> Result<Vec<(usize, source::Unit)>> {
     let isolate = sources.len() > 1;
     let mut units = Vec::new();
+    let mut errors = 0usize;
     for (i, src) in sources.iter().enumerate() {
         match src.units() {
             Ok(src_units) => units.extend(src_units.into_iter().map(|u| (i, u))),
-            Err(e) if isolate => eprintln!("skipping source ({}): {:#}", src.describe(), e),
+            Err(e) if isolate => {
+                errors += 1;
+                eprintln!("skipping source ({}): {:#}", src.describe(), e);
+            }
             Err(e) => return Err(e.context(src.describe())),
         }
+    }
+    // `errors > 0` implies the isolate path (a lone failure returned above), so this fires only
+    // when every collected source was empty and at least one was skipped for erroring.
+    if units.is_empty() && errors > 0 {
+        anyhow::bail!(
+            "no sessions to index — {errors} of {} sources failed to enumerate (see the warnings above)",
+            sources.len()
+        );
     }
     Ok(units)
 }
@@ -885,6 +898,42 @@ mod tests {
             fail: true,
         })];
         assert!(collect_units(&srcs).is_err());
+    }
+
+    #[test]
+    fn collect_units_fails_when_every_source_errors_and_nothing_is_collected() {
+        let srcs: Vec<Box<dyn source::TraceSource>> = vec![
+            Box::new(MockSource {
+                name: "bad-a",
+                keys: vec![],
+                fail: true,
+            }),
+            Box::new(MockSource {
+                name: "bad-b",
+                keys: vec![],
+                fail: true,
+            }),
+        ];
+        // 0 units + a skipped error must not look like a successful no-op.
+        assert!(collect_units(&srcs).is_err());
+    }
+
+    #[test]
+    fn collect_units_is_a_noop_for_empty_sources_without_errors() {
+        let srcs: Vec<Box<dyn source::TraceSource>> = vec![
+            Box::new(MockSource {
+                name: "empty-a",
+                keys: vec![],
+                fail: false,
+            }),
+            Box::new(MockSource {
+                name: "empty-b",
+                keys: vec![],
+                fail: false,
+            }),
+        ];
+        // Nothing to index but nothing errored → a legitimate empty result, not a failure.
+        assert!(collect_units(&srcs).unwrap().is_empty());
     }
 
     #[test]
