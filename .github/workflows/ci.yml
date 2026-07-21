@@ -8,6 +8,7 @@ on:
       - "tests/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "scripts/**"
       - ".github/workflows/ci.yml"
   push:
     branches: [main]
@@ -70,6 +71,9 @@ jobs:
       # real embedder lives in its own job below.
       - name: Unit tests
         run: cargo test --lib --profile ci
+
+      - name: Installer tests
+        run: sh scripts/test-install.sh
 
   integration-test:
     name: Integration Test (real embedder)

@@ -35,6 +35,7 @@ nucleo-matcher = "0.3"           # fuzzy filtering the browser's hit/turn lists
 serde = { version = "1", features = ["derive"] }               # MCP request structs
 serde_json = { version = "1", features = ["preserve_order"] }  # parse JSONL; preserve tool_use key order
 sha1 = "0.10"                    # chunk id = sha1(...)[:16]
+sha2 = "0.10"                    # verify release binaries before the installer/updater executes them
 hex = "0.4"
 walkdir = "2"                    # recursive *.jsonl walk
 rmcp = { version = "1", features = ["server", "macros", "transport-io", "schemars"] }  # MCP stdio server

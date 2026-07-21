@@ -24,7 +24,8 @@ or agent can recall from it.
 ## Get funes
 
 The [installer](scripts/install.sh) detects your platform, downloads the matching prebuilt binary,
-and puts it on your PATH (`~/.local/bin` by default):
+verifies its tagged release checksum and version, and puts it on your PATH (`~/.local/bin` by
+default):
 
 ```bash
 curl -fsSL https://huggingface.co/buckets/huggingface/funes/resolve/install.sh | sh
@@ -42,7 +43,8 @@ memory bound) publishes at each session boundary. From here you just work. See
 [docs/add.md](docs/add.md) for the agents, memory binding, and what a run does; `funes status` tells
 you whether recall is reading your own memory yet.
 
-Alternatively, grab a [binary](https://huggingface.co/buckets/huggingface/funes) by hand:
+Tagged binaries and their `SHA256SUMS` manifest are also available in the
+[release bucket](https://huggingface.co/buckets/huggingface/funes):
 
 | Platform | Binary |
 | --- | --- |
@@ -50,10 +52,8 @@ Alternatively, grab a [binary](https://huggingface.co/buckets/huggingface/funes)
 | Linux aarch64 | `funes-aarch64-linux` |
 | macOS Apple Silicon | `funes-arm64-apple-darwin` |
 
-```bash
-curl -fsSL https://huggingface.co/buckets/huggingface/funes/resolve/funes-x86_64-linux -o funes
-chmod +x funes && ./funes add claude
-```
+The checksum detects corrupt, truncated, or mismatched release downloads. Because the binary and
+checksum share the same bucket, it does not authenticate the bucket itself.
 
 Already installed? **`funes update`** replaces the binary in place with the latest build for your
 platform (`--force` reinstalls the current one); `funes status` tells you when a newer release is

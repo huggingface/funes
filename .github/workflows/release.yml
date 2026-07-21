@@ -13,6 +13,7 @@ on:
       - "tests/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "scripts/install.sh"
       - ".github/workflows/release.yml"
   workflow_dispatch:
     inputs:
@@ -168,7 +169,7 @@ jobs:
       - name: Install aarch64 cross toolchain
         if: matrix.arch == 'aarch64'
         run: |
-          DEBIAN_FRONTEND=noninteractive apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          DEBIAN_FRONTEND=noninteractive apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu qemu-user
           mkdir -p ~/.cargo
           {
             echo '[target.aarch64-unknown-linux-gnu]'
@@ -183,6 +184,17 @@ jobs:
 
       - name: Build
         run: cargo build --profile ${{ env.PROFILE }} --target ${{ matrix.target }} ${{ matrix.features }}
+
+      - name: Check binary version
+        run: |
+          BIN="target/${{ matrix.target }}/${{ env.PROFILE }}/funes"
+          EXPECTED=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+          if [ "${{ matrix.arch }}" = "aarch64" ]; then
+            REPORTED=$(qemu-aarch64 -L /usr/aarch64-linux-gnu "$BIN" --version)
+          else
+            REPORTED=$($BIN --version)
+          fi
+          test "$REPORTED" = "funes $EXPECTED"
 
       # The point of the container build: fail loudly if anything drags the floor above 22.04.
       - name: Check the glibc floor
@@ -239,6 +251,12 @@ jobs:
       - name: Build
         run: cargo build --profile ${{ env.PROFILE }} --target aarch64-apple-darwin
 
+      - name: Check binary version
+        run: |
+          EXPECTED=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+          REPORTED=$(target/aarch64-apple-darwin/${{ env.PROFILE }}/funes --version)
+          test "$REPORTED" = "funes $EXPECTED"
+
       - name: Package
         run: |
           mkdir -p dist
@@ -278,10 +296,44 @@ jobs:
           pattern: "{linux-*,macos-*}"
           merge-multiple: true
 
-      # Tag the released commit and publish the binaries. On dispatch we create + push the tag at the
-      # current main commit — tags aren't branch-protected, so this isn't blocked; on a manual tag
-      # push the tag already exists. The published binaries carry the computed version (stamped at
-      # build time); the tagged commit's Cargo.toml still shows the in-progress `+dev` marker.
+      - name: Validate release metadata and generate checksums
+        run: |
+          TAG="${{ needs.compute.outputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::release tag must have the form vMAJOR.MINOR.PATCH: $TAG"
+            exit 1
+          fi
+          COMPUTED="${{ needs.compute.outputs.version }}"
+          if [ -n "$COMPUTED" ] && [ "$VERSION" != "$COMPUTED" ]; then
+            echo "::error::tag $TAG does not match computed version $COMPUTED"
+            exit 1
+          fi
+
+          set -- \
+            funes-x86_64-linux \
+            funes-aarch64-linux \
+            funes-arm64-apple-darwin
+          for ASSET in "$@"; do
+            test -f "artifacts/$ASSET" || {
+              echo "::error::missing release asset: $ASSET"
+              exit 1
+            }
+          done
+          COUNT=$(find artifacts -maxdepth 1 -type f -name 'funes-*' | wc -l | tr -d ' ')
+          if [ "$COUNT" -ne "$#" ]; then
+            echo "::error::expected $# release assets, found $COUNT"
+            exit 1
+          fi
+
+          printf '%s\n' "$VERSION" > artifacts/VERSION
+          (
+            cd artifacts
+            sha256sum "$@" > SHA256SUMS
+          )
+
+      # Tag the released commit and publish the binaries and their checksums. On dispatch we create
+      # and push the tag at the current main commit; on a tag push, the tag already exists.
       - name: Tag and publish the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -296,27 +348,24 @@ jobs:
             --title "$TAG" \
             --generate-notes
 
-      # Publish the same binaries — plus install.sh itself — to the huggingface/funes storage bucket,
-      # so the one-liner and the binaries it fetches share one distribution channel. The bucket root
-      # holds the latest binaries; each release also keeps a pinned copy under its tag, so `funes -v
-      # <tag>` resolves to it. Bucket support landed in huggingface_hub 1.21 — newer than the system
-      # package — so install it into a throwaway venv.
+      # Publish the tagged release before advancing the root VERSION pointer. Root binaries remain
+      # available for clients released before tagged checksum verification was introduced.
       - name: Publish binaries and installer to the Hugging Face bucket
         env:
           HF_TOKEN: ${{ secrets.HF_FUNES_RELEASE_TOKEN }}
         run: |
           TAG="${{ needs.compute.outputs.tag || github.ref_name }}"
-          # The version marker `funes update` / `funes status` read to detect a newer release.
-          # Written after the GitHub Release above so it isn't uploaded there as a stray asset.
-          printf '%s' "${TAG#v}" > ./artifacts/VERSION
-          # The installer itself, so the one-liner resolves. Staged after the GitHub Release for the
-          # same reason as VERSION — otherwise it'd land as a stray release asset.
-          cp scripts/install.sh ./artifacts/install.sh
           python3 -m venv "$RUNNER_TEMP/hfvenv"
           "$RUNNER_TEMP/hfvenv/bin/pip" install -q -U "huggingface_hub>=1.21"
           HF="$RUNNER_TEMP/hfvenv/bin/hf"
-          "$HF" buckets sync ./artifacts hf://buckets/huggingface/funes
-          "$HF" buckets sync ./artifacts "hf://buckets/huggingface/funes/$TAG"
+          ROOT="hf://buckets/huggingface/funes"
+
+          "$HF" buckets sync ./artifacts "$ROOT/$TAG" --ignore-existing
+          for ASSET in funes-x86_64-linux funes-aarch64-linux funes-arm64-apple-darwin; do
+            "$HF" buckets cp "./artifacts/$ASSET" "$ROOT/$ASSET"
+          done
+          "$HF" buckets cp ./artifacts/VERSION "$ROOT/VERSION"
+          "$HF" buckets cp scripts/install.sh "$ROOT/install.sh"
 
       # Dispatch only: push a branch advancing main's version marker to `<version>+dev`. The org
       # blocks Actions from opening PRs, so the workflow stops at the branch and surfaces a one-click

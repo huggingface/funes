@@ -1,18 +1,19 @@
 //! `funes update`: replace the running binary in place with the latest release, and the
 //! version check behind `funes status`'s "update available" notice.
 //!
-//! Both read from the same Hugging Face bucket `install.sh` and the binary download use — a
-//! plain `VERSION` marker at the bucket root (written by the release workflow) for the latest
-//! version, and `<asset>` for the binary — via hf-hub, so there's one host and one failure
-//! mode. The self-replace is the standard unix trick: you can't open the running executable
-//! for writing (ETXTBSY), but you can `rename` a freshly-downloaded file over its path — the
-//! live process keeps its original inode, and the next run picks up the new binary.
+//! The root `VERSION` marker resolves latest to a tagged directory containing `VERSION`,
+//! `SHA256SUMS`, and the binaries. The checksum and tagged version are verified before a binary is
+//! made executable. Replacement uses a same-filesystem rename, so the live process keeps its old
+//! inode and the next run picks up the new binary.
 
 use crate::hub;
 use anyhow::{anyhow, bail, Context, Result};
 use hf_hub::buckets::BucketDownload;
 use hf_hub::HFBucket;
-use std::fs::Permissions;
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
+use std::fs::{File, Permissions};
+use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
@@ -59,6 +60,7 @@ pub async fn run(force: bool) -> Result<()> {
     let latest = fetch_latest_version(&bucket)
         .await
         .context("checking the latest funes version")?;
+    let tag = format!("v{latest}");
 
     // Compare when both parse; if either is unreadable, proceed rather than block an update.
     let up_to_date = matches!(
@@ -84,37 +86,47 @@ pub async fn run(force: bool) -> Result<()> {
         )
     })?;
     let staged = staging.path().join("funes");
+    let manifest = staging.path().join("SHA256SUMS");
+    let tagged_version = staging.path().join("VERSION");
 
     println!("Downloading funes {latest} ({asset})…");
     bucket
         .download_files()
-        .files(vec![BucketDownload::new(asset, &staged)])
+        .files(vec![
+            BucketDownload::new(format!("{tag}/{asset}"), &staged),
+            BucketDownload::new(format!("{tag}/SHA256SUMS"), &manifest),
+            BucketDownload::new(format!("{tag}/VERSION"), &tagged_version),
+        ])
         .send()
         .await
-        .with_context(|| format!("downloading {asset} from the {BUCKET_OWNER}/{BUCKET_NAME} bucket"))?;
+        .with_context(|| format!("downloading {tag} from the {BUCKET_OWNER}/{BUCKET_NAME} bucket"))?;
 
-    let installed = install_over(&staged, &exe)?;
+    let release_version = read_release_version(&tagged_version).with_context(|| format!("validating {tag}/VERSION"))?;
+    if release_version != latest {
+        bail!(
+            "release metadata mismatch: {tag}/VERSION reports {release_version}, expected {latest}; update aborted and the installed binary was left unchanged"
+        );
+    }
+
+    let installed = install_verified(&staged, &exe, &manifest, asset, &latest)?;
     println!("Updated {} ({current} → {installed}).", exe.display());
     println!("Running agents keep using the old funes until you restart them or start a new session.");
     Ok(())
 }
 
-/// Make the staged binary runnable, run it once to confirm it executes on this platform, then
-/// atomically rename it over `exe` with the existing binary's permissions. Returns the version the
-/// new binary reports. A truncated, corrupt, or wrong-arch download fails the verify step and
-/// never lands on PATH.
-fn install_over(staged: &Path, exe: &Path) -> Result<String> {
+/// Verify the staged binary, confirm its reported version, and atomically rename it over `exe`.
+fn install_verified(staged: &Path, exe: &Path, manifest: &Path, asset: &str, expected_version: &str) -> Result<String> {
+    verify_checksum(staged, manifest, asset)?;
     std::fs::set_permissions(staged, Permissions::from_mode(0o755)).context("making the new binary executable")?;
 
     let out = verify_runs(staged)?;
     if !out.status.success() {
         bail!("the downloaded binary failed to run (corrupt download, or wrong platform) — nothing changed");
     }
-    let installed = String::from_utf8_lossy(&out.stdout)
-        .trim()
-        .trim_start_matches("funes")
-        .trim()
-        .to_string();
+    let reported = String::from_utf8(out.stdout).context("reading the downloaded binary's version")?;
+    if reported.trim() != format!("funes {expected_version}") {
+        bail!("the downloaded binary does not report the expected version {expected_version} — nothing changed");
+    }
 
     // Preserve the existing binary's mode so an update never broadens it (e.g. 0700 → 0755); fall
     // back to 0755 when there's no existing binary to copy the mode from.
@@ -132,7 +144,69 @@ fn install_over(staged: &Path, exe: &Path) -> Result<String> {
             exe.parent().unwrap_or(exe).display(),
         )
     })?;
-    Ok(installed)
+    Ok(expected_version.to_string())
+}
+
+/// Verify `asset` against its one unambiguous entry in a strict SHA256SUMS manifest.
+fn verify_checksum(path: &Path, manifest: &Path, asset: &str) -> Result<()> {
+    let text = std::fs::read_to_string(manifest).context("reading SHA256SUMS")?;
+    let expected = expected_digest(&text, asset)?;
+    let actual = sha256_file(path)?;
+    if actual != expected {
+        bail!("checksum verification failed for {asset} — nothing changed");
+    }
+    Ok(())
+}
+
+fn expected_digest(manifest: &str, asset: &str) -> Result<[u8; 32]> {
+    let mut names = HashSet::new();
+    let mut expected = None;
+
+    for (index, line) in manifest.lines().enumerate() {
+        let line_number = index + 1;
+        let mut fields = line.split_ascii_whitespace();
+        let digest = fields
+            .next()
+            .ok_or_else(|| anyhow!("SHA256SUMS line {line_number} is empty"))?;
+        let name = fields
+            .next()
+            .ok_or_else(|| anyhow!("SHA256SUMS line {line_number} has no asset name"))?;
+        if fields.next().is_some() || name.contains('/') {
+            bail!("SHA256SUMS line {line_number} is malformed");
+        }
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            bail!("SHA256SUMS line {line_number} has an invalid digest");
+        }
+        if !names.insert(name) {
+            bail!("SHA256SUMS contains duplicate entries for {name}");
+        }
+        if name == asset {
+            let bytes = hex::decode(digest).context("decoding the release checksum")?;
+            expected = Some(bytes.try_into().expect("a 64-character hex digest is 32 bytes"));
+        }
+    }
+
+    expected.ok_or_else(|| anyhow!("SHA256SUMS does not contain {asset}"))
+}
+
+fn sha256_file(path: &Path) -> Result<[u8; 32]> {
+    let mut file = File::open(path).with_context(|| format!("opening {} for checksum verification", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("reading {} for checksum verification", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher.finalize().into())
 }
 
 /// Run `<path> --version`, retrying briefly on `ETXTBSY`. A just-written executable can
@@ -198,8 +272,26 @@ async fn fetch_latest_version(bucket: &HFBucket) -> Result<String> {
         .send()
         .await
         .context("downloading the VERSION marker from the bucket")?;
-    let text = std::fs::read_to_string(&path).context("reading the VERSION marker")?;
-    Ok(text.trim().to_string())
+    read_release_version(&path).context("reading the VERSION marker")
+}
+
+fn read_release_version(path: &Path) -> Result<String> {
+    let text = std::fs::read_to_string(path).context("reading release version metadata")?;
+    let mut tokens = text.split_ascii_whitespace();
+    let raw = tokens.next().ok_or_else(|| anyhow!("release version is empty"))?;
+    if tokens.next().is_some() {
+        bail!("release version must contain exactly one value");
+    }
+    let version = raw.strip_prefix('v').unwrap_or(raw);
+    let parts: Vec<_> = version.split('.').collect();
+    if parts.len() != 3
+        || parts
+            .iter()
+            .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        bail!("release version must have the form MAJOR.MINOR.PATCH");
+    }
+    Ok(version.to_string())
 }
 
 /// Parse a leading `MAJOR.MINOR.PATCH` (tolerates a `v` prefix, extra tokens, and a
@@ -219,29 +311,32 @@ pub(crate) fn parse_semver(s: &str) -> Option<(u32, u32, u32)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{install_over, notice_for, parse_semver};
+    use super::{expected_digest, install_verified, notice_for, parse_semver, read_release_version, sha256_file};
+    use std::path::Path;
+
+    fn write_manifest(path: &Path, binary: &Path, asset: &str) {
+        let digest = hex::encode(sha256_file(binary).unwrap());
+        std::fs::write(path, format!("{digest}  {asset}\n")).unwrap();
+    }
 
     #[test]
-    fn install_over_verifies_then_atomically_replaces() {
+    fn install_verified_atomically_replaces() {
         use std::fs::Permissions;
         use std::os::unix::fs::PermissionsExt;
 
-        // A stand-in "binary" that reports a version, like `funes --version` would.
         let dir = tempfile::tempdir().unwrap();
         let staged = dir.path().join("staged");
         std::fs::write(&staged, "#!/bin/sh\necho 'funes 9.9.9'\n").unwrap();
+        let manifest = dir.path().join("SHA256SUMS");
+        write_manifest(&manifest, &staged, "funes-test");
         let exe = dir.path().join("funes");
         std::fs::write(&exe, "old binary").unwrap();
-        // The existing binary is user-only (0700): the update must preserve this, not broaden it.
         std::fs::set_permissions(&exe, Permissions::from_mode(0o700)).unwrap();
 
-        // install_over makes it runnable, runs it to verify, and renames it over the target.
-        let installed = install_over(&staged, &exe).unwrap();
-        assert_eq!(installed, "9.9.9"); // reported version, `funes` prefix stripped (so verify ran it)
-        assert!(!staged.exists()); // staged was moved, not copied
+        let installed = install_verified(&staged, &exe, &manifest, "funes-test", "9.9.9").unwrap();
+        assert_eq!(installed, "9.9.9");
+        assert!(!staged.exists());
 
-        // Compared by content, not a second exec (which would reintroduce the fork/exec race under
-        // parallel tests): the target now holds the staged binary, with the preserved 0700 mode.
         assert_eq!(
             std::fs::read_to_string(&exe).unwrap(),
             "#!/bin/sh\necho 'funes 9.9.9'\n"
@@ -250,17 +345,73 @@ mod tests {
     }
 
     #[test]
-    fn install_over_rejects_a_binary_that_will_not_run() {
-        // A non-executable, non-binary staged file: the verify step must fail and leave the
-        // target untouched — a bad download never lands on PATH.
+    fn checksum_mismatch_is_rejected_before_execution() {
+        use std::os::unix::fs::PermissionsExt;
+
         let dir = tempfile::tempdir().unwrap();
         let staged = dir.path().join("staged");
-        std::fs::write(&staged, "not a real binary").unwrap();
+        let marker = dir.path().join("executed");
+        std::fs::write(
+            &staged,
+            format!("#!/bin/sh\ntouch {}\necho 'funes 9.9.9'\n", marker.display()),
+        )
+        .unwrap();
+        let manifest = dir.path().join("SHA256SUMS");
+        std::fs::write(&manifest, format!("{}  funes-test\n", "0".repeat(64))).unwrap();
         let exe = dir.path().join("funes");
         std::fs::write(&exe, "old binary").unwrap();
 
-        assert!(install_over(&staged, &exe).is_err());
-        assert_eq!(std::fs::read_to_string(&exe).unwrap(), "old binary"); // untouched
+        assert!(install_verified(&staged, &exe, &manifest, "funes-test", "9.9.9").is_err());
+        assert!(!marker.exists());
+        assert_eq!(std::fs::metadata(&staged).unwrap().permissions().mode() & 0o111, 0);
+        assert_eq!(std::fs::read_to_string(&exe).unwrap(), "old binary");
+    }
+
+    #[test]
+    fn reported_version_mismatch_does_not_replace() {
+        let dir = tempfile::tempdir().unwrap();
+        let staged = dir.path().join("staged");
+        std::fs::write(&staged, "#!/bin/sh\necho 'funes 9.9.8'\n").unwrap();
+        let manifest = dir.path().join("SHA256SUMS");
+        write_manifest(&manifest, &staged, "funes-test");
+        let exe = dir.path().join("funes");
+        std::fs::write(&exe, "old binary").unwrap();
+
+        assert!(install_verified(&staged, &exe, &manifest, "funes-test", "9.9.9").is_err());
+        assert_eq!(std::fs::read_to_string(&exe).unwrap(), "old binary");
+    }
+
+    #[test]
+    fn checksum_manifest_is_strict_and_target_bound() {
+        let a = "1".repeat(64);
+        let b = "2".repeat(64);
+        let valid = format!("{a}  funes-a\n{b}  funes-b\n");
+        assert_eq!(expected_digest(&valid, "funes-b").unwrap(), [0x22; 32]);
+
+        for malformed in [
+            format!("{a}  funes-a extra\n"),
+            format!("{}  funes-a\n", "A".repeat(64)),
+            format!("{a}  nested/funes-a\n"),
+            format!("{a}  funes-a\n{b}  funes-a\n"),
+            "\n".to_string(),
+        ] {
+            assert!(expected_digest(&malformed, "funes-a").is_err(), "{malformed:?}");
+        }
+        assert!(expected_digest(&valid, "missing").is_err());
+    }
+
+    #[test]
+    fn release_version_metadata_is_strict() {
+        let dir = tempfile::tempdir().unwrap();
+        let version = dir.path().join("VERSION");
+        for (text, expected) in [("1.2.3\n", "1.2.3"), ("v1.2.3", "1.2.3")] {
+            std::fs::write(&version, text).unwrap();
+            assert_eq!(read_release_version(&version).unwrap(), expected);
+        }
+        for malformed in ["", "1.2", "1.2.3 extra", "1.2.x", "1..3"] {
+            std::fs::write(&version, malformed).unwrap();
+            assert!(read_release_version(&version).is_err(), "{malformed:?}");
+        }
     }
 
     #[test]
