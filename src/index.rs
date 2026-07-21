@@ -264,6 +264,24 @@ struct Indexer {
     n_chunks: u64,
 }
 
+/// Enumerate every source's units (each source orders its own — recency-desc, subagents last),
+/// tagged with the source index. When several sources are indexed at once (e.g. every known
+/// harness), one that fails to enumerate — say a hermes state.db this build can't read — is warned
+/// and skipped instead of aborting the rest; a lone source stays fatal, since its failure is then
+/// the whole result.
+fn collect_units(sources: &[Box<dyn source::TraceSource>]) -> Result<Vec<(usize, source::Unit)>> {
+    let isolate = sources.len() > 1;
+    let mut units = Vec::new();
+    for (i, src) in sources.iter().enumerate() {
+        match src.units() {
+            Ok(src_units) => units.extend(src_units.into_iter().map(|u| (i, u))),
+            Err(e) if isolate => eprintln!("skipping source ({}): {:#}", src.describe(), e),
+            Err(e) => return Err(e.context(src.describe())),
+        }
+    }
+    Ok(units)
+}
+
 impl Indexer {
     /// Acquire the memory lock, open (or plan to create) the dataset, load incremental state, bring
     /// up the embedder and secret scanner, and enumerate `sources`' units.
@@ -321,13 +339,7 @@ impl Indexer {
             None => HashSet::new(),
         };
 
-        // Each source orders its own units (recency-desc, subagents last); tag each with its source.
-        let mut units = Vec::new();
-        for (i, src) in sources.iter().enumerate() {
-            for unit in src.units()? {
-                units.push((i, unit));
-            }
-        }
+        let units = collect_units(&sources)?;
 
         Ok(Indexer {
             uri,
@@ -809,6 +821,71 @@ fn fmt_eta(d: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A source whose enumeration yields fixed unit keys, or fails — for `collect_units` tests.
+    struct MockSource {
+        name: &'static str,
+        keys: Vec<&'static str>,
+        fail: bool,
+    }
+
+    impl source::TraceSource for MockSource {
+        fn describe(&self) -> String {
+            self.name.to_string()
+        }
+        fn units(&self) -> Result<Vec<source::Unit>> {
+            if self.fail {
+                anyhow::bail!("enumerate failed: {}", self.name);
+            }
+            Ok(self
+                .keys
+                .iter()
+                .map(|k| source::Unit {
+                    key: k.to_string(),
+                    signature: None,
+                    is_subagent: false,
+                })
+                .collect())
+        }
+        fn read(&self, _: &source::Unit) -> Result<Vec<trace::Turn>> {
+            Ok(vec![])
+        }
+    }
+
+    #[test]
+    fn collect_units_skips_a_failing_source_among_several() {
+        let srcs: Vec<Box<dyn source::TraceSource>> = vec![
+            Box::new(MockSource {
+                name: "good-a",
+                keys: vec!["a1"],
+                fail: false,
+            }),
+            Box::new(MockSource {
+                name: "bad",
+                keys: vec![],
+                fail: true,
+            }),
+            Box::new(MockSource {
+                name: "good-b",
+                keys: vec!["b1", "b2"],
+                fail: false,
+            }),
+        ];
+        let units = collect_units(&srcs).unwrap();
+        // The failing source (index 1) is skipped; the others keep their source-tagged units.
+        let got: Vec<(usize, &str)> = units.iter().map(|(i, u)| (*i, u.key.as_str())).collect();
+        assert_eq!(got, vec![(0, "a1"), (2, "b1"), (2, "b2")]);
+    }
+
+    #[test]
+    fn collect_units_is_fatal_for_a_lone_failing_source() {
+        let srcs: Vec<Box<dyn source::TraceSource>> = vec![Box::new(MockSource {
+            name: "only",
+            keys: vec![],
+            fail: true,
+        })];
+        assert!(collect_units(&srcs).is_err());
+    }
 
     #[test]
     fn unit_current_needs_matching_sig_and_reached_target_tier() {
