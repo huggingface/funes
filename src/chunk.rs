@@ -186,7 +186,7 @@ fn reconstruct(pieces: &[&str]) -> String {
     }
 }
 
-/// Reconstruct [`Chunk`]s from stored rows (all columns), so the store can be rewritten without its
+/// Reconstruct [`Chunk`]s from stored rows (all columns), so the memory can be rewritten without its
 /// source. The `vector` column is dropped — rewritten rows are re-embedded.
 pub(crate) fn chunks_from_batches(batches: &[RecordBatch]) -> Vec<Chunk> {
     let sv = |b: &RecordBatch, name: &str, i: usize| -> String {

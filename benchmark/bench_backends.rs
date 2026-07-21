@@ -23,7 +23,7 @@ fn short_docs() -> Vec<String> {
         "a hand-written forward calls Accelerate cblas_sgemm, which reaches the AMX matrix units.",
         "the embedding model is bge-small-en-v1.5, a 384-dimensional BERT sentence encoder.",
         "recall fuses vector ANN and BM25 hits by reciprocal rank before reranking.",
-        "the store is a lance dataset with an IVF_PQ vector index and a full-text index.",
+        "the memory is a lance dataset with an IVF_PQ vector index and a full-text index.",
         "candle's metal backend was missing a layer-norm kernel, so it could not run the model.",
         "the cat knocked a glass off the counter and it shattered on the floor.",
         "quarterly revenue rose twelve percent on strong subscription renewals.",

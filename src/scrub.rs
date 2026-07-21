@@ -1,6 +1,6 @@
-//! The `scrub` command: redact secrets from the existing local store, in place. Works on the stored
+//! The `scrub` command: redact secrets from the existing local memory, in place. Works on the stored
 //! rows themselves — so it cleans sessions whose source transcripts are already gone, which
-//! re-indexing cannot. Operates only on the local store; it does not touch a published remote.
+//! re-indexing cannot. Operates only on the local memory; it does not touch a published remote.
 
 use crate::index::{build_batch, embed_batched, schema};
 use crate::inference::{self, Embedder};
@@ -19,21 +19,21 @@ use std::time::Instant;
 /// (e.g. a key stored with escaped `\n`) — drop the block whole. Fail-closed on the scanner:
 /// scrubbing is the whole point.
 pub async fn run() -> Result<()> {
-    // scrub rewrites the whole table, so hold the store lock to be the sole writer.
-    let _lock = lock::StoreLock::acquire()?;
-    let uri = dataset::table_uri(&dataset::local_store_dir());
+    // scrub rewrites the whole table, so hold the memory lock to be the sole writer.
+    let _lock = lock::MemoryLock::acquire()?;
+    let uri = dataset::table_uri(&dataset::local_memory_dir());
     let Ok(ds) = dataset::open(&uri, HashMap::new()).await else {
-        println!("no local store to scrub");
+        println!("no local memory to scrub");
         return Ok(());
     };
     let scanner = scan::Trufflehog::find()?;
 
-    eprintln!("loading the local store…");
+    eprintln!("loading the local memory…");
     let batches = dataset::scan_rows(&ds, &[], None, None).await?;
     let chunks = chunk::chunks_from_batches(&batches);
     let total = chunks.len();
     if total == 0 {
-        println!("store is empty");
+        println!("memory is empty");
         return Ok(());
     }
 
@@ -72,7 +72,7 @@ pub async fn run() -> Result<()> {
         }
     }
     if !remove.iter().any(|&r| r) {
-        println!("store is already clean ({total} chunks)");
+        println!("memory is already clean ({total} chunks)");
         return Ok(());
     }
 
@@ -98,7 +98,7 @@ pub async fn run() -> Result<()> {
         Some(build_batch(&replacements, &vectors)?)
     };
 
-    // Rewrite the store in a single Overwrite commit: every clean row (with its existing vector) plus
+    // Rewrite the memory in a single Overwrite commit: every clean row (with its existing vector) plus
     // the re-chunked redacted blocks. One commit is deliberate — a delete-then-append is two commits,
     // and an interrupt between them would drop the secret rows without writing their replacements,
     // which for a source-gone session is permanent loss. Append-first isn't a safe alternative either:
@@ -117,7 +117,7 @@ pub async fn run() -> Result<()> {
         base += b.num_rows();
     }
     out.extend(replacement_batch);
-    eprintln!("rewriting the store…");
+    eprintln!("rewriting the memory…");
     let reader = RecordBatchIterator::new(out.into_iter().map(Ok), schema.clone());
     let mut ds = Dataset::write(
         reader,

@@ -14,12 +14,12 @@ const SCENT_CAP: usize = 240;
 /// Payload lines a tool block shows in the human `get` view before folding.
 const PAYLOAD_LINES: usize = 6;
 
-/// The agent `recall` format: provenance header with score, a `→ get` line carrying `store_arg`
-/// (the pre-rendered ` --store <label>` suffix, empty for the built-in guide), the full chunk
+/// The agent `recall` format: provenance header with score, a `→ get` line carrying `memory_arg`
+/// (the pre-rendered ` --memory <label>` suffix, empty for the built-in guide), the full chunk
 /// text, and truncated neighbor lines per hit. The chunk is never clipped — the ranking scored
 /// all of it, so a preview could hide exactly the span that made it a hit; the chunker's size
 /// cap bounds the payload instead. Byte-stable — the layout is a published contract.
-pub fn recall_agent(note: &str, store_arg: &str, hits: &[(Hit, f64)]) -> String {
+pub fn recall_agent(note: &str, memory_arg: &str, hits: &[(Hit, f64)]) -> String {
     let mut out = note.to_string();
     for (h, score) in hits {
         let s8 = &h.session_id[..h.session_id.len().min(8)];
@@ -28,7 +28,7 @@ pub fn recall_agent(note: &str, store_arg: &str, hits: &[(Hit, f64)]) -> String 
             "[{}] {} {}/{} {}  score={:.3}",
             h.ts, h.harness, h.workdir, s8, h.block_type, score
         );
-        let _ = writeln!(out, "  → get {} {}{}", h.session_id, h.turn_uuid, store_arg);
+        let _ = writeln!(out, "  → get {} {}{}", h.session_id, h.turn_uuid, memory_arg);
         let _ = writeln!(out, "{}", h.text);
         for n in &h.neighbors {
             let np: String = n.text.chars().take(160).collect();
@@ -398,16 +398,16 @@ mod tests {
             block_type: "text".to_string(),
             text: "hello".to_string(),
         });
-        let out = recall_agent("", " --store hf://datasets/acme/kb", &[(h, 0.5781)]);
+        let out = recall_agent("", " --memory hf://datasets/acme/kb", &[(h, 0.5781)]);
         assert_eq!(
             out,
             "[2026-06-19T01:29:59.000Z] claude_code -home-u-funes/01234567 text  score=0.578\n\
-             \x20 → get 0123456789abcdef aaaa-bbbb --store hf://datasets/acme/kb\n\
+             \x20 → get 0123456789abcdef aaaa-bbbb --memory hf://datasets/acme/kb\n\
              the decision was made\n\
              \x20 ~ [assistant text seq5] hello\n\
              ---\n"
         );
-        // The built-in guide has no store to name: an empty suffix keeps the hint bare.
+        // The built-in guide has no memory to name: an empty suffix keeps the hint bare.
         let bare = recall_agent("", "", &[(hit("2026-06-19T01:29:59.000Z", "text", "x"), 0.5)]);
         assert!(bare.contains("  → get 0123456789abcdef aaaa-bbbb\n"), "got: {bare}");
     }

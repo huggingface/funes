@@ -1,9 +1,9 @@
-//! Gated end-to-end: `funes scrub` redacts a secret already sitting in the store, in place, without
+//! Gated end-to-end: `funes scrub` redacts a secret already sitting in the memory, in place, without
 //! its source. Skipped unless trufflehog and ssh-keygen are available.
 //!
-//! A dirty store is created by indexing with `FUNES_TRUFFLEHOG=/usr/bin/true` — `true` ignores its
+//! A dirty memory is created by indexing with `FUNES_TRUFFLEHOG=/usr/bin/true` — `true` ignores its
 //! args and exits 0, so the scan finds nothing and the secret is stored unredacted (simulating a
-//! store built before redaction existed). Then scrub runs with the real scanner and cleans it.
+//! memory built before redaction existed). Then scrub runs with the real scanner and cleans it.
 
 use std::io::Write;
 use std::process::Command;
@@ -53,21 +53,21 @@ async fn scrub_redacts_an_existing_secret_in_place() {
     let mut f = std::fs::File::create(dir.join(format!("{session}.jsonl"))).unwrap();
     writeln!(f, "{line}").unwrap();
 
-    // Index with a no-op scanner so the secret lands in the store unredacted.
+    // Index with a no-op scanner so the secret lands in the memory unredacted.
     std::env::set_var("FUNES_TRUFFLEHOG", "/usr/bin/true");
     funes::index::run_index(source.path(), false, None).await.unwrap();
-    let dirty = funes::recall::get(funes::hub::Store::local(), session.into(), "t1".into(), 3)
+    let dirty = funes::recall::get(funes::hub::Memory::local(), session.into(), "t1".into(), 3)
         .await
         .unwrap();
     assert!(
         dirty.contains(&key_body),
-        "setup: the key should be in the store before scrub"
+        "setup: the key should be in the memory before scrub"
     );
 
     // Scrub with the real scanner: it must redact the key in place.
     std::env::remove_var("FUNES_TRUFFLEHOG");
     funes::scrub::run().await.unwrap();
-    let clean = funes::recall::get(funes::hub::Store::local(), session.into(), "t1".into(), 3)
+    let clean = funes::recall::get(funes::hub::Memory::local(), session.into(), "t1".into(), 3)
         .await
         .unwrap();
     assert!(

@@ -1,4 +1,4 @@
-//! `funes add claude` generates the hooks-only plugin tree — with the store baked into its
+//! `funes add claude` generates the hooks-only plugin tree — with the memory baked into its
 //! `hooks.json` — before it touches the `claude` CLI. Own test binary: it sets `$HOME` and clears
 //! `$PATH` (both process-global) so the `claude`-absent branch runs deterministically; the plugin
 //! files are written regardless, which is what we assert (registering with `claude` is exercised
@@ -38,7 +38,7 @@ fn add_claude_generates_the_plugin_tree() {
         );
     }
 
-    // hooks.json: plugin-root script refs, store baked, Stop + SessionStart + SessionEnd.
+    // hooks.json: plugin-root script refs, memory baked, Stop + SessionStart + SessionEnd.
     let cfg: Value = serde_json::from_str(&fs::read_to_string(root.join("funes/hooks/hooks.json")).unwrap()).unwrap();
     let stop = cfg["hooks"]["Stop"][0]["hooks"][0]["command"].as_str().unwrap();
     assert!(

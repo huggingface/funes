@@ -18,7 +18,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arrow_array::{Array, StringArray};
-use funes::hub::Store;
+use funes::hub::Memory;
 use funes::push::Confirm;
 use hf_hub::{HFClient, RepoTypeDataset};
 
@@ -49,7 +49,7 @@ fn tool_ok(bin: &str, arg: &str) -> bool {
 
 /// The distinct `session_id`s stored on the remote dataset at `uri`.
 async fn remote_sessions(uri: &str) -> HashSet<String> {
-    let ds = Store::parse(uri).open().await.expect("opening the remote dataset");
+    let ds = Memory::parse(uri).open().await.expect("opening the remote dataset");
     let batches = funes::dataset::scan_rows(&ds, &["session_id"], None, None)
         .await
         .expect("scanning the remote dataset");
@@ -83,7 +83,7 @@ async fn a_project_memory_ships_only_included_sessions() {
     std::env::set_var("HF_TOKEN", &token);
     let client = HFClient::builder().token(token).build().unwrap();
 
-    // A throwaway store: unique repo name so concurrent/repeated runs don't collide.
+    // A throwaway memory: unique repo name so concurrent/repeated runs don't collide.
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
     let name = format!("funes-test-curate-{}-{nanos}", std::process::id());
     if let Err(e) = funes::hub::create_dataset_repo(OWNER, &name).await {
@@ -93,7 +93,7 @@ async fn a_project_memory_ships_only_included_sessions() {
     let uri = format!("hf://datasets/{OWNER}/{name}");
     let project = format!("{OWNER}/curate-project");
 
-    // Synthetic local store: two sessions, one to include and one to hold back.
+    // Synthetic local memory: two sessions, one to include and one to hold back.
     let db_dir = tempfile::tempdir().unwrap();
     let src = tempfile::tempdir().unwrap();
     std::env::set_var("FUNES_HOME", db_dir.path());
@@ -101,17 +101,17 @@ async fn a_project_memory_ships_only_included_sessions() {
     write_session(src.path(), "hold", &[("h1", "HOLDME a note that stays local")]);
     funes::index::run_index(src.path(), false, None).await.unwrap();
 
-    // Name the store the project memory — this creates the dataset empty. (In the CLI this is the
+    // Name the memory the project memory — this creates the dataset empty. (In the CLI this is the
     // interactive review's deferred, consented step; here we call it directly.)
-    let named = funes::curate::name_project(&Store::parse(&uri), &project).await;
+    let named = funes::curate::name_project(&Memory::parse(&uri), &project).await;
 
     // Push before any decision: everything is held back, nothing ships.
-    let push_ungated = funes::push::run_push(Store::parse(&uri), false, Confirm::Yes).await;
+    let push_ungated = funes::push::run_push(Memory::parse(&uri), false, Confirm::Yes).await;
     let sessions_before = remote_sessions(&uri).await;
 
     // Record an `include` decision for exactly one session, then push again.
-    let recorded = funes::curate::run(&Store::parse(&uri), None, &["keep".to_string()], &[]).await;
-    let push_gated = funes::push::run_push(Store::parse(&uri), false, Confirm::Yes).await;
+    let recorded = funes::curate::run(&Memory::parse(&uri), None, &["keep".to_string()], &[]).await;
+    let push_gated = funes::push::run_push(Memory::parse(&uri), false, Confirm::Yes).await;
     let sessions_after = remote_sessions(&uri).await;
 
     // Cleanup before asserting, so a failed assertion can't leave the scratch repo behind.
@@ -124,7 +124,7 @@ async fn a_project_memory_ships_only_included_sessions() {
 
     assert!(
         matches!(named.expect("name the project"), funes::curate::Named::Created),
-        "naming a fresh store should create the empty project memory"
+        "naming a fresh memory should create the empty project memory"
     );
 
     let push_ungated = push_ungated.expect("ungated push").report;

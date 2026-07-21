@@ -32,9 +32,9 @@ with `pi install ./integrations/pi`, or load it for a single run with
 ## Requirements
 
 - `funes` on `PATH` (set `FUNES_BIN` to override the binary path).
-- A funes store the binary can read — local, or a live `hf://` remote configured
-  via `FUNES_HOME`/`funes.json` (needs network + an HF token for a private remote).
-  Set `FUNES_STORE` to pin one explicitly — forwarded as `funes mcp --store <spec>`.
+- A funes memory the binary can read — local, or a live `hf://` remote (needs network + an HF
+  token for a private remote). Bind one with `funes add pi <memory>`, or set `FUNES_MEMORY` to pin
+  it explicitly — forwarded as the `funes mcp <memory>` positional.
 
 `typebox` and the pi SDK are provided by pi's loader, so the extension declares
 no dependencies.

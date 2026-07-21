@@ -2,17 +2,17 @@
 //! onboarding) instead of returning canned content — there is no built-in corpus anymore. Points
 //! `$FUNES_HOME` at an empty temp dir and exercises the no-index paths.
 
-use funes::hub::Store;
+use funes::hub::Memory;
 
 #[tokio::test]
 async fn recall_without_an_index_guides_to_funes_add() {
     let empty = tempfile::tempdir().unwrap();
-    // $FUNES_HOME points at an empty dir: Store::local() resolves there with no dataset to open.
+    // $FUNES_HOME points at an empty dir: Memory::local() resolves there with no dataset to open.
     std::env::set_var("FUNES_HOME", empty.path());
 
     // recall: no index → a clear, actionable error (not canned corpus, not a leaked lance path).
     let err = funes::recall::recall(
-        Store::local(),
+        Memory::local(),
         "how do I connect funes to claude code".into(),
         5,
         30,
@@ -27,7 +27,7 @@ async fn recall_without_an_index_guides_to_funes_add() {
     assert!(err.contains("funes add"), "recall should point at funes add: {err}");
 
     // status: informational — reports no index and points at the onboarding command (does not error).
-    let status = funes::recall::status(Store::local()).await.unwrap();
+    let status = funes::recall::status(Memory::local()).await.unwrap();
     assert!(
         status.contains("no index yet"),
         "status should report no index: {status}"

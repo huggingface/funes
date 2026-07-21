@@ -1,6 +1,6 @@
-//! Shared store helpers: the local store location, opening a dataset, plain scans, and building the
+//! Shared memory helpers: the local memory location, opening a dataset, plain scans, and building the
 //! FTS/IVF indexes. funes's home is `$FUNES_HOME`/`~/.funes` — it holds the incremental state and
-//! the local store at `…/store` (the `chunks` Lance dataset).
+//! the local memory at `…/memory` (the `chunks` Lance dataset).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -20,11 +20,11 @@ use lance_index::IndexType;
 use lance_io::object_store::{ObjectStoreParams, WrappingObjectStore};
 use lance_linalg::distance::MetricType;
 
-/// The table (Lance dataset) name within a store.
+/// The table (Lance dataset) name within a memory.
 pub const TABLE: &str = "chunks";
 
 /// funes's home directory: `$FUNES_HOME`, else `~/.funes`. Holds the incremental state and the
-/// local store.
+/// local memory.
 pub fn funes_dir() -> PathBuf {
     if let Ok(d) = std::env::var("FUNES_HOME") {
         return PathBuf::from(d);
@@ -33,18 +33,26 @@ pub fn funes_dir() -> PathBuf {
     PathBuf::from(home).join(".funes")
 }
 
-/// Directory holding the local store (the `chunks` dataset is at `<dir>/chunks.lance`).
-pub fn local_store_dir() -> String {
-    funes_dir().join("store").to_string_lossy().into_owned()
+/// Directory holding the local memory (the `chunks` dataset is at `<dir>/chunks.lance`).
+pub fn local_memory_dir() -> String {
+    let dir = funes_dir().join("memory");
+    // Migrate a pre-rename layout in place: an earlier funes kept the local memory at `<home>/store`.
+    // Rename it once, when the current path doesn't exist yet. Best-effort — a failed rename just
+    // leaves the old memory unfound, which reads as "no index yet".
+    let legacy = funes_dir().join("store");
+    if legacy.is_dir() && !dir.exists() {
+        let _ = std::fs::rename(&legacy, &dir);
+    }
+    dir.to_string_lossy().into_owned()
 }
 
-/// The `chunks` dataset URI under a store base (a local directory or a remote URI prefix).
+/// The `chunks` dataset URI under a memory base (a local directory or a remote URI prefix).
 pub fn table_uri(base: &str) -> String {
     format!("{base}/{TABLE}.lance")
 }
 
 /// Open the `chunks` dataset at `uri`; `storage_options` carries the backend credentials/revision a
-/// remote needs (empty for a local store).
+/// remote needs (empty for a local memory).
 pub async fn open(uri: &str, storage_options: HashMap<String, String>) -> Result<Dataset> {
     DatasetBuilder::from_uri(uri)
         .with_storage_options(storage_options)

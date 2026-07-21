@@ -1,17 +1,17 @@
-//! Regression: recall must still work on a store built before the `harness` column existed (an
-//! un-migrated store). Build a normal store, drop `harness` to reproduce that schema, then recall —
+//! Regression: recall must still work on a memory built before the `harness` column existed (an
+//! un-migrated memory). Build a normal memory, drop `harness` to reproduce that schema, then recall —
 //! projecting a column the dataset lacks would error, so recall's projection must adapt. Guards the
 //! same path the gated `remote_recall` covers, but unconditionally.
 //!
 //! Its own binary (not folded into `index_recall.rs`) because it sets the process-global
 //! `FUNES_HOME`, and cargo runs a file's tests concurrently — two such tests would clobber each
-//! other's store.
+//! other's memory.
 
 use std::collections::HashMap;
 use std::io::Write;
 
 #[tokio::test]
-async fn recall_tolerates_a_store_without_the_harness_column() {
+async fn recall_tolerates_a_memory_without_the_harness_column() {
     let db_dir = tempfile::tempdir().unwrap();
     let source = tempfile::tempdir().unwrap();
     std::env::set_var("FUNES_HOME", db_dir.path());
@@ -30,8 +30,8 @@ async fn recall_tolerates_a_store_without_the_harness_column() {
 
     funes::index::run_index(source.path(), false, None).await.unwrap();
 
-    // Drop the harness column in place — the schema an un-migrated store has.
-    let uri = funes::dataset::table_uri(&funes::dataset::local_store_dir());
+    // Drop the harness column in place — the schema an un-migrated memory has.
+    let uri = funes::dataset::table_uri(&funes::dataset::local_memory_dir());
     let mut ds = funes::dataset::open(&uri, HashMap::new()).await.unwrap();
     ds.drop_columns(&["harness"]).await.unwrap();
     assert!(
@@ -42,7 +42,7 @@ async fn recall_tolerates_a_store_without_the_harness_column() {
     );
 
     let out = funes::recall::recall(
-        funes::hub::Store::local(),
+        funes::hub::Memory::local(),
         "parse transcripts into turns".into(),
         5,
         30,
@@ -52,7 +52,7 @@ async fn recall_tolerates_a_store_without_the_harness_column() {
         None,
     )
     .await
-    .expect("recall over a store without the harness column");
+    .expect("recall over a memory without the harness column");
     assert!(
         out.contains(session),
         "recall should surface the session even without a harness column: {out}"
@@ -61,7 +61,7 @@ async fn recall_tolerates_a_store_without_the_harness_column() {
     // But a `--harness` filter needs the column: refuse with a clear message, not an opaque Lance
     // schema error.
     let err = funes::recall::recall(
-        funes::hub::Store::local(),
+        funes::hub::Memory::local(),
         "parse transcripts into turns".into(),
         5,
         30,
@@ -71,9 +71,9 @@ async fn recall_tolerates_a_store_without_the_harness_column() {
         Some("pi".into()),
     )
     .await
-    .expect_err("--harness on a column-less store should error");
+    .expect_err("--harness on a column-less memory should error");
     assert!(
         err.to_string().contains("predates the harness facet"),
-        "error should explain the store predates the harness facet: {err}"
+        "error should explain the memory predates the harness facet: {err}"
     );
 }

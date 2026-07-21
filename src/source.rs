@@ -223,7 +223,7 @@ impl TraceSource for HermesDb {
 
 /// A parquet agent-trace dataset — many sessions in one file, indexed as a single bulk import.
 /// `signature: None` so it's never skipped on stats and never recorded: a re-run always re-reads
-/// and dedups by chunk id to a no-op, which also means a wiped store is never silently skipped.
+/// and dedups by chunk id to a no-op, which also means a wiped memory is never silently skipped.
 /// `limit` caps how many of its sessions (rows) are read.
 struct ParquetDataset {
     path: PathBuf,

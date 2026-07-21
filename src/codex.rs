@@ -1,7 +1,7 @@
 //! `funes add codex`: register funes recall as an MCP server with Codex.
 //!
 //! Codex has a native MCP client, so funes is consumed as its stdio MCP server —
-//! `codex mcp add funes -- funes mcp [store]`. A non-local `store` binds this agent's recall to it.
+//! `codex mcp add funes -- funes mcp [memory]`. A non-local `memory` binds this agent's recall to it.
 //! The command is `funes` from PATH (override with `FUNES_BIN`). Codex's `mcp add` always writes the
 //! user config (`~/.codex/config.toml`); it has no project scope, and re-adding an existing server
 //! overwrites it (idempotent).
@@ -9,27 +9,27 @@
 use anyhow::Result;
 use std::process::Command;
 
-/// The `codex mcp add` argument vector registering `funes mcp [store]`. A non-local `store` is
-/// appended as `funes mcp <store>`, pinning this agent's recall to it.
-fn mcp_add_args(funes: &str, store: Option<&str>) -> Vec<String> {
+/// The `codex mcp add` argument vector registering `funes mcp [memory]`. A non-local `memory` is
+/// appended as `funes mcp <memory>`, pinning this agent's recall to it.
+fn mcp_add_args(funes: &str, memory: Option<&str>) -> Vec<String> {
     let mut args: Vec<String> = ["mcp", "add", "funes", "--", funes, "mcp"]
         .into_iter()
         .map(String::from)
         .collect();
-    if let Some(s) = store {
+    if let Some(s) = memory {
         args.push(s.to_string());
     }
     args
 }
 
-pub fn install(store: Option<String>) -> Result<()> {
+pub fn install(memory: Option<String>) -> Result<()> {
     // The automation hooks (index every turn, publish at session boundaries) are files + a
     // hooks.json edit — no `codex` binary needed — so install them first, regardless of whether the
     // MCP registration below can reach the CLI.
-    crate::hooks::install(crate::hooks::Agent::Codex, store.as_deref())?;
+    crate::hooks::install(crate::hooks::Agent::Codex, memory.as_deref())?;
 
     let funes = std::env::var("FUNES_BIN").unwrap_or_else(|_| "funes".to_string());
-    let args = mcp_add_args(&funes, store.as_deref());
+    let args = mcp_add_args(&funes, memory.as_deref());
     let manual = format!("codex {}", args.join(" "));
     let status = match Command::new("codex").args(&args).status() {
         Ok(s) => s,
@@ -58,7 +58,7 @@ mod tests {
     use super::mcp_add_args;
 
     #[test]
-    fn bakes_the_store_only_when_present() {
+    fn bakes_the_memory_only_when_present() {
         assert_eq!(
             mcp_add_args("funes", None),
             ["mcp", "add", "funes", "--", "funes", "mcp"]

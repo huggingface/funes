@@ -28,11 +28,11 @@
 //! narrower seam can't do it: a custom `CommitHandler` only governs the final manifest commit and
 //! never sees the data fragments, which are written earlier.
 //!
-//! **Decorate Lance's store rather than inject our own.** Lance does support dependency injection
+//! **Decorate Lance's object store rather than inject our own.** Lance does support dependency injection
 //! (`DatasetBuilder::with_object_store`, now deprecated, or an `ObjectStoreProvider`), but both
-//! make *us* construct the HF store — reproducing Lance's OpenDAL-hf setup, XET wiring, and
+//! make *us* construct the HF object store — reproducing Lance's OpenDAL-hf setup, XET wiring, and
 //! token/revision plumbing, and keeping it in lockstep. [`WrappingObjectStore`] instead hands us
-//! the store Lance already built (`wrap`'s `original`), so we decorate it and never reconstruct
+//! the object store Lance already built (`wrap`'s `original`), so we decorate it and never reconstruct
 //! anything. It is also the non-deprecated seam.
 
 use std::collections::{BTreeMap, HashMap};
@@ -345,7 +345,7 @@ fn write_ops(files: &BTreeMap<String, Bytes>) -> Result<(Vec<CommitOperation>, t
 }
 
 /// Stamp `updates` into the remote dataset's schema metadata in one guarded commit — how an
-/// existing store is named a project memory. The full merged map is written (lance's amend
+/// existing memory is named a project memory. The full merged map is written (lance's amend
 /// replaces the metadata wholesale). Single attempt: naming is a rare, interactive act, so a
 /// moved head is an error to re-run, not a retry loop.
 pub(crate) async fn amend_schema_metadata(
@@ -372,7 +372,7 @@ pub(crate) async fn amend_schema_metadata(
     match send_commit(repo, ops, parent, rev, message).await {
         Ok(_) => Ok(()),
         Err(e) if head_moved(&e) => Err(anyhow::anyhow!(
-            "the store moved while naming it — re-run `funes curate`"
+            "the memory moved while naming it — re-run `funes curate`"
         )),
         Err(e) => Err(anyhow::Error::new(e).context("naming commit failed")),
     }

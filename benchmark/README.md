@@ -3,7 +3,7 @@
 Two runnable examples, each `cargo run --release --example <name>`:
 
 - **`bench_recall`** — `recall()` latency, local vs remote, cold vs warm (below).
-- **`bench_index`** — `index` build time, throughput, and store compactness (at the end).
+- **`bench_index`** — `index` build time, throughput, and memory compactness (at the end).
 
 ## `bench_recall` — recall latency
 
@@ -20,12 +20,12 @@ Every timed call runs the whole recall pipeline:
 embed query → vector ANN + BM25 FTS (fused by RRF) → cross-encoder rerank → recency → neighbors → format
 ```
 
-The CPU stages (query embed + BGE cross-encoder rerank) are identical whatever the store, so the
+The CPU stages (query embed + BGE cross-encoder rerank) are identical whatever the memory, so the
 local↔remote gap is entirely the I/O path: opening the dataset, the ANN/FTS scans, and the neighbor
 fetch. The embed + rerank models are loaded once in a warm-up call that is **excluded** from all
 timings.
 
-For each store the harness reports a single **cold** call followed by the min / median / max of
+For each memory the harness reports a single **cold** call followed by the min / median / max of
 `--iters` **warm** calls:
 
 - **remote cold** — the hf-hub file cache is empty (`--cold` gives it a fresh temp cache), so the
@@ -53,7 +53,7 @@ both legs run identical data, so the gap is the I/O path, not the corpus.
 |------|---------|---------|
 | `<query>` (positional) | `"how does recall rerank candidates"` | the text to recall |
 | `--remote <spec>` | `dacorvo/funes-Glint-Research-Fable-5` | dataset to benchmark (`org/repo` or `hf://…`), used for both legs |
-| `--iters <N>` | `5` | warm iterations timed per store (after the one cold call) |
+| `--iters <N>` | `5` | warm iterations timed per memory (after the one cold call) |
 | `--cold` | off | give the remote leg a throwaway `HF_HUB_CACHE` temp dir so its cold call is a true download (your real cache is left untouched) |
 | `--k <N>` | `8` | results returned |
 | `--candidates <N>` | `30` | fused candidates reranked |
@@ -69,7 +69,7 @@ both legs run identical data, so the gap is the I/O path, not the corpus.
 ```
 dataset: dacorvo/funes-Glint-Research-Fable-5   query: "how does recall rerank candidates"   k=8 candidates=30 neighbors=1   warm iters=5
 
-store     cold(ms)   warm_lo  warm_med   warm_hi  hits
+memory    cold(ms)   warm_lo  warm_med   warm_hi  hits
 local       5455.9    5682.6    5956.0    6093.4     8
 remote     10663.1    6504.0    6589.1    6668.6     8
 
@@ -98,7 +98,7 @@ second (local ≈ remote-warm ≈ ~1.9 s). The floor moves with the hardware; th
 - For a private dataset, a token must be available (`HF_TOKEN` or the cached login) — the same one
   recall uses.
 
-## Building a benchmark store
+## Building a benchmark memory
 
 The remote target above was built from a public agent-trace dataset with funes' parquet indexer:
 
@@ -111,21 +111,20 @@ hf download Glint-Research/Fable-5-traces --repo-type dataset \
 FUNES_HOME=./bench-home funes index ./traces/pi_agent/train/0000.parquet
 
 # 3. publish to a Hub dataset repo you own (create it first; funes won't), which re-materializes a
-#    clean, compact dataset on the remote
+#    clean, compact dataset on the remote (--yes accepts the first push to an empty repo)
 hf repo create <org>/<repo> --repo-type dataset
-FUNES_HOME=./bench-home funes use <org>/<repo>
-FUNES_HOME=./bench-home funes push
+FUNES_HOME=./bench-home funes push <org>/<repo> --yes
 ```
 
-`funes index <file>.parquet` indexes the whole file as a bulk import (one append, so the store stays
-compact); see `src/traces.rs`. The push gate redacts/holds back any rows containing secrets before
+`funes index <file>.parquet` indexes the whole file as a bulk import (one append, so the memory stays
+compact); see `src/hf_traces.rs`. The push gate redacts/holds back any rows containing secrets before
 upload.
 
 ## `bench_index` — index build
 
-`bench_index.rs` times an `index` build into a throwaway `$FUNES_HOME` (your real store and config
+`bench_index.rs` times an `index` build into a throwaway `$FUNES_HOME` (your real memory and config
 are untouched; no remote is attached there, so nothing is pushed) and reports build time, embedding
-throughput, and how compact the resulting store is.
+throughput, and how compact the resulting memory is.
 
 `--sessions <N>` caps how many sessions are indexed (default **500**) so the build doesn't run long
 over a big tree or the full parquet — raise it for a longer, steadier measurement.
@@ -145,14 +144,14 @@ elapsed:          385.0s  (incl. model load)
 sessions:         4665
 chunks:           21767
 throughput:       57 chunks/s
-store size:       53 MB
+memory size:      53 MB
 lance fragments:  1
 ```
 
 The three counts are deliberately distinct granularities: **4665 sessions** chunk into **21767
 chunks**, all written into **1 Lance fragment** (a physical data file). `lance fragments: 1` confirms
 the bulk-import path stayed compact — a regression to per-session appends would show one fragment per
-session and a much larger store. (That run indexed the whole file; pass a large `--sessions` to do
+session and a much larger memory. (That run indexed the whole file; pass a large `--sessions` to do
 likewise — the default 500 builds far faster.) Elapsed includes the one-time embedding-model load,
 so throughput is a slight under-estimate on small inputs.
 

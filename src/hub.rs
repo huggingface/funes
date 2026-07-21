@@ -1,6 +1,6 @@
 //! Remote, shared memory tiers.
 //!
-//! A [`Store`] is either the local index or a remote Lance dataset on the HF Hub. A remote open pins
+//! A [`Memory`] is either the local index or a remote Lance dataset on the HF Hub. A remote open pins
 //! reads to the head commit and installs a read wrapper over Lance's object store; the pin is
 //! re-resolved on every open, so a new push is picked up by the next command.
 
@@ -16,10 +16,10 @@ use crate::dataset;
 use crate::hf_dataset;
 use crate::index::{DIM, MODEL};
 
-/// A store to recall from: a local Lance directory or a remote dataset on the HF Hub.
+/// A memory to recall from: a local Lance directory or a remote dataset on the HF Hub.
 #[derive(Debug, Clone)]
-pub enum Store {
-    /// A local Lance store directory (e.g. `~/.funes/store`).
+pub enum Memory {
+    /// A local Lance memory directory (e.g. `~/.funes/memory`).
     Local { path: PathBuf },
     /// A remote Lance dataset on the HF Hub, e.g. `hf://datasets/<org>/<repo>`.
     Remote { uri: String },
@@ -29,65 +29,65 @@ pub enum Store {
 /// read sees the commits a push produced.
 const READ_BRANCH: &str = "main";
 
-impl Store {
-    /// The default local store (`$FUNES_HOME` / `~/.funes` → `…/store`).
+impl Memory {
+    /// The default local memory (`$FUNES_HOME` / `~/.funes` → `…/memory`).
     pub fn local() -> Self {
-        Store::Local {
-            path: PathBuf::from(dataset::local_store_dir()),
+        Memory::Local {
+            path: PathBuf::from(dataset::local_memory_dir()),
         }
     }
 
-    /// Parse a store spec: `"local"` → the local store; an `hf://…` URI or `<org>/<repo>` shorthand
-    /// → a remote; a path (`/`, `.`, `~`, or a bare name) → a local store there.
+    /// Parse a memory spec: `"local"` → the local memory; an `hf://…` URI or `<org>/<repo>` shorthand
+    /// → a remote; a path (`/`, `.`, `~`, or a bare name) → a local memory there.
     pub fn parse(spec: &str) -> Self {
         if spec == "local" {
-            Store::local()
+            Memory::local()
         } else if spec.starts_with("hf://") {
-            Store::Remote { uri: spec.to_string() }
+            Memory::Remote { uri: spec.to_string() }
         } else if is_remote_shorthand(spec) {
-            Store::Remote {
+            Memory::Remote {
                 uri: format!("hf://datasets/{spec}"),
             }
         } else {
-            Store::Local {
+            Memory::Local {
                 path: PathBuf::from(spec),
             }
         }
     }
 
-    /// Resolve the store the read commands should use: an explicit `spec` (a CLI `--store`), else
-    /// the local index. There is no persisted default — a store binding lives in the caller's
-    /// config (e.g. an agent's `funes mcp --store …` registration), not in funes.
+    /// Resolve the memory the read commands should use: an explicit `spec` (a CLI `--memory`), else
+    /// the local index. There is no persisted default — a memory binding lives in the caller's
+    /// config (e.g. an agent's `funes mcp <memory>` registration), not in funes.
     pub fn resolve(spec: Option<String>) -> Self {
         match spec.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
-            Some(s) => Store::parse(&s),
-            None => Store::local(),
+            Some(s) => Memory::parse(&s),
+            None => Memory::local(),
         }
     }
 
-    /// True only for the default local store (`$FUNES_HOME`/`~/.funes`), so the hello-world
-    /// fallback fires only there — never masking a missing explicit store.
+    /// True only for the default local memory (`$FUNES_HOME`/`~/.funes`), so the hello-world
+    /// fallback fires only there — never masking a missing explicit memory.
     pub fn is_default_local(&self) -> bool {
-        matches!(self, Store::Local { path } if path.as_path() == Path::new(&dataset::local_store_dir()))
+        matches!(self, Memory::Local { path } if path.as_path() == Path::new(&dataset::local_memory_dir()))
     }
 
     /// Short label for output/provenance.
     pub fn label(&self) -> String {
         match self {
-            Store::Local { path } => path.display().to_string(),
-            Store::Remote { uri, .. } => uri.clone(),
+            Memory::Local { path } => path.display().to_string(),
+            Memory::Remote { uri, .. } => uri.clone(),
         }
     }
 
-    /// Open the `chunks` dataset for this store; remote stores stream lazily over `hf://`.
-    /// Rejects a store whose `vector` dimension isn't funes's `DIM` — a coarse guard, since a
+    /// Open the `chunks` dataset for this memory; remote memories stream lazily over `hf://`.
+    /// Rejects a memory whose `vector` dimension isn't funes's `DIM` — a coarse guard, since a
     /// matching dimension doesn't prove a matching embedding model.
     pub async fn open(&self) -> Result<Dataset> {
         let ds = match self {
-            Store::Local { path } => {
+            Memory::Local { path } => {
                 dataset::open(&dataset::table_uri(&path.to_string_lossy()), HashMap::new()).await?
             }
-            Store::Remote { uri } => {
+            Memory::Remote { uri } => {
                 let (owner, name, _) = parse_hf(uri)?;
                 let token = hf_token();
                 let mut opts = HashMap::new();
@@ -120,7 +120,9 @@ pub fn is_remote_shorthand(spec: &str) -> bool {
 /// Parse `hf://datasets/<owner>/<name>[/<prefix…>]` into (owner, name, prefix). Empty prefix = repo
 /// root, matching how reads resolve a remote.
 pub fn parse_hf(uri: &str) -> Result<(String, String, String)> {
-    let rest = uri.strip_prefix("hf://").context("remote store must be an hf:// URI")?;
+    let rest = uri
+        .strip_prefix("hf://")
+        .context("remote memory must be an hf:// URI")?;
     let segs: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
     match segs.as_slice() {
         ["datasets", owner, name, prefix @ ..] => Ok((owner.to_string(), name.to_string(), prefix.join("/"))),
@@ -184,7 +186,7 @@ pub fn missing_remote(uri: &str) -> anyhow::Error {
 pub fn empty_remote(uri: &str) -> anyhow::Error {
     anyhow!(
         "{uri} exists on the Hub but holds no index yet — `funes push {uri}` to publish your local \
-         index there, or drop `--store` to read your local index"
+         index there, or drop `--memory` to read your local memory"
     )
 }
 
@@ -248,7 +250,7 @@ pub async fn create_dataset_repo(owner: &str, name: &str) -> Result<()> {
 }
 
 /// Whether a Hugging Face token is configured — the signal `funes add` uses to decide whether to
-/// offer a Hub store, without exposing the token itself to the binary.
+/// offer a Hub memory, without exposing the token itself to the binary.
 pub fn has_token() -> bool {
     hf_token().is_some()
 }
@@ -278,10 +280,10 @@ fn token_from(env: impl Fn(&str) -> Option<String>, token_file: Option<&Path>) -
     (!t.is_empty()).then(|| t.to_string())
 }
 
-/// Whether a [`Store::open`] failure means the dataset does not exist (a missing table in an
+/// Whether a [`Memory::open`] failure means the dataset does not exist (a missing table in an
 /// otherwise-reachable repo) — as opposed to one that exists but can't be read (a
 /// [`check_compat`] rejection, a transport failure). Callers must treat only the former as
-/// "empty": mistaking an unreadable store for an absent one turns a mixed-version teammate's
+/// "empty": mistaking an unreadable memory for an absent one turns a mixed-version teammate's
 /// push into a first publish over live data.
 pub fn dataset_absent(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
@@ -295,9 +297,9 @@ pub fn dataset_absent(err: &anyhow::Error) -> bool {
     })
 }
 
-/// Reject a store funes can't query with its own embeddings: the `vector` dimension must be
-/// funes's `DIM`, and — when the store records an embedding model in its schema metadata — that
-/// model must be funes's. A store with no recorded model (pre-metadata) is guarded by the
+/// Reject a memory funes can't query with its own embeddings: the `vector` dimension must be
+/// funes's `DIM`, and — when the memory records an embedding model in its schema metadata — that
+/// model must be funes's. A memory with no recorded model (pre-metadata) is guarded by the
 /// dimension alone.
 fn check_compat(ds: &Dataset) -> Result<()> {
     let schema = arrow_schema::Schema::from(ds.schema());
@@ -305,23 +307,23 @@ fn check_compat(ds: &Dataset) -> Result<()> {
     if let Some(model) = schema.metadata().get("embedding_model") {
         if model != MODEL {
             return Err(anyhow!(
-                "store built with embedding model {model:?}, not funes's {MODEL:?}"
+                "memory built with embedding model {model:?}, not funes's {MODEL:?}"
             ));
         }
     }
 
     let field = schema
         .field_with_name("vector")
-        .map_err(|_| anyhow!("store has no `vector` column"))?;
+        .map_err(|_| anyhow!("memory has no `vector` column"))?;
     if let arrow_schema::DataType::FixedSizeList(_, dim) = field.data_type() {
         if *dim != DIM {
             return Err(anyhow!(
-                "store vector dim {dim} != funes's {DIM}; it was built with a different embedding model"
+                "memory vector dim {dim} != funes's {DIM}; it was built with a different embedding model"
             ));
         }
         Ok(())
     } else {
-        Err(anyhow!("store `vector` column is not a fixed-size list"))
+        Err(anyhow!("memory `vector` column is not a fixed-size list"))
     }
 }
 
@@ -345,22 +347,22 @@ mod tests {
     use arrow_schema::{DataType, Field, Schema};
 
     #[test]
-    fn store_parse_local_remote_and_shorthand() {
-        assert!(matches!(Store::parse("local"), Store::Local { .. }));
+    fn memory_parse_local_remote_and_shorthand() {
+        assert!(matches!(Memory::parse("local"), Memory::Local { .. }));
         // explicit local paths (leading / . ~)
-        match Store::parse("/tmp/store") {
-            Store::Local { path } => assert_eq!(path, std::path::PathBuf::from("/tmp/store")),
+        match Memory::parse("/tmp/memory") {
+            Memory::Local { path } => assert_eq!(path, std::path::PathBuf::from("/tmp/memory")),
             _ => panic!("expected a local path"),
         }
-        assert!(matches!(Store::parse("./rel/dir"), Store::Local { .. }));
+        assert!(matches!(Memory::parse("./rel/dir"), Memory::Local { .. }));
         // full hf:// URI
-        match Store::parse("hf://datasets/org/kb") {
-            Store::Remote { uri } => assert_eq!(uri, "hf://datasets/org/kb"),
+        match Memory::parse("hf://datasets/org/kb") {
+            Memory::Remote { uri } => assert_eq!(uri, "hf://datasets/org/kb"),
             _ => panic!("expected remote"),
         }
         // org/repo shorthand expands to a dataset URI
-        match Store::parse("acme/kb") {
-            Store::Remote { uri } => assert_eq!(uri, "hf://datasets/acme/kb"),
+        match Memory::parse("acme/kb") {
+            Memory::Remote { uri } => assert_eq!(uri, "hf://datasets/acme/kb"),
             _ => panic!("expected remote from shorthand"),
         }
     }
@@ -391,9 +393,9 @@ mod tests {
     }
 
     #[test]
-    fn store_label() {
-        assert_eq!(Store::Local { path: "/tmp/x".into() }.label(), "/tmp/x");
-        assert_eq!(Store::parse("hf://datasets/org/kb").label(), "hf://datasets/org/kb");
+    fn memory_label() {
+        assert_eq!(Memory::Local { path: "/tmp/x".into() }.label(), "/tmp/x");
+        assert_eq!(Memory::parse("hf://datasets/org/kb").label(), "hf://datasets/org/kb");
     }
 
     #[test]
@@ -422,19 +424,19 @@ mod tests {
     #[test]
     fn resolve_prefers_explicit_spec_else_local() {
         // Explicit spec wins, with the org/repo shorthand applied.
-        match Store::resolve(Some("acme/kb".into())) {
-            Store::Remote { uri } => assert_eq!(uri, "hf://datasets/acme/kb"),
+        match Memory::resolve(Some("acme/kb".into())) {
+            Memory::Remote { uri } => assert_eq!(uri, "hf://datasets/acme/kb"),
             _ => panic!("explicit spec should win"),
         }
         // No spec -> local (there is no persisted default).
-        assert!(matches!(Store::resolve(None), Store::Local { .. }));
+        assert!(matches!(Memory::resolve(None), Memory::Local { .. }));
         // An explicit local path stays local.
-        match Store::resolve(Some("/local/path".into())) {
-            Store::Local { path } => assert_eq!(path, std::path::PathBuf::from("/local/path")),
+        match Memory::resolve(Some("/local/path".into())) {
+            Memory::Local { path } => assert_eq!(path, std::path::PathBuf::from("/local/path")),
             _ => panic!("explicit local path should resolve local"),
         }
         // Blank spec -> local.
-        assert!(matches!(Store::resolve(Some("   ".into())), Store::Local { .. }));
+        assert!(matches!(Memory::resolve(Some("   ".into())), Memory::Local { .. }));
     }
 
     // --- dim guard against real local datasets ---

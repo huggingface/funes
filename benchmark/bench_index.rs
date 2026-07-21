@@ -1,8 +1,8 @@
 //! Benchmark `funes index <source>`: build time, embedding throughput, and the compactness of the
-//! resulting store. Useful for tracking the parquet bulk-import path (one append, one Lance fragment) and
-//! catching regressions like per-session appends bloating the store.
+//! resulting memory. Useful for tracking the parquet bulk-import path (one append, one Lance fragment) and
+//! catching regressions like per-session appends bloating the memory.
 //!
-//! The index is built into a throwaway `$FUNES_HOME` so your real store and config are untouched
+//! The index is built into a throwaway `$FUNES_HOME` so your real memory and config are untouched
 //! (no remote is attached there, so no push fires).
 //!
 //! ```text
@@ -16,7 +16,7 @@
 use anyhow::Result;
 use arrow_array::{Array, StringArray};
 use clap::Parser;
-use funes::hub::Store;
+use funes::hub::Memory;
 use funes::index::run_index;
 use futures::TryStreamExt;
 use std::collections::HashSet;
@@ -25,7 +25,7 @@ use std::time::Instant;
 use walkdir::WalkDir;
 
 #[derive(Parser)]
-#[command(about = "Benchmark index build: time, throughput, store compactness")]
+#[command(about = "Benchmark index build: time, throughput, memory compactness")]
 struct Args {
     /// Source to index: a `.parquet` trace dataset or a directory of JSONL transcripts.
     source: PathBuf,
@@ -52,7 +52,7 @@ fn dir_bytes(dir: &std::path::Path) -> u64 {
 async fn main() -> Result<()> {
     let a = Args::parse();
 
-    // Build into a throwaway FUNES_HOME (held alive for the run): the real store/config are untouched
+    // Build into a throwaway FUNES_HOME (held alive for the run): the real memory/config are untouched
     // and, with no remote attached there, `index` won't push.
     let home = tempfile::Builder::new().prefix("funes-bench-index-").tempdir()?;
     std::env::set_var("FUNES_HOME", home.path());
@@ -61,10 +61,10 @@ async fn main() -> Result<()> {
     run_index(a.source.as_path(), a.no_thinking, Some(a.sessions)).await?;
     let secs = t.elapsed().as_secs_f64();
 
-    // Inspect the built store: chunks (rows), distinct sessions, on-disk size, and Lance fragments —
+    // Inspect the built memory: chunks (rows), distinct sessions, on-disk size, and Lance fragments —
     // three different granularities, so the output shows they don't coincide.
-    let store = home.path().join("store");
-    let ds = Store::local().open().await?;
+    let memory = home.path().join("memory");
+    let ds = Memory::local().open().await?;
     let chunks = ds.count_rows(None).await?;
     let mut scan = ds.scan();
     scan.project(&["session_id"])?;
@@ -81,8 +81,8 @@ async fn main() -> Result<()> {
         }
     }
     let sessions = sids.len();
-    let mb = dir_bytes(&store) as f64 / 1e6;
-    let data = store.join("chunks.lance").join("data");
+    let mb = dir_bytes(&memory) as f64 / 1e6;
+    let data = memory.join("chunks.lance").join("data");
     let fragments = std::fs::read_dir(&data).map(|d| d.count()).unwrap_or(0);
 
     println!("\n=== index benchmark ===");
@@ -91,7 +91,7 @@ async fn main() -> Result<()> {
     println!("sessions:         {sessions}");
     println!("chunks:           {chunks}");
     println!("throughput:       {:.0} chunks/s", chunks as f64 / secs.max(0.001));
-    println!("store size:       {mb:.0} MB");
+    println!("memory size:      {mb:.0} MB");
     println!("lance fragments:  {fragments}");
     Ok(())
 }

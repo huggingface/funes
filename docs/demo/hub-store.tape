@@ -1,8 +1,8 @@
-# Demo: tapping a large shared store on the Hub with no funes command at all.
+# Demo: tapping a large shared memory on the Hub with no funes command at all.
 # The prompt names a public HF dataset — dacorvo/funes-Glint-Research-Fable-5,
 # ~21.6k chunks of Fable-5 traces from the "Glint Research" project (a tiny
 # terminal coding agent) — and pi, with funes added at user scope, passes it as
-# the store on its recall call: a past decision recalled from a project this
+# the memory on its recall call: a past decision recalled from a project this
 # machine never worked on. No local indexing, nothing attached first.
 #
 # Zero visible funes commands IS the point: memory you don't have to build or

@@ -1,7 +1,7 @@
 //! End-to-end: build a real index from a tiny transcript in a temp dir, then exercise
-//! the read surface (recall / get / list / status). No mocking — this runs the real
+//! the read surface (recall / get / status). No mocking — this runs the real
 //! BGE embedder + reranker (downloaded to the fastembed cache on first run) against a
-//! real Lance store under a temp `$FUNES_HOME`.
+//! real Lance memory under a temp `$FUNES_HOME`.
 
 use std::io::Write;
 
@@ -36,16 +36,12 @@ async fn index_then_read_surface() {
     funes::index::run_index(source.path(), false, None).await.unwrap();
 
     // status: non-empty chunk count.
-    let status = funes::recall::status(funes::hub::Store::local()).await.unwrap();
+    let status = funes::recall::status(funes::hub::Memory::local()).await.unwrap();
     assert!(status.contains("chunks:"), "status missing chunk count: {status}");
-
-    // list: the session appears under its workdir.
-    let list = funes::recall::list(funes::hub::Store::local(), 50).await.unwrap();
-    assert!(list.contains(&workdir), "list should name the workdir: {list}");
 
     // recall: the parsing turn surfaces, and the `→ get` line carries the full session id.
     let out = funes::recall::recall(
-        funes::hub::Store::local(),
+        funes::hub::Memory::local(),
         "parse transcripts into turns".into(),
         5,
         30,
@@ -61,10 +57,14 @@ async fn index_then_read_surface() {
         out.contains(&session),
         "recall should surface the indexed session: {out}"
     );
+    assert!(
+        out.contains(&workdir),
+        "recall provenance should name the workdir: {out}"
+    );
 
     // type filter: restrict to tool_use → the Bash call.
     let tu = funes::recall::recall(
-        funes::hub::Store::local(),
+        funes::hub::Memory::local(),
         "cargo test".into(),
         5,
         30,
@@ -78,21 +78,21 @@ async fn index_then_read_surface() {
     assert!(tu.contains("tool_use"), "type filter should keep tool_use rows: {tu}");
 
     // get: reassemble the assistant turn by its uuid.
-    let got = funes::recall::get(funes::hub::Store::local(), session.clone(), "t2".into(), 3)
+    let got = funes::recall::get(funes::hub::Memory::local(), session.clone(), "t2".into(), 3)
         .await
         .unwrap();
     assert!(got.contains("typed blocks"), "get should return the turn text: {got}");
 
-    // Every hit names the store it was read from — the default store and an explicit one alike.
-    let default_hint = format!("--store {}", db_dir.path().join("store").display());
+    // Every hit names the memory it was read from — the default memory and an explicit one alike.
+    let default_hint = format!("--memory {}", db_dir.path().join("memory").display());
     assert!(
         out.contains(&default_hint),
-        "hits should carry the read store `{default_hint}`: {out}"
+        "hits should carry the read memory `{default_hint}`: {out}"
     );
-    let store2 = db_dir.path().join("store2");
-    copy_dir(&db_dir.path().join("store"), &store2);
+    let memory2 = db_dir.path().join("memory2");
+    copy_dir(&db_dir.path().join("memory"), &memory2);
     let out2 = funes::recall::recall(
-        funes::hub::Store::parse(&store2.to_string_lossy()),
+        funes::hub::Memory::parse(&memory2.to_string_lossy()),
         "parse transcripts into turns".into(),
         5,
         30,
@@ -103,10 +103,10 @@ async fn index_then_read_surface() {
     )
     .await
     .unwrap();
-    let hint = format!("--store {}", store2.display());
+    let hint = format!("--memory {}", memory2.display());
     assert!(
         out2.contains(&hint),
-        "explicit-store hits should carry `{hint}`: {out2}"
+        "explicit-memory hits should carry `{hint}`: {out2}"
     );
 }
 

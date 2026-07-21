@@ -1,13 +1,13 @@
-//! Gated live round-trip for `push`. Build a synthetic local store, publish it to a unique
+//! Gated live round-trip for `push`. Build a synthetic local memory, publish it to a unique
 //! scratch path on the shared test dataset (create), grow it by a turn and publish again
 //! (append → capture Lance's native append), recall both markers back from the remote, then delete the
 //! scratch path. No real data.
 //!
 //! Also covers the no-overlap confirmation gate against the live remote: declining a first publish
 //! (the local index shares nothing with the empty remote) must abort and upload nothing, while an
-//! append to a store that already shares chunks must not be prompted at all.
+//! append to a memory that already shares chunks must not be prompted at all.
 //!
-//! Skipped unless `HF_FUNES_TEST_TOKEN` is set (it provides `HF_TOKEN` for `Store::open` / the
+//! Skipped unless `HF_FUNES_TEST_TOKEN` is set (it provides `HF_TOKEN` for `Memory::open` / the
 //! hf-hub client) AND `trufflehog` is on PATH (push's pre-publish gate is fail-closed). Needs a
 //! bigger thread stack than the default — lance + fastembed recurse deeply — so set
 //! `RUST_MIN_STACK` (CI uses the same value). To run:
@@ -20,7 +20,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use funes::hub::Store;
+use funes::hub::Memory;
 use funes::push::Confirm;
 use hf_hub::{HFClient, HFError, HFRepository, RepoTypeDataset};
 
@@ -60,7 +60,7 @@ async fn root_readme(repo: &HFRepository<RepoTypeDataset>) -> Option<String> {
 }
 
 async fn recall_remote(uri: &str, query: &str) -> String {
-    funes::recall::recall(Store::parse(uri), query.into(), 5, 30, 0.0, 0, None, None)
+    funes::recall::recall(Memory::parse(uri), query.into(), 5, 30, 0.0, 0, None, None)
         .await
         .unwrap_or_else(|e| format!("<recall error: {e}>"))
 }
@@ -102,7 +102,7 @@ async fn push_round_trip_create_append_recall() {
     let client = HFClient::builder().token(token).build().unwrap();
     let repo = client.dataset(OWNER, NAME);
 
-    // The store lives under a prefix, so no push here may ever touch the repo-root README (the
+    // The memory lives under a prefix, so no push here may ever touch the repo-root README (the
     // dataset card is root-stores-only). Snapshot it now, compare after every push ran.
     let readme_before = root_readme(&repo).await;
 
@@ -111,7 +111,7 @@ async fn push_round_trip_create_append_recall() {
     let prefix = format!("_synctest/{}-{nanos}", std::process::id());
     let uri = format!("hf://datasets/{OWNER}/{NAME}/{prefix}/lancedb");
 
-    // Synthetic local store with one marked turn.
+    // Synthetic local memory with one marked turn.
     let db_dir = tempfile::tempdir().unwrap();
     let src = tempfile::tempdir().unwrap();
     std::env::set_var("FUNES_HOME", db_dir.path());
@@ -119,8 +119,8 @@ async fn push_round_trip_create_append_recall() {
     funes::index::run_index(src.path(), false, None).await.unwrap();
 
     // Gate: the local index shares nothing with the (empty) remote, so a first publish is prompted.
-    // Declining must abort and upload nothing — the "don't publish to the wrong store" promise.
-    let declined = funes::push::run_push(Store::parse(&uri), false, Confirm::Ask(decline)).await;
+    // Declining must abort and upload nothing — the "don't publish to the wrong memory" promise.
+    let declined = funes::push::run_push(Memory::parse(&uri), false, Confirm::Ask(decline)).await;
     // Verify via a *successful* Hub query that the declined push published nothing: get_paths_info
     // returns the entries present under the path (Ok([]) when absent) and Err on a transport failure,
     // so an unreachable remote fails the test loudly instead of masquerading as "nothing uploaded".
@@ -134,7 +134,7 @@ async fn push_round_trip_create_append_recall() {
     // create (first publish): accept the same gate → grow → append (data-only, no reindex) → recall
     // both. The appended turn is left unindexed, so recalling it back exercises Lance's brute-force
     // fallback. Then force a reindex and recall it again, now served by the index.
-    let create = funes::push::run_push(Store::parse(&uri), false, Confirm::Ask(accept)).await;
+    let create = funes::push::run_push(Memory::parse(&uri), false, Confirm::Ask(accept)).await;
     write_session(
         src.path(),
         &[
@@ -143,20 +143,20 @@ async fn push_round_trip_create_append_recall() {
         ],
     );
     funes::index::run_index(src.path(), false, None).await.unwrap();
-    // append: the grown local store now shares chunks with the remote, so the gate must NOT fire —
+    // append: the grown local memory now shares chunks with the remote, so the gate must NOT fire —
     // pass a prompt that would decline and assert it is never consulted.
     let prompts_before_append = PROMPTS.load(Ordering::SeqCst);
-    let append = funes::push::run_push(Store::parse(&uri), false, Confirm::Ask(decline)).await;
+    let append = funes::push::run_push(Memory::parse(&uri), false, Confirm::Ask(decline)).await;
     let prompts_after_append = PROMPTS.load(Ordering::SeqCst);
     let recall_base = recall_remote(&uri, "SYNCSMOKE parsing").await;
     let recall_new = recall_remote(&uri, "SYNCSMOKE2 continuation").await;
     // Nothing new to push, so this is a pure forced reindex: fold the unindexed appended turn into
     // the index as its own commit (capture_reindex + a separate commit), then recall it again.
-    let reindex = funes::push::run_push(Store::parse(&uri), true, Confirm::Yes).await;
+    let reindex = funes::push::run_push(Memory::parse(&uri), true, Confirm::Yes).await;
     let recall_reindexed = recall_remote(&uri, "SYNCSMOKE2 continuation").await;
     let readme_after = root_readme(&repo).await;
-    // The model id must travel with the store (stamped in the schema metadata, uploaded by push).
-    let remote_model = match Store::parse(&uri).open().await {
+    // The model id must travel with the memory (stamped in the schema metadata, uploaded by push).
+    let remote_model = match Memory::parse(&uri).open().await {
         Ok(t) => t.schema().metadata.get("embedding_model").cloned(),
         Err(_) => None,
     };
@@ -190,10 +190,10 @@ async fn push_round_trip_create_append_recall() {
         LAST_CHUNKS.load(Ordering::SeqCst) > 0,
         "the confirmation should be told how many chunks are pending"
     );
-    // Gate: a store that already shares chunks with the local index is not prompted.
+    // Gate: a memory that already shares chunks with the local index is not prompted.
     assert_eq!(
         prompts_after_append, prompts_before_append,
-        "an append to a store you already share chunks with must not trigger the confirmation"
+        "an append to a memory you already share chunks with must not trigger the confirmation"
     );
 
     let create = create.expect("create push").report;
@@ -223,7 +223,7 @@ async fn push_round_trip_create_append_recall() {
     assert_eq!(
         remote_model.as_deref(),
         Some(funes::index::MODEL),
-        "the model id should travel with the store via push"
+        "the model id should travel with the memory via push"
     );
     assert_eq!(
         readme_before, readme_after,

@@ -260,7 +260,7 @@ mod tests {
         assert_eq!(u.ts, "2026-06-19T00:00:02.000Z");
         assert_eq!(u.blocks.len(), 1);
         assert_eq!(u.blocks[0].block_type, "text");
-        // No `harness` column in this parquet → "" (a pre-migration store reads clean).
+        // No `harness` column in this parquet → "" (a pre-migration memory reads clean).
         assert_eq!(u.harness, "");
 
         let a = &turns[1];

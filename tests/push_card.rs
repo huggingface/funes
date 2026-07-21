@@ -15,7 +15,7 @@ use std::io::Write;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use funes::hub::Store;
+use funes::hub::Memory;
 use funes::push::Confirm;
 use hf_hub::repository::CommitOperation;
 use hf_hub::{HFClient, HFError, HFRepository, RepoTypeDataset};
@@ -71,7 +71,7 @@ async fn card_created_refreshed_and_a_hand_card_respected() {
     std::env::set_var("HF_TOKEN", &token);
     let client = HFClient::builder().token(token).build().unwrap();
 
-    // A throwaway ROOT store: unique repo name so concurrent/repeated runs don't collide.
+    // A throwaway ROOT memory: unique repo name so concurrent/repeated runs don't collide.
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
     let name = format!("funes-test-card-{}-{nanos}", std::process::id());
     if let Err(e) = funes::hub::create_dataset_repo(OWNER, &name).await {
@@ -81,7 +81,7 @@ async fn card_created_refreshed_and_a_hand_card_respected() {
     let repo = client.dataset(OWNER, name.clone());
     let uri = format!("hf://datasets/{OWNER}/{name}");
 
-    // Synthetic local store with one turn.
+    // Synthetic local memory with one turn.
     let db_dir = tempfile::tempdir().unwrap();
     let src = tempfile::tempdir().unwrap();
     std::env::set_var("FUNES_HOME", db_dir.path());
@@ -89,7 +89,7 @@ async fn card_created_refreshed_and_a_hand_card_respected() {
     funes::index::run_index(src.path(), false, None).await.unwrap();
 
     // First publish → the card rides the initial commit.
-    let create = funes::push::run_push(Store::parse(&uri), false, Confirm::Yes).await;
+    let create = funes::push::run_push(Memory::parse(&uri), false, Confirm::Yes).await;
     let card_created = root_readme(&repo).await;
 
     // Grow by one turn → the append must refresh the stats in the same data commit.
@@ -98,7 +98,7 @@ async fn card_created_refreshed_and_a_hand_card_respected() {
         &[("s1", "CARDSMOKE the first turn"), ("s2", "CARDSMOKE2 the second turn")],
     );
     funes::index::run_index(src.path(), false, None).await.unwrap();
-    let append = funes::push::run_push(Store::parse(&uri), false, Confirm::Yes).await;
+    let append = funes::push::run_push(Memory::parse(&uri), false, Confirm::Yes).await;
     let card_refreshed = root_readme(&repo).await;
 
     // Hand-write the README: from here on funes must keep its hands off.
@@ -122,7 +122,7 @@ async fn card_created_refreshed_and_a_hand_card_respected() {
         ],
     );
     funes::index::run_index(src.path(), false, None).await.unwrap();
-    let append_past_hand = funes::push::run_push(Store::parse(&uri), false, Confirm::Yes).await;
+    let append_past_hand = funes::push::run_push(Memory::parse(&uri), false, Confirm::Yes).await;
     let card_after_hand = root_readme(&repo).await;
 
     // Cleanup before asserting, so a failed assertion can't leave the scratch repo behind.
@@ -148,8 +148,8 @@ async fn card_created_refreshed_and_a_hand_card_respected() {
         "the card should count the pushed chunk: {card_created}"
     );
     assert!(
-        card_created.contains(&format!("--store {OWNER}/{name}")),
-        "the recall example should name this store: {card_created}"
+        card_created.contains(&format!("--memory {OWNER}/{name}")),
+        "the recall example should name this memory: {card_created}"
     );
 
     let append = append.expect("append push").report;

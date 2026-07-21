@@ -2,10 +2,10 @@
 //!
 //! hermes has two user-scoped integration surfaces under `~/.hermes`:
 //! - **Recall.** hermes has a native MCP client, so funes registers as its stdio MCP server —
-//!   `hermes mcp add funes --command funes --args mcp [store]`. hermes' `--args` is variadic, so a
-//!   non-local `store` rides along as an extra token, binding this agent's recall to it.
+//!   `hermes mcp add funes --command funes --args mcp [memory]`. hermes' `--args` is variadic, so a
+//!   non-local `memory` rides along as an extra token, binding this agent's recall to it.
 //! - **Automation.** hermes fires shell hooks declared in `config.yaml`. funes installs a per-turn
-//!   index hook (`post_llm_call`, fired once per completed turn) and, with a bound store, publish
+//!   index hook (`post_llm_call`, fired once per completed turn) and, with a bound memory, publish
 //!   hooks (`on_session_start` to catch up + `on_session_finalize` at the true session boundary),
 //!   driving the same detached scripts Claude/Codex use. hermes gates shell hooks behind a consent
 //!   allowlist; funes pre-writes its own `(event, command)` approvals so they run from the first
@@ -26,22 +26,22 @@ use std::process::{Command, Stdio};
 /// this only bounds the fast foreground handoff.
 const TIMEOUT: u64 = 30;
 
-pub fn install(store: Option<String>) -> Result<()> {
+pub fn install(memory: Option<String>) -> Result<()> {
     // Automation first: writing scripts + config + allowlist needs no `hermes` binary, so it lands
     // even if the MCP registration below can't reach the CLI (mirrors codex).
-    install_hooks(store.as_deref())?;
-    register_recall(store.as_deref())
+    install_hooks(memory.as_deref())?;
+    register_recall(memory.as_deref())
 }
 
 // ---- automation: config.yaml hooks + the consent allowlist ----
 
-/// The funes-owned hooks: a per-turn index (always) and, with a bound `store`, a publish on session
+/// The funes-owned hooks: a per-turn index (always) and, with a bound `memory`, a publish on session
 /// start (catch-up) and finalize (the true boundary). Each is an `(event, command)` pair; the
 /// command drives a detached script and is the exact string the allowlist must match.
-fn desired(hooks_dir: &Path, store: Option<&str>) -> Vec<(&'static str, String)> {
+fn desired(hooks_dir: &Path, memory: Option<&str>) -> Vec<(&'static str, String)> {
     let index_script = hooks_dir.join("funes-index.sh").display().to_string();
     let mut out = vec![("post_llm_call", crate::hooks::command(&index_script, "hermes"))];
-    if let Some(s) = store {
+    if let Some(s) = memory {
         let push = crate::hooks::command(&hooks_dir.join("funes-push.sh").display().to_string(), s);
         out.push(("on_session_start", push.clone()));
         out.push(("on_session_finalize", push));
@@ -49,23 +49,23 @@ fn desired(hooks_dir: &Path, store: Option<&str>) -> Vec<(&'static str, String)>
     out
 }
 
-fn install_hooks(store: Option<&str>) -> Result<()> {
+fn install_hooks(memory: Option<&str>) -> Result<()> {
     let home = PathBuf::from(std::env::var_os("HOME").context("resolving $HOME for the hermes hooks dir")?);
     let hermes = home.join(".hermes");
     let hooks_dir = hermes.join("hooks");
     crate::hooks::write_scripts(&hooks_dir)?;
 
-    let entries = desired(&hooks_dir, store);
+    let entries = desired(&hooks_dir, memory);
     let config = hermes.join("config.yaml");
     let allowlist = hermes.join("shell-hooks-allowlist.json");
     let wrote_config = write_config_hooks(&config, &entries)?;
     let wrote_allowlist = write_allowlist(&allowlist, &entries)?;
 
     if wrote_config && wrote_allowlist {
-        let what = if store.is_some() {
+        let what = if memory.is_some() {
             "indexes each turn and publishes at session boundaries"
         } else {
-            "indexes each turn (local only — pass a store to also publish)"
+            "indexes each turn (local only — pass a memory to also publish)"
         };
         let events: Vec<&str> = entries.iter().map(|(e, _)| *e).collect();
         println!(
@@ -231,22 +231,22 @@ fn manual_hook_instructions(
 
 // ---- recall: register funes as an MCP server ----
 
-/// The `hermes mcp add` argument vector registering `funes mcp [store]`. hermes' `--args` is
-/// variadic, so a non-local `store` is appended after `mcp` as another `--args` value.
-fn mcp_add_args(funes: &str, store: Option<&str>) -> Vec<String> {
+/// The `hermes mcp add` argument vector registering `funes mcp [memory]`. hermes' `--args` is
+/// variadic, so a non-local `memory` is appended after `mcp` as another `--args` value.
+fn mcp_add_args(funes: &str, memory: Option<&str>) -> Vec<String> {
     let mut args: Vec<String> = ["mcp", "add", "funes", "--command", funes, "--args", "mcp"]
         .into_iter()
         .map(String::from)
         .collect();
-    if let Some(s) = store {
+    if let Some(s) = memory {
         args.push(s.to_string());
     }
     args
 }
 
-fn register_recall(store: Option<&str>) -> Result<()> {
+fn register_recall(memory: Option<&str>) -> Result<()> {
     let funes = std::env::var("FUNES_BIN").unwrap_or_else(|_| "funes".to_string());
-    let args = mcp_add_args(&funes, store);
+    let args = mcp_add_args(&funes, memory);
     let manual = format!("hermes {}", args.join(" "));
     let mut child = match Command::new("hermes").args(&args).stdin(Stdio::piped()).spawn() {
         Ok(c) => c,
@@ -296,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn bakes_the_store_only_when_present() {
+    fn bakes_the_memory_only_when_present() {
         assert_eq!(
             mcp_add_args("funes", None),
             ["mcp", "add", "funes", "--command", "funes", "--args", "mcp"]

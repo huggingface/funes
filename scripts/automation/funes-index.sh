@@ -5,15 +5,15 @@
 # to `claude`. One script serves every agent — Claude's Stop hook calls it with `claude`,
 # Codex's with `codex` — so there's a single implementation to maintain.
 #
-# Fired per turn (Claude's Stop hook, Codex's Stop hook), so the local store stays fresh
+# Fired per turn (Claude's Stop hook, Codex's Stop hook), so the local memory stays fresh
 # as you work. `funes index` is incremental and idempotent — it re-embeds nothing already
 # stored — and indexing per turn yields the same chunks as indexing once per session,
 # since chunk ids derive from (session, turn, block, split). Publishing to the remote
 # is a separate step (funes-push.sh, on session boundaries), so this per-turn run
 # stays cheap and never touches the network.
 #
-# No locking here: `funes` itself serializes local-store writes (an advisory lock in the
-# binary). If another store operation holds it, this run exits non-zero (logged below) and
+# No locking here: `funes` itself serializes local-memory writes (an advisory lock in the
+# binary). If another memory operation holds it, this run exits non-zero (logged below) and
 # the next turn re-sweeps the same content — indexing is idempotent, so nothing is lost.
 # The script only detaches so it never blocks the turn or trips the hook timeout: the
 # foreground half drains the hook payload, re-execs as a background worker, and returns.

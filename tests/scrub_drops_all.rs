@@ -1,5 +1,5 @@
 //! Gated end-to-end: when *every* block scrub sees is an unredactable secret, the single Overwrite
-//! commit must still produce a valid (empty) store, not error on a zero-row write. Exercises the
+//! commit must still produce a valid (empty) memory, not error on a zero-row write. Exercises the
 //! all-dropped path that the mixed-block test does not. Skipped unless trufflehog and ssh-keygen
 //! are available.
 
@@ -8,7 +8,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 #[tokio::test]
-async fn scrub_dropping_every_block_leaves_a_valid_empty_store() {
+async fn scrub_dropping_every_block_leaves_a_valid_empty_memory() {
     if funes::scan::Trufflehog::find().is_err() {
         eprintln!("skip: trufflehog not found");
         return;
@@ -57,23 +57,23 @@ async fn scrub_dropping_every_block_leaves_a_valid_empty_store() {
     let mut f = std::fs::File::create(dir.join(format!("{session}.jsonl"))).unwrap();
     writeln!(f, "{line}").unwrap();
 
-    // Index with a no-op scanner so the escaped key lands in the store unredacted.
+    // Index with a no-op scanner so the escaped key lands in the memory unredacted.
     std::env::set_var("FUNES_TRUFFLEHOG", "/usr/bin/true");
     funes::index::run_index(source.path(), false, None).await.unwrap();
 
-    // Scrub with the real scanner: every block is unredactable, so the store is rewritten empty.
+    // Scrub with the real scanner: every block is unredactable, so the memory is rewritten empty.
     std::env::remove_var("FUNES_TRUFFLEHOG");
     funes::scrub::run().await.unwrap();
 
-    // The empty Overwrite must leave a valid, reopenable store with zero rows.
-    let uri = funes::dataset::table_uri(&funes::dataset::local_store_dir());
+    // The empty Overwrite must leave a valid, reopenable memory with zero rows.
+    let uri = funes::dataset::table_uri(&funes::dataset::local_memory_dir());
     let ds = funes::dataset::open(&uri, HashMap::new())
         .await
-        .expect("store must reopen after an all-dropped scrub");
+        .expect("memory must reopen after an all-dropped scrub");
     assert_eq!(
         ds.count_rows(None).await.unwrap(),
         0,
-        "every block was dropped, so the store is empty"
+        "every block was dropped, so the memory is empty"
     );
 }
 

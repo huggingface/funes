@@ -6,7 +6,7 @@
 //!
 //! The fixture is a stable, synthetic, read-only dataset (no real data).
 
-use funes::hub::Store;
+use funes::hub::Memory;
 
 const FIXTURE_URI: &str = "hf://datasets/optimum-internal-testing/funes-test/fixture/lancedb";
 const MARKER: &str = "UNIQUEMARKERXYZZY";
@@ -21,11 +21,11 @@ async fn recall_from_remote_fixture() {
         eprintln!("skip: HF_FUNES_TEST_TOKEN not set");
         return;
     }
-    // funes' Store::open authenticates via HF_TOKEN.
+    // funes' Memory::open authenticates via HF_TOKEN.
     std::env::set_var("HF_TOKEN", token);
 
     // Open + read over the wire (also exercises the dim guard in open()).
-    let ds = Store::parse(FIXTURE_URI)
+    let ds = Memory::parse(FIXTURE_URI)
         .open()
         .await
         .expect("open remote fixture over hf://");
@@ -34,10 +34,19 @@ async fn recall_from_remote_fixture() {
     eprintln!("remote rows = {n}");
 
     // End-to-end: the full recall pipeline (hybrid vector + BM25 → rerank → recency → format) over
-    // the remote store surfaces the marker chunk — exercising both the remote IVF_PQ and inverted-
+    // the remote memory surfaces the marker chunk — exercising both the remote IVF_PQ and inverted-
     // index reads (lazy, Xet-cached). recency off, no neighbors, to keep the assertion tight.
-    let out = funes::recall::recall(Store::parse(FIXTURE_URI), MARKER.to_string(), 5, 30, 0.0, 0, None, None)
-        .await
-        .expect("recall over remote fixture");
+    let out = funes::recall::recall(
+        Memory::parse(FIXTURE_URI),
+        MARKER.to_string(),
+        5,
+        30,
+        0.0,
+        0,
+        None,
+        None,
+    )
+    .await
+    .expect("recall over remote fixture");
     assert!(out.contains(MARKER), "recall did not surface the marker chunk: {out}");
 }

@@ -1,6 +1,6 @@
-//! The dataset card a published store carries: generated whole on first publish, its stats
+//! The dataset card a published memory carries: generated whole on first publish, its stats
 //! refreshed on later pushes — a hand-written card is never touched. The card is what makes a
-//! store on the Hub identifiable (and, via the `funes` tag, discoverable) as a funes store, and
+//! memory on the Hub identifiable (and, via the `funes` tag, discoverable) as a funes memory, and
 //! it doubles as usage instructions for whoever lands on the dataset page.
 //!
 //! Pure text in/out: [`plan`] decides what to do from the remote README's current content; the
@@ -11,7 +11,7 @@ const STATS_OPEN: &str = "<!-- funes:stats -->";
 /// Closes the region [`plan`] may rewrite.
 const STATS_CLOSE: &str = "<!-- /funes:stats -->";
 
-/// Frontmatter tags. `funes` is the load-bearing one: it makes every published store
+/// Frontmatter tags. `funes` is the load-bearing one: it makes every published memory
 /// discoverable via `huggingface.co/datasets?other=funes`. `agent-memory` names the category
 /// (no incumbent Hub tag exists — the ecosystem's category word, scoped to agents).
 const TAGS: [&str; 5] = ["funes", "agent-memory", "agent-traces", "embeddings", "lance"];
@@ -30,13 +30,13 @@ const SIZE_BANDS: [(u64, &str); 10] = [
     (1_000_000_000_000, "100B<n<1T"),
 ];
 
-/// What the card says about the store.
+/// What the card says about the memory.
 pub struct CardCtx<'a> {
     /// The repo id the card lives in, `<org>/<name>` — named in the recall example.
     pub repo: &'a str,
     /// Chunk count after the push this card rides on.
     pub chunks: u64,
-    /// The store's pinned embedding model (schema metadata `embedding_model`).
+    /// The memory's pinned embedding model (schema metadata `embedding_model`).
     pub embedding_model: &'a str,
     /// UTC date of the push, `YYYY-MM-DD`.
     pub date: &'a str,
@@ -71,28 +71,28 @@ pub fn plan(existing: Option<&str>, ctx: &CardCtx) -> CardAction {
     }
 }
 
-/// The full generated card: frontmatter (tags + size band), what a funes store is, how to
+/// The full generated card: frontmatter (tags + size band), what a funes memory is, how to
 /// recall from it, and the stats region.
 fn render(ctx: &CardCtx) -> String {
     let tags = TAGS.map(|t| format!("  - {t}\n")).concat();
     format!(
         "---\n\
-         pretty_name: funes memory store\n\
+         pretty_name: funes memory\n\
          tags:\n\
          {tags}\
          size_categories:\n  - {band}\n\
          ---\n\
          \n\
-         # funes memory store\n\
+         # funes memory\n\
          \n\
-         A [funes](https://github.com/huggingface/funes) memory store: agent sessions chunked,\n\
-         embedded, and stored as a [Lance](https://lancedb.github.io/lance/) table — a derived\n\
+         A [funes](https://github.com/huggingface/funes) memory: agent sessions chunked,\n\
+         embedded, and written to a [Lance](https://lancedb.github.io/lance/) table — a derived\n\
          index holding verbatim passages with exact provenance, not raw transcripts.\n\
          \n\
          Any agent (or you) can recall from it directly — no local index needed:\n\
          \n\
          ```bash\n\
-         funes recall \"what did we decide about …\" --store {repo}\n\
+         funes recall \"what did we decide about …\" --memory {repo}\n\
          ```\n\
          \n\
          Get funes:\n\
@@ -182,9 +182,9 @@ mod tests {
         assert!(card.contains("\ntags:\n  - funes\n"));
         assert!(card.contains("  - agent-memory\n"));
         assert!(card.contains("\nsize_categories:\n  - 10K<n<100K\n"));
-        assert!(card.contains("\n# funes memory store\n"));
-        // Body: the recall example names this store; the stats region is marker-delimited.
-        assert!(card.contains("--store acme/kb"));
+        assert!(card.contains("\n# funes memory\n"));
+        // Body: the recall example names this memory; the stats region is marker-delimited.
+        assert!(card.contains("--memory acme/kb"));
         assert!(card.contains(STATS_OPEN) && card.contains(STATS_CLOSE));
         assert!(card.contains("| Chunks | 21,636 |"));
     }
@@ -193,7 +193,7 @@ mod tests {
     fn refresh_rewrites_only_the_marker_region() {
         // A card the owner has edited around the markers: everything they wrote survives.
         let owned = format!(
-            "---\nlicense: mit\n---\n\n# My store\n\nMy own intro.\n\n{}\n\nMy own footer.\n",
+            "---\nlicense: mit\n---\n\n# My memory\n\nMy own intro.\n\n{}\n\nMy own footer.\n",
             stats_block(&ctx(999))
         );
         let CardAction::Refresh(refreshed) = plan(Some(&owned), &ctx(1_500)) else {

@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use funes::hub::Store;
+use funes::hub::Memory;
 
 const FIXTURE_URI: &str = "hf://datasets/optimum-internal-testing/funes-test/fixture/lancedb";
 const MARKER: &str = "UNIQUEMARKERXYZZY";
@@ -39,7 +39,7 @@ fn cache_footprint(dir: &Path) -> (usize, u64) {
 }
 
 async fn recall(query: &str) -> String {
-    funes::recall::recall(Store::parse(FIXTURE_URI), query.to_string(), 5, 30, 0.0, 0, None, None)
+    funes::recall::recall(Memory::parse(FIXTURE_URI), query.to_string(), 5, 30, 0.0, 0, None, None)
         .await
         .expect("recall over remote fixture")
 }
@@ -53,7 +53,7 @@ async fn warm_recall_is_served_from_cache_without_downloading() {
         eprintln!("skip: HF_FUNES_TEST_TOKEN not set");
         return;
     }
-    // funes' Store::open authenticates via HF_TOKEN.
+    // funes' Memory::open authenticates via HF_TOKEN.
     std::env::set_var("HF_TOKEN", token);
 
     // Isolate the hf-hub cache to a fresh dir, so "cold" is a genuine first download and "warm"

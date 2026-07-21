@@ -11,18 +11,18 @@
 // ./integrations/pi`, or `pi -e ./integrations/pi` for a single run.
 //
 // `funes` is taken from PATH; set FUNES_BIN to override the binary. FUNES_BIN and
-// FUNES_STORE are generic environment overrides funes honors; a host that embeds
+// FUNES_MEMORY are generic environment overrides funes honors; a host that embeds
 // funes sets them from the outside. (agentcap's funes example is one such host —
 // that example depends on funes, not the reverse: it puts its own `funes` on PATH
-// and points FUNES_STORE at a live hf:// store. This extension knows nothing of
+// and points FUNES_MEMORY at a live hf:// memory. This extension knows nothing of
 // it — only of the vars.)
 //
-// The store this extension recalls from is resolved once, in order:
-//   1. FUNES_STORE in the environment (a per-run override, set by whatever host)
-//   2. the store bound at install by `funes add pi <store>`, saved in a `store`
-//      file next to this extension (absent = the local store)
-// The result is forwarded as the `funes mcp <store>` positional; empty forwards a
-// bare `funes mcp` (the local store).
+// The memory this extension recalls from is resolved once, in order:
+//   1. FUNES_MEMORY in the environment (a per-run override, set by whatever host)
+//   2. the memory bound at install by `funes add pi <memory>`, saved in a `memory`
+//      file next to this extension (absent = the local memory)
+// The result is forwarded as the `funes mcp <memory>` positional; empty forwards a
+// bare `funes mcp` (the local memory).
 import { Type } from "typebox";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -31,17 +31,17 @@ import { dirname, join } from "node:path";
 
 const FUNES_BIN = process.env.FUNES_BIN || "funes";
 
-// The store `funes add pi <store>` wrote beside this extension, or "" if none (local).
-function boundStore(): string {
+// The memory `funes add pi <memory>` wrote beside this extension, or "" if none (local).
+function boundMemory(): string {
   try {
-    return readFileSync(join(dirname(fileURLToPath(import.meta.url)), "store"), "utf8").trim();
+    return readFileSync(join(dirname(fileURLToPath(import.meta.url)), "memory"), "utf8").trim();
   } catch {
     return "";
   }
 }
 
-const store = (process.env.FUNES_STORE || boundStore()).trim();
-const FUNES_ARGS = store ? ["mcp", store] : ["mcp"];
+const memory = (process.env.FUNES_MEMORY || boundMemory()).trim();
+const FUNES_ARGS = memory ? ["mcp", memory] : ["mcp"];
 const PROTOCOL_VERSION = "2024-11-05"; // matches funes' rmcp server
 const CALL_TIMEOUT_MS = 120_000;
 
@@ -186,19 +186,19 @@ export default function (pi: any) {
       "history of anything. Recall subject-matter too, not only decisions: before re-deriving how " +
       "an API or system behaves — or anything a past session (often a research subagent) " +
       "investigated — query the topic itself; recall surfaces those findings. To recall from a " +
-      "different store than the server's default, pass `store`.",
+      "different memory than the server's default, pass `memory`.",
     parameters: Type.Object({
       query: Type.String({ description: "Natural-language search query" }),
       k: Type.Optional(Type.Number({ description: "Number of results (default 8)" })),
-      store: Type.Optional(
+      memory: Type.Optional(
         Type.String({
           description:
-            "Store to read for this call — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Defaults to the server's store.",
+            "Memory to read for this call — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Defaults to the server's memory.",
         }),
       ),
     }),
-    execute: (_id: string, params: { query: string; k?: number; store?: string }) =>
-      call("recall", { query: params.query, k: params.k, store: params.store }),
+    execute: (_id: string, params: { query: string; k?: number; memory?: string }) =>
+      call("recall", { query: params.query, k: params.k, memory: params.memory }),
   });
 
   pi.registerTool({
@@ -207,21 +207,21 @@ export default function (pi: any) {
     description:
       "Drill down on a recall hit: fetch the named turn plus the turns around it, reassembled " +
       "into readable text. Pass the `session_id` and `turn_uuid` from a recall hit's `→ get` line — " +
-      "and the `store` it names.",
+      "and the `memory` it names.",
     parameters: Type.Object({
       session_id: Type.String({ description: "Session id from a recall hit's `→ get` line" }),
       turn_uuid: Type.String({ description: "Turn uuid from a recall hit's `→ get` line" }),
       window: Type.Optional(Type.Number({ description: "Turns within this window are included (default 3)" })),
-      store: Type.Optional(
-        Type.String({ description: "Store to read for this call — the one the recall hit came from" }),
+      memory: Type.Optional(
+        Type.String({ description: "Memory to read for this call — the one the recall hit came from" }),
       ),
     }),
-    execute: (_id: string, params: { session_id: string; turn_uuid: string; window?: number; store?: string }) =>
+    execute: (_id: string, params: { session_id: string; turn_uuid: string; window?: number; memory?: string }) =>
       call("get", {
         session_id: params.session_id,
         turn_uuid: params.turn_uuid,
         window: params.window,
-        store: params.store,
+        memory: params.memory,
       }),
   });
 }

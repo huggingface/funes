@@ -1,7 +1,7 @@
 //! `funes add <agent>` — installing the index/push automation hooks (issue #72).
 //!
 //! Two embedded scripts drive the automation: `funes-index.sh` (per-turn local index) and
-//! `funes-push.sh` (publish at session boundaries, when a remote store is bound). How they're
+//! `funes-push.sh` (publish at session boundaries, when a remote memory is bound). How they're
 //! registered differs by agent:
 //!
 //! - **Claude** has a plugin system, so funes ships a hooks-only plugin. `funes add` extracts it to
@@ -13,7 +13,7 @@
 //!   dedicated to hooks, not Codex's main `config.toml`. The merge is append-or-replace keyed by
 //!   funes's own scripts (re-running replaces funes's groups, leaves any others untouched).
 //!
-//! The push hook is registered only when a remote store is bound (`funes add <agent> <store>`); a
+//! The push hook is registered only when a remote memory is bound (`funes add <agent> <memory>`); a
 //! local-only install indexes each turn but has nothing to publish.
 
 use anyhow::{bail, Context, Result};
@@ -44,11 +44,11 @@ pub enum Agent {
     Codex,
 }
 
-/// Install the index (and, with a bound `store`, push) hooks for `agent`.
-pub fn install(agent: Agent, store: Option<&str>) -> Result<()> {
+/// Install the index (and, with a bound `memory`, push) hooks for `agent`.
+pub fn install(agent: Agent, memory: Option<&str>) -> Result<()> {
     match agent {
-        Agent::Claude => install_claude(store),
-        Agent::Codex => install_codex(store),
+        Agent::Claude => install_claude(memory),
+        Agent::Codex => install_codex(memory),
     }
 }
 
@@ -69,12 +69,12 @@ pub fn command(script: &str, arg: &str) -> String {
 }
 
 /// Escape a value for embedding inside a double-quoted shell string: backslash then double-quote.
-/// A no-op for ordinary paths and harness/store names.
+/// A no-op for ordinary paths and harness/memory names.
 fn dquote_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-/// The funes hook set: a per-turn index (always) and, with a bound `store`, a publish on each
+/// The funes hook set: a per-turn index (always) and, with a bound `memory`, a publish on each
 /// session boundary. `index_script`/`push_script` are how the scripts are referenced from the
 /// command line (absolute path for Codex, `${CLAUDE_PLUGIN_ROOT}/scripts/…` for the Claude plugin);
 /// `session_end` adds the SessionEnd publish (Claude has one, Codex doesn't).
@@ -82,7 +82,7 @@ fn desired(
     index_script: &str,
     push_script: &str,
     harness: &str,
-    store: Option<&str>,
+    memory: Option<&str>,
     session_end: bool,
 ) -> Vec<Desired> {
     let mut out = vec![Desired {
@@ -90,7 +90,7 @@ fn desired(
         command: command(index_script, harness),
         status: INDEX_STATUS,
     }];
-    if let Some(s) = store {
+    if let Some(s) = memory {
         out.push(Desired {
             event: "SessionStart",
             command: command(push_script, s),
@@ -111,8 +111,8 @@ fn desired(
 
 /// Ship the funes hooks plugin: extract it to `~/.funes/integrations/claude-plugin` (fixed, like the
 /// pi extension — Claude records the marketplace source path, so it must outlive the session) and
-/// register it with `claude`. The plugin's `hooks/hooks.json` is regenerated with the current store.
-fn install_claude(store: Option<&str>) -> Result<()> {
+/// register it with `claude`. The plugin's `hooks/hooks.json` is regenerated with the current memory.
+fn install_claude(memory: Option<&str>) -> Result<()> {
     // Fixed at `~/.funes`, deliberately not `$FUNES_HOME`: Claude stores the marketplace source
     // path by reference, so it can't follow a per-session home.
     let home = PathBuf::from(std::env::var_os("HOME").context("resolving $HOME for the plugin dir")?);
@@ -123,7 +123,7 @@ fn install_claude(store: Option<&str>) -> Result<()> {
         "${CLAUDE_PLUGIN_ROOT}/scripts/funes-index.sh",
         "${CLAUDE_PLUGIN_ROOT}/scripts/funes-push.sh",
         "claude",
-        store,
+        memory,
         true,
     );
     let hooks_json = format!(
@@ -140,14 +140,14 @@ fn install_claude(store: Option<&str>) -> Result<()> {
     dirty |= write_if_changed(&plugin.join("hooks/hooks.json"), &hooks_json)?;
     dirty |= write_scripts(&plugin.join("scripts"))?;
 
-    register_claude(&root, store.is_some(), dirty)
+    register_claude(&root, memory.is_some(), dirty)
 }
 
 /// Register (or refresh) the extracted plugin with `claude`. Idempotent: the marketplace add is a
 /// no-op when already present, and the plugin is (re)installed to pick up the current source — but
 /// since `claude plugin install` is a no-op when already installed and `update` is version-gated,
 /// a refresh (`dirty`) uninstalls first to force a fresh copy.
-fn register_claude(root: &Path, has_store: bool, dirty: bool) -> Result<()> {
+fn register_claude(root: &Path, has_memory: bool, dirty: bool) -> Result<()> {
     let root_str = root.display().to_string();
     let manual = format!("  claude plugin marketplace add \"{root_str}\"\n  claude plugin install {PLUGIN_ID}");
     match Command::new("claude").args(["plugin", "marketplace", "add", &root_str]).status() {
@@ -175,10 +175,10 @@ fn register_claude(root: &Path, has_store: bool, dirty: bool) -> Result<()> {
     }
     match Command::new("claude").args(["plugin", "install", PLUGIN_ID]).status() {
         Ok(s) if s.success() => {
-            let what = if has_store {
+            let what = if has_memory {
                 "indexes each turn and publishes at session boundaries"
             } else {
-                "indexes each turn (local only — pass a store to also publish)"
+                "indexes each turn (local only — pass a memory to also publish)"
             };
             println!("installed the funes hooks plugin into Claude Code — {what} (restart Claude Code if it's running).");
             Ok(())
@@ -196,7 +196,7 @@ fn register_claude(root: &Path, has_store: bool, dirty: bool) -> Result<()> {
 /// Write funes's hooks into `~/.codex/hooks.json`. Codex has no plugin system, but that file is
 /// dedicated to hooks (not `config.toml`), so the merge is low-stakes: append-or-replace keyed by
 /// funes's scripts, leaving any hand-authored hooks alone.
-fn install_codex(store: Option<&str>) -> Result<()> {
+fn install_codex(memory: Option<&str>) -> Result<()> {
     let home = PathBuf::from(std::env::var_os("HOME").context("resolving $HOME for the hooks dir")?);
     let base = home.join(".codex");
     let hooks_dir = base.join("hooks");
@@ -204,7 +204,7 @@ fn install_codex(store: Option<&str>) -> Result<()> {
 
     let index = hooks_dir.join("funes-index.sh").display().to_string();
     let push = hooks_dir.join("funes-push.sh").display().to_string();
-    let want = desired(&index, &push, "codex", store, false);
+    let want = desired(&index, &push, "codex", memory, false);
 
     let config = base.join("hooks.json");
     let cfg = match std::fs::read_to_string(&config).ok().as_deref().map(str::trim) {
@@ -223,10 +223,10 @@ fn install_codex(store: Option<&str>) -> Result<()> {
         .with_context(|| format!("writing {}", config.display()))?;
 
     let events: Vec<&str> = want.iter().map(|d| d.event).collect();
-    let what = if store.is_some() {
+    let what = if memory.is_some() {
         "indexes each turn and publishes at session boundaries"
     } else {
-        "indexes each turn (local only — pass a store to also publish)"
+        "indexes each turn (local only — pass a memory to also publish)"
     };
     println!(
         "installed funes hooks into {} ({}) — {what}.",
@@ -354,10 +354,10 @@ mod tests {
         );
     }
 
-    fn push(event: &'static str, store: &str) -> Desired {
+    fn push(event: &'static str, memory: &str) -> Desired {
         Desired {
             event,
-            command: command("/h/funes-push.sh", store),
+            command: command("/h/funes-push.sh", memory),
             status: "push",
         }
     }
@@ -414,7 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn push_events_only_with_a_store() {
+    fn push_events_only_with_a_memory() {
         let local = apply_funes_hooks(json!({}), &[idx("claude")]);
         assert!(local["hooks"].get("SessionStart").is_none());
 
@@ -456,8 +456,8 @@ mod tests {
     }
 
     #[test]
-    fn desired_bakes_scripts_store_and_session_end() {
-        // Claude plugin shape: plugin-root script refs, SessionStart + SessionEnd with the store.
+    fn desired_bakes_scripts_memory_and_session_end() {
+        // Claude plugin shape: plugin-root script refs, SessionStart + SessionEnd with the memory.
         let claude = desired(
             "${CLAUDE_PLUGIN_ROOT}/scripts/funes-index.sh",
             "${CLAUDE_PLUGIN_ROOT}/scripts/funes-push.sh",

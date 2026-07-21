@@ -2,18 +2,18 @@
 
 ## TL;DR
 
-funes caches the **whole immutable files** it reads from a remote lance store into hf-hub's standard
+funes caches the **whole immutable files** it reads from a remote lance memory into hf-hub's standard
 local cache, pinned to the dataset's head commit. Warm recalls then read from local disk with no
 network. The cache is **file-grained** — not byte-range, not Xet-chunk — because that's the unit
-lance stores in, and the Hub delivers whole files regardless.
+lance writes in, and the Hub delivers whole files regardless.
 
-## What a remote store actually is
+## What a remote memory actually is
 
-A funes remote store is a **lance dataset**: a directory of **immutable files** on the Hub.
+A funes remote memory is a **lance dataset**: a directory of **immutable files** on the Hub.
 
 ```
 chunks.lance/
-  data/*.lance          data fragments      (funes-store: 8 fragments, largest 89 / 42 / 23 MB)
+  data/*.lance          data fragments      (funes-memory: 8 fragments, largest 89 / 42 / 23 MB)
   _indices/**           IVF/PQ + FTS index  (~0.5–10 MB per file, a few dozen files)
   _versions/*.manifest  one manifest per dataset version (a few KB each)
 ```
@@ -59,9 +59,9 @@ recall → lance → [funes wrapper]      (head SHA re-resolved once per open �
 
 ## Why file-grained — and not the Xet *chunk* cache
 
-Xet (the Hub's content-addressed backend) stores files as sub-file *xorbs* and keeps its own chunk
+Xet (the Hub's content-addressed backend) writes files as sub-file *xorbs* and keeps its own chunk
 cache. It is tempting to assume a lower-level cache must be finer, and therefore better. For a lance
-store it is not, for two reasons:
+memory it is not, for two reasons:
 
 - **No granularity win.** A xorb caps at **64 MiB**, and our files are the *same order of magnitude* —
   index files ≤10 MB, data fragments up to 89 MB (one to two xorbs). So the chunk cache's unit is

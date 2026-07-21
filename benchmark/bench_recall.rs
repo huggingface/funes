@@ -1,8 +1,8 @@
 //! Benchmark `recall()` latency, local vs remote, cold vs warm — over the **same dataset** so the
 //! comparison isolates the I/O path, not differences in the data.
 //!
-//! The CPU stages of recall (query embed, cross-encoder rerank) are identical whatever the store;
-//! the local↔remote difference is entirely in the I/O stages (store open, vector ANN scan, BM25
+//! The CPU stages of recall (query embed, cross-encoder rerank) are identical whatever the memory;
+//! the local↔remote difference is entirely in the I/O stages (memory open, vector ANN scan, BM25
 //! scan, neighbor scan). To compare them fairly the bench downloads the `--remote` dataset to a
 //! temp dir and benchmarks that local copy against the same dataset over `hf://`.
 //!
@@ -19,7 +19,7 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use funes::hub::Store;
+use funes::hub::Memory;
 use funes::recall::recall;
 use hf_hub::HFClient;
 use std::path::Path;
@@ -35,7 +35,7 @@ struct Args {
     /// Dataset to benchmark (`org/repo` or `hf://…`), used for BOTH legs.
     #[arg(long, default_value = "dacorvo/funes-Glint-Research-Fable-5")]
     remote: String,
-    /// Warm iterations timed per store (after the one cold call).
+    /// Warm iterations timed per memory (after the one cold call).
     #[arg(long, default_value_t = 5)]
     iters: usize,
     /// Give the remote leg a throwaway temp HF cache so its cold call is a true download — your real
@@ -54,10 +54,10 @@ struct Args {
 }
 
 /// One timed `recall()` call: elapsed millis and the number of hits in the output.
-async fn time_recall(store: &Store, a: &Args) -> Result<(f64, usize)> {
+async fn time_recall(memory: &Memory, a: &Args) -> Result<(f64, usize)> {
     let t = Instant::now();
     let out = recall(
-        store.clone(),
+        memory.clone(),
         a.query.clone(),
         a.k,
         a.candidates,
@@ -74,7 +74,7 @@ async fn time_recall(store: &Store, a: &Args) -> Result<(f64, usize)> {
 }
 
 /// Download the `--remote` dataset's files into `dest` via the hf-hub crate, so the same data can be
-/// opened as a local store for the local leg. `snapshot_download` with `local_dir` writes straight to
+/// opened as a local memory for the local leg. `snapshot_download` with `local_dir` writes straight to
 /// `dest` and bypasses the hub cache, so it can't pre-warm the cache the remote leg reads — the
 /// remote "cold" call stays a true download. The client reads the token from the environment
 /// (`HF_TOKEN`, then the token file), the same source recall uses, so a private repo authenticates.
@@ -113,19 +113,19 @@ fn isolate_hub_cache() -> Result<TempDir> {
 }
 
 /// The timings the x-factor summary compares (milliseconds). The full row (incl. warm_hi, hits) is
-/// printed live by `bench_store`; only these are needed afterwards.
+/// printed live by `bench_memory`; only these are needed afterwards.
 struct Stats {
     cold: f64,
     warm_lo: f64,
     warm_med: f64,
 }
 
-async fn bench_store(name: &str, store: &Store, a: &Args) -> Result<Stats> {
-    let (cold, hits) = time_recall(store, a).await?;
+async fn bench_memory(name: &str, memory: &Memory, a: &Args) -> Result<Stats> {
+    let (cold, hits) = time_recall(memory, a).await?;
 
     let mut warm: Vec<f64> = Vec::with_capacity(a.iters);
     for _ in 0..a.iters {
-        warm.push(time_recall(store, a).await?.0);
+        warm.push(time_recall(memory, a).await?.0);
     }
     warm.sort_by(|x, y| x.partial_cmp(y).unwrap());
     let (warm_lo, warm_med, warm_hi) = if warm.is_empty() {
@@ -146,7 +146,7 @@ async fn bench_store(name: &str, store: &Store, a: &Args) -> Result<Stats> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let a = Args::parse();
-    let remote = Store::parse(a.remote.trim());
+    let remote = Memory::parse(a.remote.trim());
 
     // With --cold, redirect the hf-hub file cache to a temp dir for the whole run (held alive here)
     // so the remote leg's first read is a genuine download. The local-leg download writes via
@@ -158,12 +158,12 @@ async fn main() -> Result<()> {
     // so the downloaded copy isn't removed mid-benchmark.
     let local_dir = tempfile::Builder::new().prefix("funes-bench-local-").tempdir()?;
     download_dataset(a.remote.trim(), local_dir.path()).await?;
-    let local = Store::Local {
+    let local = Memory::Local {
         path: local_dir.path().to_path_buf(),
     };
 
     // Warm up the embed + rerank models once (against the local copy), so the one-time model load
-    // (hundreds of ms, identical for every store) is excluded from all timings below.
+    // (hundreds of ms, identical for every memory) is excluded from all timings below.
     eprintln!("loading models…");
     let _ = recall(local.clone(), a.query.clone(), 1, 5, 0.0, 0, None, None).await;
 
@@ -173,11 +173,11 @@ async fn main() -> Result<()> {
     );
     println!(
         "{:<8} {:>9} {:>9} {:>9} {:>9} {:>5}",
-        "store", "cold(ms)", "warm_lo", "warm_med", "warm_hi", "hits"
+        "memory", "cold(ms)", "warm_lo", "warm_med", "warm_hi", "hits"
     );
 
-    let l = bench_store("local", &local, &a).await?;
-    let r = bench_store("remote", &remote, &a).await?;
+    let l = bench_memory("local", &local, &a).await?;
+    let r = bench_memory("remote", &remote, &a).await?;
 
     // Headline: how much the remote tier costs over a local copy of the same data.
     let x = |remote: f64, local: f64| if local > 0.0 { remote / local } else { f64::NAN };

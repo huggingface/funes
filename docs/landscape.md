@@ -11,8 +11,8 @@ on **how much traction they have** — so the comparison is grounded, not abstra
 | Focus | Verbatim recall over coding-agent sessions | Compressed memory for coding agents | General-purpose LLM memory layer (coding via Skills) |
 | Language / footprint | Single Rust binary | TS/JS on Node + Bun; local HTTP worker | Python & TS SDK (+ Docker server / cloud) |
 | Ingest | **Deterministic — no LLM** (parse → chunk → embed) | LLM makes semantic summaries + tool-use observations | LLM extraction — one call distills a turn into "memories" |
-| Stored unit | The **verbatim passage** | Distilled summaries / observations | Distilled facts ("memories") |
-| Store model | Append-only, immutable | Derived, LLM-compressed summaries | Append-only (v3, Apr 2026; earlier versions reconciled ADD/UPDATE/DELETE) |
+| Kept unit | The **verbatim passage** | Distilled summaries / observations | Distilled facts ("memories") |
+| Memory model | Append-only, immutable | Derived, LLM-compressed summaries | Append-only (v3, Apr 2026; earlier versions reconciled ADD/UPDATE/DELETE) |
 | Provenance | **Exact & verbatim** (`session_id` + `turn_uuid`) | Observation IDs — cite the summary, not the raw turn | None described |
 | Retrieval | vector + BM25 → RRF → **cross-encoder rerank** → recency → neighbors | FTS5 + Chroma hybrid; progressive disclosure (search → timeline → get) | semantic + BM25 + entity, fused + temporal reasoning (no rerank noted) |
 | Delivery | **Pulled only** — never injected | Injected via hooks + queryable | Pulled via SDK/API; the app decides when to inject |
@@ -21,7 +21,7 @@ on **how much traction they have** — so the comparison is grounded, not abstra
 
 The through-line matches [RATIONALE.md](RATIONALE.md): funes keeps the **raw passage** with exact
 provenance and serves it **only when asked**; the others **distill with an LLM** and lean on
-**proactive injection**. Note mem0 v3 (Apr 2026) moved to an append-only store — so *append-only*
+**proactive injection**. Note mem0 v3 (Apr 2026) moved to an append-only memory — so *append-only*
 no longer separates funes from mem0; the durable differences are **no-LLM/verbatim ingest**,
 **provenance**, and **data you own**.
 
