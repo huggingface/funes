@@ -1,7 +1,7 @@
 //! Parse hermes sessions from its SQLite state store (`~/.hermes/state.db`) into the shared
 //! [`crate::trace`] turn/block model. Unlike Claude/Codex/pi (one JSONL file per session), hermes
 //! keeps every session's messages in one WAL SQLite DB: a `sessions` table (one row per session,
-//! carrying `cwd`) and a `messages` table (one row per message, ordered by the `id` autoincrement).
+//! optionally carrying `cwd`) and a `messages` table (one row per message, ordered by the `id`).
 //!
 //! One `messages` row becomes one [`Turn`]: `user`/`assistant`/`tool` roles map straight across,
 //! an assistant row expands into thinking (`reasoning_content`) + text (`content`) + tool_use
@@ -38,9 +38,21 @@ fn open_ro(db: &Path) -> Result<Connection> {
         .with_context(|| format!("opening hermes state.db at {}", db.display()))
 }
 
+/// Whether the `sessions` table has a `cwd` column. Hermes schema versions differ — some omit it —
+/// and naming a missing column is a hard SQL error, not a NULL, so callers probe before selecting
+/// it; without it the workdir facet just falls back.
+fn sessions_has_cwd(conn: &Connection) -> Result<bool> {
+    Ok(conn
+        .prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'cwd'")?
+        .exists([])?)
+}
+
 /// The workdir facet for a session: its `sessions.cwd`, munged the way every parser munges a cwd,
 /// or `None` when the session has no recorded cwd.
 fn session_workdir(conn: &Connection, session_id: &str) -> Result<Option<String>> {
+    if !sessions_has_cwd(conn)? {
+        return Ok(None);
+    }
     let cwd: Option<String> = conn
         .query_row("SELECT cwd FROM sessions WHERE id = ?1", [session_id], |r| r.get(0))
         .or_else(|e| match e {
@@ -55,14 +67,20 @@ fn session_workdir(conn: &Connection, session_id: &str) -> Result<Option<String>
 /// unchanged since the last index is skipped.
 pub fn sessions_with_watermark(db: &Path) -> Result<Vec<SessionUnit>> {
     let conn = open_ro(db)?;
-    // `messages` drives the query, so a session with no messages is already excluded (nothing to
-    // index) whatever the join. The join is LEFT to tolerate a message whose `session_id` has no
-    // `sessions` row: `sessions.cwd` is then NULL, coalesced to '' (workdir falls back).
-    let mut stmt = conn.prepare(
-        "SELECT m.session_id, COALESCE(s.cwd, ''), MAX(m.id) \
+    // Select `s.cwd` only when the column exists (see `sessions_has_cwd`). The LEFT join tolerates a
+    // message whose `session_id` has no `sessions` row; `messages` driving the query already
+    // excludes sessions with no messages.
+    let cwd = if sessions_has_cwd(&conn)? {
+        "COALESCE(s.cwd, '')"
+    } else {
+        "''"
+    };
+    let sql = format!(
+        "SELECT m.session_id, {cwd}, MAX(m.id) \
          FROM messages m LEFT JOIN sessions s ON s.id = m.session_id \
-         GROUP BY m.session_id ORDER BY m.session_id",
-    )?;
+         GROUP BY m.session_id ORDER BY m.session_id"
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], |r| {
         let session_id: String = r.get(0)?;
         let cwd: String = r.get(1)?;
@@ -283,8 +301,46 @@ mod tests {
         (dir, path)
     }
 
+    /// A temp state.db whose `sessions` table omits `cwd` entirely (the hermes schema_version 11
+    /// shape) — the case that used to crash the index.
+    fn make_db_no_cwd() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, started_at REAL);
+             CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL,
+                content TEXT, tool_call_id TEXT, tool_calls TEXT, tool_name TEXT,
+                timestamp REAL NOT NULL, reasoning TEXT, reasoning_content TEXT
+             );",
+        )
+        .unwrap();
+        conn.execute("INSERT INTO sessions (id) VALUES ('sess')", []).unwrap();
+        (dir, path)
+    }
+
     fn insert(path: &Path, sql: &str) {
         Connection::open(path).unwrap().execute_batch(sql).unwrap();
+    }
+
+    #[test]
+    fn tolerates_a_sessions_table_without_cwd() {
+        let (_dir, path) = make_db_no_cwd();
+        insert(
+            &path,
+            "INSERT INTO messages (session_id, role, content, timestamp) \
+             VALUES ('sess','user','hi',1000.0);",
+        );
+        // The watermark query must not crash on the missing `cwd` column.
+        let units = sessions_with_watermark(&path).unwrap();
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].session_id, "sess");
+        assert_eq!(units[0].workdir, "", "no cwd column → no workdir facet");
+        // Parsing falls back to the caller's workdir.
+        let turns = turns_from_state_db(&path, "sess", "fallback").unwrap();
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].workdir, "fallback");
     }
 
     #[test]
