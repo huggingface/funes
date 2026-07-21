@@ -279,7 +279,7 @@ fn collect_units(sources: &[Box<dyn source::TraceSource>]) -> Result<Vec<(usize,
             Ok(src_units) => units.extend(src_units.into_iter().map(|u| (i, u))),
             Err(e) if isolate => {
                 errors += 1;
-                eprintln!("skipping source ({}): {:#}", src.describe(), e);
+                eprintln!("{}: enumeration failed, skipping — {:#}", src.describe(), e);
             }
             Err(e) => return Err(e.context(src.describe())),
         }
