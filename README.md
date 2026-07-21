@@ -5,11 +5,9 @@ Code, Codex, and pi and lets any agent recall the past decisions, rationale, and
 memory is a dataset you can publish to the Hugging Face Hub — then any machine, teammate,
 or agent can recall from it.
 
-![Choosing an embedding model in Claude Code, then Codex recalling that decision in a separate session](docs/img/cross-agents.gif)
+![Asking a published memory why funes is append-only; funes recalls the relevant sessions and a coding agent answers, grounded, naming its sources](docs/img/ask.gif)
 
-*Different agents, one memory: Claude picks an embedding model; a session-end hook indexes it on its own; Codex — a separate agent — uses funes to recall the decision.*
-
-*Look closely at Codex's hits: some timestamps predate this recording. Those are earlier takes of this very demo — funes had already memorized the rehearsals. An append-only memory has no clean take, so we kept the Droste effect rather than pretend otherwise.*
+*Put a question to a memory and borrow a coding agent to answer it: funes recalls the relevant sessions, hands them over, and you get one grounded answer that names the sessions it drew from — nothing installed. Here it reads the public `huggingface/funes-memory` dataset named right in the command.*
 
 ## Features at a glance
 
