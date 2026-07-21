@@ -19,7 +19,7 @@ rank) → cross-encoder rerank → recency reweight → neighbor expansion. Agen
 ```
 [<ts>] <harness> <workdir>/<session8> <block_type>  score=<s.sss>
   → get <session_id> <turn_uuid> --memory <label>
-<the chunk, first 400 chars>
+<the full chunk text>
   ~ [<role> <block_type> seq<N>] <neighbor chunk, first 160 chars>
 ---
 ```

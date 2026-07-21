@@ -25,7 +25,7 @@ Each hit carries its provenance and a ready-to-run drill-down line:
 ```
 [<ts>] <harness> <workdir>/<session8> <block_type>  score=<s.sss>
   → get <session_id> <turn_uuid> --memory <label>
-<the chunk, first 400 chars>
+<the full chunk text>
   ~ [<role> <block_type> seq<N>] <neighbor chunk, first 160 chars>
 ---
 ```

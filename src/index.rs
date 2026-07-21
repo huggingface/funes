@@ -986,7 +986,7 @@ mod tests {
             source_path: String::new(),
             harness: "claude_code".into(),
         }];
-        // A text-only pass redacts the text block but leaves the tool_result it won't memory untouched.
+        // A text-only pass redacts the text block but leaves the tool_result it won't store untouched.
         redact_turns(&mut turns, &Fake, &[chunk::Tier::Text], true).unwrap();
         assert!(
             turns[0].blocks[0].text.contains("[REDACTED:PrivateKey]"),
