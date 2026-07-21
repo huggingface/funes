@@ -10,10 +10,10 @@
 
 use anyhow::{anyhow, bail, Result};
 use serde_json::Value;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, IsTerminal, Read};
 use std::process::{Command, ExitStatus, Stdio};
 
-use crate::banner::Banner;
+use crate::banner::{accent, band_width, Banner};
 use crate::hub::Memory;
 use crate::recall::{check_readable, memory_hint, recall_hits};
 use crate::render;
@@ -294,7 +294,24 @@ fn run_streaming(
 fn conclude(agent: &str, run: Run) -> Result<()> {
     if run.status.success() {
         if let Some(answer) = &run.answer {
-            println!("{}", answer.trim_end());
+            let answer = answer.trim_end();
+            // A gold rule — the width of the wait animation's band — sets the answer off from the
+            // command line above, with the trailing provenance line dimmed. Terminal-only, and off
+            // under NO_COLOR — a redirected or piped answer stays plain text.
+            if std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none() {
+                println!("{}", accent(&"─".repeat(band_width())));
+                let lines: Vec<&str> = answer.split('\n').collect();
+                let last = lines.len().saturating_sub(1);
+                for (i, line) in lines.iter().enumerate() {
+                    if i == last && lines.len() > 1 {
+                        println!("{}", render::dim(line, true));
+                    } else {
+                        println!("{line}");
+                    }
+                }
+            } else {
+                println!("{answer}");
+            }
             return Ok(());
         }
     }
