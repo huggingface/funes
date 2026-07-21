@@ -72,11 +72,7 @@ Your local memory is a dataset, and it shares the way one does: publish it to a 
 **dataset** repo you own and it becomes an artifact on the Hub like any model or dataset — owned by
 your account or org, gated by your token, readable by whoever you say. Not just the code of a
 project, but the *process* behind it — the decisions, dead ends, and rationale — becomes something
-an agent can recall:
-
-![pi recalling a past decision from a shared Hugging Face dataset named in the prompt — a project this machine never worked on](docs/img/hub-store.gif)
-
-*A project this machine never worked on: the prompt names `dacorvo/funes-Glint-Research-Fable-5` — ~21.6k chunks on the Hub — and pi recalls the past decision straight from it, one `memory` argument on the recall call. Nothing attached, no local index.*
+an agent can recall.
 
 Bind a memory when you add funes to an agent and it recalls from there and keeps it current on its
 own; or run the two commands directly:
