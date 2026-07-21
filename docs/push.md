@@ -91,10 +91,12 @@ funes status <org>/<repo>    # …and what this host has or has not pushed there
 ```
 
 `funes status` tells you whether recall is reading your own memory yet, and whether a newer funes
-release is out. For a personal remote memory it reports how many local sessions are fully pushed
-and how many have new or unpushed chunks. This comes from a per-remote receipt kept on this host,
-so sessions contributed by other hosts do not distort the result and status never scans the remote
-to compute it. Run `funes push <memory>` once to initialize the receipt for an existing memory.
+release is out. Local-index sections also report native sessions still pending a full index, using
+the lightweight transcript signatures in `state.json`. For a personal remote memory, status reports
+how many local sessions are fully pushed and how many have new or unpushed chunks. This comes from
+a per-remote receipt kept on this host, so sessions contributed by other hosts do not distort the
+result and status never scans the remote to compute it. Run `funes push <memory>` once to initialize
+the receipt for an existing memory.
 
 ## See also
 

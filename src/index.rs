@@ -227,6 +227,48 @@ fn unit_current(entry: Option<&UnitState>, sig: &str, target: Tier) -> bool {
     entry.is_some_and(|e| e.sig == sig && e.level >= target)
 }
 
+/// Lightweight coverage of the native session sources present on this host. This uses only unit
+/// enumeration/stat signatures plus `state.json`; it never parses transcripts or starts inference.
+pub(crate) struct IndexCoverage {
+    pub total: usize,
+    pub pending: usize,
+}
+
+fn index_coverage(units: &[source::Unit], state: &HashMap<String, UnitState>) -> IndexCoverage {
+    let target = *Tier::ALL.iter().max().expect("Tier::ALL is non-empty");
+    let pending = units
+        .iter()
+        .filter(|unit| {
+            unit.signature
+                .as_ref()
+                .is_none_or(|sig| !unit_current(state.get(&unit.key), sig, target))
+        })
+        .count();
+    IndexCoverage {
+        total: units.len(),
+        pending,
+    }
+}
+
+/// Current native sessions that have not reached every indexing tier. `None` means the local
+/// incremental state is absent/unreadable or every present source failed to enumerate; status then
+/// omits the line rather than guessing from the Lance rows.
+pub(crate) fn local_index_coverage() -> Option<IndexCoverage> {
+    let state: HashMap<String, UnitState> = std::fs::read_to_string(dataset::funes_dir().join("state.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())?;
+    let roots = crate::harness::known_harness_roots();
+    let mut units = Vec::new();
+    let mut enumerated = false;
+    for (path, harness) in roots {
+        if let Ok(found) = source::open_with_harness(&path, None, Some(harness)).units() {
+            enumerated = true;
+            units.extend(found);
+        }
+    }
+    enumerated.then(|| index_coverage(&units, &state))
+}
+
 /// A set-up indexer: it holds the memory lock, embedder, dataset, redaction scanner, and incremental
 /// state, so a caller can index units in whatever batches it likes — one at a time to check the
 /// clock between them, or all at once — without reloading the model. Build the indexes once at the
@@ -958,6 +1000,48 @@ mod tests {
         assert!(unit_current(Some(&full), "10:20", Tier::ToolResult));
         // No record → not current.
         assert!(!unit_current(None, "10:20", Tier::Text));
+    }
+
+    #[test]
+    fn index_coverage_counts_stale_partial_and_unrecorded_units() {
+        let unit = |key: &str, sig: Option<&str>| source::Unit {
+            key: key.to_string(),
+            signature: sig.map(str::to_string),
+            is_subagent: false,
+        };
+        let units = vec![
+            unit("current", Some("1")),
+            unit("partial", Some("2")),
+            unit("stale", Some("new")),
+            unit("new", Some("4")),
+            unit("unsigned", None),
+        ];
+        let state = HashMap::from([
+            (
+                "current".to_string(),
+                UnitState {
+                    sig: "1".into(),
+                    level: Tier::ToolResult,
+                },
+            ),
+            (
+                "partial".to_string(),
+                UnitState {
+                    sig: "2".into(),
+                    level: Tier::Text,
+                },
+            ),
+            (
+                "stale".to_string(),
+                UnitState {
+                    sig: "old".into(),
+                    level: Tier::ToolResult,
+                },
+            ),
+        ]);
+        let coverage = index_coverage(&units, &state);
+        assert_eq!(coverage.total, 5);
+        assert_eq!(coverage.pending, 4);
     }
 
     #[test]

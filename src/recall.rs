@@ -802,12 +802,23 @@ async fn session_count(ds: &Dataset) -> Option<usize> {
     Some(sessions.len())
 }
 
+fn index_coverage_line() -> Option<String> {
+    let coverage = crate::index::local_index_coverage()?;
+    Some(format!(
+        "native sessions pending index: {}/{}\n",
+        coverage.pending, coverage.total
+    ))
+}
+
 /// The indexation lines of a local memory: how many sessions it holds and when it was last
 /// written to (an `index` or `scrub` run). A version with no recorded timestamp is omitted.
 async fn index_lines(ds: &Dataset, now: DateTime<Utc>) -> String {
     let mut out = String::new();
     if let Some(n) = session_count(ds).await {
         let _ = writeln!(out, "sessions: {n}");
+    }
+    if let Some(line) = index_coverage_line() {
+        out.push_str(&line);
     }
     let t = ds.version().timestamp;
     if t.timestamp() > 0 {
@@ -859,6 +870,9 @@ pub async fn status(memory: Memory) -> Result<String> {
                         let local_sessions = session_count(&local).await;
                         if let Some(n) = local_sessions {
                             let _ = writeln!(out, "sessions: {n}");
+                        }
+                        if let Some(line) = index_coverage_line() {
+                            out.push_str(&line);
                         }
                         // A shared remote's total says nothing about this host's backlog. Personal
                         // memories use the local receipt maintained by push; project memories have
