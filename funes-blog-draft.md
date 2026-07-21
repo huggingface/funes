@@ -2,8 +2,6 @@
 DRAFT — funes launch blog post (Hugging Face Hub blog)
 Positioned as the practical continuation of "Software Forgets: Agent Traces Are the Memory"
 (cfahlgren1, 2026-05-19).
-
-Asset paths below assume the three current GIFs are copied from docs/img/ into the blog assets.
 -->
 
 ---
@@ -60,7 +58,7 @@ From there, you just work. When a task touches a past decision, rationale, or fi
 the agent can reach for `recall` itself. You do not need to remember the old session or
 paste its context into the new one.
 
-![A coding agent reaches for funes on its own, recalls an earlier decision, and grounds its answer in the retrieved session](/blog/assets/funes/recall.gif)
+![A coding agent reaches for funes on its own, recalls an earlier decision, and grounds its answer in the retrieved session](docs/img/recall.gif)
 
 *With funes added, recall happens inside the conversation: the agent reaches for its
 memory on its own and names the session behind its answer.*
@@ -133,7 +131,7 @@ your own:
 funes ask claude "why is funes append-only" --memory huggingface/funes-memory
 ```
 
-![Asking the published funes memory why it is append-only; funes retrieves the relevant sessions and a coding agent answers from them](/blog/assets/funes/ask.gif)
+![Asking the published funes memory why it is append-only; funes retrieves the relevant sessions and a coding agent answers from them](docs/img/ask.gif)
 
 *`funes ask` is the read-only, one-question sibling of `funes add`: it recalls the
 passages, hands them to a coding agent, and returns a grounded answer that names its
@@ -150,7 +148,7 @@ Claude Code, continue it in Codex next week, and the second agent can recall the
 agent's reasoning. Use pi with a local model or one served through the Hugging Face
 router, then return to Claude: the reasoning model changed, but the memory did not.
 
-![Claude Code chooses an embedding model, then Codex recalls that decision in a separate session](/blog/assets/funes/cross-agents.gif)
+![Claude Code chooses an embedding model, then Codex recalls that decision in a separate session](docs/img/cross-agents.gif)
 
 *Claude makes a decision; a hook indexes it; Codex recalls it in another session. The
 older hits in the demo are earlier recordings of the same experiment — an append-only
