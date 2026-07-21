@@ -19,9 +19,9 @@ use std::process::Command;
 /// trufflehog's exit code (under `--fail`) when at least one result was found.
 const FOUND: i32 = 183;
 
-/// The trufflehog release whose JSON output schema this module parses. CI installs the same
-/// version; accepting a moving CLI contract would make fail-closed parsing impossible.
-const SUPPORTED_TRUFFLEHOG_VERSION: &str = "3.95.5";
+/// The oldest trufflehog release whose JSON output schema this module supports. CI pins this
+/// baseline; newer releases are accepted and still pass through the strict output-contract parser.
+const MINIMUM_TRUFFLEHOG_VERSION: &str = "3.95.5";
 
 /// trufflehog's decoder name for a secret found directly in the text (not inside base64/UTF-16/…).
 /// Only these are redacted in place; an encoded match can't be reconstructed, so its block is dropped.
@@ -61,8 +61,8 @@ pub struct Trufflehog {
 }
 
 impl Trufflehog {
-    /// Locate the trufflehog binary and verify the output contract it implements. A different
-    /// version is treated like a missing scanner: callers must not assume its output means clean.
+    /// Locate the trufflehog binary and enforce the minimum supported version. Newer versions are
+    /// accepted; their result records still have to satisfy the fail-closed schema checks.
     pub fn find() -> Result<Self> {
         let bin = find_in(|k| std::env::var_os(k), |p| p.is_file())?;
         Self::from_path(bin)
@@ -75,20 +75,20 @@ impl Trufflehog {
             .with_context(|| format!("checking trufflehog version at {}", bin.display()))?;
         if !out.status.success() {
             bail!(
-                "trufflehog at {} could not report its version ({:?}); supported version is {}",
+                "trufflehog at {} could not report its version ({:?}); minimum version is {}",
                 bin.display(),
                 out.status.code(),
-                SUPPORTED_TRUFFLEHOG_VERSION
+                MINIMUM_TRUFFLEHOG_VERSION
             );
         }
         let version = parse_version(&out.stdout).with_context(|| {
             format!(
-                "checking trufflehog at {}; supported version is {}",
+                "checking trufflehog at {}; minimum version is {}",
                 bin.display(),
-                SUPPORTED_TRUFFLEHOG_VERSION
+                MINIMUM_TRUFFLEHOG_VERSION
             )
         })?;
-        require_supported_version(&version, &bin)?;
+        require_minimum_version(&version, &bin)?;
         Ok(Self { bin, version })
     }
 }
@@ -135,12 +135,30 @@ fn parse_version(stdout: &[u8]) -> Result<String> {
     Ok(version.to_string())
 }
 
-fn require_supported_version(version: &str, bin: &Path) -> Result<()> {
-    if version != SUPPORTED_TRUFFLEHOG_VERSION {
+fn numeric_version(version: &str) -> Result<(u64, u64, u64)> {
+    let core = version.split(['-', '+']).next().unwrap_or_default();
+    let mut parts = core.split('.');
+    let major = parts.next().and_then(|v| v.parse().ok());
+    let minor = parts.next().and_then(|v| v.parse().ok());
+    let patch = parts.next().and_then(|v| v.parse().ok());
+    if parts.next().is_some() {
+        bail!("expected a three-part semantic version");
+    }
+    match (major, minor, patch) {
+        (Some(major), Some(minor), Some(patch)) => Ok((major, minor, patch)),
+        _ => bail!("expected a numeric semantic version"),
+    }
+}
+
+fn require_minimum_version(version: &str, bin: &Path) -> Result<()> {
+    let detected = numeric_version(version)
+        .with_context(|| format!("unrecognized trufflehog version {version} at {}", bin.display()))?;
+    let minimum = numeric_version(MINIMUM_TRUFFLEHOG_VERSION).expect("valid pinned minimum version");
+    if detected < minimum || (detected == minimum && version.contains('-')) {
         bail!(
-            "unsupported trufflehog version {version} at {}; funes requires {}",
+            "trufflehog version {version} at {} is too old; funes requires {} or newer",
             bin.display(),
-            SUPPORTED_TRUFFLEHOG_VERSION
+            MINIMUM_TRUFFLEHOG_VERSION
         );
     }
     Ok(())
@@ -468,10 +486,10 @@ mod tests {
 
     #[test]
     fn scanner_contract_rejects_exit_183_without_records() {
-        let err = interpret_scan_output(Some(FOUND), b"", b"", SUPPORTED_TRUFFLEHOG_VERSION)
+        let err = interpret_scan_output(Some(FOUND), b"", b"", MINIMUM_TRUFFLEHOG_VERSION)
             .unwrap_err()
             .to_string();
-        assert!(err.contains(SUPPORTED_TRUFFLEHOG_VERSION), "{err}");
+        assert!(err.contains(MINIMUM_TRUFFLEHOG_VERSION), "{err}");
         assert!(err.contains("no valid findings"), "{err}");
     }
 
@@ -479,10 +497,10 @@ mod tests {
     fn scanner_contract_rejects_malformed_json_without_echoing_it() {
         let secret = "DO_NOT_ECHO";
         let malformed = format!("{{\"DetectorName\":\"Test\",\"Raw\":\"{secret}\"");
-        let err = interpret_scan_output(Some(FOUND), malformed.as_bytes(), b"", SUPPORTED_TRUFFLEHOG_VERSION)
+        let err = interpret_scan_output(Some(FOUND), malformed.as_bytes(), b"", MINIMUM_TRUFFLEHOG_VERSION)
             .unwrap_err()
             .to_string();
-        assert!(err.contains(SUPPORTED_TRUFFLEHOG_VERSION), "{err}");
+        assert!(err.contains(MINIMUM_TRUFFLEHOG_VERSION), "{err}");
         assert!(err.contains("record 1"), "{err}");
         assert!(!err.contains(secret), "scanner output leaked in error: {err}");
     }
@@ -490,21 +508,29 @@ mod tests {
     #[test]
     fn scanner_contract_rejects_an_unknown_json_schema() {
         let output = br#"{"DetectorName":"Test","Raw":"DO_NOT_ECHO","DecoderName":"PLAIN"}"#;
-        let err = interpret_scan_output(Some(FOUND), output, b"", SUPPORTED_TRUFFLEHOG_VERSION)
+        let err = interpret_scan_output(Some(FOUND), output, b"", MINIMUM_TRUFFLEHOG_VERSION)
             .unwrap_err()
             .to_string();
-        assert!(err.contains(SUPPORTED_TRUFFLEHOG_VERSION), "{err}");
+        assert!(err.contains(MINIMUM_TRUFFLEHOG_VERSION), "{err}");
         assert!(err.contains("record 1"), "{err}");
         assert!(!err.contains("DO_NOT_ECHO"), "scanner output leaked in error: {err}");
     }
 
     #[test]
-    fn scanner_contract_rejects_an_unsupported_version() {
-        let err = require_supported_version("3.95.4", Path::new("/fake/trufflehog"))
+    fn scanner_contract_rejects_a_version_below_the_baseline() {
+        let err = require_minimum_version("3.95.4", Path::new("/fake/trufflehog"))
             .unwrap_err()
             .to_string();
         assert!(err.contains("3.95.4"), "{err}");
-        assert!(err.contains(SUPPORTED_TRUFFLEHOG_VERSION), "{err}");
+        assert!(err.contains(MINIMUM_TRUFFLEHOG_VERSION), "{err}");
+    }
+
+    #[test]
+    fn scanner_contract_accepts_the_baseline_and_newer_versions() {
+        for version in [MINIMUM_TRUFFLEHOG_VERSION, "3.96.0", "4.0.0"] {
+            require_minimum_version(version, Path::new("/fake/trufflehog"))
+                .unwrap_or_else(|e| panic!("{version} should be accepted: {e}"));
+        }
     }
 
     /// Detectors located in each text — the view `scan_blocks` callers derive for "which texts are
