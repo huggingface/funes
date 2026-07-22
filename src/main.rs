@@ -572,7 +572,7 @@ async fn curate_review(memory: &hub::Memory, project: Option<&str>) -> Result<()
         }
         turns.retain(|turn| !turn.blocks.is_empty());
     }
-    let (sketches, sketch_error) = match session_sketch::generate_many(
+    let (sketches, sketch_error) = match session_sketch::generate_many_cached(
         &hub::Memory::local(),
         &ids,
         session_sketch::SketchOptions::default(),

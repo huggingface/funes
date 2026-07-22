@@ -9,11 +9,13 @@ use crate::dataset;
 use crate::hub::Memory;
 use anyhow::{bail, Context, Result};
 use arrow_array::{Array, FixedSizeListArray, Float32Array, Int64Array, RecordBatch, StringArray};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 // Initial host validation found that 8/16k retained the complete arc of focused sessions while the
@@ -33,6 +35,8 @@ const DUPLICATE_LSH_BITS: usize = 10;
 const DUPLICATE_BUCKET_HEAD: usize = 8;
 const DUPLICATE_BUCKET_RECENT: usize = 40;
 const DUPLICATE_TEMPORAL_WINDOW: usize = 16;
+const SKETCH_SCHEMA_VERSION: u32 = 1;
+const SELECTOR_VERSION: &str = "session-sketch-v2-experimental";
 
 #[derive(Clone)]
 struct RawRow {
@@ -130,10 +134,10 @@ pub struct SketchBatch {
     pub failures: HashMap<String, String>,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 pub struct SessionSketch {
     pub schema_version: u32,
-    pub selector_version: &'static str,
+    pub selector_version: String,
     pub memory: String,
     pub session_id: String,
     pub source_fingerprint: String,
@@ -145,7 +149,7 @@ pub struct SessionSketch {
     pub diagnostics: Diagnostics,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 pub struct SelectedUnit {
     pub id: String,
     pub turn_uuid: String,
@@ -154,7 +158,7 @@ pub struct SelectedUnit {
     pub reasons: Vec<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 pub struct Evidence {
     pub id: String,
     pub turn_uuid: String,
@@ -170,12 +174,12 @@ pub struct Evidence {
     pub text: String,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 pub struct Diagnostics {
     pub axes: usize,
     pub transitions: usize,
     pub near_duplicate_groups: usize,
-    pub duplicate_strategy: &'static str,
+    pub duplicate_strategy: String,
     pub duplicate_vector_comparisons: usize,
     pub candidates: usize,
     pub rendered_characters: usize,
@@ -227,6 +231,27 @@ pub async fn generate(memory: &Memory, session_id: &str, options: SketchOptions)
 /// failures are isolated in the returned batch; opening or scanning the memory still fails the
 /// whole operation.
 pub async fn generate_many(memory: &Memory, session_ids: &[String], options: SketchOptions) -> Result<SketchBatch> {
+    generate_many_inner(memory, session_ids, options, None).await
+}
+
+/// Build or reuse sketches for a picker. Cache entries live under the funes home and are accepted
+/// only when the complete source/embedding fingerprints, selector version, schema, and budgets
+/// match. A corrupt or unwritable cache quietly degrades to deterministic generation.
+pub async fn generate_many_cached(
+    memory: &Memory,
+    session_ids: &[String],
+    options: SketchOptions,
+) -> Result<SketchBatch> {
+    let cache = dataset::funes_dir().join("cache/session-sketch");
+    generate_many_inner(memory, session_ids, options, Some(&cache)).await
+}
+
+async fn generate_many_inner(
+    memory: &Memory,
+    session_ids: &[String],
+    options: SketchOptions,
+    cache_root: Option<&Path>,
+) -> Result<SketchBatch> {
     validate_options(options)?;
     if session_ids.is_empty() {
         return Ok(SketchBatch::default());
@@ -241,6 +266,7 @@ pub async fn generate_many(memory: &Memory, session_ids: &[String], options: Ske
     }
 
     let mut batch = SketchBatch::default();
+    let memory_label = memory.label();
     for session_id in session_ids {
         let Some(rows) = by_session.remove(session_id) else {
             batch
@@ -248,8 +274,25 @@ pub async fn generate_many(memory: &Memory, session_ids: &[String], options: Ske
                 .insert(session_id.clone(), "session has no stored chunks".to_string());
             continue;
         };
+
+        let source_fingerprint = fingerprint(&rows);
+        let cache_path = cache_root.map(|root| cache_path(root, &memory_label, session_id));
+        if let Some(sketch) = cache_path.as_deref().and_then(|path| {
+            load_cached_sketch(
+                path,
+                &memory_label,
+                session_id,
+                &source_fingerprint,
+                &embedding_fingerprint,
+                options,
+            )
+        }) {
+            batch.sketches.insert(session_id.clone(), sketch);
+            continue;
+        }
+
         match build_sketch(
-            memory.label(),
+            memory_label.clone(),
             session_id.clone(),
             rows,
             embedding_fingerprint.clone(),
@@ -258,6 +301,9 @@ pub async fn generate_many(memory: &Memory, session_ids: &[String], options: Ske
             Instant::now(),
         ) {
             Ok(sketch) => {
+                if let Some(path) = cache_path.as_deref() {
+                    let _ = store_cached_sketch(path, &sketch);
+                }
                 batch.sketches.insert(session_id.clone(), sketch);
             }
             Err(error) => {
@@ -266,6 +312,68 @@ pub async fn generate_many(memory: &Memory, session_ids: &[String], options: Ske
         }
     }
     Ok(batch)
+}
+
+fn cache_path(root: &Path, memory: &str, session_id: &str) -> PathBuf {
+    let mut hash = Sha256::new();
+    hash.update(memory.as_bytes());
+    hash.update([0]);
+    hash.update(session_id.as_bytes());
+    root.join(format!("{}.json", hex::encode(hash.finalize())))
+}
+
+fn load_cached_sketch(
+    path: &Path,
+    memory: &str,
+    session_id: &str,
+    source_fingerprint: &str,
+    embedding_fingerprint: &str,
+    options: SketchOptions,
+) -> Option<SessionSketch> {
+    let file = std::fs::File::open(path).ok()?;
+    let sketch: SessionSketch = serde_json::from_reader(file).ok()?;
+    cache_matches(
+        &sketch,
+        memory,
+        session_id,
+        source_fingerprint,
+        embedding_fingerprint,
+        options,
+    )
+    .then_some(sketch)
+}
+
+fn cache_matches(
+    sketch: &SessionSketch,
+    memory: &str,
+    session_id: &str,
+    source_fingerprint: &str,
+    embedding_fingerprint: &str,
+    options: SketchOptions,
+) -> bool {
+    sketch.schema_version == SKETCH_SCHEMA_VERSION
+        && sketch.selector_version == SELECTOR_VERSION
+        && sketch.memory == memory
+        && sketch.session_id == session_id
+        && sketch.source_fingerprint == source_fingerprint
+        && sketch.embedding_fingerprint == embedding_fingerprint
+        && sketch.diagnostics.budget == options.budget
+        && sketch.diagnostics.char_budget == options.char_budget
+}
+
+fn store_cached_sketch(path: &Path, sketch: &SessionSketch) -> Result<()> {
+    let parent = path.parent().context("session-sketch cache path has no parent")?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("creating session-sketch cache at {}", parent.display()))?;
+    let mut staged = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("staging session-sketch cache in {}", parent.display()))?;
+    serde_json::to_writer(&mut staged, sketch).context("serializing session-sketch cache")?;
+    staged.flush().context("flushing session-sketch cache")?;
+    staged
+        .persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("replacing session-sketch cache at {}", path.display()))?;
+    Ok(())
 }
 
 fn validate_options(options: SketchOptions) -> Result<()> {
@@ -502,8 +610,8 @@ fn build_sketch(
         .collect();
 
     Ok(SessionSketch {
-        schema_version: 1,
-        selector_version: "session-sketch-v2-experimental",
+        schema_version: SKETCH_SCHEMA_VERSION,
+        selector_version: SELECTOR_VERSION.to_string(),
         memory,
         session_id,
         source_fingerprint,
@@ -516,7 +624,7 @@ fn build_sketch(
             axes,
             transitions,
             near_duplicate_groups: duplicate_stats.groups,
-            duplicate_strategy: duplicate_stats.strategy,
+            duplicate_strategy: duplicate_stats.strategy.to_string(),
             duplicate_vector_comparisons: duplicate_stats.vector_comparisons,
             candidates: pool.order.len(),
             rendered_characters,
@@ -1348,6 +1456,51 @@ fn preview_reason_labels(reasons: &[String]) -> Vec<&'static str> {
 mod tests {
     use super::*;
 
+    fn raw_row(seq: i64, text: &str) -> RawRow {
+        RawRow {
+            session_id: "session".into(),
+            id: format!("id-{seq}"),
+            text: text.into(),
+            turn_uuid: format!("turn-{seq}"),
+            seq,
+            ts: "2026-07-22T00:00:00Z".into(),
+            role: "user".into(),
+            block_type: "text".into(),
+            tool_name: String::new(),
+            block_idx: 0,
+            split_idx: 0,
+            vector: Some(vec![1.0, 0.0]),
+        }
+    }
+
+    fn cached_sketch_fixture() -> SessionSketch {
+        SessionSketch {
+            schema_version: SKETCH_SCHEMA_VERSION,
+            selector_version: SELECTOR_VERSION.into(),
+            memory: "local-memory".into(),
+            session_id: "session".into(),
+            source_fingerprint: "source".into(),
+            embedding_fingerprint: "embedding".into(),
+            source_chunks: 1,
+            eligible_units: 1,
+            selected_units: Vec::new(),
+            evidence: Vec::new(),
+            diagnostics: Diagnostics {
+                axes: 0,
+                transitions: 0,
+                near_duplicate_groups: 0,
+                duplicate_strategy: "exact".into(),
+                duplicate_vector_comparisons: 0,
+                candidates: 0,
+                rendered_characters: 0,
+                budget: DEFAULT_BUDGET,
+                char_budget: DEFAULT_CHAR_BUDGET,
+                elapsed_ms: 1,
+                fallback: None,
+            },
+        }
+    }
+
     fn unit(seq: i64, role: &str, vector: &[f32], text: &str) -> Unit {
         Unit {
             id: format!("id-{seq}-{role}"),
@@ -1373,6 +1526,52 @@ mod tests {
     }
 
     #[test]
+    fn source_fingerprint_invalidates_growth_and_same_count_rewrites() {
+        let original = vec![raw_row(1, "original")];
+        let original_fingerprint = fingerprint(&original);
+
+        let mut grown = original.clone();
+        grown.push(raw_row(2, "new turn"));
+        assert_ne!(fingerprint(&grown), original_fingerprint);
+
+        let mut rewritten = original;
+        rewritten[0].text = "rewritten".into();
+        assert_ne!(fingerprint(&rewritten), original_fingerprint);
+    }
+
+    #[test]
+    fn sketch_cache_round_trips_and_rejects_stale_keys() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = cache_path(temp.path(), "local-memory", "session");
+        let sketch = cached_sketch_fixture();
+        let options = SketchOptions::default();
+        store_cached_sketch(&path, &sketch).unwrap();
+
+        assert!(load_cached_sketch(&path, "local-memory", "session", "source", "embedding", options,).is_some());
+        assert!(load_cached_sketch(
+            &path,
+            "local-memory",
+            "session",
+            "rewritten-source",
+            "embedding",
+            options,
+        )
+        .is_none());
+        assert!(load_cached_sketch(
+            &path,
+            "local-memory",
+            "session",
+            "source",
+            "embedding",
+            SketchOptions {
+                budget: options.budget + 1,
+                ..options
+            },
+        )
+        .is_none());
+    }
+
+    #[test]
     fn tool_result_preview_is_unicode_safe() {
         let mut u = unit(1, "user", &[1.0, 0.0], &"🦀".repeat(2_100));
         u.block_type = "tool_result".to_string();
@@ -1386,7 +1585,7 @@ mod tests {
     fn picker_preview_distinguishes_key_evidence_from_context() {
         let sketch = SessionSketch {
             schema_version: 1,
-            selector_version: "test",
+            selector_version: "test".into(),
             memory: "local".into(),
             session_id: "session".into(),
             source_fingerprint: "source".into(),
@@ -1434,7 +1633,7 @@ mod tests {
                 axes: 1,
                 transitions: 0,
                 near_duplicate_groups: 0,
-                duplicate_strategy: "exact",
+                duplicate_strategy: "exact".into(),
                 duplicate_vector_comparisons: 1,
                 candidates: 1,
                 rendered_characters: 42,
