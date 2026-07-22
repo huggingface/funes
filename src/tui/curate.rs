@@ -4,7 +4,8 @@
 //! sessions remain browseable but immutable. The preview shows the session's user prompts.
 //! Decisions persist to the memory's curation file as they're made; Enter or Esc ends the review —
 //! the caller then summarizes and offers the push. `Tab` switches the preview between the existing
-//! user-prompts view and a deterministic session sketch.
+//! user-prompts view and a deterministic session sketch; `Shift-Tab` switches between all local
+//! sessions and only those still requiring a decision.
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::style::{Color, Modifier, Style};
@@ -49,6 +50,22 @@ impl PreviewMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum SessionScope {
+    #[default]
+    All,
+    Pending,
+}
+
+impl SessionScope {
+    fn toggle(self) -> Self {
+        match self {
+            Self::All => Self::Pending,
+            Self::Pending => Self::All,
+        }
+    }
+}
+
 /// Run the arrow review for `project`'s `items` against the memory at `uri`, seeding each row from
 /// the curation file's current decision. Writes persist as decisions are made; returns when the
 /// user ends the review, propagating the first write error if any.
@@ -75,6 +92,7 @@ pub fn run(uri: String, project: String, items: Vec<Candidate>) -> anyhow::Resul
         items,
         decision,
         preview_mode: PreviewMode::default(),
+        scope: SessionScope::default(),
         err: None,
     };
     run_root(&mut picker, RunOpts::default())?; // Back and Quit both mean "done reviewing"
@@ -90,6 +108,7 @@ struct CuratePicker {
     items: Vec<Candidate>,
     decision: Vec<Option<Decision>>, // parallel to `items`; the in-memory mirror of the file
     preview_mode: PreviewMode,       // global view choice; decisions are independent of it
+    scope: SessionScope,             // all local sessions, or only undecided reviewable sessions
     err: Option<anyhow::Error>,      // first persist failure, surfaced when the review ends
 }
 
@@ -117,6 +136,13 @@ impl CuratePicker {
 impl PickerModel for CuratePicker {
     fn len(&self) -> usize {
         self.items.len()
+    }
+
+    fn visible(&self, i: usize) -> bool {
+        match self.scope {
+            SessionScope::All => true,
+            SessionScope::Pending => self.decision[i].is_none() && !self.items[i].publication.is_read_only(),
+        }
     }
 
     fn filter_key(&self, i: usize) -> &str {
@@ -170,6 +196,13 @@ impl PickerModel for CuratePicker {
                 Style::default().fg(Color::Cyan),
             ),
             Span::styled(
+                match self.scope {
+                    SessionScope::All => "    shift-tab pending",
+                    SessionScope::Pending => "    shift-tab all",
+                },
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::styled(
                 "    · ↑ published/read-only · ◐ has local updates · enter/esc when done",
                 Style::default().add_modifier(Modifier::DIM),
             ),
@@ -178,7 +211,11 @@ impl PickerModel for CuratePicker {
 
     fn hints(&self) -> String {
         // Which memory this is — context, on the dim prompt line beside the match counter.
-        format!("ctrl-u/d scroll · project memory of {}", self.project)
+        let scope = match self.scope {
+            SessionScope::All => "all local",
+            SessionScope::Pending => "pending",
+        };
+        format!("{scope} · ctrl-u/d scroll · project memory of {}", self.project)
     }
 
     fn on_key(&mut self, key: KeyEvent, sel: Option<usize>, _ctx: &mut Ctx) -> Flow {
@@ -187,17 +224,29 @@ impl PickerModel for CuratePicker {
                 if let Some(i) = sel {
                     self.toggle(i, Decision::Include);
                 }
-                Flow::Continue
+                if self.scope == SessionScope::Pending {
+                    Flow::Refilter
+                } else {
+                    Flow::Continue
+                }
             }
             KeyCode::Left => {
                 if let Some(i) = sel {
                     self.toggle(i, Decision::Exclude);
                 }
-                Flow::Continue
+                if self.scope == SessionScope::Pending {
+                    Flow::Refilter
+                } else {
+                    Flow::Continue
+                }
             }
             KeyCode::Tab => {
                 self.preview_mode = self.preview_mode.toggle();
                 Flow::ResetPreview
+            }
+            KeyCode::BackTab => {
+                self.scope = self.scope.toggle();
+                Flow::Refilter
             }
             KeyCode::Enter | KeyCode::Esc => Flow::Back,
             _ => Flow::Continue,
@@ -213,6 +262,20 @@ mod tests {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
     }
 
+    fn candidate(id: &str, publication: Publication) -> Candidate {
+        Candidate {
+            id: id.into(),
+            date: "2026-07-22".into(),
+            prompt: "prompt".into(),
+            filter: "prompt".into(),
+            comment: "comment".into(),
+            chunks: 1,
+            publication,
+            prompts_preview: Text::raw("PROMPTS"),
+            sketch_preview: Text::raw("SKETCH"),
+        }
+    }
+
     #[test]
     fn header_shows_how_to_include_and_exclude() {
         let picker = CuratePicker {
@@ -221,6 +284,7 @@ mod tests {
             items: Vec::new(),
             decision: Vec::new(),
             preview_mode: PreviewMode::Prompts,
+            scope: SessionScope::All,
             err: None,
         };
         let header = line_text(&picker.header(""));
@@ -233,6 +297,7 @@ mod tests {
             "no exclude hint: {header}"
         );
         assert!(header.contains("tab sketch"), "no sketch hint: {header}");
+        assert!(header.contains("shift-tab pending"), "no scope hint: {header}");
     }
 
     #[test]
@@ -240,19 +305,10 @@ mod tests {
         let mut picker = CuratePicker {
             uri: "hf://datasets/o/r".into(),
             project: "o/r".into(),
-            items: vec![Candidate {
-                id: "session".into(),
-                date: "2026-07-22".into(),
-                prompt: "prompt".into(),
-                filter: "prompt".into(),
-                comment: "comment".into(),
-                chunks: 1,
-                publication: Publication::Local,
-                prompts_preview: Text::raw("PROMPTS"),
-                sketch_preview: Text::raw("SKETCH"),
-            }],
+            items: vec![candidate("session", Publication::Local)],
             decision: vec![Some(Decision::Include)],
             preview_mode: PreviewMode::Prompts,
+            scope: SessionScope::All,
             err: None,
         };
 
@@ -268,24 +324,38 @@ mod tests {
         let mut picker = CuratePicker {
             uri: "hf://datasets/o/r".into(),
             project: "o/r".into(),
-            items: vec![Candidate {
-                id: "published".into(),
-                date: "2026-07-22".into(),
-                prompt: "prompt".into(),
-                filter: "prompt".into(),
-                comment: "comment".into(),
-                chunks: 1,
-                publication: Publication::Published,
-                prompts_preview: Text::raw("PROMPTS"),
-                sketch_preview: Text::raw("SKETCH"),
-            }],
+            items: vec![candidate("published", Publication::Published)],
             decision: vec![Some(Decision::Include)],
             preview_mode: PreviewMode::Prompts,
+            scope: SessionScope::All,
             err: None,
         };
 
         assert!(line_text(&picker.row(0)).contains('↑'));
         picker.toggle(0, Decision::Exclude);
         assert!(matches!(picker.decision.as_slice(), [Some(Decision::Include)]));
+    }
+
+    #[test]
+    fn pending_scope_shows_only_undecided_reviewable_sessions() {
+        let picker = CuratePicker {
+            uri: "hf://datasets/o/r".into(),
+            project: "o/r".into(),
+            items: vec![
+                candidate("pending", Publication::Local),
+                candidate("decided", Publication::Local),
+                candidate("published", Publication::Published),
+            ],
+            decision: vec![None, Some(Decision::Exclude), None],
+            preview_mode: PreviewMode::Prompts,
+            scope: SessionScope::Pending,
+            err: None,
+        };
+
+        assert!(picker.visible(0));
+        assert!(!picker.visible(1), "a settled decision does not require curation");
+        assert!(!picker.visible(2), "a fully published row is browse-only");
+        assert!(line_text(&picker.header("")).contains("shift-tab all"));
+        assert!(picker.hints().starts_with("pending"));
     }
 }

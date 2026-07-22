@@ -37,6 +37,12 @@ const DEFAULT_PREVIEW_PCT: u16 = 60;
 pub trait PickerModel {
     /// Number of items before filtering.
     fn len(&self) -> usize;
+    /// Whether item `i` belongs to the model's current scope. A screen can change this from
+    /// [`PickerModel::on_key`] and return [`Flow::Refilter`] to rebuild the visible list without
+    /// conflating a structural scope with the user's fuzzy query.
+    fn visible(&self, _i: usize) -> bool {
+        true
+    }
     /// The text nucleo scores the live query against for item `i` — usually hidden content richer
     /// than the visible row (so a query matches beyond what the scent shows).
     fn filter_key(&self, i: usize) -> &str;
@@ -63,6 +69,8 @@ pub enum Flow {
     Continue,
     /// Stay open, redraw, and return the preview pane to its first line.
     ResetPreview,
+    /// Re-run the model's scope and fuzzy filters, resetting the cursor and preview.
+    Refilter,
     /// Return `Accept(i)` from [`run`] — a select-one result for the caller.
     Accept(usize),
     /// Pop this screen: `run` returns `Back` to its caller (an outer picker, or the top).
@@ -179,6 +187,7 @@ pub fn run<M: PickerModel>(
                 match model.on_key(key, sel, &mut ctx) {
                     Flow::Continue => {}
                     Flow::ResetPreview => view.preview_off = 0,
+                    Flow::Refilter => view.refilter(model),
                     other => return Ok(other),
                 }
             }
@@ -265,9 +274,14 @@ impl View {
 /// query passes every item in original order — the initial full list.
 fn rank<M: PickerModel>(filter: &mut Filter, query: &str, model: &M) -> Vec<usize> {
     if query.is_empty() {
-        return (0..model.len()).collect();
+        return (0..model.len()).filter(|&i| model.visible(i)).collect();
     }
-    filter.rank(query, (0..model.len()).map(|i| (i, model.filter_key(i))))
+    filter.rank(
+        query,
+        (0..model.len())
+            .filter(|&i| model.visible(i))
+            .map(|i| (i, model.filter_key(i))),
+    )
 }
 
 fn draw<M: PickerModel>(f: &mut Frame, view: &mut View, model: &M) {
@@ -551,6 +565,9 @@ mod tests {
         fn len(&self) -> usize {
             self.rows.len()
         }
+        fn visible(&self, i: usize) -> bool {
+            !self.rows[i].starts_with("hidden:")
+        }
         fn filter_key(&self, i: usize) -> &str {
             &self.rows[i]
         }
@@ -600,6 +617,19 @@ mod tests {
         view.set_query_push('k', &model);
         assert_eq!(view.filtered, vec![0]);
         assert_eq!(view.sel_model_idx(), Some(0));
+    }
+
+    #[test]
+    fn model_scope_applies_before_and_during_fuzzy_filtering() {
+        let model = Mock {
+            rows: vec!["alpha visible".into(), "hidden: alpha".into(), "beta".into()],
+        };
+        let mut view = View::new(&model, &RunOpts::default());
+        assert_eq!(view.filtered, vec![0, 2]);
+        for c in "alpha".chars() {
+            view.set_query_push(c, &model);
+        }
+        assert_eq!(view.filtered, vec![0]);
     }
 
     #[test]

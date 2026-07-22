@@ -77,7 +77,8 @@ Your review alone decides what the next `funes push` ships there; leaving the re
 The picker also keeps this host's already-published project sessions available for browsing. `↑`
 marks a fully published, read-only session—an append-only upload cannot be retracted by changing its
 decision later. `◐` marks a published session with new local chunks; those updates remain reviewable.
-Press `Tab` to switch between prompts and the deterministic session sketch.
+Press `Tab` to switch between prompts and the deterministic session sketch, or `Shift-Tab` to show
+only sessions that still require a decision.
 
 For scripts, decide non-interactively:
 
