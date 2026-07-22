@@ -61,6 +61,8 @@ pub trait PickerModel {
 pub enum Flow {
     /// Stay open; redraw (the model may have mutated itself).
     Continue,
+    /// Stay open, redraw, and return the preview pane to its first line.
+    ResetPreview,
     /// Return `Accept(i)` from [`run`] — a select-one result for the caller.
     Accept(usize),
     /// Pop this screen: `run` returns `Back` to its caller (an outer picker, or the top).
@@ -176,6 +178,7 @@ pub fn run<M: PickerModel>(
                 };
                 match model.on_key(key, sel, &mut ctx) {
                     Flow::Continue => {}
+                    Flow::ResetPreview => view.preview_off = 0,
                     other => return Ok(other),
                 }
             }

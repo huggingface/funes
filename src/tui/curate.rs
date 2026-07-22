@@ -2,7 +2,8 @@
 //! list of the project's candidate sessions, each carrying a decision glyph, where `→` includes a
 //! session and `←` excludes it (the same arrow again clears to pending). The preview shows the
 //! session's user prompts. Decisions persist to the memory's curation file as they're made; Enter or
-//! Esc ends the review — the caller then summarizes and offers the push.
+//! Esc ends the review — the caller then summarizes and offers the push. `Tab` switches the preview
+//! between the existing user-prompts view and a deterministic session sketch.
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::style::{Color, Modifier, Style};
@@ -12,8 +13,7 @@ use crate::curate::{self, Decision};
 use crate::tui::{run_root, Ctx, Flow, PickerModel, RunOpts};
 
 /// One reviewable session: what its row shows (date + opening prompt), the richer text the fuzzy
-/// filter matches, the comment a decision records, and the pre-rendered preview (its user prompts,
-/// scaffolding dropped).
+/// filter matches, the comment a decision records, and both pre-rendered previews.
 pub struct Candidate {
     pub id: String,
     pub date: String,
@@ -23,7 +23,26 @@ pub struct Candidate {
     /// The session's current local chunk count — recorded with an `include` as its growth
     /// watermark, so a later push can tell whether the session has grown since this review.
     pub chunks: usize,
-    pub preview: Text<'static>,
+    /// User prompts with scaffolding dropped. This remains the default review view.
+    pub prompts_preview: Text<'static>,
+    /// Deterministically selected evidence, or an inline explanation when sketching failed.
+    pub sketch_preview: Text<'static>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum PreviewMode {
+    #[default]
+    Prompts,
+    Sketch,
+}
+
+impl PreviewMode {
+    fn toggle(self) -> Self {
+        match self {
+            Self::Prompts => Self::Sketch,
+            Self::Sketch => Self::Prompts,
+        }
+    }
 }
 
 /// Run the arrow review for `project`'s `items` against the memory at `uri`, seeding each row from
@@ -50,6 +69,7 @@ pub fn run(uri: String, project: String, items: Vec<Candidate>) -> anyhow::Resul
         project,
         items,
         decision,
+        preview_mode: PreviewMode::default(),
         err: None,
     };
     run_root(&mut picker, RunOpts::default())?; // Back and Quit both mean "done reviewing"
@@ -64,6 +84,7 @@ struct CuratePicker {
     project: String,
     items: Vec<Candidate>,
     decision: Vec<Option<Decision>>, // parallel to `items`; the in-memory mirror of the file
+    preview_mode: PreviewMode,       // global view choice; decisions are independent of it
     err: Option<anyhow::Error>,      // first persist failure, surfaced when the review ends
 }
 
@@ -110,7 +131,10 @@ impl PickerModel for CuratePicker {
     }
 
     fn preview(&self, i: usize) -> Text<'static> {
-        let preview = self.items[i].preview.clone();
+        let preview = match self.preview_mode {
+            PreviewMode::Prompts => self.items[i].prompts_preview.clone(),
+            PreviewMode::Sketch => self.items[i].sketch_preview.clone(),
+        };
         if matches!(self.decision[i], Some(Decision::Exclude)) {
             preview.style(Style::default().add_modifier(Modifier::DIM))
         } else {
@@ -124,6 +148,13 @@ impl PickerModel for CuratePicker {
         Line::from(vec![
             Span::styled("→ include", Style::default().fg(Color::Green)),
             Span::raw("    ← exclude"),
+            Span::styled(
+                match self.preview_mode {
+                    PreviewMode::Prompts => "    tab sketch",
+                    PreviewMode::Sketch => "    tab prompts",
+                },
+                Style::default().fg(Color::Cyan),
+            ),
             Span::styled(
                 "    · same arrow again clears · enter/esc when done",
                 Style::default().add_modifier(Modifier::DIM),
@@ -150,6 +181,10 @@ impl PickerModel for CuratePicker {
                 }
                 Flow::Continue
             }
+            KeyCode::Tab => {
+                self.preview_mode = self.preview_mode.toggle();
+                Flow::ResetPreview
+            }
             KeyCode::Enter | KeyCode::Esc => Flow::Back,
             _ => Flow::Continue,
         }
@@ -171,6 +206,7 @@ mod tests {
             project: "o/r".into(),
             items: Vec::new(),
             decision: Vec::new(),
+            preview_mode: PreviewMode::Prompts,
             err: None,
         };
         let header = line_text(&picker.header(""));
@@ -182,5 +218,33 @@ mod tests {
             header.contains('←') && header.contains("exclude"),
             "no exclude hint: {header}"
         );
+        assert!(header.contains("tab sketch"), "no sketch hint: {header}");
+    }
+
+    #[test]
+    fn preview_mode_toggles_without_changing_decisions() {
+        let mut picker = CuratePicker {
+            uri: "hf://datasets/o/r".into(),
+            project: "o/r".into(),
+            items: vec![Candidate {
+                id: "session".into(),
+                date: "2026-07-22".into(),
+                prompt: "prompt".into(),
+                filter: "prompt".into(),
+                comment: "comment".into(),
+                chunks: 1,
+                prompts_preview: Text::raw("PROMPTS"),
+                sketch_preview: Text::raw("SKETCH"),
+            }],
+            decision: vec![Some(Decision::Include)],
+            preview_mode: PreviewMode::Prompts,
+            err: None,
+        };
+
+        assert_eq!(picker.preview(0).lines[0].spans[0].content, "PROMPTS");
+        picker.preview_mode = picker.preview_mode.toggle();
+        assert_eq!(picker.preview(0).lines[0].spans[0].content, "SKETCH");
+        assert!(matches!(picker.decision.as_slice(), [Some(Decision::Include)]));
+        assert!(line_text(&picker.header("")).contains("tab prompts"));
     }
 }

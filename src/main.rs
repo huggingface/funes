@@ -5,7 +5,9 @@
 //! `$FUNES_HOME` or `~/.funes`.
 
 use funes::harness::Harness;
-use funes::{ask, claude, codex, curate, hermes, hub, index, mcp, pi, push, recall, render, scrub, update};
+use funes::{
+    ask, claude, codex, curate, hermes, hub, index, mcp, pi, push, recall, render, scrub, session_sketch, update,
+};
 
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -559,8 +561,9 @@ async fn curate_review(memory: &hub::Memory, project: Option<&str>) -> Result<()
         return Ok(());
     }
 
-    // Pre-render each candidate's user prompts (scaffolding dropped) — the preview pane, and
-    // (whitespace-collapsed) the surface the fuzzy filter searches beyond the visible row.
+    // Pre-render each candidate's user prompts (scaffolding dropped) and deterministic sketch. A
+    // batch sketch scan avoids reopening the local memory per candidate; failures stay inside the
+    // affected preview and never prevent a human decision from being made from the prompt view.
     let ids: Vec<String> = found.matched.iter().map(|s| s.session_id.clone()).collect();
     let mut previews = recall::session_prompts(&hub::Memory::local(), &ids).await?;
     for turns in previews.values_mut() {
@@ -569,6 +572,16 @@ async fn curate_review(memory: &hub::Memory, project: Option<&str>) -> Result<()
         }
         turns.retain(|turn| !turn.blocks.is_empty());
     }
+    let (sketches, sketch_error) = match session_sketch::generate_many(
+        &hub::Memory::local(),
+        &ids,
+        session_sketch::SketchOptions::default(),
+    )
+    .await
+    {
+        Ok(batch) => (batch, None),
+        Err(error) => (session_sketch::SketchBatch::default(), Some(format!("{error:#}"))),
+    };
     let (color, width) = human_io();
     let items: Vec<funes::tui::curate::Candidate> = found
         .matched
@@ -585,6 +598,21 @@ async fn curate_review(memory: &hub::Memory, project: Option<&str>) -> Result<()
                 .chars()
                 .take(2000)
                 .collect();
+            let sketch_body = sketches
+                .sketches
+                .get(&s.session_id)
+                .map(session_sketch::render_preview)
+                .unwrap_or_else(|| {
+                    let reason = sketches
+                        .failures
+                        .get(&s.session_id)
+                        .or(sketch_error.as_ref())
+                        .map(String::as_str)
+                        .unwrap_or("no sketch was produced");
+                    format!(
+                        "session sketch unavailable\n\n{reason}\n\nThe prompts view remains available; press Tab to switch."
+                    )
+                });
             funes::tui::curate::Candidate {
                 id: s.session_id.clone(),
                 date: s.date().to_string(),
@@ -592,7 +620,8 @@ async fn curate_review(memory: &hub::Memory, project: Option<&str>) -> Result<()
                 comment: format!("{} {}", s.date(), s.first_prompt).trim().to_string(),
                 filter,
                 chunks: s.chunks,
-                preview: funes::tui::ansi_to_text(&body),
+                prompts_preview: funes::tui::ansi_to_text(&body),
+                sketch_preview: funes::tui::ansi_to_text(&sketch_body),
             }
         })
         .collect();
