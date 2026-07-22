@@ -532,15 +532,24 @@ async fn resolve_add_memory(raw: AddMemory) -> Result<Option<Resolved>> {
     }
 }
 
-/// The deferred creation the interactive review runs once you've included sessions: materialize
-/// `memory` as the project memory of `project`, with consent. `create_repo` makes the Hub repo first
-/// (the memory was absent); otherwise it exists (a personal memory) and we only stamp it. Returns
-/// whether it happened — declining stops cleanly, publishing nothing.
+fn curation_filter(sketch: &str, prompts: &str) -> String {
+    let compact = |text: &str, limit| {
+        text.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(limit)
+            .collect::<String>()
+    };
+    format!("{} {}", compact(sketch, 3000), compact(prompts, 1000))
+}
+
 /// The interactive review behind `funes curate <memory>` in a terminal: the project's candidate
 /// sessions in the in-process [`funes::tui`] picker where `→` includes a session and `←` excludes it
-/// (the same arrow again clears to pending), the preview showing each session's user prompts.
-/// Decisions persist as they're made; leaving summarizes, and — once something is included — offers
-/// the push, materializing the memory as the project memory first when it isn't one yet.
+/// (the same arrow again clears to pending), the preview opening on each session's deterministic
+/// sketch with its user prompts available as a fallback. Decisions persist as they're made; leaving
+/// summarizes, and — once something is included — offers the push, materializing the memory as the
+/// project memory first when it isn't one yet.
 async fn curate_review(memory: &hub::Memory, project: Option<&str>) -> Result<()> {
     // Resolve without creating: `materialize` is None when the memory is already the project memory,
     // else Some(create_repo) — the deferred creation to run at the close if anything is included.
@@ -591,13 +600,6 @@ async fn curate_review(memory: &hub::Memory, project: Option<&str>) -> Result<()
                 .get(&s.session_id)
                 .map(|turns| render::get_human("", turns, color, width, None))
                 .unwrap_or_default();
-            let filter: String = body
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-                .chars()
-                .take(2000)
-                .collect();
             let sketch_body = sketches
                 .sketches
                 .get(&s.session_id)
@@ -613,6 +615,10 @@ async fn curate_review(memory: &hub::Memory, project: Option<&str>) -> Result<()
                         "session sketch unavailable\n\n{reason}\n\nThe prompts view remains available; press Tab to switch."
                     )
                 });
+            // Search the primary sketch first, while retaining enough prompt history to find a
+            // session by wording that the selector did not keep. The bounds keep fuzzy matching
+            // cheap even for very large sessions.
+            let filter = curation_filter(&sketch_body, &body);
             funes::tui::curate::Candidate {
                 id: s.session_id.clone(),
                 date: s.date().to_string(),
@@ -667,6 +673,10 @@ async fn curate_review(memory: &hub::Memory, project: Option<&str>) -> Result<()
     Ok(())
 }
 
+/// The deferred creation the interactive review runs once you've included sessions: materialize
+/// `memory` as the project memory of `project`, with consent. `create_repo` makes the Hub repo first
+/// (the memory was absent); otherwise it exists (a personal memory) and we only stamp it. Returns
+/// whether it happened — declining stops cleanly, publishing nothing.
 async fn create_project_memory(
     memory: &hub::Memory,
     project: &str,
@@ -973,7 +983,7 @@ fn prompt_new_memory(label: &str, chunks: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_confirm;
+    use super::{curation_filter, parse_confirm};
 
     #[test]
     fn parse_confirm_honors_default_and_answers() {
@@ -987,5 +997,15 @@ mod tests {
         // Anything unrecognized is a conservative no, even under a yes default.
         assert!(!parse_confirm("nope", true));
         assert!(!parse_confirm("maybe", true));
+    }
+
+    #[test]
+    fn curation_filter_searches_sketches_and_prompts_with_bounded_text() {
+        let filter = curation_filter("sketch\nneedle", "prompt\twording");
+        assert!(filter.contains("sketch needle"));
+        assert!(filter.contains("prompt wording"));
+
+        let bounded = curation_filter(&"s".repeat(4_000), &"p".repeat(2_000));
+        assert_eq!(bounded.chars().count(), 4_001); // two budgets plus their separator
     }
 }

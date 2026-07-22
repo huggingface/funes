@@ -1,11 +1,10 @@
 //! The `funes curate` interactive review over the generic [`crate::tui`] engine: a fuzzy-filterable
 //! list of the project's local sessions, each carrying a decision glyph, where `→` includes a
 //! reviewable session and `←` excludes it (the same arrow again clears to pending). Fully published
-//! sessions remain browseable but immutable. The preview shows the session's user prompts.
-//! Decisions persist to the memory's curation file as they're made; Enter or Esc ends the review —
-//! the caller then summarizes and offers the push. `Tab` switches the preview between the existing
-//! user-prompts view and a deterministic session sketch; `Shift-Tab` switches between all local
-//! sessions and only those still requiring a decision.
+//! sessions remain browseable but immutable. The preview opens on the deterministic session sketch,
+//! with the prompt history one `Tab` away as a fallback. Decisions persist to the memory's curation
+//! file as they're made; Enter or Esc ends the review — the caller then summarizes and offers the
+//! push. `Shift-Tab` switches between all local sessions and only those still requiring a decision.
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::style::{Color, Modifier, Style};
@@ -14,8 +13,8 @@ use ratatui::text::{Line, Span, Text};
 use crate::curate::{self, Decision, Publication};
 use crate::tui::{run_root, Ctx, Flow, PickerModel, RunOpts};
 
-/// One reviewable session: what its row shows (date + opening prompt), the richer text the fuzzy
-/// filter matches, the comment a decision records, and both pre-rendered previews.
+/// One local session: what its row shows (date + opening prompt), the sketch-and-prompts text the
+/// fuzzy filter matches, the comment a decision records, and both pre-rendered previews.
 pub struct Candidate {
     pub id: String,
     pub date: String,
@@ -28,7 +27,7 @@ pub struct Candidate {
     /// Publication state relative to the target memory. Fully published sessions remain visible
     /// for browsing, but their decisions cannot change because an exclude cannot retract them.
     pub publication: Publication,
-    /// User prompts with scaffolding dropped. This remains the default review view.
+    /// User prompts with scaffolding dropped. This is the fallback review view.
     pub prompts_preview: Text<'static>,
     /// Deterministically selected evidence, or an inline explanation when sketching failed.
     pub sketch_preview: Text<'static>,
@@ -36,8 +35,8 @@ pub struct Candidate {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum PreviewMode {
-    #[default]
     Prompts,
+    #[default]
     Sketch,
 }
 
@@ -317,6 +316,11 @@ mod tests {
         assert_eq!(picker.preview(0).lines[0].spans[0].content, "SKETCH");
         assert!(matches!(picker.decision.as_slice(), [Some(Decision::Include)]));
         assert!(line_text(&picker.header("")).contains("tab prompts"));
+    }
+
+    #[test]
+    fn sketch_is_the_default_preview() {
+        assert_eq!(PreviewMode::default(), PreviewMode::Sketch);
     }
 
     #[test]
