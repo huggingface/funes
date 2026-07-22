@@ -14,6 +14,7 @@ use std::fmt::{self, Write as FmtWrite};
 use std::fs::File;
 use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 pub const CRITERION_SCHEMA_VERSION: u32 = 1;
 pub const ARTIFACT_SCHEMA_VERSION: u32 = 1;
@@ -416,6 +417,8 @@ pub struct AssessmentArtifact {
     pub validation: ValidationRecord,
     pub assessment: Option<Assessment>,
     pub raw_response: String,
+    pub raw_stderr: String,
+    pub exit_code: Option<i32>,
     pub sketch: session_sketch::SessionSketch,
 }
 
@@ -461,6 +464,261 @@ pub fn load_artifact(
 
 pub fn store_artifact(memory_uri: &str, artifact: &AssessmentArtifact) -> Result<()> {
     write_json_atomic(&artifact_file_for(memory_uri, &artifact.session_id), artifact)
+}
+
+#[derive(Clone, Debug)]
+pub struct RunnerSpec {
+    executable: PathBuf,
+    pub name: String,
+    pub model: String,
+    pub max_budget_usd: f64,
+}
+
+impl RunnerSpec {
+    pub fn claude(model: impl Into<String>) -> Self {
+        Self {
+            executable: PathBuf::from("claude"),
+            name: "claude".into(),
+            model: model.into(),
+            max_budget_usd: 1.25,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_executable(mut self, executable: PathBuf) -> Self {
+        self.executable = executable;
+        self
+    }
+}
+
+fn executable_version(spec: &RunnerSpec) -> Option<String> {
+    let output = Command::new(&spec.executable).arg("--version").output().ok()?;
+    let text = if output.stdout.is_empty() {
+        &output.stderr
+    } else {
+        &output.stdout
+    };
+    let text = String::from_utf8_lossy(text).trim().to_string();
+    (!text.is_empty()).then_some(text)
+}
+
+struct RejectedRun {
+    runner: RunnerRecord,
+    error: String,
+    raw_response: String,
+    raw_stderr: String,
+    exit_code: Option<i32>,
+}
+
+fn rejected_artifact(
+    criterion: &CriterionSnapshot,
+    sketch: &session_sketch::SessionSketch,
+    evidence: &[EvidenceRef],
+    run: RejectedRun,
+) -> AssessmentArtifact {
+    AssessmentArtifact {
+        artifact_kind: ARTIFACT_KIND.into(),
+        schema_version: ARTIFACT_SCHEMA_VERSION,
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        session_id: sketch.session_id.clone(),
+        source_fingerprint: sketch.source_fingerprint.clone(),
+        embedding_fingerprint: sketch.embedding_fingerprint.clone(),
+        selector_version: sketch.selector_version.clone(),
+        evidence_fingerprint: evidence_fingerprint(evidence),
+        criterion: criterion.clone(),
+        prompt_version: PROMPT_VERSION.into(),
+        assessment_schema_version: ASSESSMENT_SCHEMA_VERSION,
+        runner: run.runner,
+        validation: ValidationRecord {
+            status: "rejected".into(),
+            error: Some(run.error),
+        },
+        assessment: None,
+        raw_response: run.raw_response,
+        raw_stderr: run.raw_stderr,
+        exit_code: run.exit_code,
+        sketch: sketch.clone(),
+    }
+}
+
+/// Run one no-tools Claude assessment. The selected sketch is written to stdin so large evidence
+/// never hits the operating system's argv limit or appears in process listings. A runner that
+/// starts but returns malformed output produces a rejected artifact; inability to start the runner
+/// is an ordinary command error and produces no cache entry.
+pub fn generate(
+    criterion: &CriterionSnapshot,
+    sketch: &session_sketch::SessionSketch,
+    spec: &RunnerSpec,
+) -> Result<AssessmentArtifact> {
+    if spec.name != "claude" {
+        bail!("unsupported curation assistance runner: {}", spec.name);
+    }
+    if spec.model.trim().is_empty() {
+        bail!("curation assistance model is empty");
+    }
+    if !spec.max_budget_usd.is_finite() || spec.max_budget_usd <= 0.0 {
+        bail!("curation assistance budget must be positive");
+    }
+    let evidence = evidence_for(sketch);
+    if evidence.is_empty() {
+        bail!("session sketch has no provider-visible evidence");
+    }
+    let schema = assessment_schema();
+    let rendered_prompt = prompt(criterion, sketch, &evidence);
+    let temp = tempfile::tempdir().context("creating isolated curation-assistance directory")?;
+    let version = executable_version(spec);
+    let mut child = Command::new(&spec.executable)
+        .args([
+            "-p",
+            "--model",
+            &spec.model,
+            "--max-budget-usd",
+            &spec.max_budget_usd.to_string(),
+            "--safe-mode",
+            "--tools",
+            "",
+            "--disable-slash-commands",
+            "--no-session-persistence",
+            "--strict-mcp-config",
+            "--mcp-config",
+            r#"{"mcpServers":{}}"#,
+            "--output-format",
+            "json",
+            "--json-schema",
+            &serde_json::to_string(&schema).expect("assessment schema is serializable"),
+        ])
+        .current_dir(temp.path())
+        .env("FUNES_INTERNAL_SESSION", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("starting `{}` for curation assistance", spec.name))?;
+    child
+        .stdin
+        .take()
+        .context("curation child has no stdin")?
+        .write_all(rendered_prompt.as_bytes())
+        .context("sending the session sketch to the curation child")?;
+    let output = child.wait_with_output().context("waiting for the curation child")?;
+    let raw_response = String::from_utf8_lossy(&output.stdout).to_string();
+    let raw_stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let mut runner = RunnerRecord {
+        name: spec.name.clone(),
+        version,
+        requested_model: spec.model.clone(),
+        reported_models: Vec::new(),
+        provider: None,
+        usage: json!({}),
+    };
+    if !output.status.success() {
+        return Ok(rejected_artifact(
+            criterion,
+            sketch,
+            &evidence,
+            RejectedRun {
+                runner,
+                error: format!("{} exited with status {}", spec.name, output.status),
+                raw_response,
+                raw_stderr,
+                exit_code: output.status.code(),
+            },
+        ));
+    }
+    let envelope: Value = match serde_json::from_str(&raw_response) {
+        Ok(envelope) => envelope,
+        Err(_) => {
+            return Ok(rejected_artifact(
+                criterion,
+                sketch,
+                &evidence,
+                RejectedRun {
+                    runner,
+                    error: format!("{} returned no JSON result envelope", spec.name),
+                    raw_response,
+                    raw_stderr,
+                    exit_code: output.status.code(),
+                },
+            ));
+        }
+    };
+    runner.reported_models = envelope
+        .get("modelUsage")
+        .and_then(Value::as_object)
+        .map(|models| models.keys().cloned().collect())
+        .unwrap_or_default();
+    runner.usage = envelope.get("modelUsage").cloned().unwrap_or_else(|| json!({}));
+    let candidate = envelope.get("structured_output").cloned().or_else(|| {
+        envelope
+            .get("result")
+            .and_then(Value::as_str)
+            .and_then(|result| serde_json::from_str(result).ok())
+    });
+    let Some(candidate) = candidate else {
+        return Ok(rejected_artifact(
+            criterion,
+            sketch,
+            &evidence,
+            RejectedRun {
+                runner,
+                error: format!("{} returned no structured assessment", spec.name),
+                raw_response,
+                raw_stderr,
+                exit_code: output.status.code(),
+            },
+        ));
+    };
+    let assessment = match validate_assessment(candidate, criterion, &evidence) {
+        Ok(assessment) => assessment,
+        Err(error) => {
+            return Ok(rejected_artifact(
+                criterion,
+                sketch,
+                &evidence,
+                RejectedRun {
+                    runner,
+                    error: format!("invalid structured assessment: {error}"),
+                    raw_response,
+                    raw_stderr,
+                    exit_code: output.status.code(),
+                },
+            ));
+        }
+    };
+    Ok(AssessmentArtifact {
+        artifact_kind: ARTIFACT_KIND.into(),
+        schema_version: ARTIFACT_SCHEMA_VERSION,
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        session_id: sketch.session_id.clone(),
+        source_fingerprint: sketch.source_fingerprint.clone(),
+        embedding_fingerprint: sketch.embedding_fingerprint.clone(),
+        selector_version: sketch.selector_version.clone(),
+        evidence_fingerprint: evidence_fingerprint(&evidence),
+        criterion: criterion.clone(),
+        prompt_version: PROMPT_VERSION.into(),
+        assessment_schema_version: ASSESSMENT_SCHEMA_VERSION,
+        runner,
+        validation: ValidationRecord {
+            status: "accepted".into(),
+            error: None,
+        },
+        assessment: Some(assessment),
+        raw_response,
+        raw_stderr,
+        exit_code: output.status.code(),
+        sketch: sketch.clone(),
+    })
+}
+
+pub fn generate_and_store(
+    memory_uri: &str,
+    criterion: &CriterionSnapshot,
+    sketch: &session_sketch::SessionSketch,
+    spec: &RunnerSpec,
+) -> Result<AssessmentArtifact> {
+    let artifact = generate(criterion, sketch, spec)?;
+    store_artifact(memory_uri, &artifact)?;
+    Ok(artifact)
 }
 
 fn read_json_optional<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Option<T>> {
@@ -642,11 +900,56 @@ mod tests {
             },
             assessment: None,
             raw_response: String::new(),
+            raw_stderr: String::new(),
+            exit_code: Some(0),
             sketch: sketch.clone(),
         };
         assert!(artifact.is_fresh(&criterion, &sketch, &evidence));
         let mut changed = criterion.clone();
         changed.fingerprint = "sha256:changed".into();
         assert!(!artifact.is_fresh(&changed, &sketch, &evidence));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_runner_uses_stdin_and_accepts_handle_citations() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("claude");
+        std::fs::write(
+            &executable,
+            r##"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "fake claude 1"
+  exit 0
+fi
+for arg in "$@"; do
+  case "$arg" in
+    *UNTRUSTED*EVIDENCE*) exit 91 ;;
+  esac
+done
+prompt=$(tr '\n' ' ')
+case "$prompt" in
+  *evidence=E001*) ;;
+  *) exit 92 ;;
+esac
+printf '%s\n' '{"structured_output":{"criterion_match":"strong","recommendation":"exclude_candidate","rationale":"The opening is explicit.","supports":[{"claim":"A private plan is discussed.","evidence":["E001"]}],"against":[],"uncertainties":[]},"modelUsage":{"fake-model":{"costUSD":0.01}}}'
+"##,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+
+        let artifact = generate(
+            &criterion(CriterionEffect::Exclusion),
+            &sketch(),
+            &RunnerSpec::claude("fake-model").with_executable(executable),
+        )
+        .unwrap();
+        assert_eq!(artifact.validation.status, "accepted");
+        assert_eq!(artifact.assessment.unwrap().supports[0].evidence, ["turn-1"]);
+        assert_eq!(artifact.runner.reported_models, ["fake-model"]);
     }
 }
