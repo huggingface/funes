@@ -78,7 +78,7 @@ pub fn run(uri: String, project: String, items: Vec<Candidate>) -> anyhow::Resul
             if existing.include.contains(&c.id) && (c.publication.is_read_only() || !existing.is_stale(&c.id, c.chunks))
             {
                 Some(Decision::Include)
-            } else if existing.exclude.contains(&c.id) {
+            } else if existing.exclude.contains(&c.id) && !existing.criteria_is_stale(&c.id) {
                 Some(Decision::Exclude)
             } else {
                 None
@@ -92,6 +92,7 @@ pub fn run(uri: String, project: String, items: Vec<Candidate>) -> anyhow::Resul
         decision,
         preview_mode: PreviewMode::default(),
         scope: SessionScope::default(),
+        criteria_fingerprint: existing.active_criteria().map(str::to_string),
         err: None,
     };
     run_root(&mut picker, RunOpts::default())?; // Back and Quit both mean "done reviewing"
@@ -108,6 +109,7 @@ struct CuratePicker {
     decision: Vec<Option<Decision>>, // parallel to `items`; the in-memory mirror of the file
     preview_mode: PreviewMode,       // global view choice; decisions are independent of it
     scope: SessionScope,             // all local sessions, or only undecided reviewable sessions
+    criteria_fingerprint: Option<String>, // criteria new decisions are bound to
     err: Option<anyhow::Error>,      // first persist failure, surfaced when the review ends
 }
 
@@ -125,7 +127,14 @@ impl CuratePicker {
         self.decision[i] = next;
         if self.err.is_none() {
             let c = &self.items[i];
-            if let Err(e) = curate::set_decision(&self.uri, &c.id, next, c.chunks, &c.comment) {
+            if let Err(e) = curate::set_decision(
+                &self.uri,
+                &c.id,
+                next,
+                c.chunks,
+                self.criteria_fingerprint.as_deref(),
+                &c.comment,
+            ) {
                 self.err = Some(e);
             }
         }
@@ -284,6 +293,7 @@ mod tests {
             decision: Vec::new(),
             preview_mode: PreviewMode::Prompts,
             scope: SessionScope::All,
+            criteria_fingerprint: None,
             err: None,
         };
         let header = line_text(&picker.header(""));
@@ -308,6 +318,7 @@ mod tests {
             decision: vec![Some(Decision::Include)],
             preview_mode: PreviewMode::Prompts,
             scope: SessionScope::All,
+            criteria_fingerprint: None,
             err: None,
         };
 
@@ -332,6 +343,7 @@ mod tests {
             decision: vec![Some(Decision::Include)],
             preview_mode: PreviewMode::Prompts,
             scope: SessionScope::All,
+            criteria_fingerprint: None,
             err: None,
         };
 
@@ -353,6 +365,7 @@ mod tests {
             decision: vec![None, Some(Decision::Exclude), None],
             preview_mode: PreviewMode::Prompts,
             scope: SessionScope::Pending,
+            criteria_fingerprint: None,
             err: None,
         };
 

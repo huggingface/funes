@@ -658,7 +658,7 @@ async fn curate_review(memory: &hub::Memory, project: Option<&str>, criteria: Op
         .count();
     let exc = reviewable
         .clone()
-        .filter(|s| curation.exclude.contains(&s.session_id))
+        .filter(|s| curation.exclude.contains(&s.session_id) && !curation.criteria_is_stale(&s.session_id))
         .count();
     let pending = reviewable.count() - inc - exc;
     println!("project memory of {project} — {published} published, {inc} include, {exc} exclude, {pending} pending");
