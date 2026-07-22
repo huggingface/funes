@@ -11,6 +11,7 @@
 pub mod curate;
 
 use std::io::{Stdout, Write};
+use std::time::Duration;
 
 use anyhow::Result;
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
@@ -31,6 +32,7 @@ pub type Term = Terminal<CrosstermBackend<Stdout>>;
 const PAGE: i32 = 10;
 const PREVIEW_STEP: i32 = 8;
 const DEFAULT_PREVIEW_PCT: u16 = 60;
+const MODEL_TICK: Duration = Duration::from_millis(200);
 
 /// A screen the picker can drive. The engine calls these; a consumer implements them.
 #[allow(clippy::len_without_is_empty)]
@@ -61,6 +63,11 @@ pub trait PickerModel {
     /// Enter, Esc, ←/→, Ctrl-y, … `sel` is the model index under the cursor (None on an empty
     /// list). The returned [`Flow`] decides what happens next.
     fn on_key(&mut self, key: KeyEvent, sel: Option<usize>, ctx: &mut Ctx) -> Flow;
+    /// Poll background domain work while the picker is idle. The default keeps static screens
+    /// unchanged; a model with a worker channel can drain it and request a redraw or refilter.
+    fn on_tick(&mut self) -> Flow {
+        Flow::Continue
+    }
 }
 
 /// What a model's [`PickerModel::on_key`] tells the engine to do next.
@@ -158,6 +165,15 @@ pub fn run<M: PickerModel>(
     let mut view = View::new(model, &opts);
     loop {
         term.draw(|f| draw(f, &mut view, &*model))?;
+        if !event::poll(MODEL_TICK)? {
+            match model.on_tick() {
+                Flow::Continue => {}
+                Flow::ResetPreview => view.preview_off = 0,
+                Flow::Refilter => view.refilter(model),
+                other => return Ok(other),
+            }
+            continue;
+        }
         let Event::Key(key) = event::read()? else {
             continue; // resize/mouse/paste: just redraw
         };
