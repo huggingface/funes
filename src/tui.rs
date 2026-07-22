@@ -19,7 +19,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, HighlightSpacing, List, ListItem, ListState, Paragraph, Wrap};
@@ -253,7 +253,7 @@ impl View {
     }
 
     fn scroll_preview(&mut self, delta: i32) {
-        self.preview_off = (self.preview_off as i32 + delta).max(0) as u16;
+        self.preview_off = (self.preview_off as i32 + delta).clamp(0, u16::MAX as i32) as u16;
     }
 
     fn sel_model_idx(&self) -> Option<usize> {
@@ -289,14 +289,12 @@ fn draw<M: PickerModel>(f: &mut Frame, view: &mut View, model: &M) {
     f.render_stateful_widget(list, body[0], &mut view.list);
 
     let preview = view.sel_model_idx().map(|i| model.preview(i)).unwrap_or_default();
-    // Bound the scroll to the content so a short preview can't be scrolled off into empty space.
-    view.preview_off = view.preview_off.min(preview.lines.len().saturating_sub(1) as u16);
-    f.render_widget(
-        Paragraph::new(preview)
-            .wrap(Wrap { trim: false })
-            .scroll((view.preview_off, 0)),
-        body[1],
-    );
+    let paragraph = Paragraph::new(preview).wrap(Wrap { trim: false });
+    // Paragraph scroll offsets address rendered rows, not source lines. A prose-heavy preview can
+    // contain one logical line that wraps into dozens of terminal rows, so `Text::lines.len()` is
+    // not a valid bound here.
+    view.preview_off = view.preview_off.min(preview_scroll_limit(&paragraph, body[1]));
+    f.render_widget(paragraph.scroll((view.preview_off, 0)), body[1]);
 
     let meta = format!("  [{}/{}]  {}", view.filtered.len(), model.len(), model.hints());
     let prompt = Line::from(vec![
@@ -306,6 +304,13 @@ fn draw<M: PickerModel>(f: &mut Frame, view: &mut View, model: &M) {
     f.render_widget(Paragraph::new(prompt), rows[2]);
     let cx = rows[2].x + 2 + view.query.chars().count() as u16;
     f.set_cursor_position((cx.min(rows[2].x + rows[2].width.saturating_sub(1)), rows[2].y));
+}
+
+fn preview_scroll_limit(paragraph: &Paragraph<'_>, area: Rect) -> u16 {
+    paragraph
+        .line_count(area.width)
+        .saturating_sub(area.height as usize)
+        .min(u16::MAX as usize) as u16
 }
 
 // --- terminal lifecycle ---
@@ -608,5 +613,18 @@ mod tests {
         };
         let view = View::new(&model, &opts);
         assert_eq!(view.sel_model_idx(), Some(3));
+    }
+
+    #[test]
+    fn preview_scroll_limit_counts_wrapped_visual_lines() {
+        let paragraph = Paragraph::new("wrapped prose ".repeat(40)).wrap(Wrap { trim: false });
+        let area = Rect::new(0, 0, 12, 3);
+        let rendered = paragraph.line_count(area.width);
+        assert!(rendered > area.height as usize);
+        assert_eq!(
+            preview_scroll_limit(&paragraph, area),
+            (rendered - area.height as usize) as u16
+        );
+        assert_eq!(preview_scroll_limit(&paragraph, Rect::new(0, 0, 1_000, 3)), 0);
     }
 }

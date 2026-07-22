@@ -30,7 +30,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "syn
 futures = "0.3"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-ratatui = "0.29"                 # in-process recall browser (list + preview picker); re-exports crossterm 0.28
+ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }  # picker + exact wrapped preview height; re-exports crossterm 0.28
 nucleo-matcher = "0.3"           # fuzzy filtering the browser's hit/turn lists
 serde = { version = "1", features = ["derive"] }               # MCP request structs
 serde_json = { version = "1", features = ["preserve_order"] }  # parse JSONL; preserve tool_use key order

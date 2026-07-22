@@ -164,7 +164,7 @@ impl PickerModel for CuratePicker {
 
     fn hints(&self) -> String {
         // Which memory this is — context, on the dim prompt line beside the match counter.
-        format!("project memory of {}", self.project)
+        format!("ctrl-u/d scroll · project memory of {}", self.project)
     }
 
     fn on_key(&mut self, key: KeyEvent, sel: Option<usize>, _ctx: &mut Ctx) -> Flow {
