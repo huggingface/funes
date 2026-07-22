@@ -15,6 +15,7 @@ use std::fs::File;
 use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Instant;
 
 pub const CRITERION_SCHEMA_VERSION: u32 = 1;
 pub const ARTIFACT_SCHEMA_VERSION: u32 = 1;
@@ -134,6 +135,15 @@ pub fn load_criterion(memory_uri: &str) -> Result<Option<CriterionSnapshot>> {
         bail!("curation criterion fingerprint mismatch at {}", path.display());
     }
     Ok(Some(snapshot))
+}
+
+pub fn clear_criterion(memory_uri: &str) -> Result<()> {
+    let path = criterion_file_for(memory_uri);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("removing {}", path.display())),
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -258,12 +268,33 @@ pub enum CriterionMatch {
     InsufficientEvidence,
 }
 
+impl fmt::Display for CriterionMatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Strong => "strong",
+            Self::Mixed => "mixed",
+            Self::Weak => "weak",
+            Self::InsufficientEvidence => "insufficient evidence",
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Recommendation {
     IncludeCandidate,
     ExcludeCandidate,
     NeedsFullReview,
+}
+
+impl fmt::Display for Recommendation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::IncludeCandidate => "include candidate",
+            Self::ExcludeCandidate => "exclude candidate",
+            Self::NeedsFullReview => "needs full review",
+        })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -390,6 +421,15 @@ pub struct RunnerRecord {
     pub reported_models: Vec<String>,
     pub provider: Option<String>,
     pub usage: Value,
+    /// End-to-end child-process time measured by funes, independent of provider reporting.
+    #[serde(default)]
+    pub wall_seconds: f64,
+    /// Provider-reported total cost when the runner exposes it.
+    #[serde(default)]
+    pub total_cost_usd: Option<f64>,
+    /// Provider-reported duration when the runner exposes it.
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -567,6 +607,7 @@ pub fn generate(
     let rendered_prompt = prompt(criterion, sketch, &evidence);
     let temp = tempfile::tempdir().context("creating isolated curation-assistance directory")?;
     let version = executable_version(spec);
+    let started = Instant::now();
     let mut child = Command::new(&spec.executable)
         .args([
             "-p",
@@ -601,6 +642,7 @@ pub fn generate(
         .write_all(rendered_prompt.as_bytes())
         .context("sending the session sketch to the curation child")?;
     let output = child.wait_with_output().context("waiting for the curation child")?;
+    let wall_seconds = started.elapsed().as_secs_f64();
     let raw_response = String::from_utf8_lossy(&output.stdout).to_string();
     let raw_stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let mut runner = RunnerRecord {
@@ -610,6 +652,9 @@ pub fn generate(
         reported_models: Vec::new(),
         provider: None,
         usage: json!({}),
+        wall_seconds,
+        total_cost_usd: None,
+        duration_ms: None,
     };
     if !output.status.success() {
         return Ok(rejected_artifact(
@@ -648,6 +693,16 @@ pub fn generate(
         .map(|models| models.keys().cloned().collect())
         .unwrap_or_default();
     runner.usage = envelope.get("modelUsage").cloned().unwrap_or_else(|| json!({}));
+    runner.provider = envelope.get("provider").and_then(Value::as_str).map(str::to_string);
+    runner.total_cost_usd = envelope.get("total_cost_usd").and_then(Value::as_f64).or_else(|| {
+        envelope.get("modelUsage").and_then(Value::as_object).map(|models| {
+            models
+                .values()
+                .filter_map(|usage| usage.get("costUSD").and_then(Value::as_f64))
+                .sum()
+        })
+    });
+    runner.duration_ms = envelope.get("duration_ms").and_then(Value::as_u64);
     let candidate = envelope.get("structured_output").cloned().or_else(|| {
         envelope
             .get("result")
@@ -719,6 +774,20 @@ pub fn generate_and_store(
     let artifact = generate(criterion, sketch, spec)?;
     store_artifact(memory_uri, &artifact)?;
     Ok(artifact)
+}
+
+#[derive(Clone, Debug)]
+pub struct AssistRequest {
+    pub memory_uri: String,
+    pub criterion: CriterionSnapshot,
+    pub sketch: session_sketch::SessionSketch,
+    pub runner: RunnerSpec,
+}
+
+impl AssistRequest {
+    pub fn run(&self) -> Result<AssessmentArtifact> {
+        generate_and_store(&self.memory_uri, &self.criterion, &self.sketch, &self.runner)
+    }
 }
 
 fn read_json_optional<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Option<T>> {
@@ -893,6 +962,9 @@ mod tests {
                 reported_models: vec!["model".into()],
                 provider: None,
                 usage: json!({}),
+                wall_seconds: 1.5,
+                total_cost_usd: Some(0.01),
+                duration_ms: Some(1_400),
             },
             validation: ValidationRecord {
                 status: "accepted".into(),
@@ -951,5 +1023,7 @@ printf '%s\n' '{"structured_output":{"criterion_match":"strong","recommendation"
         assert_eq!(artifact.validation.status, "accepted");
         assert_eq!(artifact.assessment.unwrap().supports[0].evidence, ["turn-1"]);
         assert_eq!(artifact.runner.reported_models, ["fake-model"]);
+        assert_eq!(artifact.runner.total_cost_usd, Some(0.01));
+        assert!(artifact.runner.wall_seconds > 0.0);
     }
 }

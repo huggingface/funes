@@ -6,7 +6,8 @@
 
 use funes::harness::Harness;
 use funes::{
-    ask, claude, codex, curate, hermes, hub, index, mcp, pi, push, recall, render, scrub, session_sketch, update,
+    ask, claude, codex, curate, curation_assist, hermes, hub, index, mcp, pi, push, recall, render, scrub,
+    session_sketch, update,
 };
 
 use anyhow::{anyhow, Result};
@@ -142,6 +143,26 @@ enum Cmd {
         /// Mark these sessions `exclude` — held back from this memory.
         #[arg(long, value_name = "SESSION")]
         exclude: Vec<String>,
+        /// Fix an inclusion criterion for this review, as LABEL=FILE. The text is snapshotted
+        /// locally and shown above every session preview.
+        #[arg(long, value_name = "LABEL=FILE", conflicts_with = "exclude_criterion")]
+        criterion: Option<String>,
+        /// Fix an exclusion criterion for this review, as LABEL=FILE. A sketch can flag a match,
+        /// but cannot clear a session for publication.
+        #[arg(long, value_name = "LABEL=FILE")]
+        exclude_criterion: Option<String>,
+        /// Forget the saved criterion and open an ordinary human review.
+        #[arg(
+            long,
+            conflicts_with_all = ["criterion", "exclude_criterion", "assist", "assist_model"]
+        )]
+        clear_criterion: bool,
+        /// Enable on-demand assessment of the selected sketch. Nothing is sent until F2 is pressed.
+        #[arg(long, value_enum, value_name = "AGENT")]
+        assist: Option<AssistAgent>,
+        /// Model requested from the assistance agent (default: opus).
+        #[arg(long, value_name = "MODEL", requires = "assist")]
+        assist_model: Option<String>,
     },
     /// Redact secrets from your local memory in place — for rows indexed before redaction existed (or
     /// flagged by an updated ruleset); needs no source transcript. Cleans the local memory only: it
@@ -264,6 +285,34 @@ enum OutputFormat {
     Human,
     /// The stable agent layout: multi-line hits with provenance, previews, and neighbors.
     Agent,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum AssistAgent {
+    Claude,
+}
+
+#[derive(Debug)]
+struct CriterionArg {
+    id: String,
+    source: PathBuf,
+    effect: curation_assist::CriterionEffect,
+}
+
+fn parse_criterion_arg(raw: &str, effect: curation_assist::CriterionEffect) -> Result<CriterionArg> {
+    let (id, source) = raw
+        .split_once('=')
+        .ok_or_else(|| anyhow!("curation criterion must be LABEL=FILE, got {raw:?}"))?;
+    let id = id.trim();
+    let source = source.trim();
+    if id.is_empty() || source.is_empty() {
+        return Err(anyhow!("curation criterion must be LABEL=FILE, got {raw:?}"));
+    }
+    Ok(CriterionArg {
+        id: id.to_string(),
+        source: PathBuf::from(source),
+        effect,
+    })
 }
 
 impl OutputFormat {
@@ -458,8 +507,21 @@ async fn main() -> Result<()> {
             project,
             include,
             exclude,
+            criterion,
+            exclude_criterion,
+            clear_criterion,
+            assist,
+            assist_model,
         } => {
             let memory = hub::Memory::parse(&memory);
+            let criterion = criterion
+                .as_deref()
+                .map(|raw| parse_criterion_arg(raw, curation_assist::CriterionEffect::Inclusion))
+                .transpose()?
+                .or(exclude_criterion
+                    .as_deref()
+                    .map(|raw| parse_criterion_arg(raw, curation_assist::CriterionEffect::Exclusion))
+                    .transpose()?);
             // A project memory is of a git repo — funes attributes sessions to it by their
             // checkout's remotes, so the project must be a repo identity (`owner/name`). A bare
             // name gets a "did you mean", inferring the owner from local repos with that name.
@@ -479,8 +541,21 @@ async fn main() -> Result<()> {
             // (and the FUNES_NO_TUI opt-out) get the plain text listing.
             let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
             if include.is_empty() && exclude.is_empty() && interactive && std::env::var_os("FUNES_NO_TUI").is_none() {
-                curate_review(&memory, project.as_deref()).await
+                curate_review(
+                    &memory,
+                    project.as_deref(),
+                    criterion,
+                    clear_criterion,
+                    assist,
+                    assist_model.as_deref(),
+                )
+                .await
             } else {
+                if criterion.is_some() || clear_criterion || assist.is_some() || assist_model.is_some() {
+                    return Err(anyhow!(
+                        "guided curation requires the interactive picker; omit --include/--exclude and run from a terminal"
+                    ));
+                }
                 print!(
                     "{}",
                     curate::run(&memory, project.as_deref(), &include, &exclude).await?
@@ -550,13 +625,53 @@ fn curation_filter(sketch: &str, prompts: &str) -> String {
 /// sketch with its user prompts available as a fallback. Decisions persist as they're made; leaving
 /// summarizes, and — once something is included — offers the push, materializing the memory as the
 /// project memory first when it isn't one yet.
-async fn curate_review(memory: &hub::Memory, project: Option<&str>) -> Result<()> {
+async fn curate_review(
+    memory: &hub::Memory,
+    project: Option<&str>,
+    criterion_arg: Option<CriterionArg>,
+    clear_criterion: bool,
+    assist: Option<AssistAgent>,
+    assist_model: Option<&str>,
+) -> Result<()> {
     // Resolve without creating: `materialize` is None when the memory is already the project memory,
     // else Some(create_repo) — the deferred creation to run at the close if anything is included.
     let (uri, project, materialize) = match curate::prepare(memory, project).await? {
         curate::Prepared::Ready { uri, project } => (uri, project, None),
         curate::Prepared::Absent { uri, project } => (uri, project, Some(true)),
         curate::Prepared::Personal { uri, project } => (uri, project, Some(false)),
+    };
+    let criterion = match criterion_arg {
+        Some(arg) => Some(curation_assist::snapshot_criterion(
+            &uri,
+            &arg.id,
+            arg.effect,
+            &arg.source,
+        )?),
+        None if clear_criterion => {
+            curation_assist::clear_criterion(&uri)?;
+            None
+        }
+        None => curation_assist::load_criterion(&uri)?,
+    };
+    let runner = match assist {
+        Some(AssistAgent::Claude) => {
+            let criterion = criterion.as_ref().ok_or_else(|| {
+                anyhow!(
+                    "--assist claude needs a fixed criterion; pass --criterion LABEL=FILE or --exclude-criterion LABEL=FILE"
+                )
+            })?;
+            ask::preflight("claude")?;
+            let model = assist_model.unwrap_or("opus");
+            let consent = confirm(
+                &format!(
+                    "F2 will send the selected session sketch and criterion {} to Claude ({model}); enable it? [y/N] ",
+                    criterion.label()
+                ),
+                false,
+            );
+            consent.then(|| curation_assist::RunnerSpec::claude(model))
+        }
+        None => None,
     };
     let found = curate::candidates(memory, &uri, &project, true).await?;
     if found.matched.is_empty() {
@@ -592,47 +707,66 @@ async fn curate_review(memory: &hub::Memory, project: Option<&str>) -> Result<()
         Err(error) => (session_sketch::SketchBatch::default(), Some(format!("{error:#}"))),
     };
     let (color, width) = human_io();
-    let items: Vec<funes::tui::curate::Candidate> = found
-        .matched
-        .iter()
-        .map(|s| {
-            let body = previews
+    let mut items = Vec::with_capacity(found.matched.len());
+    for s in &found.matched {
+        let body = previews
+            .get(&s.session_id)
+            .map(|turns| render::get_human("", turns, color, width, None))
+            .unwrap_or_default();
+        let sketch = sketches.sketches.get(&s.session_id).cloned();
+        let sketch_body = sketch.as_ref().map(session_sketch::render_preview).unwrap_or_else(|| {
+            let reason = sketches
+                .failures
                 .get(&s.session_id)
-                .map(|turns| render::get_human("", turns, color, width, None))
-                .unwrap_or_default();
-            let sketch_body = sketches
-                .sketches
-                .get(&s.session_id)
-                .map(session_sketch::render_preview)
-                .unwrap_or_else(|| {
-                    let reason = sketches
-                        .failures
-                        .get(&s.session_id)
-                        .or(sketch_error.as_ref())
-                        .map(String::as_str)
-                        .unwrap_or("no sketch was produced");
-                    format!(
-                        "session sketch unavailable\n\n{reason}\n\nThe prompts view remains available; press Tab to switch."
-                    )
+                .or(sketch_error.as_ref())
+                .map(String::as_str)
+                .unwrap_or("no sketch was produced");
+            format!(
+                "session sketch unavailable\n\n{reason}\n\nThe prompts view remains available; press Tab to switch."
+            )
+        });
+        // Search the primary sketch first, while retaining enough prompt history to find a
+        // session by wording that the selector did not keep. The bounds keep fuzzy matching
+        // cheap even for very large sessions.
+        let filter = curation_filter(&sketch_body, &body);
+        let assist_request =
+            criterion
+                .as_ref()
+                .zip(sketch.as_ref())
+                .zip(runner.as_ref())
+                .map(|((criterion, sketch), runner)| curation_assist::AssistRequest {
+                    memory_uri: uri.clone(),
+                    criterion: criterion.clone(),
+                    sketch: sketch.clone(),
+                    runner: runner.clone(),
                 });
-            // Search the primary sketch first, while retaining enough prompt history to find a
-            // session by wording that the selector did not keep. The bounds keep fuzzy matching
-            // cheap even for very large sessions.
-            let filter = curation_filter(&sketch_body, &body);
-            funes::tui::curate::Candidate {
-                id: s.session_id.clone(),
-                date: s.date().to_string(),
-                prompt: s.first_prompt.clone(),
-                comment: format!("{} {}", s.date(), s.first_prompt).trim().to_string(),
-                filter,
-                chunks: s.chunks,
-                publication: s.publication,
-                prompts_preview: funes::tui::ansi_to_text(&body),
-                sketch_preview: funes::tui::ansi_to_text(&sketch_body),
-            }
-        })
-        .collect();
-    funes::tui::curate::run(uri.clone(), project.clone(), items)?;
+        let assistance = match criterion.as_ref().zip(sketch.as_ref()) {
+            Some((criterion, sketch)) => match curation_assist::load_artifact(&uri, criterion, sketch) {
+                Ok(Some(artifact)) => funes::tui::curate::Assistance::Ready(Box::new(artifact)),
+                Ok(None) if assist_request.is_some() => funes::tui::curate::Assistance::Pending,
+                Ok(None) => funes::tui::curate::Assistance::Unavailable,
+                Err(error) => {
+                    funes::tui::curate::Assistance::Failed(format!("could not read cached assessment: {error:#}"))
+                }
+            },
+            None => funes::tui::curate::Assistance::Unavailable,
+        };
+        items.push(funes::tui::curate::Candidate {
+            id: s.session_id.clone(),
+            date: s.date().to_string(),
+            prompt: s.first_prompt.clone(),
+            comment: format!("{} {}", s.date(), s.first_prompt).trim().to_string(),
+            filter,
+            chunks: s.chunks,
+            publication: s.publication,
+            prompts_preview: funes::tui::ansi_to_text(&body),
+            sketch_preview: funes::tui::ansi_to_text(&sketch_body),
+            sketch,
+            assist_request,
+            assistance,
+        });
+    }
+    funes::tui::curate::run(uri.clone(), project.clone(), criterion, items)?;
 
     // The review persisted every decision, so leaving just summarizes and offers the push.
     let curation = curate::load(&uri)?.unwrap_or_default();
@@ -983,7 +1117,8 @@ fn prompt_new_memory(label: &str, chunks: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{curation_filter, parse_confirm};
+    use super::{curation_filter, parse_confirm, parse_criterion_arg};
+    use funes::curation_assist::CriterionEffect;
 
     #[test]
     fn parse_confirm_honors_default_and_answers() {
@@ -1007,5 +1142,17 @@ mod tests {
 
         let bounded = curation_filter(&"s".repeat(4_000), &"p".repeat(2_000));
         assert_eq!(bounded.chars().count(), 4_001); // two budgets plus their separator
+    }
+
+    #[test]
+    fn criterion_argument_requires_a_label_and_file() {
+        let parsed = parse_criterion_arg(" internal = ./private.txt ", CriterionEffect::Exclusion).unwrap();
+        assert_eq!(parsed.id, "internal");
+        assert_eq!(parsed.source, std::path::Path::new("./private.txt"));
+        assert_eq!(parsed.effect, CriterionEffect::Exclusion);
+
+        assert!(parse_criterion_arg("internal", CriterionEffect::Exclusion).is_err());
+        assert!(parse_criterion_arg("=private.txt", CriterionEffect::Exclusion).is_err());
+        assert!(parse_criterion_arg("internal=", CriterionEffect::Exclusion).is_err());
     }
 }

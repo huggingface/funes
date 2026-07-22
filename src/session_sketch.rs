@@ -1440,13 +1440,24 @@ fn display_text(unit: &Unit) -> (String, bool) {
 /// Render the review-oriented sketch view. It keeps exact turn provenance and selection/context
 /// distinctions, while replacing selector-internal reason names with labels useful to a curator.
 pub fn render_preview(sketch: &SessionSketch) -> String {
+    render_preview_with_citations(sketch, &HashSet::new())
+}
+
+/// Render a sketch while promoting the exact turns cited by a validated curation assessment. A
+/// citation is turn-scoped, so every reconstructed block from that turn is emphasized.
+pub fn render_preview_with_citations(sketch: &SessionSketch, cited_turns: &HashSet<String>) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "\x1b[1mSESSION SKETCH\x1b[0m  · {} selected · {} shown · {} chars",
+        "\x1b[1mSESSION SKETCH\x1b[0m  · {} selected · {} shown · {} chars{}",
         sketch.selected_units.len(),
         sketch.evidence.len(),
-        sketch.diagnostics.rendered_characters
+        sketch.diagnostics.rendered_characters,
+        if cited_turns.is_empty() {
+            String::new()
+        } else {
+            format!(" · {} cited turn(s)", cited_turns.len())
+        }
     );
     let _ = writeln!(
         out,
@@ -1462,6 +1473,7 @@ pub fn render_preview(sketch: &SessionSketch) -> String {
     }
 
     for evidence in &sketch.evidence {
+        let cited = cited_turns.contains(&evidence.turn_uuid);
         let kind = match &evidence.tool_name {
             Some(tool) => format!("{} ({tool})", evidence.block_type),
             None => evidence.block_type.clone(),
@@ -1472,11 +1484,16 @@ pub fn render_preview(sketch: &SessionSketch) -> String {
             Vec::new()
         };
         let shortened = if evidence.truncated { " · shortened" } else { "" };
-        if evidence.selected {
-            let badge = if labels.is_empty() {
+        if evidence.selected || cited {
+            let selection = if labels.is_empty() {
                 "SELECTED".to_string()
             } else {
                 labels.join(" · ")
+            };
+            let badge = match (cited, evidence.selected) {
+                (true, true) => format!("CRITERION EVIDENCE · {selection}"),
+                (true, false) => "CRITERION EVIDENCE · CONTEXT".to_string(),
+                (false, _) => selection,
             };
             let _ = writeln!(
                 out,
@@ -1738,6 +1755,12 @@ mod tests {
         assert!(preview.contains("TRANSITION n = nth-strongest local semantic boundary"));
         assert!(!preview.contains("axis_1_positive"));
         assert!(!preview.contains("topic shift"));
+
+        let cited = HashSet::from(["turn-context".to_string()]);
+        let assessed = render_preview_with_citations(&sketch, &cited);
+        assert!(assessed.contains("1 cited turn(s)"));
+        assert!(assessed.contains("CRITERION EVIDENCE · CONTEXT"));
+        assert!(!assessed.contains("context · assistant text · seq 2"));
     }
 
     #[test]
