@@ -124,7 +124,7 @@ impl Funes {
     }
 
     #[tool(
-        description = "Show funes memory status: chunk and session counts, when it was last indexed, and — for a remote memory — the last push."
+        description = "Show funes memory status: chunk and session counts, pending local indexing, and — for a remote memory — last push plus this host's pending push coverage."
     )]
     async fn status(&self, Parameters(StatusRequest { memory }): Parameters<StatusRequest>) -> String {
         // No update check here: it needs the network, and the "update available" notice belongs

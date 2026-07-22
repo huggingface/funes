@@ -32,6 +32,9 @@ use chrono::Utc;
 use hf_hub::{HFError, HFRepository, RepoTypeDataset};
 use lance::Dataset;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs::File;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Reindex the remote once this many appended rows are sitting unindexed (answered by a
@@ -78,6 +81,120 @@ async fn all_ids(ds: &Dataset) -> Result<HashSet<String>> {
         }
     }
     Ok(ids)
+}
+
+/// Per-remote local receipt of chunk ids this host has observed on that remote. It is deliberately
+/// local: a shared remote's sessions from other hosts say nothing about this host's push backlog.
+fn pushed_path(memory_uri: &str) -> PathBuf {
+    dataset::funes_dir().join("pushed").join(curate::sanitize(memory_uri))
+}
+
+fn load_pushed_from(path: &Path) -> Option<HashSet<String>> {
+    let text = std::fs::read_to_string(path).ok()?;
+    Some(
+        text.lines()
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+fn load_pushed(memory_uri: &str) -> Option<HashSet<String>> {
+    load_pushed_from(&pushed_path(memory_uri))
+}
+
+fn record_pushed_at<'a>(path: &Path, ids: impl IntoIterator<Item = &'a String>) -> Result<()> {
+    let dir = path.parent().context("push receipt has no parent directory")?;
+    std::fs::create_dir_all(dir).context("creating the push receipt directory")?;
+
+    // Lock a stable sibling rather than the receipt itself: the receipt is atomically replaced,
+    // so locking its inode would let a second writer lock the replacement and race the first.
+    let lock_dir = dir.join(".locks");
+    std::fs::create_dir_all(&lock_dir).context("creating the push receipt lock directory")?;
+    let lock_path = lock_dir.join(path.file_name().context("push receipt has no file name")?);
+    let lock = File::options()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("opening push receipt lock at {}", lock_path.display()))?;
+    lock.lock().context("locking the push receipt")?;
+
+    let mut pushed = load_pushed_from(path).unwrap_or_default();
+    let before = pushed.len();
+    pushed.extend(ids.into_iter().cloned());
+    if pushed.len() == before && path.is_file() {
+        return Ok(());
+    }
+
+    let mut ids: Vec<_> = pushed.into_iter().collect();
+    ids.sort_unstable();
+    let mut temp = tempfile::NamedTempFile::new_in(dir).context("creating a push receipt")?;
+    for id in ids {
+        writeln!(temp, "{id}").context("writing the push receipt")?;
+    }
+    temp.flush().context("flushing the push receipt")?;
+    temp.persist(path)
+        .map_err(|e| anyhow::Error::new(e.error).context("saving the push receipt"))?;
+    Ok(())
+}
+
+fn record_pushed<'a>(memory_uri: &str, ids: impl IntoIterator<Item = &'a String>) -> Result<()> {
+    record_pushed_at(&pushed_path(memory_uri), ids)
+}
+
+/// This host's session-level push coverage for one remote. A session is fully pushed only when
+/// every chunk it currently has is in the local receipt, so a session that later grows returns to
+/// `pending` until its new chunks are pushed.
+pub(crate) struct PushCoverage {
+    pub total: usize,
+    pub pending: usize,
+}
+
+fn push_coverage(batches: &[RecordBatch], pushed_ids: &HashSet<String>) -> Option<PushCoverage> {
+    let mut complete: HashMap<String, bool> = HashMap::new();
+    for batch in batches {
+        let ids = batch.column_by_name("id")?.as_any().downcast_ref::<StringArray>()?;
+        let sessions = batch
+            .column_by_name("session_id")?
+            .as_any()
+            .downcast_ref::<StringArray>()?;
+        for i in 0..batch.num_rows() {
+            let present = pushed_ids.contains(ids.value(i));
+            complete
+                .entry(sessions.value(i).to_string())
+                .and_modify(|all| *all &= present)
+                .or_insert(present);
+        }
+    }
+    let pushed = complete.values().filter(|&&all| all).count();
+    Some(PushCoverage {
+        total: complete.len(),
+        pending: complete.len() - pushed,
+    })
+}
+
+pub(crate) async fn local_push_coverage(local: &Dataset, memory_uri: &str) -> Option<PushCoverage> {
+    let pushed_ids = load_pushed(memory_uri)?;
+    let batches = dataset::scan_rows(local, &["id", "session_id"], None, None)
+        .await
+        .ok()?;
+    push_coverage(&batches, &pushed_ids)
+}
+
+fn ids_in_batches(batches: &[RecordBatch]) -> HashSet<String> {
+    let mut ids = HashSet::new();
+    for batch in batches {
+        if let Some(col) = batch
+            .column_by_name("id")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+        {
+            for i in 0..batch.num_rows() {
+                ids.insert(col.value(i).to_string());
+            }
+        }
+    }
+    ids
 }
 
 /// The to-push rows (all columns) from the local memory. An append reads just the missing ids via an
@@ -209,6 +326,12 @@ pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm) -> 
     let held_back = pending_note(not_reviewed.len(), &target.label());
     let to_push: HashSet<String> = candidates.difference(&remote_ids).cloned().collect();
 
+    // Bootstrap/refresh the local receipt from facts the push comparison has already established.
+    // This makes a no-op push enough to initialize status for a legacy remote, with no extra scan.
+    if remote.is_some() {
+        record_pushed(&uri, candidates.intersection(&remote_ids))?;
+    }
+
     // Nothing to push => done (no token needed), unless this is a forced reindex of an existing
     // remote, which is still work.
     if to_push.is_empty() && (first_publish || !force_reindex) {
@@ -282,6 +405,7 @@ pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm) -> 
             blocked: true,
         });
     }
+    let pushed_ids = ids_in_batches(&batches);
 
     // The dataset card rides the data commit — created when the repo has none, refreshed when it
     // carries the funes markers, a hand-written card left alone (see `card_file`). Root stores
@@ -326,6 +450,7 @@ pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm) -> 
         let Some(oid) = oid else {
             return Ok(format!("{}: nothing new to upload\n", target.label()).into());
         };
+        record_pushed(&uri, &pushed_ids)?;
         return Ok(format!(
             "{}: pushed {n_chunks} chunks (commit {oid})\n{card_note}{held_back}{}",
             target.label(),
@@ -360,6 +485,7 @@ pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm) -> 
             }
         }
     };
+    record_pushed(&uri, &pushed_ids)?;
     let mut out = format!("{}: pushed {n_chunks} chunks (commit {oid})\n", target.label());
     out.push_str(&card_note);
     out.push_str(&held_back);
@@ -743,6 +869,62 @@ mod tests {
         assert_eq!(by_session.len(), 2, "one entry per session");
         assert!(by_session.contains_key("reviewed") && by_session.contains_key("private"));
         assert!(by_session.values().all(|ids| !ids.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn push_coverage_requires_every_current_chunk_of_a_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let ds = two_session_ds(dir.path()).await;
+        let by_session = curate::ids_by_session(&ds).await.unwrap();
+        let pushed: HashSet<String> = by_session["reviewed"].iter().cloned().collect();
+        let batches = dataset::scan_rows(&ds, &["id", "session_id"], None, None)
+            .await
+            .unwrap();
+        let coverage = push_coverage(&batches, &pushed).unwrap();
+        assert_eq!(coverage.total, 2);
+        assert_eq!(coverage.pending, 1);
+    }
+
+    #[test]
+    fn push_receipt_is_an_atomic_growing_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("receipt");
+        let first = ["b".to_string(), "a".to_string()];
+        record_pushed_at(&path, &first).unwrap();
+        let second = ["b".to_string(), "c".to_string()];
+        record_pushed_at(&path, &second).unwrap();
+        assert_eq!(
+            load_pushed_from(&path).unwrap(),
+            ["a", "b", "c"].into_iter().map(str::to_string).collect()
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "a\nb\nc\n");
+    }
+
+    #[test]
+    fn concurrent_push_receipt_updates_do_not_lose_ids() {
+        use std::sync::{Arc, Barrier};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = Arc::new(dir.path().join("receipt"));
+        let writers = 16;
+        let barrier = Arc::new(Barrier::new(writers));
+        let threads: Vec<_> = (0..writers)
+            .map(|i| {
+                let path = Arc::clone(&path);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let id = format!("id-{i}");
+                    barrier.wait();
+                    record_pushed_at(&path, [&id]).unwrap();
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        let expected: HashSet<_> = (0..writers).map(|i| format!("id-{i}")).collect();
+        assert_eq!(load_pushed_from(&path).unwrap(), expected);
     }
 
     #[tokio::test]

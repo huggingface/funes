@@ -87,11 +87,17 @@ funes curate <memory> --include <session> --exclude <session>
 
 ```bash
 funes status                 # memory label, chunk/session counts, last indexed (and an update check)
-funes status <org>/<repo>    # …for a remote memory
+funes status <org>/<repo>    # …and what this host has or has not pushed there
 ```
 
 `funes status` tells you whether recall is reading your own memory yet, and whether a newer funes
-release is out.
+release is out. When work exists, local-index sections report how many source sessions the latest
+indexing sweep left pending and the command to run; a completed sweep stays quiet. The status read
+uses the sweep's small coverage snapshot rather than recursively scanning transcript trees. For a
+personal remote memory, one `local push` line says either that this host is up to date or how many
+local sessions are pending. This comes from a per-remote receipt kept on this host, so sessions
+contributed by other hosts do not distort the result and status never scans the remote to compute
+it. Run `funes push <memory>` once to initialize the receipt for an existing memory.
 
 ## See also
 

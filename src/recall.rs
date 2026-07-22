@@ -784,8 +784,9 @@ fn age(t: DateTime<Utc>, now: DateTime<Utc>) -> String {
     format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
 }
 
-/// Distinct sessions in the memory — the human-scale size of the index. Best-effort: a failed
-/// scan omits the line rather than failing status.
+/// Distinct sessions in a local memory — the human-scale size of the index. Best-effort: a failed
+/// scan omits the line rather than failing status. Never call this for a remote: even a projected
+/// column scan can download an enormous published memory.
 async fn session_count(ds: &Dataset) -> Option<usize> {
     let batches = dataset::scan_rows(ds, &["session_id"], None, None).await.ok()?;
     let mut sessions = HashSet::new();
@@ -801,12 +802,26 @@ async fn session_count(ds: &Dataset) -> Option<usize> {
     Some(sessions.len())
 }
 
+fn index_coverage_line() -> Option<String> {
+    let coverage = crate::index::local_index_coverage()?;
+    (coverage.pending > 0).then(|| {
+        format!(
+            "pending indexing: {} source session{} — run `funes index`\n",
+            coverage.pending,
+            if coverage.pending == 1 { "" } else { "s" }
+        )
+    })
+}
+
 /// The indexation lines of a local memory: how many sessions it holds and when it was last
 /// written to (an `index` or `scrub` run). A version with no recorded timestamp is omitted.
 async fn index_lines(ds: &Dataset, now: DateTime<Utc>) -> String {
     let mut out = String::new();
     if let Some(n) = session_count(ds).await {
         let _ = writeln!(out, "sessions: {n}");
+    }
+    if let Some(line) = index_coverage_line() {
+        out.push_str(&line);
     }
     let t = ds.version().timestamp;
     if t.timestamp() > 0 {
@@ -825,7 +840,8 @@ pub async fn status(memory: Memory) -> Result<String> {
                 Memory::Local { .. } => out.push_str(&index_lines(&ds, now).await),
                 Memory::Remote { uri } => {
                     // A project memory announces itself and this machine's review backlog.
-                    if let Some(project) = curate::project(&ds) {
+                    let project = curate::project(&ds);
+                    if let Some(project) = &project {
                         let _ = writeln!(out, "project memory of {project}");
                         let pending = curate::pending_count(&ds, uri).await?;
                         if pending > 0 {
@@ -849,14 +865,53 @@ pub async fn status(memory: Memory) -> Result<String> {
                     // answers both "what's published" and "what's indexed on this machine".
                     if let Ok(local) = Memory::local().open().await {
                         let local_rows = local.count_rows(None).await?;
-                        let _ = write!(out, "\nlocal index: {}\nchunks: {local_rows}", Memory::local().label());
-                        // A count difference only approximates the push delta (scrub-held
-                        // rows and other hosts' pushes also move it).
-                        if local_rows > rows {
-                            let _ = write!(out, " (≈{} not yet pushed)", local_rows - rows);
+                        let _ = writeln!(
+                            out,
+                            "\nlocal index: {}\nchunks: {local_rows}",
+                            Memory::local().label()
+                        );
+                        let local_sessions = session_count(&local).await;
+                        if let Some(n) = local_sessions {
+                            let _ = writeln!(out, "sessions: {n}");
                         }
-                        out.push('\n');
-                        out.push_str(&index_lines(&local, now).await);
+                        if let Some(line) = index_coverage_line() {
+                            out.push_str(&line);
+                        }
+                        // A shared remote's total says nothing about this host's backlog. Personal
+                        // memories use the local receipt maintained by push; project memories have
+                        // their decision-aware pending-review report above.
+                        if project.is_none() {
+                            if let Some(coverage) = crate::push::local_push_coverage(&local, uri).await
+                            {
+                                if coverage.pending == 0 {
+                                    let _ = writeln!(
+                                        out,
+                                        "local push: up to date ({} session{})",
+                                        coverage.total,
+                                        if coverage.total == 1 { "" } else { "s" }
+                                    );
+                                } else {
+                                    let _ = writeln!(
+                                        out,
+                                        "local push: {} of {} session{} pending — run `funes push {}`",
+                                        coverage.pending,
+                                        coverage.total,
+                                        if coverage.total == 1 { "" } else { "s" },
+                                        memory.label()
+                                    );
+                                }
+                            } else {
+                                let _ = writeln!(
+                                    out,
+                                    "local push coverage: unknown — run `funes push {}` once",
+                                    memory.label()
+                                );
+                            }
+                        }
+                        let t = local.version().timestamp;
+                        if t.timestamp() > 0 {
+                            let _ = writeln!(out, "last indexed: {}", stamp(t, now));
+                        }
                     }
                 }
             }

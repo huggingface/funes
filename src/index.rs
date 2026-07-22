@@ -11,7 +11,7 @@ use crate::chunk::{self, Tier};
 use crate::harness::Harness;
 use crate::inference::{self, Embedder};
 use crate::{dataset, hub, lock, repo, scan, source, trace};
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use arrow_array::types::Float32Type;
 use arrow_array::{Array, FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator, StringArray};
 use arrow_schema::{DataType, Field, Schema};
@@ -227,6 +227,67 @@ fn unit_current(entry: Option<&UnitState>, sig: &str, target: Tier) -> bool {
     entry.is_some_and(|e| e.sig == sig && e.level >= target)
 }
 
+/// Lightweight coverage snapshot written by indexing runs for `status` to read without walking
+/// the transcript trees again.
+#[derive(Serialize, Deserialize, Default)]
+struct IndexCoverageSnapshot {
+    pending: HashSet<String>,
+}
+
+pub(crate) struct IndexCoverage {
+    pub pending: usize,
+}
+
+fn update_index_coverage<'a>(
+    mut snapshot: IndexCoverageSnapshot,
+    units: impl IntoIterator<Item = &'a source::Unit>,
+    state: &HashMap<String, UnitState>,
+) -> IndexCoverageSnapshot {
+    let target = *Tier::ALL.iter().max().expect("Tier::ALL is non-empty");
+    for unit in units {
+        // Native sessions have incremental signatures. Bulk parquet and remote imports do not
+        // belong in the local-session status snapshot (and unsigned units never become current).
+        let Some(sig) = &unit.signature else {
+            continue;
+        };
+        if unit.key.starts_with("hf://") {
+            continue;
+        }
+        if unit_current(state.get(&unit.key), sig, target) {
+            snapshot.pending.remove(&unit.key);
+        } else {
+            snapshot.pending.insert(unit.key.clone());
+        }
+    }
+    snapshot
+}
+
+fn write_index_coverage(
+    path: &Path,
+    units: &[(usize, source::Unit)],
+    state: &HashMap<String, UnitState>,
+) -> Result<()> {
+    let snapshot = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    let snapshot = update_index_coverage(snapshot, units.iter().map(|(_, unit)| unit), state);
+    std::fs::write(path, serde_json::to_string(&snapshot)?)
+        .with_context(|| format!("writing index coverage at {}", path.display()))
+}
+
+/// Native sessions that the most recent indexing sweep found short of a complete index. `None`
+/// means no sweep has written a readable snapshot yet; status omits the line rather than doing an
+/// unbounded recursive transcript scan.
+pub(crate) fn local_index_coverage() -> Option<IndexCoverage> {
+    std::fs::read_to_string(dataset::funes_dir().join("index-coverage.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<IndexCoverageSnapshot>(&text).ok())
+        .map(|snapshot| IndexCoverage {
+            pending: snapshot.pending.len(),
+        })
+}
+
 /// A set-up indexer: it holds the memory lock, embedder, dataset, redaction scanner, and incremental
 /// state, so a caller can index units in whatever batches it likes — one at a time to check the
 /// clock between them, or all at once — without reloading the model. Build the indexes once at the
@@ -243,6 +304,7 @@ struct Indexer {
     repo_cache: HashMap<String, String>,
     state: HashMap<String, UnitState>,
     state_path: PathBuf,
+    coverage_path: PathBuf,
     /// The memory didn't exist when this run opened it — the first index.
     first_index: bool,
     /// A human is watching (stdin is a terminal) — probed once here, so every prompt-or-proceed
@@ -326,6 +388,7 @@ impl Indexer {
         // empty. A first index (memory missing) owes everything, whatever an old state.json says — a
         // stale one would silently skip every unit against the empty memory.
         let state_path = dir.join("state.json");
+        let coverage_path = dir.join("index-coverage.json");
         let state = if first_index {
             HashMap::new()
         } else {
@@ -353,6 +416,7 @@ impl Indexer {
         };
 
         let units = collect_units(&sources)?;
+        write_index_coverage(&coverage_path, &units, &state)?;
 
         Ok(Indexer {
             uri,
@@ -364,6 +428,7 @@ impl Indexer {
             repo_cache: HashMap::new(),
             state,
             state_path,
+            coverage_path,
             first_index,
             interactive,
             work_remaining: false,
@@ -478,6 +543,7 @@ impl Indexer {
                 },
             );
             std::fs::write(&self.state_path, serde_json::to_string_pretty(&self.state)?)?;
+            write_index_coverage(&self.coverage_path, &self.units, &self.state)?;
         }
         // Count a unit's sessions once per run — later tier passes over it only add chunks.
         if self.counted.insert(i) {
@@ -958,6 +1024,56 @@ mod tests {
         assert!(unit_current(Some(&full), "10:20", Tier::ToolResult));
         // No record → not current.
         assert!(!unit_current(None, "10:20", Tier::Text));
+    }
+
+    #[test]
+    fn index_coverage_merges_native_pending_units_across_sweeps() {
+        let unit = |key: &str, sig: Option<&str>| source::Unit {
+            key: key.to_string(),
+            signature: sig.map(str::to_string),
+            is_subagent: false,
+        };
+        let first = vec![
+            unit("current", Some("1")),
+            unit("partial", Some("2")),
+            unit("stale", Some("new")),
+            unit("new", Some("4")),
+            unit("unsigned", None),
+            unit("hf://datasets/acme/traces/shard.parquet", Some("oid")),
+        ];
+        let state = HashMap::from([
+            (
+                "current".to_string(),
+                UnitState {
+                    sig: "1".into(),
+                    level: Tier::ToolResult,
+                },
+            ),
+            (
+                "partial".to_string(),
+                UnitState {
+                    sig: "2".into(),
+                    level: Tier::Text,
+                },
+            ),
+            (
+                "stale".to_string(),
+                UnitState {
+                    sig: "old".into(),
+                    level: Tier::ToolResult,
+                },
+            ),
+        ]);
+        let snapshot = update_index_coverage(IndexCoverageSnapshot::default(), &first, &state);
+        assert_eq!(
+            snapshot.pending,
+            ["partial", "stale", "new"].into_iter().map(str::to_string).collect()
+        );
+
+        let second = [unit("other-harness", Some("5"))];
+        let snapshot = update_index_coverage(snapshot, &second, &state);
+        assert!(snapshot.pending.contains("partial"));
+        assert!(snapshot.pending.contains("other-harness"));
     }
 
     #[test]
