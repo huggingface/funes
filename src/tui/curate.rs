@@ -1,15 +1,16 @@
 //! The `funes curate` interactive review over the generic [`crate::tui`] engine: a fuzzy-filterable
-//! list of the project's candidate sessions, each carrying a decision glyph, where `→` includes a
-//! session and `←` excludes it (the same arrow again clears to pending). The preview shows the
-//! session's user prompts. Decisions persist to the memory's curation file as they're made; Enter or
-//! Esc ends the review — the caller then summarizes and offers the push. `Tab` switches the preview
-//! between the existing user-prompts view and a deterministic session sketch.
+//! list of the project's local sessions, each carrying a decision glyph, where `→` includes a
+//! reviewable session and `←` excludes it (the same arrow again clears to pending). Fully published
+//! sessions remain browseable but immutable. The preview shows the session's user prompts.
+//! Decisions persist to the memory's curation file as they're made; Enter or Esc ends the review —
+//! the caller then summarizes and offers the push. `Tab` switches the preview between the existing
+//! user-prompts view and a deterministic session sketch.
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 
-use crate::curate::{self, Decision};
+use crate::curate::{self, Decision, Publication};
 use crate::tui::{run_root, Ctx, Flow, PickerModel, RunOpts};
 
 /// One reviewable session: what its row shows (date + opening prompt), the richer text the fuzzy
@@ -23,6 +24,9 @@ pub struct Candidate {
     /// The session's current local chunk count — recorded with an `include` as its growth
     /// watermark, so a later push can tell whether the session has grown since this review.
     pub chunks: usize,
+    /// Publication state relative to the target memory. Fully published sessions remain visible
+    /// for browsing, but their decisions cannot change because an exclude cannot retract them.
+    pub publication: Publication,
     /// User prompts with scaffolding dropped. This remains the default review view.
     pub prompts_preview: Text<'static>,
     /// Deterministically selected evidence, or an inline explanation when sketching failed.
@@ -55,7 +59,8 @@ pub fn run(uri: String, project: String, items: Vec<Candidate>) -> anyhow::Resul
         .map(|c| {
             // A stale include — the session grew since it was reviewed — seeds as pending, so it
             // reads as needing a fresh look rather than a settled ✓.
-            if existing.include.contains(&c.id) && !existing.is_stale(&c.id, c.chunks) {
+            if existing.include.contains(&c.id) && (c.publication.is_read_only() || !existing.is_stale(&c.id, c.chunks))
+            {
                 Some(Decision::Include)
             } else if existing.exclude.contains(&c.id) {
                 Some(Decision::Exclude)
@@ -92,6 +97,9 @@ impl CuratePicker {
     /// Set item `i` to `want`, or clear it to pending if it already holds that decision, then
     /// persist the new state to the curation file.
     fn toggle(&mut self, i: usize, want: Decision) {
+        if self.items[i].publication.is_read_only() {
+            return;
+        }
         let next = match (self.decision[i], want) {
             (Some(Decision::Include), Decision::Include) | (Some(Decision::Exclude), Decision::Exclude) => None,
             _ => Some(want),
@@ -117,16 +125,22 @@ impl PickerModel for CuratePicker {
 
     fn row(&self, i: usize) -> Line<'static> {
         let c = &self.items[i];
-        let rest = format!(" {}  {}", c.date, c.prompt);
-        match self.decision[i] {
-            Some(Decision::Include) => Line::from(vec![
-                Span::styled("✓", Style::default().fg(Color::Green)),
-                Span::raw(rest),
-            ]),
-            Some(Decision::Exclude) => {
-                Line::from(format!("✗{rest}")).style(Style::default().add_modifier(Modifier::DIM))
-            }
-            None => Line::from(format!("·{rest}")),
+        let mut spans = match self.decision[i] {
+            Some(Decision::Include) => vec![Span::styled("✓", Style::default().fg(Color::Green))],
+            Some(Decision::Exclude) => vec![Span::styled("✗", Style::default().add_modifier(Modifier::DIM))],
+            None => vec![Span::raw("·")],
+        };
+        spans.push(match c.publication {
+            Publication::Local => Span::raw("   "),
+            Publication::Partial => Span::styled(" ◐ ", Style::default().fg(Color::Yellow)),
+            Publication::Published => Span::styled(" ↑ ", Style::default().fg(Color::Cyan)),
+        });
+        spans.push(Span::raw(format!("{}  {}", c.date, c.prompt)));
+        let line = Line::from(spans);
+        if matches!(self.decision[i], Some(Decision::Exclude)) {
+            line.style(Style::default().add_modifier(Modifier::DIM))
+        } else {
+            line
         }
     }
 
@@ -156,7 +170,7 @@ impl PickerModel for CuratePicker {
                 Style::default().fg(Color::Cyan),
             ),
             Span::styled(
-                "    · same arrow again clears · enter/esc when done",
+                "    · ↑ published/read-only · ◐ has local updates · enter/esc when done",
                 Style::default().add_modifier(Modifier::DIM),
             ),
         ])
@@ -233,6 +247,7 @@ mod tests {
                 filter: "prompt".into(),
                 comment: "comment".into(),
                 chunks: 1,
+                publication: Publication::Local,
                 prompts_preview: Text::raw("PROMPTS"),
                 sketch_preview: Text::raw("SKETCH"),
             }],
@@ -246,5 +261,31 @@ mod tests {
         assert_eq!(picker.preview(0).lines[0].spans[0].content, "SKETCH");
         assert!(matches!(picker.decision.as_slice(), [Some(Decision::Include)]));
         assert!(line_text(&picker.header("")).contains("tab prompts"));
+    }
+
+    #[test]
+    fn a_published_session_is_visible_but_immutable() {
+        let mut picker = CuratePicker {
+            uri: "hf://datasets/o/r".into(),
+            project: "o/r".into(),
+            items: vec![Candidate {
+                id: "published".into(),
+                date: "2026-07-22".into(),
+                prompt: "prompt".into(),
+                filter: "prompt".into(),
+                comment: "comment".into(),
+                chunks: 1,
+                publication: Publication::Published,
+                prompts_preview: Text::raw("PROMPTS"),
+                sketch_preview: Text::raw("SKETCH"),
+            }],
+            decision: vec![Some(Decision::Include)],
+            preview_mode: PreviewMode::Prompts,
+            err: None,
+        };
+
+        assert!(line_text(&picker.row(0)).contains('↑'));
+        picker.toggle(0, Decision::Exclude);
+        assert!(matches!(picker.decision.as_slice(), [Some(Decision::Include)]));
     }
 }

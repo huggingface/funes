@@ -74,6 +74,11 @@ checkout's git remotes. In a terminal, `curate` opens an interactive review of t
 sessions: `→` includes a session, `←` excludes it, and the preview shows each session's prompts.
 Your review alone decides what the next `funes push` ships there; leaving the review offers that push.
 
+The picker also keeps this host's already-published project sessions available for browsing. `↑`
+marks a fully published, read-only session—an append-only upload cannot be retracted by changing its
+decision later. `◐` marks a published session with new local chunks; those updates remain reviewable.
+Press `Tab` to switch between prompts and the deterministic session sketch.
+
 For scripts, decide non-interactively:
 
 ```bash

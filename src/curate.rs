@@ -424,12 +424,44 @@ pub struct SessionSummary {
     pub first_prompt: String,
     /// The session's source repo(s) as `owner/name`, space-joined; empty when unresolvable.
     pub repo: String,
+    /// How much of this local session is already in the memory being curated. Plain [`summaries`]
+    /// have no target-memory context and leave this as [`Publication::Local`]; [`candidates`]
+    /// fills it in.
+    pub publication: Publication,
 }
 
 impl SessionSummary {
     /// The `YYYY-MM-DD` of the session's latest activity, for a decision's auto-comment.
     pub fn date(&self) -> &str {
         self.last_ts.get(..10).unwrap_or(&self.last_ts)
+    }
+}
+
+/// A local session's publication state relative to the project memory being curated.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Publication {
+    /// None of the local chunks are in the project memory yet.
+    #[default]
+    Local,
+    /// Some chunks are published, but the local session has since grown.
+    Partial,
+    /// Every local chunk is already in the project memory. Its picker row is browse-only because
+    /// the append-only remote cannot honor a later exclusion.
+    Published,
+}
+
+impl Publication {
+    pub fn is_read_only(self) -> bool {
+        self == Self::Published
+    }
+}
+
+fn publication(ids: &[String], remote_ids: &HashSet<String>) -> Publication {
+    let published = ids.iter().filter(|id| remote_ids.contains(*id)).count();
+    match published {
+        0 => Publication::Local,
+        n if n == ids.len() => Publication::Published,
+        _ => Publication::Partial,
     }
 }
 
@@ -530,6 +562,7 @@ pub async fn summaries(ds: &Dataset, only: Option<&HashSet<String>>) -> Result<V
             workdir: a.workdir,
             first_prompt: a.first_prompt,
             repo: a.repo,
+            publication: Publication::Local,
         })
         .collect();
     out.sort_by(|a, b| b.last_ts.cmp(&a.last_ts));
@@ -671,9 +704,9 @@ pub async fn projects_named(label: &str) -> Result<Vec<String>> {
 
 /// The sessions a review may offer for `project`, grouped by matching each session's stored repo
 /// against it (matched / other / unresolvable). `all_reviewable` chooses the set: `true` — every
-/// session with a chunk not yet on the remote, whatever its decision, so a decision stays visible
-/// and reversible in the review; `false` — only the pending (undecided) ones, the to-do the text
-/// listing reports. Empty when there's no local memory or the set is empty.
+/// local session, including sessions already fully published, so the interactive picker is also a
+/// browser over this host's project history; `false` — only the pending (undecided) ones, the to-do
+/// the text listing reports. Empty when there's no local memory or the set is empty.
 pub async fn candidates(memory: &Memory, uri: &str, project: &str, all_reviewable: bool) -> Result<Discovered> {
     let empty = || Discovered {
         matched: Vec::new(),
@@ -689,11 +722,7 @@ pub async fn candidates(memory: &Memory, uri: &str, project: &str, all_reviewabl
         Err(_) => HashSet::new(),
     };
     let set: HashSet<String> = if all_reviewable {
-        by_session
-            .iter()
-            .filter(|(_, ids)| ids.iter().any(|id| !remote_ids.contains(id)))
-            .map(|(session, _)| session.clone())
-            .collect()
+        by_session.keys().cloned().collect()
     } else {
         let decisions = load(uri)?.unwrap_or_default();
         partition(&by_session, &decisions, &remote_ids).1.into_iter().collect()
@@ -701,7 +730,12 @@ pub async fn candidates(memory: &Memory, uri: &str, project: &str, all_reviewabl
     if set.is_empty() {
         return Ok(empty());
     }
-    let sums = summaries(&local, Some(&set)).await?;
+    let mut sums = summaries(&local, Some(&set)).await?;
+    for summary in &mut sums {
+        if let Some(ids) = by_session.get(&summary.session_id) {
+            summary.publication = publication(ids, &remote_ids);
+        }
+    }
     Ok(discover(sums, project))
 }
 
@@ -905,6 +939,20 @@ exclude ddd # later";
     }
 
     #[test]
+    fn publication_distinguishes_local_updated_and_fully_published_sessions() {
+        let ids = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(publication(&ids, &HashSet::new()), Publication::Local);
+        assert_eq!(
+            publication(&ids, &HashSet::from(["a".to_string()])),
+            Publication::Partial
+        );
+        assert_eq!(
+            publication(&ids, &HashSet::from(["a".to_string(), "b".to_string()])),
+            Publication::Published
+        );
+    }
+
+    #[test]
     fn project_schema_stamps_beside_the_embedder_pin() {
         let schema = project_schema("huggingface/funes");
         assert_eq!(
@@ -999,6 +1047,7 @@ exclude ddd # later";
             workdir: String::new(),
             first_prompt: String::new(),
             repo: repo.to_string(),
+            publication: Publication::Local,
         };
         let sessions = vec![
             mk("matched", "acme/widget"),

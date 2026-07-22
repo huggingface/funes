@@ -620,6 +620,7 @@ async fn curate_review(memory: &hub::Memory, project: Option<&str>) -> Result<()
                 comment: format!("{} {}", s.date(), s.first_prompt).trim().to_string(),
                 filter,
                 chunks: s.chunks,
+                publication: s.publication,
                 prompts_preview: funes::tui::ansi_to_text(&body),
                 sketch_preview: funes::tui::ansi_to_text(&sketch_body),
             }
@@ -631,20 +632,18 @@ async fn curate_review(memory: &hub::Memory, project: Option<&str>) -> Result<()
     let curation = curate::load(&uri)?.unwrap_or_default();
     // A stale include (the session grew since it was reviewed) counts as pending here, not as a
     // fresh include — it won't ship until it's reviewed again.
-    let inc = found
-        .matched
-        .iter()
+    let published = found.matched.iter().filter(|s| s.publication.is_read_only()).count();
+    let reviewable = found.matched.iter().filter(|s| !s.publication.is_read_only());
+    let inc = reviewable
+        .clone()
         .filter(|s| curation.include.contains(&s.session_id) && !curation.is_stale(&s.session_id, s.chunks))
         .count();
-    let exc = found
-        .matched
-        .iter()
+    let exc = reviewable
+        .clone()
         .filter(|s| curation.exclude.contains(&s.session_id))
         .count();
-    println!(
-        "project memory of {project} — {inc} include, {exc} exclude, {} pending",
-        found.matched.len() - inc - exc
-    );
+    let pending = reviewable.count() - inc - exc;
+    println!("project memory of {project} — {published} published, {inc} include, {exc} exclude, {pending} pending");
     if inc == 0 {
         return Ok(()); // nothing included — nothing to publish, and no memory created
     }
