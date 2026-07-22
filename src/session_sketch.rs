@@ -155,7 +155,7 @@ pub struct SketchRefresh {
     pub outcome: CacheOutcome,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SessionSketch {
     pub schema_version: u32,
     pub selector_version: String,
@@ -170,7 +170,7 @@ pub struct SessionSketch {
     pub diagnostics: Diagnostics,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SelectedUnit {
     pub id: String,
     pub turn_uuid: String,
@@ -179,7 +179,7 @@ pub struct SelectedUnit {
     pub reasons: Vec<String>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Evidence {
     pub id: String,
     pub turn_uuid: String,
@@ -195,7 +195,7 @@ pub struct Evidence {
     pub text: String,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Diagnostics {
     pub axes: usize,
     pub transitions: usize,

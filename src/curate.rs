@@ -195,7 +195,7 @@ pub fn file_for(memory_uri: &str) -> PathBuf {
 
 /// A memory URI as a filename — every path-hostile byte becomes `_`, deterministically, so the
 /// canonical `hf://…` URI always maps to the same file.
-fn sanitize(uri: &str) -> String {
+pub(crate) fn sanitize(uri: &str) -> String {
     uri.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '-' || c == '.' {
