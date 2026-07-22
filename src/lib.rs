@@ -45,6 +45,7 @@ pub mod render;
 pub mod repo;
 pub mod scan;
 pub mod scrub;
+pub mod session_sketch;
 pub mod source;
 pub mod trace;
 pub mod tui;
