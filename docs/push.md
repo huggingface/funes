@@ -56,8 +56,9 @@ $ echo $?
 2
 ```
 
-`funes push` and `funes scrub` refuse to run unscanned when TruffleHog is unavailable. Install it on
-`PATH` or set `FUNES_TRUFFLEHOG=/path/to/trufflehog`; see
+`funes push` and `funes scrub` refuse to run unscanned when TruffleHog is unavailable. See the
+[upstream installation documentation](https://github.com/trufflesecurity/trufflehog#installation).
+funes looks for it on `PATH`, or at the path set by `FUNES_TRUFFLEHOG`; see
 [configuration.md](configuration.md#environment-reference).
 
 ### What `funes scrub` changes

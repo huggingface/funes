@@ -5,9 +5,9 @@
 //! `$FUNES_HOME` or `~/.funes`.
 
 use funes::harness::Harness;
-use funes::{ask, claude, codex, curate, hermes, hub, index, mcp, pi, push, recall, render, scrub, update};
+use funes::{ask, claude, codex, curate, hermes, hub, index, mcp, pi, push, recall, render, scan, scrub, update};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
@@ -494,13 +494,25 @@ async fn main() -> Result<()> {
             // bootstraps it: build the first index and do the first push — the two one-time steps
             // the hooks can't do unattended — so nothing is left to run by hand.
             AddAgent::Claude { memory } => {
-                bootstrap_add(Harness::Claude, resolve_add_memory(memory).await?, claude::install).await
+                let resolved = resolve_add_memory(memory).await?;
+                if let Some(remote) = resolved.as_ref().filter(|r| r.is_remote()) {
+                    require_scanner(&remote.memory, Harness::Claude)?;
+                }
+                bootstrap_add(Harness::Claude, resolved, claude::install).await
             }
             AddAgent::Codex { memory } => {
-                bootstrap_add(Harness::Codex, resolve_add_memory(memory).await?, codex::install).await
+                let resolved = resolve_add_memory(memory).await?;
+                if let Some(remote) = resolved.as_ref().filter(|r| r.is_remote()) {
+                    require_scanner(&remote.memory, Harness::Codex)?;
+                }
+                bootstrap_add(Harness::Codex, resolved, codex::install).await
             }
             AddAgent::Hermes { memory } => {
-                bootstrap_add(Harness::Hermes, resolve_add_memory(memory).await?, hermes::install).await
+                let resolved = resolve_add_memory(memory).await?;
+                if let Some(remote) = resolved.as_ref().filter(|r| r.is_remote()) {
+                    require_scanner(&remote.memory, Harness::Hermes)?;
+                }
+                bootstrap_add(Harness::Hermes, resolved, hermes::install).await
             }
             // The rest register a read-side integration only (no local pipeline to bootstrap), so
             // they just take the resolved memory — the `created` flag only matters to the first push.
@@ -517,6 +529,12 @@ struct Resolved {
     created: bool,
 }
 
+impl Resolved {
+    fn is_remote(&self) -> bool {
+        matches!(hub::Memory::parse(&self.memory), hub::Memory::Remote { .. })
+    }
+}
+
 /// Resolve the memory `funes add` binds. An explicitly-named memory is validated — offer to create it
 /// if it's missing on the Hub (a typo guard). With no memory, offer to set one up on the Hub when a
 /// token is present (`<user>/funes-memory`); otherwise stay local.
@@ -528,6 +546,17 @@ async fn resolve_add_memory(raw: AddMemory) -> Result<Option<Resolved>> {
         }
         None => offer_hub_memory().await,
     }
+}
+
+fn require_scanner(memory: &str, harness: Harness) -> Result<()> {
+    scan::Trufflehog::find().map(|_| ()).with_context(|| {
+        format!(
+            "can't publish agent traces to {memory} without TruffleHog. Once it is available, re-run \
+             `funes add {} {memory}`; to keep this setup local, run `funes add {} local` instead.",
+            harness.cli_name(),
+            harness.cli_name(),
+        )
+    })
 }
 
 /// The deferred creation the interactive review runs once you've included sessions: materialize
@@ -648,10 +677,17 @@ async fn create_project_memory(
     let hub::Memory::Remote { uri } = memory else {
         return Ok(false);
     };
-    let prompt = format!(
-        "publish {includes} session(s) to {} as the project memory of {project}? [Y/n] ",
-        memory.label()
-    );
+    let prompt = if create_repo {
+        format!(
+            "create {} as a private dataset and publish {includes} session(s) to it as the project memory of {project}? [Y/n] ",
+            memory.label()
+        )
+    } else {
+        format!(
+            "publish {includes} session(s) to {} as the project memory of {project}? [Y/n] ",
+            memory.label()
+        )
+    };
     if !confirm(&prompt, true) {
         eprintln!("nothing published; {} left as is.", memory.label());
         return Ok(false);
@@ -659,6 +695,7 @@ async fn create_project_memory(
     if create_repo {
         let (owner, name, _) = hub::parse_hf(uri)?;
         hub::create_dataset_repo(&owner, &name).await?;
+        eprintln!("created {owner}/{name} as a private dataset.");
     }
     curate::name_project(memory, project).await?;
     eprintln!("{} is now the project memory of {project}.", memory.label());
@@ -681,10 +718,13 @@ async fn ensure_remote_exists(remote: &str) -> Result<bool> {
         hub::Reachability::Missing => {
             let (owner, name, _) = hub::parse_hf(&uri)?;
             if std::io::stdin().is_terminal()
-                && confirm(&format!("{remote} doesn't exist on the Hub. Create it? [y/N] "), false)
+                && confirm(
+                    &format!("{remote} doesn't exist on the Hub. Create it as a private dataset? [y/N] "),
+                    false,
+                )
             {
                 hub::create_dataset_repo(&owner, &name).await?;
-                eprintln!("created {owner}/{name}.");
+                eprintln!("created {owner}/{name} as a private dataset.");
                 Ok(true)
             } else {
                 Err(hub::missing_remote(&uri))
@@ -732,9 +772,12 @@ async fn offer_hub_memory() -> Result<Option<Resolved>> {
             Ok(None)
         }
         hub::Reachability::Missing => {
-            if confirm(&format!("Create {memory} for your memory? [Y/n] "), true) {
+            if confirm(
+                &format!("Create {memory} as a private dataset for your memory? [Y/n] "),
+                true,
+            ) {
                 hub::create_dataset_repo(&user, "funes-memory").await?;
-                eprintln!("created {memory}.");
+                eprintln!("created {memory} as a private dataset.");
                 Ok(Some(Resolved { memory, created: true }))
             } else {
                 Ok(None)
