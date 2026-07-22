@@ -71,8 +71,8 @@ parse. ask reads no stdin. Quote the question (or put `--` before it) when it co
 words. CLI-only; not an MCP tool.
 
 funes errors before any agent spawns on: a memory that can't be read (missing, empty,
-unauthorized, no index yet, or unreachable), a missing agent CLI, and (codex) zero
-recalled passages. A non-zero agent exit fails funes (exit 1, the child's code quoted).
+unauthorized, no index yet, or unreachable), a missing agent CLI, and zero recalled passages.
+A non-zero agent exit fails funes (exit 1, the child's code quoted).
 
 | Flag | Default | Meaning |
 | --- | --- | --- |

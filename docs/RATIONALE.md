@@ -68,12 +68,17 @@ the dataset's commit, so a warm recall reads from disk with no network. That hub
 and reranking still happen locally; nothing on the hub processes, distills, or "learns" from
 your data.
 
-**Why:** memory of your work is among the most sensitive data you have, so funes never hands
-it to a third party that runs a model over it. But "local" shouldn't mean "trapped on one
-laptop": the optional hub tier lets you share a memory across your own machines or a team
-*without* surrendering control of the data or changing what the data is — it's the same raw,
-deterministic index, just hosted somewhere you own. Model-agnostic ingest means funes
-outlives whichever model you use today.
+**Why:** memory of your work is among the most sensitive data you have, so indexing, embedding,
+reranking, and Hub-backed retrieval do not hand it to a third-party model service. But "local"
+shouldn't mean "trapped on one laptop": the optional hub tier lets you share a memory across your
+own machines or a team *without* changing what the data is — it's the same raw, deterministic index,
+just hosted somewhere you own. Model-agnostic ingest means funes outlives whichever model you use
+today.
+
+The reader is a separate trust boundary. When a cloud coding agent calls `recall`, the returned
+passages enter that agent's context; likewise, the explicitly-invoked [`funes ask`](ask.md) sends its
+question and recalled passages to the provider configured for the selected agent. Use local models
+or inspect `funes recall` output directly when those passages must not go to a hosted model.
 
 ### 4. Recall is pulled, not pushed
 
