@@ -80,6 +80,42 @@ decision later. `◐` marks a published session with new local chunks; those upd
 The preview opens on the deterministic session sketch; press `Tab` for the prompt history.
 Typing filters across both views. `Shift-Tab` shows only sessions that still require a decision.
 
+### Guided review against one criterion
+
+Fix one editorial criterion before opening the picker by giving it a short label and a text file:
+
+```bash
+funes curate <memory> \
+  --exclude-criterion internal=./exclude-internal.txt
+```
+
+The complete criterion is shown above every preview and cannot be edited while the picker is open.
+It is saved locally for that memory and reused on later reviews; replace it with another
+`--criterion` or `--exclude-criterion`, or remove it with `--clear-criterion`. Use `--criterion` for
+a condition that supports inclusion when matched, and `--exclude-criterion` for a condition that
+supports exclusion when matched.
+
+Claude can assess the selected **session sketch** against that fixed criterion on demand:
+
+```bash
+funes curate <memory> \
+  --exclude-criterion internal=./exclude-internal.txt \
+  --assist claude
+```
+
+funes asks once before enabling the provider. Nothing is sent merely by opening or browsing the
+picker; press `F2` on a session to send that sketch and the criterion. The assessment runs while you
+continue browsing, is checked against funes's schema and evidence handles, and is cached locally.
+Fresh cached results appear on later runs even without `--assist`. Change the model with
+`--assist-model`; the default is `opus`, with a per-assessment budget ceiling of $1.25.
+
+The row badges summarize the advisory result: `+` include candidate, `!` exclude candidate, `?`
+full review needed, `◇` not assessed, and `×` runner or validation failure. The preview shows the
+rationale, measured time and reported cost, then promotes every cited source turn as **CRITERION
+EVIDENCE** inside the sketch. The result never changes a human decision. In particular, an exclusion
+criterion evaluated from a selected sketch may flag a session for exclusion, but it cannot clear
+unseen content for publication; insufficient evidence becomes `needs full review`.
+
 For scripts, decide non-interactively:
 
 ```bash
