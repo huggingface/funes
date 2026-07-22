@@ -74,11 +74,20 @@ funes add claude local                     # explicit local (the default)
 
 A memory is an `<org>/<repo>` shorthand, a full `hf://…` URI, or `local`. The binding lives in the
 **agent's own config** — there is no hidden global default. If you name a memory that doesn't exist on
-the Hub yet, `funes add` offers to create it (default no, to catch typos).
+the Hub yet, `funes add` offers to create it (default no, to catch typos). Dataset repositories that
+funes creates are **private by default**; changing their visibility later is an explicit action on
+the Hub. An existing repository keeps its existing visibility.
 
 With **no memory named**, and an HF token present in a terminal, `funes add` offers to set up
 `<user>/funes-memory` for you so your memory follows you across machines; decline and it stays local.
 Without a token it stays local and tells you how to enable syncing later.
+
+Remote publishing also requires [TruffleHog](https://github.com/trufflesecurity/trufflehog). `add`
+checks for it before installing a publishing integration. See its
+[installation documentation](https://github.com/trufflesecurity/trufflehog#installation); funes
+looks for it on `PATH`, or at the path set by `FUNES_TRUFFLEHOG`. Agent traces commonly capture
+exported environment variables, so the first push and every later push fail closed unless funes can
+scan the content for credentials. Local-only setup does not require TruffleHog.
 
 ## What a run does
 

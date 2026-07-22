@@ -79,6 +79,9 @@ your account or org, gated by your token, readable by whoever you say. Not just 
 project, but the *process* behind it — the decisions, dead ends, and rationale — becomes something
 an agent can recall.
 
+Dataset repositories created by funes are **private by default**. Existing repositories retain their
+current visibility, and making a funes-created memory public is a deliberate change on the Hub.
+
 Bind a memory when you add funes to an agent and it recalls from there and keeps it current on its
 own; or run the two commands directly:
 
