@@ -28,7 +28,7 @@ use lance::dataset::WriteParams;
 use lance::Dataset;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// The project this memory is *of* — the `project` schema-metadata key, carried beside the
@@ -299,12 +299,105 @@ pub(crate) async fn ids_by_session(ds: &Dataset) -> Result<HashMap<String, Vec<S
     Ok(by_session)
 }
 
-/// The local sessions curation may offer — [`ids_by_session`] minus sub-agents. Project memories
-/// and the review both draw from this; a personal memory's `all_ids` push is unaffected (it keeps
-/// everything).
+const APPROVAL_HISTORY: u8 = 1;
+const APPROVAL_START: u8 = 2;
+const APPROVAL_END: u8 = 4;
+
+/// Structural signals left in already-indexed Codex guardian transcripts. The exact header plus
+/// both delimiters is deliberately stricter than matching `APPROVAL REQUEST END` alone: a primary
+/// session may discuss that phrase while diagnosing this very issue.
+fn approval_review_signal(text: &str) -> u8 {
+    let text = text.trim();
+    let mut signal = 0;
+    if text.starts_with("The following is the Codex agent history whose request action you are assessing.")
+        || text.starts_with("The following is the Codex agent history added since your last approval assessment.")
+    {
+        signal |= APPROVAL_HISTORY;
+    }
+    if text == ">>> APPROVAL REQUEST START" {
+        signal |= APPROVAL_START;
+    }
+    if text == ">>> APPROVAL REQUEST END" {
+        signal |= APPROVAL_END;
+    }
+    signal
+}
+
+fn is_approval_review(signals: u8) -> bool {
+    signals & (APPROVAL_HISTORY | APPROVAL_START | APPROVAL_END) == APPROVAL_HISTORY | APPROVAL_START | APPROVAL_END
+}
+
+/// The local sessions curation may offer — local rows minus child-agent sessions. Claude exposes
+/// those through its `agent-<id>` filename; Codex records the fact only in the source JSONL's
+/// `session_meta`, so inspect each distinct Codex source path as well. The approval-wrapper
+/// fingerprint covers guardian rows already indexed on a host where the original JSONL is gone.
+/// Project memories and the review both draw from this; a personal memory's `all_ids` push is
+/// unaffected (it keeps everything).
 pub(crate) async fn candidate_sessions(local: &Dataset) -> Result<HashMap<String, Vec<String>>> {
-    let mut by_session = ids_by_session(local).await?;
-    by_session.retain(|session, _| !jsonl::is_subagent(session));
+    let cols = [
+        "id",
+        "session_id",
+        "source_path",
+        "harness",
+        "role",
+        "block_type",
+        "text",
+    ];
+    let batches = dataset::scan_rows(local, &cols, None, None).await?;
+    let mut by_session: HashMap<String, Vec<String>> = HashMap::new();
+    let mut subagents = HashSet::new();
+    let mut approval_signals: HashMap<String, u8> = HashMap::new();
+    let mut codex_source_kind: HashMap<String, bool> = HashMap::new();
+    for batch in batches {
+        let col = |name: &str| {
+            batch
+                .column_by_name(name)
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+        };
+        let (Some(ids), Some(sessions)) = (col("id"), col("session_id")) else {
+            continue;
+        };
+        let (source_paths, harnesses, roles, block_types, texts) = (
+            col("source_path"),
+            col("harness"),
+            col("role"),
+            col("block_type"),
+            col("text"),
+        );
+        for i in 0..batch.num_rows() {
+            let session = sessions.value(i);
+            by_session
+                .entry(session.to_string())
+                .or_default()
+                .push(ids.value(i).to_string());
+            if jsonl::is_subagent(session) {
+                subagents.insert(session.to_string());
+                continue;
+            }
+
+            if harnesses.is_some_and(|h| h.value(i) == "codex") {
+                let source_path = source_paths.map(|paths| paths.value(i)).unwrap_or("");
+                if !source_path.is_empty()
+                    && *codex_source_kind
+                        .entry(source_path.to_string())
+                        .or_insert_with(|| crate::codex_traces::is_subagent_file(Path::new(source_path)))
+                {
+                    subagents.insert(session.to_string());
+                }
+            }
+
+            if roles.is_some_and(|role| role.value(i) == "user")
+                && block_types.is_some_and(|kind| kind.value(i) == "text")
+            {
+                if let Some(texts) = texts {
+                    *approval_signals.entry(session.to_string()).or_default() |= approval_review_signal(texts.value(i));
+                }
+            }
+        }
+    }
+    by_session.retain(|session, _| {
+        !subagents.contains(session) && !approval_signals.get(session).copied().is_some_and(is_approval_review)
+    });
     Ok(by_session)
 }
 
@@ -1036,6 +1129,106 @@ exclude ddd # later";
         ));
         assert!(!is_scaffolding("explain me again why funes push finds secrets"));
         assert!(!is_scaffolding("why did we drop lancedb for funes"));
+    }
+
+    #[test]
+    fn approval_review_requires_the_wrapper_structure() {
+        let signals = [
+            "The following is the Codex agent history whose request action you are assessing.",
+            ">>> APPROVAL REQUEST START",
+            ">>> APPROVAL REQUEST END",
+        ]
+        .into_iter()
+        .fold(0, |signals, text| signals | approval_review_signal(text));
+        assert!(is_approval_review(signals));
+        assert!(!is_approval_review(approval_review_signal(
+            "It has incredibly long text ending with APPROVAL REQUEST END"
+        )));
+    }
+
+    #[tokio::test]
+    async fn candidate_sessions_hide_codex_subagents_and_indexed_guardians() {
+        let root = tempfile::tempdir().unwrap();
+        let guardian_path = root.path().join("rollout-guardian.jsonl");
+        std::fs::write(
+            &guardian_path,
+            br#"{"type":"session_meta","payload":{"id":"guardian","thread_source":"subagent","source":{"subagent":{"other":"guardian"}}}}
+"#,
+        )
+        .unwrap();
+        let primary_path = root.path().join("rollout-primary.jsonl");
+        std::fs::write(
+            &primary_path,
+            br#"{"type":"session_meta","payload":{"id":"primary","thread_source":"cli"}}
+"#,
+        )
+        .unwrap();
+
+        let rows = [
+            (
+                "guardian",
+                guardian_path.to_string_lossy().into_owned(),
+                "wrapped transcript",
+            ),
+            ("primary", primary_path.to_string_lossy().into_owned(), "real work"),
+            (
+                "orphaned-guardian",
+                "/gone/guardian.jsonl".into(),
+                "The following is the Codex agent history whose request action you are assessing.",
+            ),
+            (
+                "orphaned-guardian",
+                "/gone/guardian.jsonl".into(),
+                ">>> APPROVAL REQUEST START",
+            ),
+            (
+                "orphaned-guardian",
+                "/gone/guardian.jsonl".into(),
+                ">>> APPROVAL REQUEST END",
+            ),
+            (
+                "discussion",
+                primary_path.to_string_lossy().into_owned(),
+                "This preview ends with APPROVAL REQUEST END",
+            ),
+        ];
+        let chunks: Vec<chunk::Chunk> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, (session, source_path, text))| chunk::Chunk {
+                id: format!("id{i}"),
+                text: (*text).into(),
+                session_id: (*session).into(),
+                workdir: "w".into(),
+                turn_uuid: format!("u{i}"),
+                parent_uuid: None,
+                seq: i as i64,
+                ts: "2026-07-22T00:00:00Z".into(),
+                role: "user".into(),
+                block_type: "text".into(),
+                tool_name: None,
+                source_path: source_path.clone(),
+                block_idx: 0,
+                split_idx: 0,
+                harness: "codex".into(),
+                repo: "huggingface/funes".into(),
+            })
+            .collect();
+        let vectors = vec![vec![0.0f32; index::DIM as usize]; chunks.len()];
+        let batch = index::build_batch(&chunks, &vectors).unwrap();
+        let memory_dir = root.path().join("memory");
+        let uri = dataset::table_uri(&memory_dir.to_string_lossy());
+        let reader = RecordBatchIterator::new(vec![Ok(batch.clone())], batch.schema());
+        Dataset::write(reader, &uri, Some(WriteParams::default()))
+            .await
+            .unwrap();
+        let ds = dataset::open(&uri, HashMap::new()).await.unwrap();
+
+        let candidates = candidate_sessions(&ds).await.unwrap();
+        assert_eq!(
+            candidates.keys().cloned().collect::<BTreeSet<_>>(),
+            BTreeSet::from(["discussion".to_string(), "primary".to_string()])
+        );
     }
 
     #[test]

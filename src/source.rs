@@ -156,10 +156,16 @@ impl TraceSource for JsonlTree {
         }
         let mut units: Vec<Unit> = files
             .into_iter()
-            .map(|p| Unit {
-                is_subagent: jsonl::is_subagent(&jsonl::session_id_of(&p)),
-                signature: file_sig(&p),
-                key: p.to_string_lossy().into_owned(),
+            .map(|p| {
+                let is_subagent = match self.harness {
+                    Harness::Codex => codex_traces::is_subagent_file(&p),
+                    _ => jsonl::is_subagent(&jsonl::session_id_of(&p)),
+                };
+                Unit {
+                    is_subagent,
+                    signature: file_sig(&p),
+                    key: p.to_string_lossy().into_owned(),
+                }
             })
             .collect();
         // Subagents last (stable sort preserves recency within each group).
@@ -430,6 +436,30 @@ mod tests {
         assert!(units[..first_sub].iter().all(|u| !u.is_subagent));
         assert!(units[first_sub..].iter().all(|u| u.is_subagent));
         assert_eq!(units.iter().filter(|u| u.is_subagent).count(), 2);
+    }
+
+    #[test]
+    fn codex_tree_recognizes_metadata_marked_subagents() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("rollout-main.jsonl"),
+            br#"{"type":"session_meta","payload":{"id":"main","thread_source":"cli"}}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("rollout-guardian.jsonl"),
+            br#"{"type":"session_meta","payload":{"id":"guardian","thread_source":"subagent","source":{"subagent":{"other":"guardian"}}}}
+"#,
+        )
+        .unwrap();
+
+        let units = open_with_harness(dir.path(), None, Some(Harness::Codex))
+            .units()
+            .unwrap();
+        assert_eq!(units.len(), 2);
+        assert!(!units[0].is_subagent);
+        assert!(units[1].is_subagent);
     }
 
     #[test]

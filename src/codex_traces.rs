@@ -69,6 +69,19 @@ pub fn turns_from_jsonl_file(p: &Path, fallback_workdir: &str) -> std::io::Resul
     Ok(turns)
 }
 
+/// Whether a Codex rollout is a child agent rather than the user's primary session. Unlike Claude
+/// Code's `agent-<id>` filenames, Codex keeps a regular UUID filename and records the distinction in
+/// `session_meta`; consumers must therefore inspect the metadata rather than the name.
+pub(crate) fn is_subagent_file(p: &Path) -> bool {
+    jsonl::first_record(p).as_ref().is_some_and(is_subagent_record)
+}
+
+fn is_subagent_record(record: &Value) -> bool {
+    record.get("type").and_then(Value::as_str) == Some("session_meta")
+        && (record.pointer("/payload/thread_source").and_then(Value::as_str) == Some("subagent")
+            || record.pointer("/payload/source/subagent").is_some())
+}
+
 /// The workdir a rollout's records name: the `session_meta` payload's `cwd`, munged.
 /// `None` when no record carries one.
 pub fn workdir_from_records(records: &[Value]) -> Option<String> {
@@ -281,6 +294,24 @@ mod tests {
         // No recorded cwd → the path-derived fallback.
         let bare = write_jsonl(&[msg]);
         assert_eq!(turns_from_jsonl_file(bare.path(), "fb").unwrap()[0].workdir, "fb");
+    }
+
+    #[test]
+    fn subagent_comes_from_session_meta_not_the_uuid_filename() {
+        let guardian = write_jsonl(&[
+            r#"{"type":"session_meta","payload":{"id":"019f887b-c1b3","thread_source":"subagent","source":{"subagent":{"other":"guardian"}}}}"#,
+        ]);
+        assert!(is_subagent_file(guardian.path()));
+
+        let nested = write_jsonl(&[
+            r#"{"type":"session_meta","payload":{"id":"019f887b-c1b4","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent"}}}}}"#,
+        ]);
+        assert!(is_subagent_file(nested.path()));
+
+        let primary = write_jsonl(&[
+            r#"{"type":"session_meta","payload":{"id":"019f887b-c1b5","thread_source":"cli","source":"cli"}}"#,
+        ]);
+        assert!(!is_subagent_file(primary.path()));
     }
 
     #[test]
