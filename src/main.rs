@@ -728,7 +728,7 @@ async fn curate_review(
         // Search the primary sketch first, while retaining enough prompt history to find a
         // session by wording that the selector did not keep. The bounds keep fuzzy matching
         // cheap even for very large sessions.
-        let filter = curation_filter(&sketch_body, &body);
+        let filter = format!("{} {}", s.session_id, curation_filter(&sketch_body, &body));
         let assist_request =
             criterion
                 .as_ref()

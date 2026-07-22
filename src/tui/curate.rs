@@ -409,7 +409,8 @@ impl PickerModel for CuratePicker {
         if let Some(assistance) = assistance {
             spans.push(assistance);
         }
-        spans.push(Span::raw(format!("{}  {}", c.date, c.prompt)));
+        let short_id = &c.id[..c.id.len().min(8)];
+        spans.push(Span::raw(format!("{}  {}  {}", c.date, short_id, c.prompt)));
         let line = Line::from(spans);
         if matches!(self.decision[i], Some(Decision::Exclude)) {
             line.style(Style::default().add_modifier(Modifier::DIM))
@@ -419,7 +420,14 @@ impl PickerModel for CuratePicker {
     }
 
     fn preview(&self, i: usize) -> Text<'static> {
-        let mut preview = self.guidance(i);
+        let mut preview = Text::from(vec![
+            Line::from(vec![
+                Span::styled("SESSION ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(self.items[i].id.clone()),
+            ]),
+            Line::raw(""),
+        ]);
+        preview.lines.extend(self.guidance(i).lines);
         preview.lines.extend(self.preview_body(i).lines);
         if matches!(self.decision[i], Some(Decision::Exclude)) {
             preview.style(Style::default().add_modifier(Modifier::DIM))
@@ -624,6 +632,7 @@ mod tests {
 
         let preview = picker.preview(0).to_string();
         assert!(preview.contains("PROMPTS"));
+        assert!(preview.contains("SESSION session"));
         picker.preview_mode = picker.preview_mode.toggle();
         let preview = picker.preview(0).to_string();
         assert!(preview.contains("SKETCH"));
@@ -670,6 +679,7 @@ mod tests {
         );
 
         assert!(line_text(&picker.row(0)).contains('↑'));
+        assert!(line_text(&picker.row(0)).contains("publishe"));
         picker.toggle(0, Decision::Exclude);
         assert!(matches!(picker.decision.as_slice(), [Some(Decision::Include)]));
     }
