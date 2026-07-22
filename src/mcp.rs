@@ -67,7 +67,7 @@ impl Funes {
         }
     }
 
-    /// The memory a call reads: its explicit `memory` argument wins over the server's `--memory`,
+    /// The memory a call reads: its explicit `memory` argument wins over the server's `<memory>`,
     /// else the local memory.
     fn memory(&self, spec: Option<String>) -> Memory {
         Memory::resolve(spec.filter(|s| !s.trim().is_empty()).or_else(|| self.memory.clone()))
