@@ -19,7 +19,7 @@ pub struct RecallRequest {
     pub k: Option<usize>,
     #[schemars(description = "Restrict to a block type: text | thinking | tool_use | tool_result")]
     pub block_type: Option<String>,
-    #[schemars(description = "Restrict to a harness: claude | codex | pi")]
+    #[schemars(description = "Restrict to a harness: claude | codex | pi | hermes")]
     pub harness: Option<String>,
     #[schemars(
         description = "Memory to read for this call — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Defaults to the server's memory."
@@ -51,7 +51,7 @@ pub struct StatusRequest {
 
 #[derive(Clone)]
 pub(crate) struct Funes {
-    /// Explicit memory spec (`funes mcp --memory`), pinned for the server's lifetime. `None` reads
+    /// Explicit memory spec (`funes mcp <memory>`), pinned for the server's lifetime. `None` reads
     /// the local memory unless a call passes its own `memory`.
     memory: Option<String>,
     #[allow(dead_code)]
@@ -67,7 +67,7 @@ impl Funes {
         }
     }
 
-    /// The memory a call reads: its explicit `memory` argument wins over the server's `--memory`,
+    /// The memory a call reads: its explicit `memory` argument wins over the server's `<memory>`,
     /// else the local memory.
     fn memory(&self, spec: Option<String>) -> Memory {
         Memory::resolve(spec.filter(|s| !s.trim().is_empty()).or_else(|| self.memory.clone()))

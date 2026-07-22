@@ -1,9 +1,9 @@
 # funes
 
 **Durable memory for your AI coding agents.** `funes` indexes your past sessions across Claude
-Code, Codex, and pi and lets any agent recall the past decisions, rationale, and findings. Your
-memory is a dataset you can publish to the Hugging Face Hub — then any machine, teammate,
-or agent can recall from it.
+Code, Codex, pi, and Hermes and lets any agent recall the past decisions, rationale, and findings.
+Your memory is a dataset you can publish to the Hugging Face Hub — then any machine, teammate, or
+agent can recall from it.
 
 ![Asking a published memory why funes is append-only; funes recalls the relevant sessions and a coding agent answers, grounded, naming its sources](docs/img/ask.gif)
 
@@ -12,8 +12,8 @@ or agent can recall from it.
 ## Features at a glance
 
 - **Your agent recalls your past work.** The model spontaneously uses `funes` to recall prior decisions, rationale, and findings mid-task.
-- **One memory across your agents.** Index Claude Code, Codex, and pi into a single memory; recall
-  spans all of them, and every hit shows which agent it came from.
+- **One memory across your agents.** Index Claude Code, Codex, pi, and Hermes into a single memory;
+  recall spans all of them, and every hit shows which agent it came from.
 - **Your memory is a Hugging Face dataset.** Publish it to the Hugging Face Hub; a teammate,
   another of your machines — or anyone, if you make it public — recalls from it with one flag.
 
@@ -61,14 +61,15 @@ out. To build it yourself, see [Building from source](#building-from-source).
 
 ## Works across your agents (and models)
 
-Your memory isn't tied to one tool. Because Claude Code, Codex, and pi all index into a single
+Your memory isn't tied to one tool. Because Claude Code, Codex, pi, and Hermes all index into a single
 memory, you can **switch agents without losing anything** — start a task in Claude Code, pick it up
 in Codex next week, and each one recalls the *entire* history, not just its own sessions (every hit
-shows which agent it came from). Any other agent joins the same memory via a `.parquet` trace export.
+shows which agent it came from). Another agent can join through a compatible `.parquet` trace
+export; [the import contract](docs/index.md#parquet-trace-format) defines the required schema.
 
-Models work the same way. funes runs no model of its own, so you reason with whatever your agent
-does — through **pi**, any local model or one served through the Hugging Face router. Switch models
-between sessions and the memory doesn't move.
+Models work the same way. funes runs pinned local embedding and reranking models, but no generative
+model of its own: you reason with whatever your agent uses — through **pi**, any local model or one
+served through the Hugging Face router. Switch models between sessions and the memory doesn't move.
 
 ## Your memory on the Hub
 
@@ -108,15 +109,17 @@ how remote recall caches to local speed.
 
 ## Commands
 
-`funes add` wires all of this into your agent; each command is also usable on its own.
+`funes add` wires all of this into your agent; each command is also usable on its own. Browse the
+workflow-oriented [documentation index](docs/README.md) for the complete guides.
 
 | Command | Docs |
 | --- | --- |
-| `funes add <agent> [memory]` | [docs/add.md](docs/add.md) — wire an agent: tools, hooks, memory binding |
+| `funes add <agent> [memory]` / `funes mcp [memory]` | [docs/add.md](docs/add.md) — supported agents, generic MCP clients, hooks, and memory binding |
 | `funes index [path]` | [docs/index.md](docs/index.md) — build/update the memory; sources, incremental, flags |
 | `funes recall "…"` / `funes get …` | [docs/recall.md](docs/recall.md) — recall passages and drill into them |
 | `funes ask <agent> "…"` | [docs/ask.md](docs/ask.md) — borrow an agent for a grounded answer |
 | `funes push <memory>` (+ `curate`, `scrub`, `status`) | [docs/push.md](docs/push.md) — publish and share a memory |
+| `funes update` | [installation and updating](#get-funes) — replace the installed binary with a verified release |
 
 The stable agent-facing output contract for the read commands is specified in [AGENTS.md](AGENTS.md).
 The per-turn indexing and session-boundary publishing the hooks run are detailed in

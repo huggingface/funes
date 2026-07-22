@@ -1,9 +1,10 @@
 # Benchmarks
 
-Two runnable examples, each `cargo run --release --example <name>`:
+Three runnable examples, each `cargo run --release --example <name>`:
 
 - **`bench_recall`** — `recall()` latency, local vs remote, cold vs warm (below).
 - **`bench_index`** — `index` build time, throughput, and memory compactness (at the end).
+- **`bench_backends`** — latency and output agreement between the BLAS and ONNX inference backends.
 
 ## `bench_recall` — recall latency
 
@@ -155,3 +156,22 @@ session and a much larger memory. (That run indexed the whole file; pass a large
 likewise — the default 500 builds far faster.) Elapsed includes the one-time embedding-model load,
 so throughput is a slight under-estimate on small inputs.
 
+## `bench_backends` — inference backend comparison
+
+`bench_backends.rs` compares every compiled `Embedder`/`Reranker` implementation. Build with both
+the default BLAS backend and the optional ONNX reference:
+
+```sh
+cargo run --release --features onnx --example bench_backends
+```
+
+It runs two fixed workloads: 16 short documents to expose per-call overhead, and 30 documents near
+the 512-token truncation limit to approximate recall's rerank worst case. For each backend it reports
+embedding and reranking latency plus agreement with the first backend:
+
+- `embed cos↔ref` is the minimum cosine similarity between corresponding embedding vectors.
+- `rerank Δ↔ref` is the maximum absolute difference between corresponding reranker scores.
+
+ONNX is the reference when that feature is present. The benchmark has no command-line options; edit
+its fixed query or workloads when investigating a particular regression. Building with only one
+backend still prints its timing, along with a note that there is nothing to compare.

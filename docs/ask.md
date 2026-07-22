@@ -15,15 +15,14 @@ back with `funes get`.
 
 ## The agents
 
-`ask` supports **claude** and **codex**, which ground differently:
+`ask` supports **claude** and **codex**. Both get the same forced grounding: funes recalls
+in-process, embeds the returned passages in one prompt, and asks the selected agent for one answer.
+The child gets no tools and reads no stdin; registered MCP servers are disabled for this invocation,
+so the answer can use only the question and passages funes supplied.
 
-- **claude** runs with funes mounted as a **session-only MCP server** (`--strict-mcp-config` keeps
-  every persistent registration out) and recalls on its own — the same `recall`/`get` tools it would
-  get from `funes add`, but scoped to this one invocation.
-- **codex** can't run MCP tools headless (its exec-mode tool-approval elicitation is auto-cancelled),
-  so funes recalls **in-process** and embeds the passages in the prompt before handing it off.
-
-Either way the child reads no stdin: the grounding is exactly what funes built, nothing piped in.
+This is deliberately different from [`funes add`](add.md), where a persistent agent decides when to
+call `recall` and can try another query or drill in with `get`. A one-shot `ask` is faster and more
+predictable, but it cannot recover on its own when the initial retrieval misses.
 
 ## Output and arguments
 
@@ -38,12 +37,19 @@ parse. Quote the question (or put `--` before it) when it contains flag-like wor
 `ask` reuses recall's defaults (`-k 8`, 30 candidates, 30-day half-life, 1 neighbor) and exposes no
 tuning of its own; drop to `funes recall` when you want to adjust retrieval.
 
+## Data sent to the agent
+
+Embedding, retrieval, and reranking happen locally, including when the memory itself is hosted on
+the Hub. After retrieval, `ask` sends the question and recalled passages to the provider configured
+for the selected Claude or Codex CLI. Do not use `ask` with a memory whose passages you would not
+send to that provider; use `funes recall` to inspect the evidence locally instead.
+
 ## Failure modes
 
 `ask` errors **before any agent spawns** on: a memory that can't be read (missing, empty,
-unauthorized, no index yet, or unreachable), a missing agent CLI, and — for codex — zero recalled
-passages (there'd be nothing to ground on). A non-zero exit from the agent itself fails `ask`, with
-the child's exit code reported.
+unauthorized, no index yet, or unreachable), a missing agent CLI, and zero recalled passages
+(there'd be nothing to ground on). A non-zero exit from the agent itself fails `ask`, with the
+child's exit code reported.
 
 ## See also
 

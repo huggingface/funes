@@ -23,6 +23,45 @@ funes add claude <user|org>/funes-memory   # …backed by a memory you own (sync
 recall fresh by re-running `funes index` (it sweeps `~/.pi/agent/sessions`). What exactly gets
 installed for each agent — and how the hooks behave — is in [automation.md](automation.md).
 
+## Other MCP clients
+
+`funes add` handles the supported agents above. Any client that can launch a stdio MCP server can
+use the same read tools by running `funes mcp [memory]`. For example, in the common MCP JSON shape:
+
+```json
+{
+  "mcpServers": {
+    "funes": {
+      "command": "funes",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+To bind that server to a shared memory, put the memory after `mcp`:
+
+```json
+{
+  "command": "funes",
+  "args": ["mcp", "acme/funes-memory"]
+}
+```
+
+Client configuration filenames and surrounding keys vary, but the spawned command is the same. The
+server exposes:
+
+| Tool | Purpose | Main arguments |
+| --- | --- | --- |
+| `recall` | Retrieve ranked passages. | `query`, optional `k`, `block_type`, `harness`, `memory` |
+| `get` | Reassemble a hit and its surrounding turns. | `session_id`, `turn_uuid`, optional `window`, `memory` |
+| `status` | Inspect memory and synchronization state. | optional `memory` |
+
+Every tool returns the stable agent-format strings defined in [`AGENTS.md`](../AGENTS.md). A
+tool-call `memory` overrides the memory bound when the server started; with neither, the server reads
+the local memory. `mcp` is read-only: indexing and publishing remain separate commands or automation
+installed by `funes add`.
+
 ## Binding a memory
 
 The optional positional `[memory]` is the memory this agent recalls from — and, for the agents with
@@ -64,3 +103,5 @@ finding, the agent reaches for [`recall`](recall.md) itself.
 - [index.md](index.md) — building and updating the memory by hand.
 - [push.md](push.md) — publishing a memory and sharing it.
 - [automation.md](automation.md) — exactly what the hooks install and how they behave.
+- [configuration.md](configuration.md) — installed paths, authentication, caches, and environment
+  overrides.

@@ -38,10 +38,15 @@ The hooks [`funes add`](add.md) installs run this at session boundaries automati
 
 ## Keeping secrets out: the gate and `funes scrub`
 
-funes redacts credentials from each session *before* it's written. On push, a separate, **always-on
-gate** withholds any chunk that still contains a secret rather than upload it — the clean rows still
-publish, with a warning about what was held back. Only when that leaves *nothing* to publish does the
-push exit non-zero (code `2`):
+When TruffleHog is available, indexing redacts detected credentials before storing a session. That
+first pass is best-effort: local indexing still works without the scanner because the local memory
+has not crossed a publication boundary. It prints a warning that index-time redaction is disabled.
+
+Push is the hard boundary. A separate, **always-on, fail-closed gate** requires TruffleHog and scans
+the rows about to leave the machine. It reconstructs complete content blocks before scanning, so a
+secret split across chunks cannot evade detection. If any chunk of a block contains a secret, every
+chunk of that block is held back; unrelated clean rows still publish with a warning. Only when that
+leaves *nothing* to publish does push exit non-zero (code `2`):
 
 ```console
 $ funes push <user|org>/funes-memory
@@ -51,12 +56,30 @@ $ echo $?
 2
 ```
 
-`funes scrub` redacts secrets from your **local** memory in place — for rows indexed before redaction
-existed, or flagged by an updated ruleset. It needs no source transcript. Run it, then push again.
+`funes push` and `funes scrub` refuse to run unscanned when TruffleHog is unavailable. Install it on
+`PATH` or set `FUNES_TRUFFLEHOG=/path/to/trufflehog`; see
+[configuration.md](configuration.md#environment-reference).
 
-Scrub cleans the local memory only; it does **not** scrub an already-published remote — the gate can
-only stop *adding* secrets to one. If a secret was published before, remove it from the Hub the way
-you would any dataset row.
+### What `funes scrub` changes
+
+`funes scrub` repairs the **local derived memory** in place, including sessions whose source
+transcripts no longer exist. It takes the local writer lock, reconstructs and scans every stored
+block, then makes one replacement commit:
+
+- A secret whose value can be located safely is replaced with a `[REDACTED:<detector>]` marker. The
+  block is re-chunked and its replacement chunks are re-embedded.
+- If a finding cannot be reconstructed safely—for example, an encoded value with no reliable byte
+  match—the entire block is dropped instead of risking a partial redaction.
+- Clean rows retain their existing embeddings. The vector and full-text indexes are rebuilt after
+  the replacement.
+
+The source transcripts are never modified. Scrub reports how many secrets and blocks it redacted and
+how many rows it had to drop. Run `funes push <memory>` afterward; the repaired local rows then pass
+through the independent egress gate.
+
+Scrub does **not** alter an already-published remote. If a live credential reached the Hub, revoke or
+rotate it first, then remediate the dataset separately; funes can prevent another upload but does not
+automate remote deletion.
 
 ## Project memories: `funes curate`
 
@@ -74,11 +97,24 @@ checkout's git remotes. In a terminal, `curate` opens an interactive review of t
 sessions: `→` includes a session, `←` excludes it, and the preview shows each session's prompts.
 Your review alone decides what the next `funes push` ships there; leaving the review offers that push.
 
+The preview is evidence for the decision, not the publication unit: **including publishes every
+chunk in that session**. A session left pending stays local, as does an excluded session. Decisions
+are stored per host because each host can publish only the sessions in its own local memory.
+
+An include records how many chunks the session had when it was reviewed. If that session later
+grows, its new state becomes pending again and no additional chunks ship until it is re-reviewed.
+Changing an include to exclude prevents future chunks from shipping, but cannot retract chunks
+already present in the append-only remote. Curation is a pre-publication gate, not a remote undo.
+
 For scripts, decide non-interactively:
 
 ```bash
 funes curate <memory> --include <session> --exclude <session>
 ```
+
+The decisions are kept under `$FUNES_HOME/curation/` in a line-oriented, human-readable file; see
+[configuration.md](configuration.md#the-funes-home). `funes status <memory>` reports this host's
+pending review count for a project memory.
 
 ## Inspecting a memory: `status`
 
