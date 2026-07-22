@@ -132,6 +132,27 @@ impl Default for SketchOptions {
 pub struct SketchBatch {
     pub sketches: HashMap<String, SessionSketch>,
     pub failures: HashMap<String, String>,
+    pub cache_outcomes: HashMap<String, CacheOutcome>,
+}
+
+/// What one cached generation did. This lets a future detached hook report whether it did useful
+/// work without coupling the selector to hook installation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CacheOutcome {
+    /// No prior cache file existed.
+    Created,
+    /// The source and selector keys matched; the existing sketch was reused.
+    Reused,
+    /// A prior entry existed but session growth, a rewrite, or selector inputs made it stale.
+    Refreshed,
+    /// Generation succeeded but the best-effort cache write did not.
+    NotStored,
+}
+
+/// One hook-friendly cache refresh, scoped to an exact session id.
+pub struct SketchRefresh {
+    pub sketch: SessionSketch,
+    pub outcome: CacheOutcome,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -246,6 +267,23 @@ pub async fn generate_many_cached(
     generate_many_inner(memory, session_ids, options, Some(&cache)).await
 }
 
+/// Refresh exactly one session's cache entry. A future per-turn hook can call this after indexing
+/// the active session without discovering a project or rebuilding sketches for unrelated sessions.
+/// The deterministic selector still runs over the complete changed session because an appended
+/// turn can change global axes, duplicate groups, transitions, and the closing anchor.
+pub async fn refresh_cached(memory: &Memory, session_id: &str, options: SketchOptions) -> Result<SketchRefresh> {
+    let mut batch = generate_many_cached(memory, &[session_id.to_string()], options).await?;
+    if let Some(error) = batch.failures.remove(session_id) {
+        bail!("refreshing session {session_id}: {error}");
+    }
+    let sketch = batch
+        .sketches
+        .remove(session_id)
+        .with_context(|| format!("refreshing session {session_id} produced no sketch"))?;
+    let outcome = batch.cache_outcomes.remove(session_id).unwrap_or(CacheOutcome::Created);
+    Ok(SketchRefresh { sketch, outcome })
+}
+
 async fn generate_many_inner(
     memory: &Memory,
     session_ids: &[String],
@@ -277,6 +315,7 @@ async fn generate_many_inner(
 
         let source_fingerprint = fingerprint(&rows);
         let cache_path = cache_root.map(|root| cache_path(root, &memory_label, session_id));
+        let had_cache = cache_path.as_deref().is_some_and(Path::exists);
         if let Some(sketch) = cache_path.as_deref().and_then(|path| {
             load_cached_sketch(
                 path,
@@ -288,6 +327,7 @@ async fn generate_many_inner(
             )
         }) {
             batch.sketches.insert(session_id.clone(), sketch);
+            batch.cache_outcomes.insert(session_id.clone(), CacheOutcome::Reused);
             continue;
         }
 
@@ -302,7 +342,14 @@ async fn generate_many_inner(
         ) {
             Ok(sketch) => {
                 if let Some(path) = cache_path.as_deref() {
-                    let _ = store_cached_sketch(path, &sketch);
+                    let outcome = if store_cached_sketch(path, &sketch).is_err() {
+                        CacheOutcome::NotStored
+                    } else if had_cache {
+                        CacheOutcome::Refreshed
+                    } else {
+                        CacheOutcome::Created
+                    };
+                    batch.cache_outcomes.insert(session_id.clone(), outcome);
                 }
                 batch.sketches.insert(session_id.clone(), sketch);
             }
