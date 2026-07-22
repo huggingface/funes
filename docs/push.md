@@ -80,6 +80,18 @@ decision later. `◐` marks a published session with new local chunks; those upd
 The preview opens on the deterministic session sketch; press `Tab` for the prompt history.
 Typing filters across both views. `Shift-Tab` shows only sessions that still require a decision.
 
+Give the review an explicit Markdown brief with `--criteria`:
+
+```bash
+funes curate <memory> --criteria ./transformers-memory.md
+```
+
+funes snapshots the file into this host's local curation state and identifies it by a content
+fingerprint; neither the snapshot nor its source path is pushed. Press `c` in the picker to read the
+full brief. Its filename and short fingerprint remain in the footer while reviewing. New include
+and exclude decisions record that fingerprint. Replacing the brief with changed content reopens
+unpublished decisions, and stale includes remain held back until they are reviewed again.
+
 For scripts, decide non-interactively:
 
 ```bash
