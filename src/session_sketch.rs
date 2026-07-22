@@ -1443,19 +1443,25 @@ pub fn render_preview(sketch: &SessionSketch) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "session sketch · {} key blocks · {} with context · {} chars",
+        "\x1b[1mSESSION SKETCH\x1b[0m  · {} selected · {} shown · {} chars",
         sketch.selected_units.len(),
         sketch.evidence.len(),
         sketch.diagnostics.rendered_characters
     );
-    let _ = writeln!(out, "* key evidence    ~ context");
+    let _ = writeln!(
+        out,
+        "\x1b[2mHighlighted headings are selected evidence; dim blocks are surrounding context.\x1b[0m"
+    );
+    let _ = writeln!(
+        out,
+        "\x1b[2mTRANSITION n = nth-strongest local semantic boundary; it may be progression, pivot, or topic change.\x1b[0m"
+    );
 
     if let Some(note) = &sketch.diagnostics.fallback {
         let _ = writeln!(out, "note: {note}");
     }
 
     for evidence in &sketch.evidence {
-        let marker = if evidence.selected { '*' } else { '~' };
         let kind = match &evidence.tool_name {
             Some(tool) => format!("{} ({tool})", evidence.block_type),
             None => evidence.block_type.clone(),
@@ -1465,38 +1471,72 @@ pub fn render_preview(sketch: &SessionSketch) -> String {
         } else {
             Vec::new()
         };
-        let labels = if labels.is_empty() {
-            String::new()
-        } else {
-            format!(" · {}", labels.join(", "))
-        };
         let shortened = if evidence.truncated { " · shortened" } else { "" };
-        let _ = writeln!(
-            out,
-            "\n{marker} {} {kind} · seq {}{labels}{shortened}",
-            evidence.role, evidence.seq
-        );
-        let _ = writeln!(out, "  turn {}", evidence.turn_uuid);
-        let _ = writeln!(out, "{}", evidence.text);
+        if evidence.selected {
+            let badge = if labels.is_empty() {
+                "SELECTED".to_string()
+            } else {
+                labels.join(" · ")
+            };
+            let _ = writeln!(
+                out,
+                "\n\x1b[7m {badge} \x1b[0m \x1b[1m{} {kind} · seq {}{shortened}\x1b[0m",
+                evidence.role, evidence.seq
+            );
+            let _ = writeln!(out, "\x1b[2mturn {}\x1b[0m", evidence.turn_uuid);
+            let _ = writeln!(out, "{}", evidence.text);
+        } else {
+            let _ = writeln!(
+                out,
+                "\n\x1b[2m  context · {} {kind} · seq {}{shortened}",
+                evidence.role, evidence.seq
+            );
+            let _ = writeln!(out, "  turn {}", evidence.turn_uuid);
+            let _ = writeln!(out, "{}\x1b[0m", evidence.text);
+        }
     }
     out
 }
 
-fn preview_reason_labels(reasons: &[String]) -> Vec<&'static str> {
-    let mut labels = BTreeSet::new();
+fn preview_reason_labels(reasons: &[String]) -> Vec<String> {
+    let mut labels = Vec::new();
     for reason in reasons {
         let label = match reason.as_str() {
-            "opening_user" => "opening",
-            "closing_assistant" => "outcome",
-            "centroid_medoid" => "central",
-            "all_evidence" => "complete session",
-            reason if reason.starts_with("axis_") => "semantic extreme",
-            reason if reason.starts_with("transition_") => "topic shift",
-            _ => "selected",
+            "opening_user" => "OPENING".to_string(),
+            "closing_assistant" => "OUTCOME".to_string(),
+            "centroid_medoid" => "CENTRAL".to_string(),
+            "all_evidence" => "COMPLETE SESSION".to_string(),
+            reason if reason.starts_with("axis_") => axis_preview_label(reason),
+            reason if reason.starts_with("transition_") => transition_preview_label(reason),
+            _ => "SELECTED".to_string(),
         };
-        labels.insert(label);
+        if !labels.contains(&label) {
+            labels.push(label);
+        }
     }
-    labels.into_iter().collect()
+    labels
+}
+
+fn axis_preview_label(reason: &str) -> String {
+    let mut parts = reason.trim_start_matches("axis_").split('_');
+    let rank = parts.next().unwrap_or("?");
+    let side = match parts.next() {
+        Some("positive") => "A",
+        Some("negative") => "B",
+        _ => "?",
+    };
+    format!("CONTRAST {rank}{side}")
+}
+
+fn transition_preview_label(reason: &str) -> String {
+    let mut parts = reason.trim_start_matches("transition_").split('_');
+    let rank = parts.next().unwrap_or("?");
+    let side = match parts.next() {
+        Some("left") => "BEFORE",
+        Some("right") => "AFTER",
+        _ => "BOUNDARY",
+    };
+    format!("TRANSITION {rank} · {side}")
 }
 
 #[cfg(test)]
@@ -1692,10 +1732,24 @@ mod tests {
         };
 
         let preview = render_preview(&sketch);
-        assert!(preview.contains("* user text · seq 1 · opening, semantic extreme"));
-        assert!(preview.contains("~ assistant text · seq 2"));
+        assert!(preview.contains("\x1b[7m OPENING · CONTRAST 1A \x1b[0m"));
+        assert!(preview.contains("\x1b[2m  context · assistant text · seq 2"));
         assert!(preview.contains("turn turn-selected"));
+        assert!(preview.contains("TRANSITION n = nth-strongest local semantic boundary"));
         assert!(!preview.contains("axis_1_positive"));
+        assert!(!preview.contains("topic shift"));
+    }
+
+    #[test]
+    fn preview_labels_transition_pairs_without_claiming_a_topic_change() {
+        assert_eq!(
+            preview_reason_labels(&[
+                "transition_1_left".into(),
+                "transition_1_right".into(),
+                "axis_2_negative".into(),
+            ]),
+            ["TRANSITION 1 · BEFORE", "TRANSITION 1 · AFTER", "CONTRAST 2B"]
+        );
     }
 
     #[test]
@@ -1713,7 +1767,7 @@ mod tests {
     }
 
     #[test]
-    fn transition_finds_the_topic_change() {
+    fn transition_finds_a_strong_semantic_boundary() {
         let units = vec![
             unit(0, "user", &[1.0, 0.0], "a0"),
             unit(1, "assistant", &[1.0, 0.0], "a1"),

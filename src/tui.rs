@@ -412,10 +412,13 @@ fn dim_style() -> Style {
     Style::default().add_modifier(Modifier::DIM)
 }
 
-fn sgr_style(dim: bool, reverse: bool) -> Style {
+fn sgr_style(dim: bool, bold: bool, reverse: bool) -> Style {
     let mut s = Style::default();
     if dim {
         s = s.add_modifier(Modifier::DIM);
+    }
+    if bold {
+        s = s.add_modifier(Modifier::BOLD);
     }
     if reverse {
         s = s.add_modifier(Modifier::REVERSED);
@@ -423,10 +426,11 @@ fn sgr_style(dim: bool, reverse: bool) -> Style {
     s
 }
 
-fn apply_sgr(params: &str, dim: &mut bool, reverse: &mut bool) {
+fn apply_sgr(params: &str, dim: &mut bool, bold: &mut bool, reverse: &mut bool) {
     if params.is_empty() {
         // `ESC[m` is `ESC[0m`.
         *dim = false;
+        *bold = false;
         *reverse = false;
         return;
     }
@@ -434,24 +438,29 @@ fn apply_sgr(params: &str, dim: &mut bool, reverse: &mut bool) {
         match p.parse::<u16>() {
             Ok(0) => {
                 *dim = false;
+                *bold = false;
                 *reverse = false;
             }
+            Ok(1) => *bold = true,
             Ok(2) => *dim = true,
             Ok(7) => *reverse = true,
-            Ok(22) => *dim = false,
+            Ok(22) => {
+                *dim = false;
+                *bold = false;
+            }
             Ok(27) => *reverse = false,
             _ => {} // color/other SGR funes never emits — ignore, keep the text
         }
     }
 }
 
-/// Convert a string carrying render.rs's SGR escapes (only dim `2`, reverse `7`, and resets) into
-/// styled ratatui `Text`. Splits on newlines; unknown escapes are dropped, their text kept.
+/// Convert a string carrying render.rs's SGR escapes (bold `1`, dim `2`, reverse `7`, and resets)
+/// into styled ratatui `Text`. Splits on newlines; unknown escapes are dropped, their text kept.
 pub fn ansi_to_text(s: &str) -> Text<'static> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut cur = String::new();
-    let (mut dim, mut reverse) = (false, false);
+    let (mut dim, mut bold, mut reverse) = (false, false, false);
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
@@ -465,13 +474,13 @@ pub fn ansi_to_text(s: &str) -> Text<'static> {
                     params.push(pc);
                 }
                 if !cur.is_empty() {
-                    spans.push(Span::styled(std::mem::take(&mut cur), sgr_style(dim, reverse)));
+                    spans.push(Span::styled(std::mem::take(&mut cur), sgr_style(dim, bold, reverse)));
                 }
-                apply_sgr(&params, &mut dim, &mut reverse);
+                apply_sgr(&params, &mut dim, &mut bold, &mut reverse);
             }
             '\n' => {
                 if !cur.is_empty() {
-                    spans.push(Span::styled(std::mem::take(&mut cur), sgr_style(dim, reverse)));
+                    spans.push(Span::styled(std::mem::take(&mut cur), sgr_style(dim, bold, reverse)));
                 }
                 lines.push(Line::from(std::mem::take(&mut spans)));
             }
@@ -479,7 +488,7 @@ pub fn ansi_to_text(s: &str) -> Text<'static> {
         }
     }
     if !cur.is_empty() {
-        spans.push(Span::styled(cur, sgr_style(dim, reverse)));
+        spans.push(Span::styled(cur, sgr_style(dim, bold, reverse)));
     }
     if !spans.is_empty() || lines.is_empty() {
         lines.push(Line::from(spans));
@@ -508,7 +517,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     #[test]
-    fn ansi_converts_dim_and_reverse() {
+    fn ansi_converts_bold_dim_and_reverse() {
         let t = ansi_to_text("\x1b[2mmeta\x1b[0m tail");
         let spans = &t.lines[0].spans;
         assert_eq!(spans[0].content, "meta");
@@ -521,6 +530,12 @@ mod tests {
             .spans
             .iter()
             .any(|s| s.content == "hit" && s.style.add_modifier.contains(Modifier::REVERSED)));
+
+        let b = ansi_to_text("\x1b[1mimportant\x1b[0m plain");
+        assert!(b.lines[0]
+            .spans
+            .iter()
+            .any(|s| s.content == "important" && s.style.add_modifier.contains(Modifier::BOLD)));
     }
 
     #[test]
