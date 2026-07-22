@@ -87,8 +87,9 @@ slightly conservative if BM25 continues to grow sublinearly.
 
 ### Total
 
-The measured local memory costs **2.30 KB/chunk** — 92.3% data and 7.7% index.
-The embedding alone is about two-thirds of the live total.
+The current samples support a planning budget of **~2.30 KB/chunk** at
+six-figure scale — roughly 92% data and 8% index. The embedding alone is about
+two-thirds of the live total.
 
 ## Projection
 
@@ -127,8 +128,7 @@ public repos have separate limits. See
 [HF storage limits](https://huggingface.co/docs/hub/storage-limits).
 
 At 2.30 KB/chunk, 100 GB corresponds to about 43 million live chunks before
-version-history overhead. The current published snapshot holds 46.3 MB of live
-data; adding an index at the measured local rate would put its live generation
-at roughly 50.3 MB, about 0.05% of that 100 GB reference point. At the observed
-~6.2 MB/day rate, the reference point remains decades away. Storage is not the
-binding constraint on this workload.
+version-history overhead. At the observed ~6.2 MB/day rate, that reference
+point remains decades away. Even allowing for published-memory history, raw
+storage capacity is unlikely to be the binding constraint for this kind of
+workload.
