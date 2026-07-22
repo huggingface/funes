@@ -110,7 +110,7 @@ async fn a_project_memory_ships_only_included_sessions() {
     let sessions_before = remote_sessions(&uri).await;
 
     // Record an `include` decision for exactly one session, then push again.
-    let recorded = funes::curate::run(&Memory::parse(&uri), None, &["keep".to_string()], &[]).await;
+    let recorded = funes::curate::run(&Memory::parse(&uri), None, &["keep".to_string()], &[], None).await;
     let push_gated = funes::push::run_push(Memory::parse(&uri), false, Confirm::Yes).await;
     let sessions_after = remote_sessions(&uri).await;
 

@@ -26,10 +26,15 @@ use arrow_schema::Schema;
 use hf_hub::repository::CommitOperation;
 use lance::dataset::WriteParams;
 use lance::Dataset;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+const CRITERIA_SCHEMA_VERSION: u32 = 1;
 
 /// The project this memory is *of* — the `project` schema-metadata key, carried beside the
 /// `embedding_model` pin: a repo identity (`huggingface/funes`) or a bare label. Its presence
@@ -205,6 +210,111 @@ fn sanitize(uri: &str) -> String {
             }
         })
         .collect()
+}
+
+/// A local snapshot of the Markdown criteria used to judge one project memory. The snapshot is
+/// deliberately kept beside the host's curation state and is never part of a Hub commit: its
+/// disclosure section may itself enumerate private names and projects.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CriteriaSnapshot {
+    pub schema_version: u32,
+    /// Source filename for a compact UI label; never the source's full local path.
+    pub name: String,
+    pub fingerprint: String,
+    pub markdown: String,
+}
+
+impl CriteriaSnapshot {
+    fn new(name: String, markdown: String) -> Result<Self> {
+        if markdown.trim().is_empty() {
+            bail!("curation criteria are empty")
+        }
+        Ok(Self {
+            schema_version: CRITERIA_SCHEMA_VERSION,
+            name,
+            fingerprint: criteria_fingerprint(&markdown),
+            markdown,
+        })
+    }
+
+    /// The first eight digest digits, sufficient to recognize the active snapshot in the picker.
+    pub fn short_fingerprint(&self) -> &str {
+        self.fingerprint
+            .strip_prefix("sha256:")
+            .unwrap_or(&self.fingerprint)
+            .get(..8)
+            .unwrap_or(&self.fingerprint)
+    }
+}
+
+/// The criteria snapshot for `memory_uri`: `<funes-home>/curation/<memory>.criteria.json`.
+pub fn criteria_file_for(memory_uri: &str) -> PathBuf {
+    dataset::funes_dir()
+        .join("curation")
+        .join(format!("{}.criteria.json", sanitize(memory_uri)))
+}
+
+fn criteria_fingerprint(markdown: &str) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(markdown.as_bytes())))
+}
+
+/// Copy a human-authored Markdown file into this host's local curation state. Re-snapshotting the
+/// same content is harmless; changing only the source path leaves the content identity unchanged.
+pub fn snapshot_criteria(memory_uri: &str, source: &Path) -> Result<CriteriaSnapshot> {
+    let markdown = std::fs::read_to_string(source)
+        .with_context(|| format!("reading curation criteria from {}", source.display()))?;
+    let name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("criteria")
+        .to_string();
+    let snapshot = CriteriaSnapshot::new(name, markdown)?;
+    store_criteria_snapshot(&criteria_file_for(memory_uri), &snapshot)?;
+    Ok(snapshot)
+}
+
+/// The active local criteria snapshot, if this memory has one. A malformed, incompatible, or
+/// content-mismatched snapshot is an error rather than silently changing what decisions mean.
+pub fn load_criteria(memory_uri: &str) -> Result<Option<CriteriaSnapshot>> {
+    load_criteria_snapshot(&criteria_file_for(memory_uri))
+}
+
+fn load_criteria_snapshot(path: &Path) -> Result<Option<CriteriaSnapshot>> {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+    };
+    let snapshot: CriteriaSnapshot =
+        serde_json::from_reader(file).with_context(|| format!("parsing {}", path.display()))?;
+    if snapshot.schema_version != CRITERIA_SCHEMA_VERSION {
+        bail!(
+            "unsupported curation criteria schema {} in {} (expected {})",
+            snapshot.schema_version,
+            path.display(),
+            CRITERIA_SCHEMA_VERSION
+        );
+    }
+    let actual = criteria_fingerprint(&snapshot.markdown);
+    if snapshot.fingerprint != actual {
+        bail!("curation criteria fingerprint mismatch in {}", path.display());
+    }
+    Ok(Some(snapshot))
+}
+
+fn store_criteria_snapshot(path: &Path, snapshot: &CriteriaSnapshot) -> Result<()> {
+    let parent = path.parent().context("curation criteria path has no parent")?;
+    std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    let mut staged = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("staging curation criteria in {}", parent.display()))?;
+    serde_json::to_writer_pretty(&mut staged, snapshot).context("serializing curation criteria")?;
+    staged.write_all(b"\n").context("writing curation criteria")?;
+    staged.flush().context("flushing curation criteria")?;
+    staged
+        .persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("replacing curation criteria at {}", path.display()))?;
+    Ok(())
 }
 
 /// The memory's curation, or None when it has no file (nothing decided — push holds everything).
@@ -872,7 +982,13 @@ pub async fn record_decisions(uri: &str, project: &str, include: &[String], excl
 /// pending review. The text path never creates one — standing up a project memory needs the
 /// interactive review's consent — so `memory` must already be one. The interactive review wraps
 /// these same pieces (and deferred creation) in the CLI layer.
-pub async fn run(memory: &Memory, project: Option<&str>, include: &[String], exclude: &[String]) -> Result<String> {
+pub async fn run(
+    memory: &Memory,
+    project: Option<&str>,
+    include: &[String],
+    exclude: &[String],
+    criteria: Option<&Path>,
+) -> Result<String> {
     let (uri, project) = match prepare(memory, project).await? {
         Prepared::Ready { uri, project } => (uri, project),
         Prepared::Absent { .. } => bail!("{} doesn't exist", memory.label()),
@@ -884,6 +1000,15 @@ pub async fn run(memory: &Memory, project: Option<&str>, include: &[String], exc
         }
     };
     let mut out = String::new();
+    if let Some(path) = criteria {
+        let snapshot = snapshot_criteria(&uri, path)?;
+        let _ = writeln!(
+            out,
+            "criteria: {} ({}) — local only",
+            snapshot.name,
+            snapshot.short_fingerprint()
+        );
+    }
 
     // Recording decisions is a complete action — record, report, and stop.
     if !include.is_empty() || !exclude.is_empty() {
@@ -974,6 +1099,35 @@ exclude ddd # later";
     fn sanitize_is_deterministic_and_path_safe() {
         assert_eq!(sanitize("hf://datasets/acme/kb"), "hf___datasets_acme_kb");
         assert!(!sanitize("a/../b").contains('/'));
+    }
+
+    #[test]
+    fn criteria_snapshot_round_trips_and_verifies_its_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.criteria.json");
+        let snapshot = CriteriaSnapshot::new(
+            "transformers-memory.md".into(),
+            "# Purpose\n\nExplain durable maintainer decisions.\n".into(),
+        )
+        .unwrap();
+        assert!(snapshot.fingerprint.starts_with("sha256:"));
+        assert_eq!(snapshot.short_fingerprint().len(), 8);
+
+        store_criteria_snapshot(&path, &snapshot).unwrap();
+        assert_eq!(load_criteria_snapshot(&path).unwrap(), Some(snapshot.clone()));
+
+        let mut mismatched = snapshot;
+        mismatched.markdown.push_str("\nChanged without updating the digest.\n");
+        store_criteria_snapshot(&path, &mismatched).unwrap();
+        assert!(load_criteria_snapshot(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("fingerprint mismatch"));
+    }
+
+    #[test]
+    fn criteria_snapshot_rejects_an_empty_brief() {
+        assert!(CriteriaSnapshot::new("empty.md".into(), " \n".into()).is_err());
     }
 
     fn by_session(entries: &[(&str, &[&str])]) -> HashMap<String, Vec<String>> {
