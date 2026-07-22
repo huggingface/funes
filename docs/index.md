@@ -30,6 +30,44 @@ An existing local path always wins over reading the same string as a repo ref. A
 (non-terminal) run must name a target** — a path or `--harness <name>`; funes refuses to sweep every
 harness root unattended (a Claude session-end shouldn't pull in Codex or pi sessions).
 
+### Parquet trace format
+
+Parquet import targets the Hugging Face agent-traces layout: **one row per session**, with these two
+required columns:
+
+| Column | Arrow type | Meaning |
+| --- | --- | --- |
+| `session_id` | `Utf8` or `LargeUtf8` | Stable identity for the session. |
+| `messages` | `List<Utf8>` or `List<LargeUtf8>` | JSON-encoded, OpenAI-style chat messages in chronological order. |
+
+Each non-null `messages` element is a JSON object. funes reads these fields:
+
+| Field | Mapping |
+| --- | --- |
+| `role` | Turn role. |
+| `content` | A `text` block when it is a non-empty string. |
+| `reasoning_content` | A `thinking` block when it is a non-empty string. |
+| `tool_calls[].function.name` | Tool name on a `tool_use` block. |
+| `tool_calls[].function.arguments` | Tool input, kept as a string or serialized from its JSON value. |
+
+The importer does not currently derive `tool_result` blocks from Parquet messages. Other message
+fields are ignored. Invalid JSON elements are skipped; a row is skipped when none of its messages
+produces an indexable block.
+
+Optional string columns add provenance:
+
+| Column | Meaning |
+| --- | --- |
+| `sent_at` | Timestamp applied to the imported turns. |
+| `harness` | Agent/harness facet; it may differ per row. |
+| `file_path` | Original source path shown in provenance. |
+| `metadata` | JSON object whose `cwd` becomes the workdir facet. |
+
+When optional provenance is absent, funes falls back to the Parquet filename where possible. Turn
+UUIDs are synthesized as `<session_id>-<sequence>` and sequence counts only retained messages. This
+is the compatibility contract behind “another agent can join through a Parquet trace export”; an
+arbitrary Parquet table is not accepted merely because it has a `.parquet` suffix.
+
 ## Incremental by construction
 
 A chunk's id derives from `(session, turn, block, split)`, so a completed turn produces **exactly the
