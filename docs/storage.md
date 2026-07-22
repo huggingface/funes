@@ -3,9 +3,11 @@
 How big does a funes memory get, and how does it grow? This document builds a
 per-chunk cost model from three real memories and projects it forward.
 
-All figures were measured with funes 0.8.0 against bge-small-en-v1.5 memories
-(`DIM = 384`). Coefficients shift a little with chunk length and vocabulary, but
-the shape holds.
+These figures are a **historical planning baseline**, measured with funes 0.8.0 against
+bge-small-en-v1.5 memories (`DIM = 384`). They have not been remeasured for the current 1.2-era
+schema, which adds `harness` and `repo` provenance columns. Coefficients shift with chunk length,
+vocabulary, schema, and Lance versions; use the projections for order-of-magnitude planning rather
+than as current byte-exact guarantees.
 
 ## Reference memories
 
@@ -27,7 +29,7 @@ A memory is a single Lance dataset (`chunks.lance`) with these parts:
 
 | Part | Holds | Grows with |
 |---|---|---|
-| `data/` | rows — text, 13 metadata cols, the embedding vector | chunks × content |
+| `data/` | rows — text, provenance metadata, and the embedding vector | chunks × content |
 | `_indices/` | BM25 + vector index | chunks (sublinear) |
 | `_versions/` | one manifest per committed version | number of index/push commits |
 | `_transactions/` | transaction records | negligible |
@@ -52,7 +54,7 @@ Breakdown (`data/` plus the live index generation):
 The vector is a hard floor: `384 × 4 B = 1,536 B/chunk`, full-precision float32
 (`FixedSizeList<Float32, 384>`), incompressible — product quantization lives in
 the *index*, not the data. Text is bounded (chunks are split at ~1,200 chars) and
-the ~13 provenance columns are small, so text + metadata lands at ~0.5–0.6 KB
+the provenance columns are small, so text + metadata landed at ~0.5–0.6 KB
 regardless of session type. The two memories agree within ~4%.
 
 **→ budget ~2.1 KB/chunk of data**, ~73% of it the embedding.
@@ -88,8 +90,8 @@ Size, using ~2.1 KB/chunk data and ~0.18 KB/chunk index:
 | Chunks | Data | Index | Total |
 |---|---|---|---|
 | 10k | 21 MB | 2 MB | 23 MB |
-| 65k (Main dev today) | 137 MB | 12 MB | 149 MB |
-| ~94k (remote today) | 197 MB | 17 MB | ~214 MB |
+| 65k (measured main dev) | 137 MB | 12 MB | 149 MB |
+| ~94k (measured remote) | 197 MB | 17 MB | ~214 MB |
 | 250k | 525 MB | 45 MB | 570 MB |
 | 500k | 1.05 GB | 90 MB | 1.14 GB |
 | 1M | 2.1 GB | 180 MB | 2.3 GB |
@@ -116,6 +118,6 @@ public repos have separate limits. See
 [HF storage limits](https://huggingface.co/docs/hub/storage-limits).
 
 At ~2.1 KB/chunk, 100 GB corresponds to tens of millions of chunks (~45M); the
-current remote (93,684 chunks, ~214 MB) uses ~0.2% of it. At the measured
+measured remote (93,684 chunks, ~214 MB) used ~0.2% of it. At the measured
 ~6 MB/day rate that is on the order of decades. Storage is not the binding
 constraint on this workload.
