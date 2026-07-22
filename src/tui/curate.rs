@@ -2,10 +2,9 @@
 //! list of the project's local sessions, each carrying a decision glyph, where `→` includes a
 //! reviewable session and `←` excludes it (the same arrow again clears to pending). Fully published
 //! sessions remain browseable but immutable. The preview opens on the deterministic session sketch,
-//! with the prompt history one `Tab` away as a fallback and the active local criteria under `c`.
-//! Decisions persist to the memory's curation file as they're made; Enter or Esc ends the review —
-//! the caller then summarizes and offers the push. `Shift-Tab` switches between all local sessions
-//! and only those still requiring a decision.
+//! with the prompt history one `Tab` away as a fallback. Decisions persist to the memory's curation
+//! file as they're made; Enter or Esc ends the review — the caller then summarizes and offers the
+//! push. `Shift-Tab` switches between all local sessions and only those still requiring a decision.
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::style::{Color, Modifier, Style};
@@ -39,7 +38,6 @@ enum PreviewMode {
     Prompts,
     #[default]
     Sketch,
-    Criteria,
 }
 
 impl PreviewMode {
@@ -47,7 +45,6 @@ impl PreviewMode {
         match self {
             Self::Prompts => Self::Sketch,
             Self::Sketch => Self::Prompts,
-            Self::Criteria => Self::Sketch,
         }
     }
 }
@@ -73,12 +70,6 @@ impl SessionScope {
 /// user ends the review, propagating the first write error if any.
 pub fn run(uri: String, project: String, items: Vec<Candidate>) -> anyhow::Result<()> {
     let existing = curate::load(&uri)?.unwrap_or_default();
-    let criteria = curate::load_criteria(&uri)?;
-    let criteria_fingerprint = criteria.as_ref().map(|snapshot| snapshot.fingerprint.clone());
-    let criteria_label = criteria
-        .as_ref()
-        .map(|snapshot| format!("criteria {} {}", snapshot.name, snapshot.short_fingerprint()));
-    let criteria_preview = criteria.as_ref().map(criteria_text);
     let decision = items
         .iter()
         .map(|c| {
@@ -87,7 +78,7 @@ pub fn run(uri: String, project: String, items: Vec<Candidate>) -> anyhow::Resul
             if existing.include.contains(&c.id) && (c.publication.is_read_only() || !existing.is_stale(&c.id, c.chunks))
             {
                 Some(Decision::Include)
-            } else if existing.exclude.contains(&c.id) && !existing.criteria_is_stale(&c.id) {
+            } else if existing.exclude.contains(&c.id) {
                 Some(Decision::Exclude)
             } else {
                 None
@@ -101,9 +92,6 @@ pub fn run(uri: String, project: String, items: Vec<Candidate>) -> anyhow::Resul
         decision,
         preview_mode: PreviewMode::default(),
         scope: SessionScope::default(),
-        criteria_fingerprint,
-        criteria_label,
-        criteria_preview,
         err: None,
     };
     run_root(&mut picker, RunOpts::default())?; // Back and Quit both mean "done reviewing"
@@ -120,41 +108,7 @@ struct CuratePicker {
     decision: Vec<Option<Decision>>, // parallel to `items`; the in-memory mirror of the file
     preview_mode: PreviewMode,       // global view choice; decisions are independent of it
     scope: SessionScope,             // all local sessions, or only undecided reviewable sessions
-    criteria_fingerprint: Option<String>, // criteria new decisions are bound to
-    criteria_label: Option<String>,  // compact name + fingerprint, always visible in the footer
-    criteria_preview: Option<Text<'static>>, // full local Markdown snapshot, opened with `c`
     err: Option<anyhow::Error>,      // first persist failure, surfaced when the review ends
-}
-
-fn criteria_text(snapshot: &curate::CriteriaSnapshot) -> Text<'static> {
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled("CURATION CRITERIA", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(format!(
-                "  · {} · {} · local only",
-                snapshot.name,
-                snapshot.short_fingerprint()
-            )),
-        ]),
-        Line::raw(""),
-    ];
-    for source in snapshot.markdown.lines() {
-        let trimmed = source.trim_start();
-        if trimmed.starts_with('#') {
-            lines.push(Line::styled(
-                source.to_string(),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            ));
-        } else if let Some(item) = trimmed.strip_prefix("- ") {
-            lines.push(Line::from(vec![
-                Span::styled("• ", Style::default().fg(Color::Yellow)),
-                Span::raw(item.to_string()),
-            ]));
-        } else {
-            lines.push(Line::raw(source.to_string()));
-        }
-    }
-    Text::from(lines)
 }
 
 impl CuratePicker {
@@ -171,14 +125,7 @@ impl CuratePicker {
         self.decision[i] = next;
         if self.err.is_none() {
             let c = &self.items[i];
-            if let Err(e) = curate::set_decision(
-                &self.uri,
-                &c.id,
-                next,
-                c.chunks,
-                self.criteria_fingerprint.as_deref(),
-                &c.comment,
-            ) {
+            if let Err(e) = curate::set_decision(&self.uri, &c.id, next, c.chunks, &c.comment) {
                 self.err = Some(e);
             }
         }
@@ -226,10 +173,6 @@ impl PickerModel for CuratePicker {
         let preview = match self.preview_mode {
             PreviewMode::Prompts => self.items[i].prompts_preview.clone(),
             PreviewMode::Sketch => self.items[i].sketch_preview.clone(),
-            PreviewMode::Criteria => self
-                .criteria_preview
-                .clone()
-                .unwrap_or_else(|| Text::raw("No criteria snapshot. Run `funes curate <memory> --criteria <file>`.")),
         };
         if matches!(self.decision[i], Some(Decision::Exclude)) {
             preview.style(Style::default().add_modifier(Modifier::DIM))
@@ -241,28 +184,16 @@ impl PickerModel for CuratePicker {
     fn header(&self, _query: &str) -> Line<'static> {
         // The prominent line: how to act. `→`/`←` aren't discoverable, so they lead here rather
         // than hide on the dim prompt line; `→ include` wears the green of the ✓ it sets.
-        let mut spans = vec![
+        Line::from(vec![
             Span::styled("→ include", Style::default().fg(Color::Green)),
             Span::raw("    ← exclude"),
             Span::styled(
                 match self.preview_mode {
                     PreviewMode::Prompts => "    tab sketch",
-                    PreviewMode::Sketch | PreviewMode::Criteria => "    tab prompts",
+                    PreviewMode::Sketch => "    tab prompts",
                 },
                 Style::default().fg(Color::Cyan),
             ),
-        ];
-        if self.criteria_preview.is_some() {
-            spans.push(Span::styled(
-                if self.preview_mode == PreviewMode::Criteria {
-                    "    c sketch"
-                } else {
-                    "    c criteria"
-                },
-                Style::default().fg(Color::Cyan),
-            ));
-        }
-        spans.extend([
             Span::styled(
                 match self.scope {
                     SessionScope::All => "    shift-tab pending",
@@ -274,8 +205,7 @@ impl PickerModel for CuratePicker {
                 "    · ↑ published/read-only · ◐ has local updates · enter/esc when done",
                 Style::default().add_modifier(Modifier::DIM),
             ),
-        ]);
-        Line::from(spans)
+        ])
     }
 
     fn hints(&self) -> String {
@@ -284,11 +214,7 @@ impl PickerModel for CuratePicker {
             SessionScope::All => "all local",
             SessionScope::Pending => "pending",
         };
-        let criteria = self.criteria_label.as_deref().unwrap_or("no criteria");
-        format!(
-            "{scope} · {criteria} · ctrl-u/d scroll · project memory of {}",
-            self.project
-        )
+        format!("{scope} · ctrl-u/d scroll · project memory of {}", self.project)
     }
 
     fn on_key(&mut self, key: KeyEvent, sel: Option<usize>, _ctx: &mut Ctx) -> Flow {
@@ -315,14 +241,6 @@ impl PickerModel for CuratePicker {
             }
             KeyCode::Tab => {
                 self.preview_mode = self.preview_mode.toggle();
-                Flow::ResetPreview
-            }
-            KeyCode::Char('c') if self.criteria_preview.is_some() => {
-                self.preview_mode = if self.preview_mode == PreviewMode::Criteria {
-                    PreviewMode::Sketch
-                } else {
-                    PreviewMode::Criteria
-                };
                 Flow::ResetPreview
             }
             KeyCode::BackTab => {
@@ -366,9 +284,6 @@ mod tests {
             decision: Vec::new(),
             preview_mode: PreviewMode::Prompts,
             scope: SessionScope::All,
-            criteria_fingerprint: None,
-            criteria_label: None,
-            criteria_preview: None,
             err: None,
         };
         let header = line_text(&picker.header(""));
@@ -393,9 +308,6 @@ mod tests {
             decision: vec![Some(Decision::Include)],
             preview_mode: PreviewMode::Prompts,
             scope: SessionScope::All,
-            criteria_fingerprint: None,
-            criteria_label: None,
-            criteria_preview: None,
             err: None,
         };
 
@@ -404,46 +316,6 @@ mod tests {
         assert_eq!(picker.preview(0).lines[0].spans[0].content, "SKETCH");
         assert!(matches!(picker.decision.as_slice(), [Some(Decision::Include)]));
         assert!(line_text(&picker.header("")).contains("tab prompts"));
-    }
-
-    #[test]
-    fn criteria_view_shows_the_full_named_snapshot_and_fingerprint() {
-        let snapshot = curate::CriteriaSnapshot {
-            schema_version: 1,
-            name: "transformers-memory.md".into(),
-            fingerprint: "sha256:1234567890abcdef".into(),
-            markdown: "# Purpose\n\n- Explain durable decisions\n\nNever publish private plans.\n".into(),
-        };
-        let preview = criteria_text(&snapshot);
-        let mut picker = CuratePicker {
-            uri: "hf://datasets/o/r".into(),
-            project: "o/r".into(),
-            items: vec![candidate("session", Publication::Local)],
-            decision: vec![None],
-            preview_mode: PreviewMode::Criteria,
-            scope: SessionScope::All,
-            criteria_fingerprint: Some(snapshot.fingerprint.clone()),
-            criteria_label: Some("criteria transformers-memory.md 12345678".into()),
-            criteria_preview: Some(preview),
-            err: None,
-        };
-
-        let rendered: String = picker
-            .preview(0)
-            .lines
-            .iter()
-            .map(line_text)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(rendered.contains("CURATION CRITERIA  · transformers-memory.md · 12345678 · local only"));
-        assert!(rendered.contains("# Purpose"));
-        assert!(rendered.contains("• Explain durable decisions"));
-        assert!(rendered.contains("Never publish private plans."));
-        assert!(line_text(&picker.header("")).contains("c sketch"));
-        assert!(picker.hints().contains("criteria transformers-memory.md 12345678"));
-
-        picker.preview_mode = PreviewMode::Sketch;
-        assert!(line_text(&picker.header("")).contains("c criteria"));
     }
 
     #[test]
@@ -460,9 +332,6 @@ mod tests {
             decision: vec![Some(Decision::Include)],
             preview_mode: PreviewMode::Prompts,
             scope: SessionScope::All,
-            criteria_fingerprint: None,
-            criteria_label: None,
-            criteria_preview: None,
             err: None,
         };
 
@@ -484,9 +353,6 @@ mod tests {
             decision: vec![None, Some(Decision::Exclude), None],
             preview_mode: PreviewMode::Prompts,
             scope: SessionScope::Pending,
-            criteria_fingerprint: None,
-            criteria_label: None,
-            criteria_preview: None,
             err: None,
         };
 

@@ -142,9 +142,6 @@ enum Cmd {
         /// Mark these sessions `exclude` — held back from this memory.
         #[arg(long, value_name = "SESSION")]
         exclude: Vec<String>,
-        /// Snapshot this Markdown brief locally as the criteria for reviewing this memory.
-        #[arg(long, value_name = "FILE")]
-        criteria: Option<PathBuf>,
     },
     /// Redact secrets from your local memory in place — for rows indexed before redaction existed (or
     /// flagged by an updated ruleset); needs no source transcript. Cleans the local memory only: it
@@ -461,7 +458,6 @@ async fn main() -> Result<()> {
             project,
             include,
             exclude,
-            criteria,
         } => {
             let memory = hub::Memory::parse(&memory);
             // A project memory is of a git repo — funes attributes sessions to it by their
@@ -483,11 +479,11 @@ async fn main() -> Result<()> {
             // (and the FUNES_NO_TUI opt-out) get the plain text listing.
             let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
             if include.is_empty() && exclude.is_empty() && interactive && std::env::var_os("FUNES_NO_TUI").is_none() {
-                curate_review(&memory, project.as_deref(), criteria.as_deref()).await
+                curate_review(&memory, project.as_deref()).await
             } else {
                 print!(
                     "{}",
-                    curate::run(&memory, project.as_deref(), &include, &exclude, criteria.as_deref()).await?
+                    curate::run(&memory, project.as_deref(), &include, &exclude).await?
                 );
                 Ok(())
             }
@@ -554,7 +550,7 @@ fn curation_filter(sketch: &str, prompts: &str) -> String {
 /// sketch with its user prompts available as a fallback. Decisions persist as they're made; leaving
 /// summarizes, and — once something is included — offers the push, materializing the memory as the
 /// project memory first when it isn't one yet.
-async fn curate_review(memory: &hub::Memory, project: Option<&str>, criteria: Option<&std::path::Path>) -> Result<()> {
+async fn curate_review(memory: &hub::Memory, project: Option<&str>) -> Result<()> {
     // Resolve without creating: `materialize` is None when the memory is already the project memory,
     // else Some(create_repo) — the deferred creation to run at the close if anything is included.
     let (uri, project, materialize) = match curate::prepare(memory, project).await? {
@@ -562,14 +558,6 @@ async fn curate_review(memory: &hub::Memory, project: Option<&str>, criteria: Op
         curate::Prepared::Absent { uri, project } => (uri, project, Some(true)),
         curate::Prepared::Personal { uri, project } => (uri, project, Some(false)),
     };
-    if let Some(path) = criteria {
-        let snapshot = curate::snapshot_criteria(&uri, path)?;
-        eprintln!(
-            "criteria: {} ({}) — local only",
-            snapshot.name,
-            snapshot.short_fingerprint()
-        );
-    }
     let found = curate::candidates(memory, &uri, &project, true).await?;
     if found.matched.is_empty() {
         let skipped = found.other.len() + found.unresolvable.len();
@@ -658,7 +646,7 @@ async fn curate_review(memory: &hub::Memory, project: Option<&str>, criteria: Op
         .count();
     let exc = reviewable
         .clone()
-        .filter(|s| curation.exclude.contains(&s.session_id) && !curation.criteria_is_stale(&s.session_id))
+        .filter(|s| curation.exclude.contains(&s.session_id))
         .count();
     let pending = reviewable.count() - inc - exc;
     println!("project memory of {project} — {published} published, {inc} include, {exc} exclude, {pending} pending");

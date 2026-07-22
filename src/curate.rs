@@ -26,15 +26,10 @@ use arrow_schema::Schema;
 use hf_hub::repository::CommitOperation;
 use lance::dataset::WriteParams;
 use lance::Dataset;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-
-const CRITERIA_SCHEMA_VERSION: u32 = 1;
 
 /// The project this memory is *of* — the `project` schema-metadata key, carried beside the
 /// `embedding_model` pin: a repo identity (`huggingface/funes`) or a bare label. Its presence
@@ -177,10 +172,6 @@ pub struct Curation {
     /// one. A session absent here — a legacy `include` with no count — has no watermark and never
     /// re-flags; one present re-flags once the session grows past it (see [`Curation::is_stale`]).
     reviewed: HashMap<String, usize>,
-    /// Criteria fingerprint each decision was made against. Absent on legacy decision lines.
-    reviewed_criteria: HashMap<String, String>,
-    /// The memory's currently active local snapshot, filled by [`load`] rather than the line parser.
-    active_criteria: Option<String>,
 }
 
 impl Curation {
@@ -193,20 +184,7 @@ impl Curation {
     /// no longer covers the session's current content, so its new chunks must not ship until it's
     /// reviewed again — a review dismissed by new commits landing on the PR.
     pub fn is_stale(&self, session: &str, current_chunks: usize) -> bool {
-        self.reviewed.get(session).is_some_and(|&n| current_chunks > n) || self.criteria_is_stale(session)
-    }
-
-    /// Whether a settled decision predates the active criteria snapshot. With no snapshot, legacy
-    /// decisions keep their old meaning. Once criteria are introduced, an unversioned decision is
-    /// intentionally stale and must be reviewed against them.
-    pub fn criteria_is_stale(&self, session: &str) -> bool {
-        self.active_criteria
-            .as_ref()
-            .is_some_and(|active| self.reviewed_criteria.get(session).map(String::as_str) != Some(active.as_str()))
-    }
-
-    pub fn active_criteria(&self) -> Option<&str> {
-        self.active_criteria.as_deref()
+        self.reviewed.get(session).is_some_and(|&n| current_chunks > n)
     }
 }
 
@@ -229,129 +207,15 @@ fn sanitize(uri: &str) -> String {
         .collect()
 }
 
-/// A local snapshot of the Markdown criteria used to judge one project memory. The snapshot is
-/// deliberately kept beside the host's curation state and is never part of a Hub commit: its
-/// disclosure section may itself enumerate private names and projects.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct CriteriaSnapshot {
-    pub schema_version: u32,
-    /// Source filename for a compact UI label; never the source's full local path.
-    pub name: String,
-    pub fingerprint: String,
-    pub markdown: String,
-}
-
-impl CriteriaSnapshot {
-    fn new(name: String, markdown: String) -> Result<Self> {
-        if markdown.trim().is_empty() {
-            bail!("curation criteria are empty")
-        }
-        Ok(Self {
-            schema_version: CRITERIA_SCHEMA_VERSION,
-            name,
-            fingerprint: criteria_fingerprint(&markdown),
-            markdown,
-        })
-    }
-
-    /// The first eight digest digits, sufficient to recognize the active snapshot in the picker.
-    pub fn short_fingerprint(&self) -> &str {
-        self.fingerprint
-            .strip_prefix("sha256:")
-            .unwrap_or(&self.fingerprint)
-            .get(..8)
-            .unwrap_or(&self.fingerprint)
-    }
-}
-
-/// The criteria snapshot for `memory_uri`: `<funes-home>/curation/<memory>.criteria.json`.
-pub fn criteria_file_for(memory_uri: &str) -> PathBuf {
-    dataset::funes_dir()
-        .join("curation")
-        .join(format!("{}.criteria.json", sanitize(memory_uri)))
-}
-
-fn criteria_fingerprint(markdown: &str) -> String {
-    format!("sha256:{}", hex::encode(Sha256::digest(markdown.as_bytes())))
-}
-
-/// Copy a human-authored Markdown file into this host's local curation state. Re-snapshotting the
-/// same content is harmless; changing only the source path leaves the content identity unchanged.
-pub fn snapshot_criteria(memory_uri: &str, source: &Path) -> Result<CriteriaSnapshot> {
-    let markdown = std::fs::read_to_string(source)
-        .with_context(|| format!("reading curation criteria from {}", source.display()))?;
-    let name = source
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("criteria")
-        .to_string();
-    let snapshot = CriteriaSnapshot::new(name, markdown)?;
-    store_criteria_snapshot(&criteria_file_for(memory_uri), &snapshot)?;
-    Ok(snapshot)
-}
-
-/// The active local criteria snapshot, if this memory has one. A malformed, incompatible, or
-/// content-mismatched snapshot is an error rather than silently changing what decisions mean.
-pub fn load_criteria(memory_uri: &str) -> Result<Option<CriteriaSnapshot>> {
-    load_criteria_snapshot(&criteria_file_for(memory_uri))
-}
-
-fn load_criteria_snapshot(path: &Path) -> Result<Option<CriteriaSnapshot>> {
-    let file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
-    };
-    let snapshot: CriteriaSnapshot =
-        serde_json::from_reader(file).with_context(|| format!("parsing {}", path.display()))?;
-    if snapshot.schema_version != CRITERIA_SCHEMA_VERSION {
-        bail!(
-            "unsupported curation criteria schema {} in {} (expected {})",
-            snapshot.schema_version,
-            path.display(),
-            CRITERIA_SCHEMA_VERSION
-        );
-    }
-    let actual = criteria_fingerprint(&snapshot.markdown);
-    if snapshot.fingerprint != actual {
-        bail!("curation criteria fingerprint mismatch in {}", path.display());
-    }
-    Ok(Some(snapshot))
-}
-
-fn store_criteria_snapshot(path: &Path, snapshot: &CriteriaSnapshot) -> Result<()> {
-    let parent = path.parent().context("curation criteria path has no parent")?;
-    std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-    let mut staged = tempfile::NamedTempFile::new_in(parent)
-        .with_context(|| format!("staging curation criteria in {}", parent.display()))?;
-    serde_json::to_writer_pretty(&mut staged, snapshot).context("serializing curation criteria")?;
-    staged.write_all(b"\n").context("writing curation criteria")?;
-    staged.flush().context("flushing curation criteria")?;
-    staged
-        .persist(path)
-        .map_err(|error| error.error)
-        .with_context(|| format!("replacing curation criteria at {}", path.display()))?;
-    Ok(())
-}
-
-/// The memory's curation, or None when it has neither decisions nor an active criteria snapshot.
-/// Criteria alone return an empty decision set carrying that active fingerprint, so the first
-/// decision made in the picker is versioned correctly.
+/// The memory's curation, or None when it has no file (nothing decided — push holds everything).
 pub fn load(memory_uri: &str) -> Result<Option<Curation>> {
-    load_from_paths(&file_for(memory_uri), &criteria_file_for(memory_uri))
-}
-
-fn load_from_paths(path: &Path, criteria_path: &Path) -> Result<Option<Curation>> {
-    let criteria = load_criteria_snapshot(criteria_path)?;
-    let text = match std::fs::read_to_string(path) {
+    let path = file_for(memory_uri);
+    let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound && criteria.is_none() => return Ok(None),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
-    let mut curation = parse(&text);
-    curation.active_criteria = criteria.map(|snapshot| snapshot.fingerprint);
-    Ok(Some(curation))
+    Ok(Some(parse(&text)))
 }
 
 /// Parse decision lines. Blank, comment-only, and unrecognizable lines are skipped (with a note
@@ -368,31 +232,14 @@ fn parse(text: &str) -> Curation {
         match (words.next(), words.next()) {
             (Some("include"), Some(id)) => {
                 curation.include.insert(id.to_string());
-                for word in words {
-                    // A trailing integer is the reviewed-at chunk count (the growth watermark);
-                    // its absence (a legacy line) leaves the session without one.
-                    if let Ok(n) = word.parse::<usize>() {
-                        curation.reviewed.entry(id.to_string()).or_insert(n);
-                    } else if let Some(fingerprint) = word.strip_prefix("criteria=") {
-                        if !fingerprint.is_empty() {
-                            curation
-                                .reviewed_criteria
-                                .insert(id.to_string(), fingerprint.to_string());
-                        }
-                    }
+                // A trailing integer is the reviewed-at chunk count (the growth watermark); its
+                // absence (a legacy line) leaves the session without one.
+                if let Some(n) = words.next().and_then(|w| w.parse::<usize>().ok()) {
+                    curation.reviewed.insert(id.to_string(), n);
                 }
             }
             (Some("exclude"), Some(id)) => {
                 curation.exclude.insert(id.to_string());
-                for word in words {
-                    if let Some(fingerprint) = word.strip_prefix("criteria=") {
-                        if !fingerprint.is_empty() {
-                            curation
-                                .reviewed_criteria
-                                .insert(id.to_string(), fingerprint.to_string());
-                        }
-                    }
-                }
             }
             _ => eprintln!("note: skipped an unrecognized curation line: {line}"),
         }
@@ -412,22 +259,15 @@ pub fn partition(
     let mut shipped = HashSet::new();
     let mut pending = Vec::new();
     for (session, ids) in by_session {
-        let has_unpublished = ids.iter().any(|id| !remote_ids.contains(id));
         if curation.include.contains(session) {
             // An included session that grew past its reviewed count is stale — its new chunks are
             // held for a fresh review, like a PR review dismissed by new commits.
             if curation.is_stale(session, ids.len()) {
-                if has_unpublished {
-                    pending.push(session.clone());
-                }
+                pending.push(session.clone());
             } else {
                 shipped.extend(ids.iter().cloned());
             }
-        } else if curation.exclude.contains(session) {
-            if curation.criteria_is_stale(session) && has_unpublished {
-                pending.push(session.clone());
-            }
-        } else if has_unpublished {
+        } else if !curation.decided(session) && ids.iter().any(|id| !remote_ids.contains(id)) {
             pending.push(session.clone());
         }
     }
@@ -603,14 +443,10 @@ pub enum Decision {
 /// One curation line. An `include` carries the reviewed-at chunk count (`chunks`) as its growth
 /// watermark; `exclude` needs none (it never ships, so growth is moot). The comment, when present,
 /// follows a `#`.
-fn decision_line(decision: Decision, session: &str, chunks: usize, criteria: Option<&str>, comment: &str) -> String {
+fn decision_line(decision: Decision, session: &str, chunks: usize, comment: &str) -> String {
     let head = match decision {
         Decision::Include => format!("include {session} {chunks}"),
         Decision::Exclude => format!("exclude {session}"),
-    };
-    let head = match criteria {
-        Some(fingerprint) => format!("{head} criteria={fingerprint}"),
-        None => head,
     };
     match comment.trim() {
         "" => format!("{head}\n"),
@@ -628,7 +464,6 @@ pub fn set_decision(
     session: &str,
     decision: Option<Decision>,
     chunks: usize,
-    criteria: Option<&str>,
     comment: &str,
 ) -> Result<()> {
     let path = file_for(memory_uri);
@@ -648,7 +483,7 @@ pub fn set_decision(
         }
     }
     if let Some(d) = decision {
-        out.push_str(&decision_line(d, session, chunks, criteria, comment));
+        out.push_str(&decision_line(d, session, chunks, comment));
     }
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -1018,15 +853,13 @@ pub async fn record_decisions(uri: &str, project: &str, include: &[String], excl
             .unwrap_or_default();
         (comment, s.map(|s| s.chunks).unwrap_or(0))
     };
-    let criteria = load_criteria(uri)?;
-    let criteria = criteria.as_ref().map(|snapshot| snapshot.fingerprint.as_str());
     for id in include {
         let (comment, chunks) = comment_and_chunks(id);
-        set_decision(uri, id, Some(Decision::Include), chunks, criteria, &comment)?;
+        set_decision(uri, id, Some(Decision::Include), chunks, &comment)?;
     }
     for id in exclude {
         let (comment, chunks) = comment_and_chunks(id);
-        set_decision(uri, id, Some(Decision::Exclude), chunks, criteria, &comment)?;
+        set_decision(uri, id, Some(Decision::Exclude), chunks, &comment)?;
     }
     Ok(format!(
         "project memory of {project} — recorded {} include, {} exclude\n",
@@ -1039,13 +872,7 @@ pub async fn record_decisions(uri: &str, project: &str, include: &[String], excl
 /// pending review. The text path never creates one — standing up a project memory needs the
 /// interactive review's consent — so `memory` must already be one. The interactive review wraps
 /// these same pieces (and deferred creation) in the CLI layer.
-pub async fn run(
-    memory: &Memory,
-    project: Option<&str>,
-    include: &[String],
-    exclude: &[String],
-    criteria: Option<&Path>,
-) -> Result<String> {
+pub async fn run(memory: &Memory, project: Option<&str>, include: &[String], exclude: &[String]) -> Result<String> {
     let (uri, project) = match prepare(memory, project).await? {
         Prepared::Ready { uri, project } => (uri, project),
         Prepared::Absent { .. } => bail!("{} doesn't exist", memory.label()),
@@ -1057,15 +884,6 @@ pub async fn run(
         }
     };
     let mut out = String::new();
-    if let Some(path) = criteria {
-        let snapshot = snapshot_criteria(&uri, path)?;
-        let _ = writeln!(
-            out,
-            "criteria: {} ({}) — local only",
-            snapshot.name,
-            snapshot.short_fingerprint()
-        );
-    }
 
     // Recording decisions is a complete action — record, report, and stop.
     if !include.is_empty() || !exclude.is_empty() {
@@ -1156,39 +974,6 @@ exclude ddd # later";
     fn sanitize_is_deterministic_and_path_safe() {
         assert_eq!(sanitize("hf://datasets/acme/kb"), "hf___datasets_acme_kb");
         assert!(!sanitize("a/../b").contains('/'));
-    }
-
-    #[test]
-    fn criteria_snapshot_round_trips_and_verifies_its_content() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("memory.criteria.json");
-        let snapshot = CriteriaSnapshot::new(
-            "transformers-memory.md".into(),
-            "# Purpose\n\nExplain durable maintainer decisions.\n".into(),
-        )
-        .unwrap();
-        assert!(snapshot.fingerprint.starts_with("sha256:"));
-        assert_eq!(snapshot.short_fingerprint().len(), 8);
-
-        store_criteria_snapshot(&path, &snapshot).unwrap();
-        assert_eq!(load_criteria_snapshot(&path).unwrap(), Some(snapshot.clone()));
-        let decisions = dir.path().join("memory.decisions");
-        let state = load_from_paths(&decisions, &path).unwrap().unwrap();
-        assert_eq!(state.active_criteria(), Some(snapshot.fingerprint.as_str()));
-        assert!(state.include.is_empty() && state.exclude.is_empty());
-
-        let mut mismatched = snapshot;
-        mismatched.markdown.push_str("\nChanged without updating the digest.\n");
-        store_criteria_snapshot(&path, &mismatched).unwrap();
-        assert!(load_criteria_snapshot(&path)
-            .unwrap_err()
-            .to_string()
-            .contains("fingerprint mismatch"));
-    }
-
-    #[test]
-    fn criteria_snapshot_rejects_an_empty_brief() {
-        assert!(CriteriaSnapshot::new("empty.md".into(), " \n".into()).is_err());
     }
 
     fn by_session(entries: &[(&str, &[&str])]) -> HashMap<String, Vec<String>> {
@@ -1303,60 +1088,31 @@ exclude ddd # later";
     #[test]
     fn decision_line_carries_the_watermark_and_round_trips() {
         assert_eq!(
-            decision_line(Decision::Include, "bbb", 7, None, "2026-07-15 fix the parser"),
+            decision_line(Decision::Include, "bbb", 7, "2026-07-15 fix the parser"),
             "include bbb 7   # 2026-07-15 fix the parser\n"
         );
         assert_eq!(
-            decision_line(Decision::Include, "ccc", 5, None, "  "),
+            decision_line(Decision::Include, "ccc", 5, "  "),
             "include ccc 5\n",
             "blank comment → no #"
         );
         assert_eq!(
-            decision_line(Decision::Exclude, "ddd", 9, None, "private"),
+            decision_line(Decision::Exclude, "ddd", 9, "private"),
             "exclude ddd   # private\n",
             "exclude carries no count"
-        );
-        assert_eq!(
-            decision_line(Decision::Include, "eee", 3, Some("sha256:brief"), "useful"),
-            "include eee 3 criteria=sha256:brief   # useful\n"
         );
         // Round-trips through the parser the file is read back with, watermark and all.
         let text = format!(
             "{}{}",
-            decision_line(Decision::Include, "bbb", 7, Some("sha256:brief"), ""),
-            decision_line(Decision::Exclude, "ddd", 9, Some("sha256:brief"), "")
+            decision_line(Decision::Include, "bbb", 7, ""),
+            decision_line(Decision::Exclude, "ddd", 9, "")
         );
         let parsed = parse(&text);
         assert!(parsed.include.contains("bbb") && parsed.exclude.contains("ddd"));
-        assert_eq!(parsed.reviewed_criteria["bbb"], "sha256:brief");
-        assert_eq!(parsed.reviewed_criteria["ddd"], "sha256:brief");
         assert!(
             !parsed.is_stale("bbb", 7) && parsed.is_stale("bbb", 8),
             "the reviewed-at count round-trips"
         );
-    }
-
-    #[test]
-    fn new_criteria_reopen_unpublished_include_and_exclude_decisions() {
-        let sessions = by_session(&[("keep", &["k1"] as &[&str]), ("drop", &["d1"])]);
-        let mut curation = parse("include keep 1 criteria=sha256:old\nexclude drop criteria=sha256:old\n");
-        curation.active_criteria = Some("sha256:new".into());
-
-        assert!(curation.is_stale("keep", 1));
-        assert!(curation.criteria_is_stale("drop"));
-        let (shipped, pending) = partition(&sessions, &curation, &HashSet::new());
-        assert!(shipped.is_empty());
-        assert_eq!(pending, ["drop", "keep"]);
-
-        let already_published = HashSet::from(["d1".to_string(), "k1".to_string()]);
-        let (shipped, pending) = partition(&sessions, &curation, &already_published);
-        assert!(shipped.is_empty());
-        assert!(pending.is_empty(), "published rows are audit-only, not review work");
-
-        curation.active_criteria = Some("sha256:old".into());
-        let (shipped, pending) = partition(&sessions, &curation, &HashSet::new());
-        assert_eq!(shipped, HashSet::from(["k1".to_string()]));
-        assert!(pending.is_empty());
     }
 
     #[test]
