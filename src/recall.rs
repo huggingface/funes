@@ -830,15 +830,20 @@ async fn index_lines(ds: &Dataset, now: DateTime<Utc>) -> String {
     out
 }
 
-pub async fn status(memory: Memory) -> Result<String> {
+/// Status with phase notifications for interactive callers. The stable status body remains the
+/// return value; progress is ephemeral terminal presentation and must never be parsed.
+pub async fn status_with_progress(memory: Memory, progress: &(dyn Fn(&str) + Sync)) -> Result<String> {
+    progress(&format!("opening {}…", memory.label()));
     match open_for_read(&memory).await? {
         ReadOutcome::Ready(ds) => {
             let now = Utc::now();
+            progress("counting chunks…");
             let rows = ds.count_rows(None).await?;
             let mut out = format!("memory: {}\nchunks: {rows}\n", memory.label());
             match &memory {
                 Memory::Local { .. } => out.push_str(&index_lines(&ds, now).await),
                 Memory::Remote { uri } => {
+                    progress("reading remote metadata…");
                     // A project memory announces itself and this machine's review backlog.
                     let project = curate::project(&ds);
                     if let Some(project) = &project {
@@ -854,6 +859,7 @@ pub async fn status(memory: Memory) -> Result<String> {
                     if t.timestamp() > 0 {
                         let _ = writeln!(out, "last push: {}", stamp(t, now));
                     }
+                    progress("checking remote indexes…");
                     let unindexed = crate::hf_dataset::max_unindexed_rows(&ds).await;
                     if unindexed > 0 {
                         let _ = writeln!(
@@ -863,6 +869,7 @@ pub async fn status(memory: Memory) -> Result<String> {
                     }
                     // The local index is what pushes here — show it alongside, so one status
                     // answers both "what's published" and "what's indexed on this machine".
+                    progress("reading local index…");
                     if let Ok(local) = Memory::local().open().await {
                         let local_rows = local.count_rows(None).await?;
                         let _ = writeln!(
@@ -919,7 +926,8 @@ pub async fn status(memory: Memory) -> Result<String> {
         }
         // An unreachable remote shows the local index's status instead, like the read commands.
         ReadOutcome::Offline => {
-            let body = Box::pin(status(Memory::local())).await?;
+            progress("remote unavailable; reading local index…");
+            let body = Box::pin(status_with_progress(Memory::local(), progress)).await?;
             Ok(format!(
                 "remote {} unreachable — showing your local memory instead\n{body}",
                 memory.label()
@@ -932,6 +940,11 @@ pub async fn status(memory: Memory) -> Result<String> {
             memory.label(),
         )),
     }
+}
+
+/// Status without presentation callbacks — used by MCP and programmatic callers.
+pub async fn status(memory: Memory) -> Result<String> {
+    status_with_progress(memory, &|_| {}).await
 }
 
 #[cfg(test)]

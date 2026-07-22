@@ -417,7 +417,22 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Status { memory } => {
-            print!("{}", recall::status(hub::Memory::resolve(memory)).await?);
+            let memory = hub::Memory::resolve(memory);
+            // A remote status crosses the network several times (reachability, Lance metadata,
+            // counts/index state). Keep the terminal alive and name each phase; scripted/MCP
+            // callers remain silent because the spinner only exists on a terminal.
+            let spinner = match &memory {
+                hub::Memory::Remote { .. } => Spinner::start(&format!("opening {}…", memory.label())),
+                hub::Memory::Local { .. } => None,
+            };
+            let progress = |label: &str| {
+                if let Some(s) = &spinner {
+                    s.set(label);
+                }
+            };
+            let status = recall::status_with_progress(memory, &progress).await?;
+            drop(spinner);
+            print!("{status}");
             // Show the status body before the (bounded, best-effort) update check, so a slow or
             // offline Hub can't delay the useful output.
             std::io::stdout().flush().ok();

@@ -3,6 +3,7 @@
 //! `$FUNES_HOME` at an empty temp dir and exercises the no-index paths.
 
 use funes::hub::Memory;
+use std::sync::Mutex;
 
 #[tokio::test]
 async fn recall_without_an_index_guides_to_funes_add() {
@@ -26,8 +27,18 @@ async fn recall_without_an_index_guides_to_funes_add() {
     .to_string();
     assert!(err.contains("funes add"), "recall should point at funes add: {err}");
 
-    // status: informational — reports no index and points at the onboarding command (does not error).
-    let status = funes::recall::status(Memory::local()).await.unwrap();
+    // status: informational — reports no index and points at the onboarding command (does not
+    // error). Presentation callbacks are separate from that stable body.
+    let phases = Mutex::new(Vec::new());
+    let status = funes::recall::status_with_progress(Memory::local(), &|phase| {
+        phases.lock().unwrap().push(phase.to_string());
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        phases.into_inner().unwrap(),
+        [format!("opening {}…", Memory::local().label())]
+    );
     assert!(
         status.contains("no index yet"),
         "status should report no index: {status}"

@@ -134,7 +134,10 @@ uses the sweep's small coverage snapshot rather than recursively scanning transc
 personal remote memory, one `local push` line says either that this host is up to date or how many
 local sessions are pending. This comes from a per-remote receipt kept on this host, so sessions
 contributed by other hosts do not distort the result and status never scans the remote to compute
-it. Run `funes push <memory>` once to initialize the receipt for an existing memory.
+it. Run `funes push <memory>` once to initialize the receipt for an existing memory. Because remote
+status crosses the network several times, an interactive terminal shows a transient spinner naming
+the current phase. It is drawn on stderr and erased before the stable status body is printed, so
+piped output and MCP calls remain unchanged.
 
 ## See also
 
