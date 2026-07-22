@@ -18,6 +18,8 @@ This directory contains the user guides and design notes for
   session-boundary publishing.
 - [Publishing and sharing](push.md) — publish a memory to the Hugging Face Hub and share it across
   machines or teams.
+- [Configuration and local files](configuration.md) — state paths, caches, authentication,
+  integration files, and environment overrides.
 - [Remote-memory caching](hub-caching.md) — how `hf://` recall caches immutable Lance files.
 
 ## Design and reference

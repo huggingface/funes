@@ -103,3 +103,5 @@ finding, the agent reaches for [`recall`](recall.md) itself.
 - [index.md](index.md) — building and updating the memory by hand.
 - [push.md](push.md) — publishing a memory and sharing it.
 - [automation.md](automation.md) — exactly what the hooks install and how they behave.
+- [configuration.md](configuration.md) — installed paths, authentication, caches, and environment
+  overrides.
