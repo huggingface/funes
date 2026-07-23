@@ -1,4 +1,4 @@
-//! `funes add pi`: install funes recall as a first-class pi tool.
+//! `funes add pi` / `funes remove pi`: manage funes recall as a first-class pi tool.
 //!
 //! pi has no MCP client, so funes ships a small pi extension (a bridge that
 //! spawns `funes mcp` over stdio — see `integrations/pi/`). The extension is
@@ -36,6 +36,7 @@ pub fn install(memory: Option<String>, force: bool) -> Result<()> {
     let dir = PathBuf::from(home).join(".funes/integrations/pi");
     extract(&dir, memory.as_deref(), force)?;
     let dir = dir.to_string_lossy().into_owned();
+    let install_command = crate::integration::shell_command("pi", &["install", &dir]);
 
     // Probe pi: this confirms it's on PATH (else extract-and-instruct) and lets us flag a
     // version older than the one the extension API was validated against.
@@ -44,7 +45,7 @@ pub fn install(memory: Option<String>, force: bool) -> Result<()> {
         Ok(_) => String::new(), // pi present but odd --version; proceed without a version
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             println!("extracted the funes pi extension to {dir}");
-            println!("`pi` isn't on PATH — once it is, run:  pi install {dir}");
+            println!("`pi` isn't on PATH — once it is, run:  {install_command}");
             return Ok(());
         }
         Err(e) => return Err(anyhow::Error::new(e).context("running `pi --version`")),
@@ -69,11 +70,38 @@ pub fn install(memory: Option<String>, force: bool) -> Result<()> {
             Ok(())
         }
         Ok(s) => anyhow::bail!(
-            "`pi install {dir}` failed (exit {:?}); the extension is extracted there — retry that command manually.",
+            "`{install_command}` failed (exit {:?}); the extension is extracted at {dir} — retry that command manually.",
             s.code()
         ),
         Err(e) => Err(anyhow::Error::new(e).context("running `pi install`")),
     }
+}
+
+/// Reverse [`install`]: unregister the fixed-source extension from pi, then delete funes's extracted
+/// copy. The local memory and pi's session traces are deliberately untouched.
+pub fn uninstall() -> Result<()> {
+    let home = std::env::var_os("HOME").context("resolving $HOME for the pi install dir")?;
+    let dir = PathBuf::from(home).join(".funes/integrations/pi");
+    let source = dir.display().to_string();
+    let remove_command = crate::integration::shell_command("pi", &["remove", &source]);
+    if crate::integration::run_remove("pi", &["remove", &source], &["No matching package found for"])?
+        == crate::integration::RemoveCommand::MissingCli
+    {
+        crate::integration::remove_tree(&dir)?;
+        if let Some(parent) = dir.parent() {
+            crate::integration::remove_empty_dir(parent)?;
+        }
+        println!(
+            "`pi` isn't on PATH — extracted integration files were removed. Once it is, remove the registration manually:  {remove_command}"
+        );
+        return Ok(());
+    }
+    crate::integration::remove_tree(&dir)?;
+    if let Some(parent) = dir.parent() {
+        crate::integration::remove_empty_dir(parent)?;
+    }
+    println!("removed funes from pi — extension registration and extracted integration files.");
+    Ok(())
 }
 
 /// True if `path` exists and already holds exactly `want`.

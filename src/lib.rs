@@ -34,6 +34,7 @@ pub mod hooks;
 pub mod hub;
 pub mod index;
 pub mod inference;
+mod integration;
 pub mod jsonl;
 pub mod lock;
 pub mod mcp;

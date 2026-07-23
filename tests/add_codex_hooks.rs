@@ -1,8 +1,8 @@
 //! `funes add codex` writes the automation hooks into `~/.codex/hooks.json` + the scripts, and its
 //! append-or-replace merge leaves any hooks already there alone. Own test binary: it sets `$HOME`
-//! (process-global), so it can't share a binary with other env-setting tests.
+//! and `$PATH` (process-global), so it can't share a binary with other env-setting tests.
 
-use funes::hooks::{self, Agent};
+use funes::codex;
 use serde_json::Value;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -11,6 +11,7 @@ use std::os::unix::fs::PermissionsExt;
 fn add_codex_installs_hooks_and_preserves_existing() {
     let home = tempfile::tempdir().unwrap();
     std::env::set_var("HOME", home.path());
+    std::env::set_var("PATH", "");
     let config = home.path().join(".codex/hooks.json");
 
     // A hook the user already had must survive funes's merge.
@@ -21,7 +22,7 @@ fn add_codex_installs_hooks_and_preserves_existing() {
     )
     .unwrap();
 
-    hooks::install(Agent::Codex, Some("acme/kb")).unwrap();
+    codex::install(Some("acme/kb".to_string())).unwrap();
 
     // Scripts written and executable.
     let hooks_dir = home.path().join(".codex/hooks");
@@ -54,7 +55,7 @@ fn add_codex_installs_hooks_and_preserves_existing() {
     assert_eq!(cfg["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "guard.sh");
 
     // Re-run local: funes's push hook is dropped, its index hook stays (no dup), user hook survives.
-    hooks::install(Agent::Codex, None).unwrap();
+    codex::install(None).unwrap();
     let cfg2: Value = serde_json::from_str(&fs::read_to_string(&config).unwrap()).unwrap();
     assert!(
         cfg2["hooks"].get("SessionStart").is_none(),

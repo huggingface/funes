@@ -1,4 +1,4 @@
-# Adding funes to an agent
+# Adding and removing funes
 
 `funes add <agent> [memory]` wires funes into a coding agent in one command. Every agent gets the
 `recall` and `get` tools plus instructions on when to use them; for **Claude, Codex, and Hermes** it
@@ -9,6 +9,17 @@ and (with a memory bound) doing the first publish. Nothing is left to run by han
 funes add claude                           # local
 funes add claude <user|org>/funes-memory   # …backed by a memory you own (sync across machines/team)
 ```
+
+`funes remove <agent>` reverses that integration:
+
+```bash
+funes remove claude                       # or codex, pi, hermes
+```
+
+It unregisters funes's tools, removes its automation hooks and owned integration files, and
+preserves unrelated agent hooks and configuration. It does **not** delete your local memory,
+original session transcripts, curation decisions, model/Hub caches, or any published memory. The
+command is idempotent, so an already-absent integration is a successful no-op.
 
 ## The agents
 
@@ -102,6 +113,7 @@ For Claude, Codex, and Hermes, `funes add` runs the one-time bootstrap the hooks
 
 Re-run `funes add <agent> <memory>` any time to change the memory or refresh the setup — it's
 idempotent. On a new host, re-running it once clears the wrong-memory guard for that machine.
+Run `funes remove <agent>` to reverse the agent wiring without deleting the memory it used.
 
 From here you just work: when something touches a past decision, its rationale, or an earlier
 finding, the agent reaches for [`recall`](recall.md) itself.

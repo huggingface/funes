@@ -48,7 +48,8 @@ when they're indexed, and `funes index` re-embeds nothing already written. Keepi
 - **Claude Code** has a plugin system, so funes ships a hooks-only plugin (extracted to
   `~/.funes/integrations/claude-plugin`) and registers it with `claude plugin marketplace add` +
   `claude plugin install`. Claude's loader activates the plugin's hooks — **funes never edits your
-  `settings.json`**. Remove it with `claude plugin uninstall funes@huggingface`.
+  `settings.json`**. `funes remove claude` removes the plugin, its local marketplace registration,
+  the extracted source, and the separate MCP registration.
 - **Codex** has no plugin system, so funes writes its hooks into `~/.codex/hooks.json` — a file
   dedicated to hooks, not your `config.toml`. The merge is append-or-replace keyed by funes's own
   scripts, so any hooks you added yourself are left untouched. Codex has no session-end event, so it
@@ -60,6 +61,11 @@ when they're indexed, and `funes index` re-embeds nothing already written. Keepi
   rewrites the file the same way). Hermes gates shell hooks behind a consent allowlist
   (`~/.hermes/shell-hooks-allowlist.json`); funes pre-writes its own approvals so the hooks run from
   the first turn.
+
+`funes remove codex` and `funes remove hermes` surgically remove only hook entries whose commands
+invoke funes's scripts, then remove the scripts and their `funes-sync.log`; other hooks, approvals,
+and config keys remain. Removing an integration never deletes the indexed memory or source
+transcripts.
 
 All three agents drive the same two scripts, installed alongside: `funes-index.sh` (the per-turn
 local index) and `funes-push.sh` (the network publish). Each drains the hook payload and re-execs a
