@@ -4,6 +4,27 @@ use anyhow::{bail, Context, Result};
 use std::path::Path;
 use std::process::Command;
 
+/// Render an argv as a copy/paste-safe POSIX shell command.
+pub(crate) fn shell_command<S: AsRef<str>>(program: &str, args: &[S]) -> String {
+    std::iter::once(program)
+        .chain(args.iter().map(AsRef::as_ref))
+        .map(shell_arg)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_arg(arg: &str) -> String {
+    if !arg.is_empty()
+        && arg
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_@%+=:,./-".contains(&b))
+    {
+        arg.to_string()
+    } else {
+        format!("'{}'", arg.replace('\'', "'\"'\"'"))
+    }
+}
+
 /// What happened when an agent CLI was asked to remove one funes registration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RemoveCommand {
@@ -19,10 +40,11 @@ pub(crate) enum RemoveCommand {
 /// contains one of `absent_markers` is treated as already removed. Other failures retain their
 /// diagnostics and fail rather than claiming a partial uninstall succeeded.
 pub(crate) fn run_remove(program: &str, args: &[&str], absent_markers: &[&str]) -> Result<RemoveCommand> {
+    let command = shell_command(program, args);
     let output = match Command::new(program).args(args).output() {
         Ok(output) => output,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(RemoveCommand::MissingCli),
-        Err(e) => return Err(anyhow::Error::new(e).context(format!("running `{program} {}`", args.join(" ")))),
+        Err(e) => return Err(anyhow::Error::new(e).context(format!("running `{command}`"))),
     };
     if output.status.success() {
         return Ok(RemoveCommand::Removed);
@@ -42,11 +64,7 @@ pub(crate) fn run_remove(program: &str, args: &[&str], absent_markers: &[&str]) 
     } else {
         format!(": {detail}")
     };
-    bail!(
-        "`{program} {}` failed (exit {:?}){suffix}",
-        args.join(" "),
-        output.status.code()
-    )
+    bail!("`{command}` failed (exit {:?}){suffix}", output.status.code())
 }
 
 /// Remove one exact funes-owned file. Missing is already removed.
@@ -81,5 +99,26 @@ pub(crate) fn remove_empty_dir(path: &Path) -> Result<()> {
             Ok(())
         }
         Err(e) => Err(anyhow::Error::new(e).context(format!("removing empty {}", path.display()))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shell_command;
+
+    #[test]
+    fn shell_command_quotes_only_unsafe_arguments() {
+        assert_eq!(
+            shell_command(
+                "codex",
+                &["mcp", "add", "funes", "--", "/Applications/Funes Bin/funes", "mcp"]
+            ),
+            "codex mcp add funes -- '/Applications/Funes Bin/funes' mcp"
+        );
+        assert_eq!(
+            shell_command("pi", &["remove", "/Users/O'Brien/funes"]),
+            "pi remove '/Users/O'\"'\"'Brien/funes'"
+        );
+        assert_eq!(shell_command("agent", &[""]), "agent ''");
     }
 }

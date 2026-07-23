@@ -41,7 +41,7 @@ pub fn install(memory: Option<String>) -> Result<()> {
 
     let funes = std::env::var("FUNES_BIN").unwrap_or_else(|_| "funes".to_string());
     let args = mcp_add_args(&funes, memory.as_deref());
-    let manual = format!("claude {}", args.join(" "));
+    let manual = crate::integration::shell_command("claude", &args);
 
     // `claude mcp add` errors if `funes` is already registered, so a re-run — e.g. to change the
     // memory — would fail. Remove any existing registration first (silenced and ignored: it errors
@@ -190,7 +190,9 @@ fn install_hooks(memory: Option<&str>) -> Result<()> {
 /// plugin and update is version-gated, so changed content is refreshed by uninstalling first.
 fn register_hooks(root: &Path, has_memory: bool, dirty: bool) -> Result<()> {
     let root_str = root.display().to_string();
-    let manual = format!("  claude plugin marketplace add \"{root_str}\"\n  claude plugin install {PLUGIN_ID}");
+    let marketplace = crate::integration::shell_command("claude", &["plugin", "marketplace", "add", &root_str]);
+    let install = crate::integration::shell_command("claude", &["plugin", "install", PLUGIN_ID]);
+    let manual = format!("  {marketplace}\n  {install}");
     match Command::new("claude").args(["plugin", "marketplace", "add", &root_str]).status() {
         Ok(s) if s.success() => {}
         Ok(s) => bail!(

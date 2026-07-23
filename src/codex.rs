@@ -38,7 +38,7 @@ pub fn install(memory: Option<String>) -> Result<()> {
 
     let funes = std::env::var("FUNES_BIN").unwrap_or_else(|_| "funes".to_string());
     let args = mcp_add_args(&funes, memory.as_deref());
-    let manual = format!("codex {}", args.join(" "));
+    let manual = crate::integration::shell_command("codex", &args);
     let status = match Command::new("codex").args(&args).status() {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {

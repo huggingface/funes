@@ -348,7 +348,7 @@ fn mcp_add_args(funes: &str, memory: Option<&str>) -> Vec<String> {
 fn register_recall(memory: Option<&str>) -> Result<()> {
     let funes = std::env::var("FUNES_BIN").unwrap_or_else(|_| "funes".to_string());
     let args = mcp_add_args(&funes, memory);
-    let manual = format!("hermes {}", args.join(" "));
+    let manual = crate::integration::shell_command("hermes", &args);
     let mut child = match Command::new("hermes").args(&args).stdin(Stdio::piped()).spawn() {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
