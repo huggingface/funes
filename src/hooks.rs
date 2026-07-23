@@ -43,6 +43,9 @@ fn dquote_escape(s: &str) -> String {
 pub(crate) fn apply_funes_hooks(mut cfg: Value, desired: &[Hook]) -> Value {
     let obj = cfg.as_object_mut().expect("cfg is a JSON object");
     if !obj.get("hooks").map(Value::is_object).unwrap_or(false) {
+        if desired.is_empty() {
+            return cfg;
+        }
         obj.insert("hooks".to_string(), json!({}));
     }
     let hooks = obj["hooks"].as_object_mut().expect("hooks is an object");
@@ -232,5 +235,29 @@ mod tests {
             funes_command(&local, "TurnComplete"),
             Some("bash \"/h/funes-index.sh\" \"agent\"")
         );
+    }
+
+    #[test]
+    fn empty_desired_removes_only_funes_groups() {
+        let cfg = json!({
+            "theme": "dark",
+            "hooks": {
+                "TurnComplete": [
+                    { "hooks": [ { "type": "command", "command": "make lint" } ] },
+                    { "hooks": [ { "type": "command", "command": "bash \"/h/funes-index.sh\" \"agent\"" } ] }
+                ],
+                "Start": [
+                    { "hooks": [ { "type": "command", "command": "bash \"/h/funes-push.sh\" \"memory\"" } ] }
+                ]
+            }
+        });
+        let out = apply_funes_hooks(cfg, &[]);
+        assert_eq!(out["theme"], "dark");
+        assert_eq!(out["hooks"]["TurnComplete"].as_array().unwrap().len(), 1);
+        assert_eq!(out["hooks"]["TurnComplete"][0]["hooks"][0]["command"], "make lint");
+        assert!(out["hooks"].get("Start").is_none());
+
+        let no_hooks = json!({ "theme": "dark" });
+        assert_eq!(apply_funes_hooks(no_hooks.clone(), &[]), no_hooks);
     }
 }

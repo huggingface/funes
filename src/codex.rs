@@ -1,4 +1,4 @@
-//! `funes add codex`: register recall and automation with Codex.
+//! `funes add codex` / `funes remove codex`: manage recall and automation in Codex.
 //!
 //! Codex has a native MCP client, so funes is consumed as its stdio MCP server —
 //! `codex mcp add funes -- funes mcp [memory]`. A non-local `memory` binds this agent's recall to it.
@@ -10,7 +10,7 @@
 //! completed turn and, with a bound memory, `SessionStart` publishes it. funes merges only its own
 //! hook groups and installs the scripts under `~/.codex/hooks/`.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -59,6 +59,34 @@ pub fn install(memory: Option<String>) -> Result<()> {
             status.code()
         );
     }
+}
+
+/// Reverse [`install`] without touching the memory. MCP unregistering and hook cleanup are both
+/// attempted, so a malformed hooks file cannot leave recall registered.
+pub fn uninstall() -> Result<()> {
+    let registration = crate::integration::run_remove(
+        "codex",
+        &["mcp", "remove", "funes"],
+        &["No MCP server named 'funes' found"],
+    );
+    let hooks = uninstall_hooks();
+    let outcome = match (registration, hooks) {
+        (Ok(outcome), Ok(())) => outcome,
+        (Err(registration), Ok(())) => {
+            return Err(registration.context("local Codex hooks were removed"));
+        }
+        (Ok(_), Err(hooks)) => return Err(hooks),
+        (Err(registration), Err(hooks)) => {
+            return Err(registration.context(format!("Codex hook cleanup also failed: {hooks:#}")));
+        }
+    };
+
+    if outcome == crate::integration::RemoveCommand::MissingCli {
+        println!("`codex` isn't on PATH — hooks were removed; once it is, run:  codex mcp remove funes");
+    } else {
+        println!("removed funes from Codex — recall registration, hook entries, and hook scripts.");
+    }
+    Ok(())
 }
 
 fn desired_hooks(hooks_dir: &Path, memory: Option<&str>) -> Vec<crate::hooks::Hook> {
@@ -121,6 +149,45 @@ fn manual_hook_instructions(path: &Path, desired: &[crate::hooks::Hook]) -> Resu
         "{} isn't plain JSON — leaving it untouched. Merge this in to enable funes hooks:\n{block}",
         path.display()
     );
+    Ok(())
+}
+
+/// Remove only funes's groups from Codex's shared hooks file, then delete its scripts and log. An
+/// absent setup is already removed; a malformed hooks file is left wholly untouched.
+fn uninstall_hooks() -> Result<()> {
+    let home = PathBuf::from(std::env::var_os("HOME").context("resolving $HOME for the hooks dir")?);
+    let base = home.join(".codex");
+    let config = base.join("hooks.json");
+
+    let current = match std::fs::read_to_string(&config) {
+        Ok(s) if !s.trim().is_empty() => {
+            let value = serde_json::from_str::<Value>(&s)
+                .with_context(|| format!("parsing {} to remove funes hooks", config.display()))?;
+            if !value.is_object() {
+                bail!(
+                    "{} isn't a JSON object — leaving it and the hook scripts untouched; remove hook groups whose command contains `funes-index.sh` or `funes-push.sh`, then re-run `funes remove codex`",
+                    config.display()
+                );
+            }
+            Some(value)
+        }
+        Ok(_) => None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(anyhow::Error::new(e).context(format!("reading {}", config.display()))),
+    };
+    if let Some(current) = current {
+        let out = crate::hooks::apply_funes_hooks(current.clone(), &[]);
+        if out != current {
+            std::fs::write(&config, format!("{}\n", serde_json::to_string_pretty(&out)?))
+                .with_context(|| format!("writing {}", config.display()))?;
+        }
+    }
+
+    let hooks_dir = base.join("hooks");
+    for name in ["funes-index.sh", "funes-push.sh", "funes-sync.log"] {
+        crate::integration::remove_file(&hooks_dir.join(name))?;
+    }
+    crate::integration::remove_empty_dir(&hooks_dir)?;
     Ok(())
 }
 

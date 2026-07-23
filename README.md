@@ -117,7 +117,7 @@ workflow-oriented [documentation index](docs/README.md) for the complete guides.
 
 | Command | Docs |
 | --- | --- |
-| `funes add <agent> [memory]` / `funes mcp [memory]` | [docs/add.md](docs/add.md) — supported agents, generic MCP clients, hooks, and memory binding |
+| `funes add <agent> [memory]` / `funes remove <agent>` / `funes mcp [memory]` | [docs/add.md](docs/add.md) — supported agents, integration lifecycle, generic MCP clients, hooks, and memory binding |
 | `funes index [path]` | [docs/index.md](docs/index.md) — build/update the memory; sources, incremental, flags |
 | `funes recall "…"` / `funes get …` | [docs/recall.md](docs/recall.md) — recall passages and drill into them |
 | `funes ask <agent> "…"` | [docs/ask.md](docs/ask.md) — borrow an agent for a grounded answer |

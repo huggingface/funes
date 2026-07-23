@@ -5,8 +5,8 @@ This directory contains the user guides and design notes for
 
 ## Getting started
 
-- [Adding funes to an agent](add.md) — install the tools and automation for Claude Code, Codex,
-  pi, or Hermes.
+- [Adding and removing funes](add.md) — install or remove the tools and automation for Claude Code,
+  Codex, pi, or Hermes.
 - [Building the memory](index.md) — index session transcripts and understand the indexing
   pipeline.
 - [Recalling](recall.md) — retrieve passages and drill into their surrounding turns.

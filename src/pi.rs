@@ -1,4 +1,4 @@
-//! `funes add pi`: install funes recall as a first-class pi tool.
+//! `funes add pi` / `funes remove pi`: manage funes recall as a first-class pi tool.
 //!
 //! pi has no MCP client, so funes ships a small pi extension (a bridge that
 //! spawns `funes mcp` over stdio — see `integrations/pi/`). The extension is
@@ -74,6 +74,32 @@ pub fn install(memory: Option<String>, force: bool) -> Result<()> {
         ),
         Err(e) => Err(anyhow::Error::new(e).context("running `pi install`")),
     }
+}
+
+/// Reverse [`install`]: unregister the fixed-source extension from pi, then delete funes's extracted
+/// copy. The local memory and pi's session traces are deliberately untouched.
+pub fn uninstall() -> Result<()> {
+    let home = std::env::var_os("HOME").context("resolving $HOME for the pi install dir")?;
+    let dir = PathBuf::from(home).join(".funes/integrations/pi");
+    let source = dir.display().to_string();
+    if crate::integration::run_remove("pi", &["remove", &source], &["No matching package found for"])?
+        == crate::integration::RemoveCommand::MissingCli
+    {
+        crate::integration::remove_tree(&dir)?;
+        if let Some(parent) = dir.parent() {
+            crate::integration::remove_empty_dir(parent)?;
+        }
+        println!(
+            "`pi` isn't on PATH — extracted integration files were removed. Once it is, remove the registration manually:  pi remove {source}"
+        );
+        return Ok(());
+    }
+    crate::integration::remove_tree(&dir)?;
+    if let Some(parent) = dir.parent() {
+        crate::integration::remove_empty_dir(parent)?;
+    }
+    println!("removed funes from pi — extension registration and extracted integration files.");
+    Ok(())
 }
 
 /// True if `path` exists and already holds exactly `want`.

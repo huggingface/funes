@@ -1,4 +1,4 @@
-//! `funes add claude`: register recall and automation with Claude Code.
+//! `funes add claude` / `funes remove claude`: manage recall and automation in Claude Code.
 //!
 //! Claude Code has a native MCP client, so funes is consumed as its stdio MCP server —
 //! `claude mcp add funes -s user -- funes mcp [memory]`, registered at `user` scope so recall is
@@ -71,6 +71,77 @@ pub fn install(memory: Option<String>) -> Result<()> {
             status.code()
         );
     }
+}
+
+/// Reverse [`install`] without touching the memory: remove both user-scoped registrations and the
+/// extracted hooks plugin source.
+pub fn uninstall() -> Result<()> {
+    use crate::integration::RemoveCommand;
+
+    let registrations = uninstall_registrations();
+    let files = uninstall_hooks();
+    let outcome = match (registrations, files) {
+        (Ok(outcome), Ok(())) => outcome,
+        (Err(registration), Ok(())) => {
+            return Err(registration.context("local Claude integration files were removed"));
+        }
+        (Ok(_), Err(files)) => return Err(files),
+        (Err(registration), Err(files)) => {
+            return Err(registration.context(format!("local Claude cleanup also failed: {files:#}")));
+        }
+    };
+
+    if outcome == RemoveCommand::MissingCli {
+        println!(
+            "`claude` isn't on PATH — extracted integration files were removed. Once it is, remove the registrations manually:\n{}",
+            remove_instructions()
+        );
+    } else {
+        println!(
+            "removed funes from Claude Code — recall registration, hooks plugin, and extracted integration files."
+        );
+    }
+    Ok(())
+}
+
+fn remove_instructions() -> &'static str {
+    "  claude mcp remove funes -s user\n  \
+     claude plugin uninstall funes@huggingface -s user\n  \
+     claude plugin marketplace remove huggingface --scope user"
+}
+
+fn uninstall_registrations() -> Result<crate::integration::RemoveCommand> {
+    use crate::integration::{run_remove, RemoveCommand};
+
+    let outcome = run_remove(
+        "claude",
+        &["mcp", "remove", "funes", "-s", "user"],
+        &["No MCP server named \"funes\""],
+    )?;
+    if outcome == RemoveCommand::MissingCli {
+        return Ok(outcome);
+    }
+    run_remove(
+        "claude",
+        &["plugin", "uninstall", PLUGIN_ID, "-s", "user"],
+        &["Plugin \"funes@huggingface\" not found"],
+    )?;
+    run_remove(
+        "claude",
+        &["plugin", "marketplace", "remove", "huggingface", "--scope", "user"],
+        &["Marketplace 'huggingface' not found"],
+    )?;
+    Ok(outcome)
+}
+
+fn uninstall_hooks() -> Result<()> {
+    let home = PathBuf::from(std::env::var_os("HOME").context("resolving $HOME for the plugin dir")?);
+    let root = home.join(".funes/integrations/claude-plugin");
+    crate::integration::remove_tree(&root)?;
+    if let Some(parent) = root.parent() {
+        crate::integration::remove_empty_dir(parent)?;
+    }
+    Ok(())
 }
 
 fn desired_hooks(memory: Option<&str>) -> Vec<crate::hooks::Hook> {

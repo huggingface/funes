@@ -1,4 +1,4 @@
-//! `funes add hermes`: wire funes into hermes — recall (MCP) and the index/push automation.
+//! `funes add hermes` / `funes remove hermes`: manage recall and automation in hermes.
 //!
 //! hermes has two user-scoped integration surfaces under `~/.hermes`:
 //! - **Recall.** hermes has a native MCP client, so funes registers as its stdio MCP server —
@@ -31,6 +31,36 @@ pub fn install(memory: Option<String>) -> Result<()> {
     // even if the MCP registration below can't reach the CLI (mirrors codex).
     install_hooks(memory.as_deref())?;
     register_recall(memory.as_deref())
+}
+
+/// Reverse [`install`]: remove only funes's hooks and approvals, delete its hook scripts/log, and
+/// unregister the MCP server. The memory and Hermes session database are deliberately untouched.
+pub fn uninstall() -> Result<()> {
+    // These surfaces are independent: attempt MCP removal before propagating any malformed hook
+    // config error, and still attempt hook cleanup if the CLI removal itself fails.
+    let registration = crate::integration::run_remove(
+        "hermes",
+        &["mcp", "remove", "funes"],
+        &["Server 'funes' not found in config"],
+    );
+    let hooks = uninstall_hooks();
+    let outcome = match (registration, hooks) {
+        (Ok(outcome), Ok(())) => outcome,
+        (Err(registration), Ok(())) => {
+            return Err(registration.context("local Hermes hooks were removed"));
+        }
+        (Ok(_), Err(hooks)) => return Err(hooks),
+        (Err(registration), Err(hooks)) => {
+            return Err(registration.context(format!("Hermes hook cleanup also failed: {hooks:#}")));
+        }
+    };
+
+    if outcome == crate::integration::RemoveCommand::MissingCli {
+        println!("`hermes` isn't on PATH — hooks were removed; once it is, run:  hermes mcp remove funes");
+    } else {
+        println!("removed funes from hermes — recall registration, hook entries, approvals, and hook scripts.");
+    }
+    Ok(())
 }
 
 // ---- automation: config.yaml hooks + the consent allowlist ----
@@ -79,6 +109,71 @@ fn install_hooks(memory: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Parse both shared files before changing either, remove only funes-owned entries, then delete the
+/// scripts/log. This avoids a half-edited local integration when one file is malformed.
+fn uninstall_hooks() -> Result<()> {
+    let home = PathBuf::from(std::env::var_os("HOME").context("resolving $HOME for the hermes hooks dir")?);
+    let hermes = home.join(".hermes");
+    let config = hermes.join("config.yaml");
+    let allowlist = hermes.join("shell-hooks-allowlist.json");
+
+    let config_doc = match std::fs::read_to_string(&config) {
+        Ok(s) if !s.trim().is_empty() => {
+            let doc = serde_yaml::from_str::<serde_yaml::Value>(&s)
+                .with_context(|| format!("parsing {} to remove funes hooks", config.display()))?;
+            if !doc.is_mapping() {
+                anyhow::bail!(
+                    "{} isn't a YAML mapping — leaving the Hermes integration untouched; remove hooks whose command contains `funes-index.sh` or `funes-push.sh`, then re-run `funes remove hermes`",
+                    config.display()
+                );
+            }
+            Some(doc)
+        }
+        Ok(_) => None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(anyhow::Error::new(e).context(format!("reading {}", config.display()))),
+    };
+    let allowlist_doc = match std::fs::read_to_string(&allowlist) {
+        Ok(s) if !s.trim().is_empty() => {
+            let doc = serde_json::from_str::<serde_json::Value>(&s)
+                .with_context(|| format!("parsing {} to remove funes approvals", allowlist.display()))?;
+            if !doc.is_object() {
+                anyhow::bail!(
+                    "{} isn't a JSON object — leaving the Hermes integration untouched; remove approvals whose command contains `funes-index.sh` or `funes-push.sh`, then re-run `funes remove hermes`",
+                    allowlist.display()
+                );
+            }
+            Some(doc)
+        }
+        Ok(_) => None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(anyhow::Error::new(e).context(format!("reading {}", allowlist.display()))),
+    };
+
+    if let Some(current) = config_doc {
+        let out = apply_config_hooks(current.clone(), &[]);
+        if out != current {
+            atomic_write(
+                &config,
+                &serde_yaml::to_string(&out).context("serializing ~/.hermes/config.yaml")?,
+            )?;
+        }
+    }
+    if let Some(current) = allowlist_doc {
+        let out = apply_allowlist(current.clone(), &[]);
+        if out != current {
+            atomic_write(&allowlist, &format!("{}\n", serde_json::to_string_pretty(&out)?))?;
+        }
+    }
+
+    let hooks_dir = hermes.join("hooks");
+    for name in ["funes-index.sh", "funes-push.sh", "funes-sync.log"] {
+        crate::integration::remove_file(&hooks_dir.join(name))?;
+    }
+    crate::integration::remove_empty_dir(&hooks_dir)?;
+    Ok(())
+}
+
 /// Merge the funes hooks into `~/.hermes/config.yaml`'s `hooks:` block. Returns `false` (writing
 /// nothing) when an existing file isn't a plain YAML mapping — funes won't clobber a config it can't
 /// safely round-trip; the caller then prints the block to add by hand.
@@ -119,6 +214,9 @@ fn apply_config_hooks(mut doc: serde_yaml::Value, entries: &[(&'static str, Stri
     let map = doc.as_mapping_mut().expect("config is a mapping");
     let hooks_key = serde_yaml::Value::from("hooks");
     if !map.get(&hooks_key).map(serde_yaml::Value::is_mapping).unwrap_or(false) {
+        if entries.is_empty() {
+            return doc;
+        }
         map.insert(hooks_key.clone(), serde_yaml::Value::Mapping(Default::default()));
     }
     let hooks = map.get_mut(&hooks_key).unwrap().as_mapping_mut().unwrap();
@@ -164,6 +262,9 @@ fn hook_entry(command: &str) -> serde_yaml::Value {
 fn apply_allowlist(mut doc: serde_json::Value, entries: &[(&'static str, String)]) -> serde_json::Value {
     let obj = doc.as_object_mut().expect("allowlist is an object");
     if !obj.get("approvals").map(serde_json::Value::is_array).unwrap_or(false) {
+        if entries.is_empty() {
+            return doc;
+        }
         obj.insert("approvals".to_string(), json!([]));
     }
     let list = obj.get_mut("approvals").unwrap().as_array_mut().unwrap();
@@ -398,5 +499,44 @@ mod tests {
                 "missing approval for {event}"
             );
         }
+    }
+
+    #[test]
+    fn empty_entries_remove_only_funes_hooks_and_approvals() {
+        let doc = cfg("model: hermes-4\n\
+             hooks:\n  \
+               post_llm_call:\n    \
+                 - command: make lint\n      \
+                   timeout: 10\n    \
+                 - command: bash \"/h/funes-index.sh\" \"hermes\"\n  \
+               on_session_start:\n    \
+                 - command: bash \"/h/funes-push.sh\" \"acme/kb\"\n");
+        let out = apply_config_hooks(doc, &[]);
+        assert_eq!(out.get("model").unwrap().as_str(), Some("hermes-4"));
+        assert_eq!(
+            out.get("hooks")
+                .unwrap()
+                .get("post_llm_call")
+                .unwrap()
+                .as_sequence()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(out.get("hooks").unwrap().get("on_session_start").is_none());
+
+        let approvals = json!({ "approved": true, "approvals": [
+            { "event": "pre_tool_call", "command": "guard.sh" },
+            { "event": "post_llm_call", "command": "bash \"/h/funes-index.sh\" \"hermes\"" }
+        ]});
+        let out = apply_allowlist(approvals, &[]);
+        assert_eq!(out["approved"], true);
+        assert_eq!(out["approvals"].as_array().unwrap().len(), 1);
+        assert_eq!(out["approvals"][0]["command"], "guard.sh");
+
+        let no_hooks = cfg("model: hermes-4\n");
+        assert_eq!(apply_config_hooks(no_hooks.clone(), &[]), no_hooks);
+        let no_approvals = json!({ "approved": true });
+        assert_eq!(apply_allowlist(no_approvals.clone(), &[]), no_approvals);
     }
 }

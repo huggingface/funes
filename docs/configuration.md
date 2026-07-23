@@ -33,7 +33,8 @@ Those paths must remain stable after an agent records them.
 
 ## Agent integration files
 
-`funes add` writes or registers these user-wide files:
+`funes add` writes or registers these user-wide files; `funes remove <agent>` removes the matching
+registration and funes-owned files/entries:
 
 | Agent | Files or configuration |
 | --- | --- |
@@ -85,4 +86,5 @@ file-grained cache design and cold-versus-warm behavior.
 | `COLUMNS` | Human-rendering width, clamped to 40–120 columns. |
 
 Bindings passed to `funes add` live in the agent's own registration or integration files; there is
-no hidden “active remote” in `$FUNES_HOME`. Re-run `funes add <agent> [memory]` to change one.
+no hidden “active remote” in `$FUNES_HOME`. Re-run `funes add <agent> [memory]` to change one, or
+`funes remove <agent>` to remove that agent integration without deleting the memory.

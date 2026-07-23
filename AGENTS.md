@@ -87,7 +87,8 @@ A non-zero agent exit fails funes (exit 1, the child's code quoted).
 `funes mcp [memory]` serves stdio; `funes add claude|codex|pi|hermes` registers it (and for
 claude/codex/hermes also installs the automation hooks — see [docs/automation.md](docs/automation.md)). A
 positional `memory` binds the server to a memory; `funes add <agent> <memory>` bakes it into the
-registration. Tools: `recall` (query, k, block_type/harness filters, memory), `get`
+registration. `funes remove <agent>` reverses that agent integration without deleting memories or
+transcripts. Tools: `recall` (query, k, block_type/harness filters, memory), `get`
 (session_id, turn_uuid, window, memory), `status` (memory) — each returns the corresponding
 agent-format string verbatim. A tool call's `memory` overrides the server's; with neither, it reads
 the local memory.

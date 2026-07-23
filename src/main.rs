@@ -174,6 +174,19 @@ enum Cmd {
         #[command(subcommand)]
         agent: AddAgent,
     },
+    /// Remove funes from a coding agent.
+    ///
+    /// Unregisters the `recall`/`get` tools and removes funes's automation hooks and integration
+    /// files. Your local memory, source transcripts, and remote memories are left untouched.
+    #[command(
+        subcommand_value_name = "AGENT",
+        subcommand_help_heading = "Agents",
+        override_usage = "funes remove <AGENT>"
+    )]
+    Remove {
+        #[command(subcommand)]
+        agent: RemoveAgent,
+    },
 }
 
 // Flattened into every agent so they share one optional `[MEMORY]` positional; the user-facing help
@@ -206,6 +219,14 @@ enum AddAgent {
         #[command(flatten)]
         memory: AddMemory,
     },
+}
+
+#[derive(Subcommand)]
+enum RemoveAgent {
+    Claude,
+    Codex,
+    Pi,
+    Hermes,
 }
 
 /// The memory to bake into an agent's `funes mcp` registration: `None`/blank/`local` → the local
@@ -517,6 +538,12 @@ async fn main() -> Result<()> {
             // The rest register a read-side integration only (no local pipeline to bootstrap), so
             // they just take the resolved memory — the `created` flag only matters to the first push.
             AddAgent::Pi { memory, force } => pi::install(resolve_add_memory(memory).await?.map(|r| r.memory), force),
+        },
+        Cmd::Remove { agent } => match agent {
+            RemoveAgent::Claude => claude::uninstall(),
+            RemoveAgent::Codex => codex::uninstall(),
+            RemoveAgent::Pi => pi::uninstall(),
+            RemoveAgent::Hermes => hermes::uninstall(),
         },
     }
 }
