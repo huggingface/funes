@@ -4,7 +4,7 @@
 //! files are written regardless, which is what we assert (registering with `claude` is exercised
 //! manually, not here).
 
-use funes::hooks::{self, Agent};
+use funes::claude;
 use serde_json::Value;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -16,7 +16,7 @@ fn add_claude_generates_the_plugin_tree() {
     // No `claude` on PATH → funes extracts the plugin and returns Ok without registering it.
     std::env::set_var("PATH", "");
 
-    hooks::install(Agent::Claude, Some("acme/kb")).unwrap();
+    claude::install(Some("acme/kb".to_string())).unwrap();
 
     let root = home.path().join(".funes/integrations/claude-plugin");
     assert!(
