@@ -1,0 +1,9 @@
+# The recipe lives here in git; heavy/generated data lives on the dataset (dacorvo/funes-handoff-test)
+# or is regenerated locally. Keep transcripts, stores, and run receipts out of the repo.
+base-sessions/
+prehandoff-src/
+funes-home/
+results/
+forks/
+.cache/
+*.log
