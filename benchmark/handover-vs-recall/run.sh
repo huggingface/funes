@@ -130,6 +130,7 @@ case "$ARM" in
       run_stream "$STEM" "${NOFUNES[@]}" "${COMMON[@]}" "$P"
     else  # live-producer: fork the origin session, have it write HANDOFF.md, then a fresh consumer reads it
       place_fork
+      cd "$WT"   # the producer resumes the placed fork BY ID — Claude resolves it under this cwd's project dir
       P='We are handing this project off to a fresh session that will implement the next task. Write the complete handoff note it needs to do that without re-investigating: the decisions already made, the root cause, the chosen approach and why, key files/seams, and dead-ends to avoid. The task: '"$TASK"' Do not implement anything and do not use any tools. Return ONLY the contents of HANDOFF.md.'
       claude --resume "$FORK_ID" --fork-session --model "$MODEL" "${NOFUNES[@]}" --tools "" \
         --print --output-format json "$P" >"$OUT/$STEM-producer.json" 2>"$OUT/$STEM-producer.err"
