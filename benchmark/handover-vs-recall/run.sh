@@ -131,7 +131,14 @@ case "$ARM" in
     else  # live-producer: fork the origin session, have it write HANDOFF.md, then a fresh consumer reads it
       place_fork
       cd "$WT"   # the producer resumes the placed fork BY ID — Claude resolves it under this cwd's project dir
-      P='We are handing this project off to a fresh session that will implement the next task. Write the complete handoff note it needs to do that without re-investigating: the decisions already made, the root cause, the chosen approach and why, key files/seams, and dead-ends to avoid. The task: '"$TASK"' Do not implement anything and do not use any tools. Return ONLY the contents of HANDOFF.md.'
+      # The producer is BLIND to the consumer's task/form — it summarizes its own investigation.
+      # Handing it $TASK lets it pre-fill the deliverable (for a recommendation task, a verbatim
+      # answer key), so B would transcribe, not comprehend. A bundle may supply a form-blind
+      # producer.md brief; otherwise the producer just writes up its session. The consumer (P2) is
+      # the only side that sees the task.
+      if [ -f "$BUNDLE/producer.md" ]; then BRIEF="$(cat "$BUNDLE/producer.md")"
+      else BRIEF='You are wrapping up this session and handing the project off to a fresh session that will continue this work. Write the complete handoff note it needs to continue without re-investigating: the decisions already made, the root cause, the chosen approach and why, key files/seams, and dead-ends to avoid.'; fi
+      P="$BRIEF"' Do not implement anything and do not use any tools. Return ONLY the contents of HANDOFF.md.'
       claude --resume "$FORK_ID" --fork-session --model "$MODEL" "${NOFUNES[@]}" --tools "" \
         --print --output-format json "$P" >"$OUT/$STEM-producer.json" 2>"$OUT/$STEM-producer.err"
       python3 -c "import json,sys; open(sys.argv[2],'w').write(json.load(open(sys.argv[1]))['result'])" \
