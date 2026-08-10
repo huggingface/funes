@@ -69,9 +69,9 @@ if python3 "$BENCH/hub_io.py" exists "$HANDOFF_MEMORY" "$BUCKET_PATH" 2>/dev/nul
   echo "!!! REFUSING: $BUCKET_PATH already on the dataset — pick a different rep."; exit 1
 fi
 
-# scaffold worktree at the base commit; hand the grader in if HANDS_TEST=yes (it defines the contract)
+# scaffold a worktree at the base commit. The grader is ALWAYS hidden — never handed to the arm, or the
+# task degrades to "implement to this handed test" and no channel can beat branch-only (the exp1-easy mistake).
 [ -d "$WT" ] || git -C "$MAIN" worktree add --detach "$WT" "$BASE_COMMIT"
-[ "${HANDS_TEST:-no}" = yes ] && cp "$BUNDLE/grader.rs" "$WT/tests/$GRADER_TEST.rs"
 echo "pre-warming build (shared target: $CARGO_TARGET_DIR)…"
 (cd "$WT" && cargo build --tests) >>"$OUT/prewarm.log" 2>&1 || echo "prewarm had issues (see prewarm.log)"
 
@@ -150,9 +150,9 @@ case "$ARM" in
   *) echo "unknown arm: $ARM (use A|B|C|D)"; exit 2 ;;
 esac
 
-# grade: HANDS_TEST=yes → the handed test is the grader; else drop a hidden copy under a distinct name
-if [ "${HANDS_TEST:-no}" = yes ]; then GT="$GRADER_TEST"
-else cp "$BUNDLE/grader.rs" "$WT/tests/bench_grader.rs"; GT=bench_grader; fi
+# grade with a HIDDEN copy under a distinct name the arm never saw: it compiles against the base's public
+# API, so if the arm changed that surface the grader won't build — a fair fail.
+cp "$BUNDLE/grader.rs" "$WT/tests/bench_grader.rs"; GT=bench_grader
 echo "=== grading: cargo test --test $GT ==="
 if (cd "$WT" && cargo test --test "$GT" -- --nocapture) >"$OUT/$STEM.grade" 2>&1; then echo "GRADE: PASS"
 else echo "GRADE: FAIL (see $OUT/$STEM.grade)"; fi

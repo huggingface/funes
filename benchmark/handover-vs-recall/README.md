@@ -113,9 +113,11 @@ logged the result.
 | `fork.jsonl`  | pre-handoff fork (`build_fork.py <session> <cut> fork.jsonl`); its `sessionId` = `FORK_ID` | arms B(live)/D |
 | `memory/chunks.lance/` | `funes index` of the session sliced to the boundary | arm C |
 
-`config.sh` sets — **consumed by `run.sh`:** `BASE_COMMIT`, `FORK_ID`, `GRADER_TEST` (the `cargo test
---test` name), `HANDS_TEST` (`yes` hands the arm the grader / `no` hides it), `ARM_B_MODE`
-(`live-producer` | `prewritten-docs`), `HOST_REQUIRES` (space-sep binaries to require), `MODEL`.
+`config.sh` sets — **consumed by `run.sh`:** `BASE_COMMIT`, `FORK_ID`, `ARM_B_MODE`
+(`live-producer` | `prewritten-docs`), `HOST_REQUIRES` (space-sep binaries to require), `MODEL`. The
+grader is **always hidden**: `run.sh` drops `grader.rs` as `tests/bench_grader.rs` only at grade time and
+never hands it to the arm — handing the arm its test is the exp1-easy mistake (the task collapses to
+"implement to this test," so no channel beats branch-only).
 **Provenance (not consumed):** `ORIGIN_SESSION`, `ORIGIN_CUT`, and any per-arm accounting notes.
 
 **3. Upload** and run:
@@ -141,4 +143,6 @@ Secret-scan any transcript (`fork.jsonl`) before upload — `trufflehog filesyst
 was *lookup-able*, so A wins and the gate fails. They bound the flagship's claim.
 - **`codex-parser`** — Codex rollout format is in fetchable public sample transcripts.
 - **`prefilter`** — the fix (`lance prefilter=false` post-filters) is in lance's docstring + a textbook pattern.
-- **`store-lock`** — the grader was handed to the arm (`HANDS_TEST=yes`), trivializing re-derivation.
+- **`store-lock`** — the grader was handed to the arm (the exp1-easy mistake; `HANDS_TEST` has since been
+  removed — graders are always hidden), trivializing re-derivation. Revisit only with a hidden black-box
+  grader (drive the `funes` binary, not the internal `StoreLock` API).
