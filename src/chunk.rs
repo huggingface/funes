@@ -5,6 +5,7 @@ use crate::trace::Turn;
 use arrow_array::{Array, Int64Array, RecordBatch, StringArray};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 const MAX_CHARS: usize = 1200;
@@ -71,7 +72,51 @@ fn py_opt(o: &Option<String>) -> &str {
     o.as_deref().unwrap_or("None")
 }
 
+const BASE64_MARKER: &str = ";base64,";
+
+/// Whether `head`, which ends in [`BASE64_MARKER`], is a `data:` URI up to its payload: the marker
+/// also occurs in prose, so everything back to the scheme must still be the media type.
+fn is_data_uri_head(head: &str) -> bool {
+    let media = &head[..head.len() - BASE64_MARKER.len()];
+    match media.rfind("data:") {
+        Some(i) => media[i + "data:".len()..]
+            .chars()
+            .all(|c| !c.is_whitespace() && !matches!(c, ',' | '"' | '\'')),
+        None => false,
+    }
+}
+
+/// `text` with every inline base64 `data:` URI payload replaced by `[elided]`. A pasted screenshot
+/// is megabytes of base64 that swamp its block, carry nothing recallable, and trip secret detectors
+/// on values that are not secrets.
+fn elide_data_uris(text: &str) -> Cow<'_, str> {
+    if !text.contains(BASE64_MARKER) {
+        return Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(BASE64_MARKER) {
+        let (head, tail) = rest.split_at(at + BASE64_MARKER.len());
+        out.push_str(head);
+        let payload = tail.len() - tail.trim_start_matches(is_base64_char).len();
+        rest = if payload > 0 && is_data_uri_head(head) {
+            out.push_str("[elided]");
+            &tail[payload..]
+        } else {
+            tail
+        };
+    }
+    out.push_str(rest);
+    Cow::Owned(out)
+}
+
+fn is_base64_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=')
+}
+
 fn render(block_type: &str, text: &str, tool_name: &Option<String>) -> String {
+    let text = elide_data_uris(text);
+    let text = text.as_ref();
     match block_type {
         "tool_use" => format!("[tool_use {}] {}", py_opt(tool_name), text).trim().to_string(),
         "tool_result" => {
@@ -349,6 +394,30 @@ mod tests {
         );
         assert_eq!(render("tool_result", "out", &None), "[tool_result] out");
         assert_eq!(render("text", "hello", &None), "hello");
+    }
+
+    #[test]
+    fn render_elides_inline_base64_payloads() {
+        let text = r#"{"image_url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==","detail":"original"}"#;
+        assert_eq!(
+            render("tool_result", text, &None),
+            r#"[tool_result] {"image_url":"data:image/png;base64,[elided]","detail":"original"}"#
+        );
+        assert_eq!(
+            render("text", "a data:image/gif;base64,R0lGOD b data:;base64,QUJD c", &None),
+            "a data:image/gif;base64,[elided] b data:;base64,[elided] c"
+        );
+    }
+
+    #[test]
+    fn render_leaves_a_base64_mention_that_is_not_a_data_uri() {
+        for text in [
+            "encode it as ;base64,AAAA",
+            "Content-Transfer-Encoding;base64,AAAA",
+            "data: image/png;base64,AAAA",
+        ] {
+            assert_eq!(render("text", text, &None), text, "must not elide: {text}");
+        }
     }
 
     #[test]
