@@ -19,7 +19,7 @@
 //! already shipped — the remote is append-only; curation prevents, it does not undo.
 
 use crate::hub;
-use crate::memory::{self, Memory};
+use crate::memory::{self, Memory, MemoryState};
 use crate::memory::{dataset, remote};
 use crate::traces::jsonl;
 use anyhow::{bail, Context, Result};
@@ -71,14 +71,16 @@ pub async fn name_project(target: &Memory, project: &str) -> Result<Named> {
             bail!("a project memory must be remote — pass `<org>/<repo>` or an `hf://…` URI")
         }
     };
-    match memory::remote_reachability(&uri).await {
-        memory::Reachability::Offline => bail!("{uri} is unreachable — can't curate it while offline"),
-        memory::Reachability::Missing => return Err(memory::missing_remote(&uri)),
-        memory::Reachability::Ok => {}
-    }
-
-    match target.open().await {
-        Ok(ds) => match self::project(&ds) {
+    match target.state().await.map_err(|e| {
+        e.context(format!(
+            "can't read {} to curate it — not treating an unreadable memory as absent",
+            target.label()
+        ))
+    })? {
+        MemoryState::Offline => bail!("{uri} is unreachable — can't curate it while offline"),
+        MemoryState::Missing => Err(memory::missing_remote(&uri)),
+        MemoryState::Unauthorized => Err(memory::unauthorized_remote(&uri)),
+        MemoryState::Ready(ds) => match self::project(&ds) {
             Some(existing) if existing == project => Ok(Named::Unchanged),
             Some(existing) => bail!(
                 "{} is already the project memory of {existing} — refusing to rename it to {project}",
@@ -89,14 +91,10 @@ pub async fn name_project(target: &Memory, project: &str) -> Result<Named> {
                 Ok(Named::Promoted)
             }
         },
-        Err(e) if memory::dataset_absent(&e) => {
+        MemoryState::Empty => {
             create_memory(&uri, project).await?;
             Ok(Named::Created)
         }
-        Err(e) => Err(e.context(format!(
-            "can't read {} to curate it — not treating an unreadable memory as absent",
-            target.label()
-        ))),
     }
 }
 
@@ -624,8 +622,15 @@ pub async fn prepare(memory: &Memory, project: Option<&str>) -> Result<Prepared>
             bail!("a project memory must be remote — pass `<org>/<repo>` or an `hf://…` URI")
         }
     };
-    match memory.open().await {
-        Ok(ds) => match (self::project(&ds), project) {
+    match memory
+        .state()
+        .await
+        .map_err(|e| e.context(format!("can't read {}", memory.label())))?
+    {
+        MemoryState::Offline => bail!("{} is unreachable — can't curate it while offline", memory.label()),
+        MemoryState::Missing => Err(memory::missing_remote(&uri)),
+        MemoryState::Unauthorized => Err(memory::unauthorized_remote(&uri)),
+        MemoryState::Ready(ds) => match (self::project(&ds), project) {
             (Some(existing), Some(given)) if existing != given => bail!(
                 "{} is already the project memory of {existing} — refusing to rename it to {given}",
                 memory.label()
@@ -637,11 +642,10 @@ pub async fn prepare(memory: &Memory, project: Option<&str>) -> Result<Prepared>
                 memory.label()
             ),
         },
-        Err(e) if memory::dataset_absent(&e) => match project {
+        MemoryState::Empty => match project {
             Some(given) => Ok(Prepared::Absent { uri, project: given.to_string() }),
             None => bail!("{} doesn't exist", memory.label()),
         },
-        Err(e) => Err(e.context(format!("can't read {}", memory.label()))),
     }
 }
 

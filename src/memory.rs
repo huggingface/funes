@@ -1,15 +1,15 @@
 //! The memory funes reads from and writes to: a local Lance directory, or a shared dataset on the
 //! Hugging Face Hub.
 //!
-//! This root is the **domain**: what a [] is, how a spec resolves to one, what state it is
-//! in ([], []) and the messages that state renders as. A remote open
+//! This root is the **domain**: what a [`Memory`] is, how a spec resolves to one, what state it is
+//! in ([`MemoryState`], via [`Memory::state`]) and the messages that state renders as. A remote open
 //! pins reads to the head commit and installs a read wrapper over Lance's object store; the pin is
 //! re-resolved on every open, so a new push is picked up by the next command.
 //!
-//! Below it: [], [] and [] are **mechanics** — Lance and object
-//! stores, knowing nothing about the Hub. [] and [] are **transport** — the Hub
-//! client, credentials, repo identity and lifecycle, and the commits an append or reindex lands.
-//! [] serves a published memory's dataset card, [] the local writer lock.
+//! Below it: [`dataset`], [`fetch_store`] and [`capture_store`] are **mechanics** — Lance and object
+//! stores, knowing nothing about the Hub. [`remote`] is **transport** — the pinned reads and the
+//! single guarded commit an append or reindex lands as, over the Hub client in [`crate::hub`].
+//! [`card`] serves a published memory's dataset card, [`lock`] the local writer lock.
 //!
 //! The commands ask this module what state a memory is in; they never infer it from error shapes.
 
@@ -125,12 +125,71 @@ impl Memory {
         check_compat(&ds)?;
         Ok(ds)
     }
+
+    /// What state this memory is in — the one answer the commands act on, so none of them has to
+    /// read it out of an error. A remote is probed first (an unreachable or absent repo costs no
+    /// open), then the open decides between ready, empty and refused.
+    ///
+    /// `Err` is reserved for a memory that exists and still can't be read — a permission problem, a
+    /// corrupt dataset, an incompatible schema. Callers must never treat that as [`Empty`]:
+    /// mistaking an unreadable memory for an absent one turns a mixed-version teammate's push into
+    /// a first publish over live data.
+    ///
+    /// [`Empty`]: MemoryState::Empty
+    pub async fn state(&self) -> Result<MemoryState> {
+        if let Memory::Remote { uri } = self {
+            match remote_reachability(uri).await {
+                Reachability::Offline => return Ok(MemoryState::Offline),
+                Reachability::Missing => return Ok(MemoryState::Missing),
+                Reachability::Ok => {}
+            }
+        }
+        match self.open().await {
+            Ok(ds) => Ok(MemoryState::Ready(ds)),
+            // A gated repo answers `info()` fine and 403s only here, on the file read — so the open
+            // is the only place this is knowable. Local paths keep their own error: a
+            // `PermissionDenied` there is a filesystem problem, not the Hub refusing a read.
+            Err(e) if matches!(self, Memory::Remote { .. }) && is_auth_error(&e) => Ok(MemoryState::Unauthorized),
+            Err(e) if dataset_absent(&e) => Ok(MemoryState::Empty),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// What state a memory is in. Produced by [`Memory::state`] — the one classifier — so a command
+/// matches on facts instead of sniffing error shapes.
+// A transient return value, never stored en masse, so the `Ready(Dataset)`/unit size gap is fine —
+// boxing would only add indirection.
+#[allow(clippy::large_enum_variant)]
+pub enum MemoryState {
+    /// Opened, compatible, ready to query.
+    Ready(Dataset),
+    /// Nothing there yet: a local memory with no dataset, or a repo never pushed to.
+    Empty,
+    /// A remote repo that doesn't exist on the Hub. funes never creates it.
+    Missing,
+    /// A remote funes can't reach right now (no connection, DNS, timeout, 5xx).
+    Offline,
+    /// The Hub refused the read (401/403): no token, a token without access, or terms not accepted.
+    Unauthorized,
+}
+
+/// True if `e` is the Hub refusing a remote read on auth (401/403). lance has no typed auth variant
+/// — it buries an opendal `PermissionDenied` (with the HTTP status) in an `IO` error — so match the
+/// chain's text.
+fn is_auth_error(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        let s = c.to_string();
+        s.contains("PermissionDenied") || s.contains("status: 401") || s.contains("status: 403")
+    })
 }
 
 /// How long the reachability probe waits before treating a remote as offline.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// What a lightweight probe of a remote dataset repo found.
+/// What a lightweight probe of a remote dataset **repo** found — repo-level only, so it costs no
+/// dataset open. [`Memory::state`] builds on it; `funes add`'s typo guard uses it on its own, where
+/// opening the dataset would be overreach (the repo is expected to be empty at that point).
 pub enum Reachability {
     /// The repo answered — a read or push can proceed.
     Ok,
@@ -191,7 +250,7 @@ pub fn unauthorized_remote(uri: &str) -> anyhow::Error {
 /// [`check_compat`] rejection, a transport failure). Callers must treat only the former as
 /// "empty": mistaking an unreadable memory for an absent one turns a mixed-version teammate's
 /// push into a first publish over live data.
-pub fn dataset_absent(err: &anyhow::Error) -> bool {
+fn dataset_absent(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
         if let Some(hf) = cause.downcast_ref::<HFError>() {
             return matches!(hf, HFError::EntryNotFound { .. });
@@ -249,6 +308,25 @@ mod tests {
         // the gated round-trip exercises it live — its first publish runs through this.)
         assert!(!dataset_absent(&anyhow::anyhow!("404 Entry not found")));
         assert!(!dataset_absent(&anyhow::anyhow!("Dataset not found: chunks")));
+    }
+
+    #[test]
+    fn auth_error_is_detected() {
+        // Shape verified against a live 401: an opendal PermissionDenied with the HTTP status.
+        let err = anyhow::anyhow!(
+            "LanceError(IO): Generic PermissionDenied error: PermissionDenied (permanent) at list, \
+             response: status: 401"
+        );
+        assert!(is_auth_error(&err));
+    }
+
+    #[test]
+    fn unrelated_error_is_not_auth_error() {
+        assert!(!is_auth_error(&anyhow::anyhow!("some other failure")));
+        // a missing-dataset error must not be misread as auth
+        assert!(!is_auth_error(&anyhow::anyhow!(
+            "LanceError: DatasetNotFound, no such file"
+        )));
     }
 
     #[tokio::test]

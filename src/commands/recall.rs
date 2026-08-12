@@ -8,7 +8,7 @@ use super::curate;
 use crate::chunk;
 use crate::inference::{self, Embedder, Reranker};
 use crate::memory::dataset;
-use crate::memory::{self, Memory, Reachability};
+use crate::memory::{self, Memory, MemoryState};
 use crate::traces::harness::Harness;
 use anyhow::{anyhow, Context, Result};
 use arrow_array::{Float32Array, Int64Array, RecordBatch, StringArray, UInt64Array};
@@ -130,10 +130,9 @@ struct Read {
     memory_label: Option<String>,
 }
 
-/// The outcome of resolving a memory for reading. `Offline` degrades to the local index (this
-/// module's to apply); a missing or empty remote is a hard error with a clear message; `NoIndex`
-/// (the default local memory, unbuilt) is a clear error from the read verbs and a friendly note in
-/// `status`.
+/// What a read verb does about the memory's state: query it, degrade to the local index, or point a
+/// fresh install at onboarding. The states a verb can't act on are already errors by the time this
+/// is built.
 // A transient return value, never stored en masse, so the `Ready(Dataset)`/unit size gap is fine —
 // boxing would only add indirection.
 #[allow(clippy::large_enum_variant)]
@@ -146,36 +145,22 @@ enum ReadOutcome {
     NoIndex,
 }
 
-/// Resolve a memory for reading — the one place every source state is handled. An offline remote
-/// degrades (`Offline`); a missing or empty remote errors with a clear message; an absent default
-/// local index degrades (`NoIndex`); a present memory opens (`Ready`). All read verbs route through
-/// this; the remote-state classification and messages come from `hub`.
+/// Resolve a memory for reading: ask [`Memory::state`] what it is, then decide what a read verb
+/// does about it. Only two states are actionable — degrade when offline, onboard when the default
+/// local memory is unbuilt; the rest are errors carrying the domain's message.
 async fn open_for_read(memory: &Memory) -> Result<ReadOutcome> {
-    if let Memory::Remote { uri } = memory {
-        match memory::remote_reachability(uri).await {
-            Reachability::Offline => return Ok(ReadOutcome::Offline),
-            Reachability::Missing => return Err(memory::missing_remote(uri)),
-            Reachability::Ok => {}
-        }
-    }
-    match memory.open().await {
-        Ok(ds) => Ok(ReadOutcome::Ready(ds)),
-        // The default local memory with no dataset yet → NoIndex (a clear "run funes add" error
-        // below). Gated on `dataset_absent` so a real open failure (permissions, corruption, an
-        // incompatible schema) isn't masked as "no index" — it falls through to surface as itself.
-        Err(e) if memory.is_default_local() && memory::dataset_absent(&e) => Ok(ReadOutcome::NoIndex),
-        // The Hub refused the read on auth (401/403): a clear message beats lance's opendal dump.
-        Err(e) if is_auth_error(&e) => match memory {
-            Memory::Remote { uri } => Err(memory::unauthorized_remote(uri)),
-            Memory::Local { .. } => Err(e),
-        },
-        // Opened to nothing: a reachable remote never pushed to, or a local path with no dataset.
-        // Either way, a clear message beats lance's internal path error.
-        Err(e) if memory::dataset_absent(&e) => match memory {
+    match memory.state().await? {
+        MemoryState::Ready(ds) => Ok(ReadOutcome::Ready(ds)),
+        MemoryState::Offline => Ok(ReadOutcome::Offline),
+        MemoryState::Missing => Err(memory::missing_remote(&memory.label())),
+        MemoryState::Unauthorized => Err(memory::unauthorized_remote(&memory.label())),
+        // Nothing there yet. The default local memory is a fresh install (onboarding, below); an
+        // explicit path or a never-pushed remote says so instead.
+        MemoryState::Empty if memory.is_default_local() => Ok(ReadOutcome::NoIndex),
+        MemoryState::Empty => match memory {
             Memory::Remote { uri } => Err(memory::empty_remote(uri)),
             Memory::Local { path } => Err(anyhow::anyhow!("no index found at {}", path.display())),
         },
-        Err(e) => Err(e),
     }
 }
 
@@ -190,16 +175,6 @@ pub async fn check_readable(memory: &Memory) -> Result<()> {
             memory.label()
         )),
     }
-}
-
-/// True if `e` is the Hub refusing a remote read on auth (401/403). lance has no typed auth variant
-/// — it buries an opendal `PermissionDenied` (with the HTTP status) in an `IO` error — so match the
-/// chain's text.
-fn is_auth_error(e: &anyhow::Error) -> bool {
-    e.chain().any(|c| {
-        let s = c.to_string();
-        s.contains("PermissionDenied") || s.contains("status: 401") || s.contains("status: 403")
-    })
 }
 
 /// Open a memory for reading, applying the fallback [`open_for_read`] leaves to the caller: an
@@ -952,25 +927,6 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 7, 9, 12, 0, 0).unwrap();
         let t = Utc.with_ymd_and_hms(2026, 7, 7, 13, 30, 0).unwrap();
         assert_eq!(stamp(t, now), "2026-07-07 13:30 UTC (46 hours ago)");
-    }
-
-    #[test]
-    fn auth_error_is_detected() {
-        // Shape verified against a live 401: an opendal PermissionDenied with the HTTP status.
-        let err = anyhow::anyhow!(
-            "LanceError(IO): Generic PermissionDenied error: PermissionDenied (permanent) at list, \
-             response: status: 401"
-        );
-        assert!(is_auth_error(&err));
-    }
-
-    #[test]
-    fn unrelated_error_is_not_auth_error() {
-        assert!(!is_auth_error(&anyhow::anyhow!("some other failure")));
-        // a missing-dataset error must not be misread as auth
-        assert!(!is_auth_error(&anyhow::anyhow!(
-            "LanceError: DatasetNotFound, no such file"
-        )));
     }
 
     #[test]

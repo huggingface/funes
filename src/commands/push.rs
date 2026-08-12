@@ -25,7 +25,7 @@ use crate::hub;
 use crate::memory::card::{self, CardAction, CardCtx};
 use crate::memory::dataset;
 use crate::memory::remote::{self, Appended, Reindexed};
-use crate::memory::{self, Memory};
+use crate::memory::{self, Memory, MemoryState};
 use crate::{chunk, scan};
 use anyhow::{bail, Context, Result};
 use arrow_array::{BooleanArray, RecordBatch, StringArray};
@@ -274,33 +274,31 @@ pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm) -> 
         }
     };
 
-    // Fail fast, before any local build or scan: an unreachable or missing remote otherwise looks
-    // like a first publish, so push scans + builds the whole dataset before the commit finally fails.
-    match memory::remote_reachability(&uri).await {
-        memory::Reachability::Offline => {
+    // 1. What the remote *is*, and what's on it — asked before any local build or scan, so an
+    // unreachable or missing remote costs nothing (it would otherwise look like a first publish,
+    // and push would scan + build the whole dataset before the commit failed). An unreadable
+    // dataset is a hard error, never "empty": treating it as a first publish would commit a fresh
+    // dataset's files into a repo that already holds one (`check_compat` rejections land here too
+    // — a mixed-version teammate must stop, not clobber). An empty remote is a personal memory's
+    // first publish; a project memory always exists (born empty when named).
+    let state = target.state().await.map_err(|e| {
+        e.context(format!(
+            "{} exists but can't be read — refusing to treat it as empty",
+            target.label()
+        ))
+    })?;
+    let remote = match state {
+        MemoryState::Offline => {
             bail!("{uri} is unreachable — can't push while offline (check your connection)")
         }
-        memory::Reachability::Missing => return Err(memory::missing_remote(&uri)),
-        memory::Reachability::Ok => {}
-    }
+        MemoryState::Missing => return Err(memory::missing_remote(&uri)),
+        MemoryState::Unauthorized => return Err(memory::unauthorized_remote(&uri)),
+        MemoryState::Empty => None,
+        MemoryState::Ready(ds) => Some(ds),
+    };
 
-    // 1. What the remote *is*, and what's on it. An unreadable dataset is a hard error, never
-    // "empty": treating it as a first publish would commit a fresh dataset's files into a repo
-    // that already holds one (`check_compat` rejections land here too — a mixed-version
-    // teammate must stop, not clobber). A missing dataset is a personal memory's first publish;
-    // a project memory always exists (born empty when named).
     eprintln!("comparing local and remote indexes…");
     let local = Memory::local().open().await?;
-    let remote = match target.open().await {
-        Ok(ds) => Some(ds),
-        Err(e) if memory::dataset_absent(&e) => None,
-        Err(e) => {
-            return Err(e.context(format!(
-                "{} exists but can't be read — refusing to treat it as empty",
-                target.label()
-            )))
-        }
-    };
     let project = remote.as_ref().and_then(curate::project);
     let remote_ids = match &remote {
         Some(ds) => all_ids(ds).await?,

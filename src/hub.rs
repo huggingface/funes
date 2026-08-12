@@ -1,6 +1,6 @@
 //! Talking to the Hugging Face Hub: the client, credentials, and dataset-repo identity and
-//! lifecycle. It knows nothing about what a memory is — [] is the domain that interprets
-//! what these calls answer.
+//! lifecycle. It knows nothing about what a memory is — [`crate::memory`] is the domain that
+//! interprets what these calls answer.
 
 use std::path::{Path, PathBuf};
 
