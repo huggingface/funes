@@ -28,7 +28,9 @@ async fn recall_tolerates_a_memory_without_the_harness_column() {
         writeln!(f, "{l}").unwrap();
     }
 
-    funes::index::run_index(source.path(), false, None).await.unwrap();
+    funes::commands::index::run_index(source.path(), false, None)
+        .await
+        .unwrap();
 
     // Drop the harness column in place — the schema an un-migrated memory has.
     let uri = funes::memory::dataset::table_uri(&funes::memory::dataset::local_memory_dir());
@@ -41,7 +43,7 @@ async fn recall_tolerates_a_memory_without_the_harness_column() {
         "harness column should be gone"
     );
 
-    let out = funes::recall::recall(
+    let out = funes::commands::recall::recall(
         funes::memory::hub::Memory::local(),
         "parse transcripts into turns".into(),
         5,
@@ -60,7 +62,7 @@ async fn recall_tolerates_a_memory_without_the_harness_column() {
 
     // But a `--harness` filter needs the column: refuse with a clear message, not an opaque Lance
     // schema error.
-    let err = funes::recall::recall(
+    let err = funes::commands::recall::recall(
         funes::memory::hub::Memory::local(),
         "parse transcripts into turns".into(),
         5,

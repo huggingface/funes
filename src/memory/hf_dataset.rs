@@ -470,7 +470,7 @@ impl ProgressHandler for UploadBar {
 }
 
 /// The upload progress handler for `create_commit`, shared by [`send_commit`] and the first-publish
-/// commit in [`crate::push`]. See [`UploadBar`].
+/// commit in [`crate::commands::push`]. See [`UploadBar`].
 pub(crate) fn upload_progress() -> Progress {
     Progress::new(UploadBar)
 }

@@ -5,10 +5,11 @@
 //! `$FUNES_HOME` or `~/.funes`.
 
 use funes::agents::{claude, codex, hermes, pi};
+use funes::commands::{ask, curate, index, mcp, push, recall, scrub, update};
 use funes::memory::hub;
+use funes::scan;
 use funes::traces::harness::Harness;
 use funes::ui::render;
-use funes::{ask, curate, index, mcp, push, recall, scan, scrub, update};
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};

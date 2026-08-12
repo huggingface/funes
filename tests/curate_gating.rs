@@ -18,8 +18,8 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arrow_array::{Array, StringArray};
+use funes::commands::push::Confirm;
 use funes::memory::hub::Memory;
-use funes::push::Confirm;
 use hf_hub::{HFClient, RepoTypeDataset};
 
 const OWNER: &str = "optimum-internal-testing";
@@ -99,19 +99,21 @@ async fn a_project_memory_ships_only_included_sessions() {
     std::env::set_var("FUNES_HOME", db_dir.path());
     write_session(src.path(), "keep", &[("k1", "KEEPME a decision worth publishing")]);
     write_session(src.path(), "hold", &[("h1", "HOLDME a note that stays local")]);
-    funes::index::run_index(src.path(), false, None).await.unwrap();
+    funes::commands::index::run_index(src.path(), false, None)
+        .await
+        .unwrap();
 
     // Name the memory the project memory — this creates the dataset empty. (In the CLI this is the
     // interactive review's deferred, consented step; here we call it directly.)
-    let named = funes::curate::name_project(&Memory::parse(&uri), &project).await;
+    let named = funes::commands::curate::name_project(&Memory::parse(&uri), &project).await;
 
     // Push before any decision: everything is held back, nothing ships.
-    let push_ungated = funes::push::run_push(Memory::parse(&uri), false, Confirm::Yes).await;
+    let push_ungated = funes::commands::push::run_push(Memory::parse(&uri), false, Confirm::Yes).await;
     let sessions_before = remote_sessions(&uri).await;
 
     // Record an `include` decision for exactly one session, then push again.
-    let recorded = funes::curate::run(&Memory::parse(&uri), None, &["keep".to_string()], &[]).await;
-    let push_gated = funes::push::run_push(Memory::parse(&uri), false, Confirm::Yes).await;
+    let recorded = funes::commands::curate::run(&Memory::parse(&uri), None, &["keep".to_string()], &[]).await;
+    let push_gated = funes::commands::push::run_push(Memory::parse(&uri), false, Confirm::Yes).await;
     let sessions_after = remote_sessions(&uri).await;
 
     // Cleanup before asserting, so a failed assertion can't leave the scratch repo behind.
@@ -123,7 +125,10 @@ async fn a_project_memory_ships_only_included_sessions() {
         .await;
 
     assert!(
-        matches!(named.expect("name the project"), funes::curate::Named::Created),
+        matches!(
+            named.expect("name the project"),
+            funes::commands::curate::Named::Created
+        ),
         "naming a fresh memory should create the empty project memory"
     );
 

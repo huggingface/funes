@@ -7,14 +7,14 @@
 async fn ask_errors_when_the_agent_cli_is_missing() {
     std::env::set_var("PATH", "");
 
-    let err = funes::ask::claude("q".into(), funes::memory::hub::Memory::local())
+    let err = funes::commands::ask::claude("q".into(), funes::memory::hub::Memory::local())
         .await
         .unwrap_err()
         .to_string();
     assert!(err.contains("`claude` isn't on PATH"), "{err}");
     assert!(err.contains("funes ask codex"), "suggests the other agent: {err}");
 
-    let err = funes::ask::preflight("codex").unwrap_err().to_string();
+    let err = funes::commands::ask::preflight("codex").unwrap_err().to_string();
     assert!(err.contains("`codex` isn't on PATH"), "{err}");
     assert!(err.contains("funes ask claude"), "suggests the other agent: {err}");
 }

@@ -9,7 +9,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 
 use super::{run_root, Ctx, Flow, PickerModel, RunOpts};
-use crate::curate::{self, Decision};
+use crate::commands::curate::{self, Decision};
 
 /// One reviewable session: what its row shows (date + opening prompt), the richer text the fuzzy
 /// filter matches, the comment a decision records, and the pre-rendered preview (its user prompts,

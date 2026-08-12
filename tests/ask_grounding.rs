@@ -28,9 +28,11 @@ async fn grounding_embeds_memory_passages_in_the_prompt() {
     let source = tempfile::tempdir().unwrap();
     std::env::set_var("FUNES_HOME", db_dir.path());
     let session = write_transcript(source.path());
-    funes::index::run_index(source.path(), false, None).await.unwrap();
+    funes::commands::index::run_index(source.path(), false, None)
+        .await
+        .unwrap();
 
-    let prompt = funes::ask::grounding(
+    let prompt = funes::commands::ask::grounding(
         funes::memory::hub::Memory::local(),
         "why reciprocal rank fusion",
         &|_| (),

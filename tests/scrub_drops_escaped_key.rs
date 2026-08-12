@@ -63,8 +63,10 @@ async fn scrub_redacts_an_escaped_key_in_place() {
 
     // Index with a no-op scanner so the escaped key lands in the memory unredacted.
     std::env::set_var("FUNES_TRUFFLEHOG", "/usr/bin/true");
-    funes::index::run_index(source.path(), false, None).await.unwrap();
-    let dirty = funes::recall::get(funes::memory::hub::Memory::local(), session.into(), "t2".into(), 0)
+    funes::commands::index::run_index(source.path(), false, None)
+        .await
+        .unwrap();
+    let dirty = funes::commands::recall::get(funes::memory::hub::Memory::local(), session.into(), "t2".into(), 0)
         .await
         .unwrap();
     assert!(
@@ -74,9 +76,9 @@ async fn scrub_redacts_an_escaped_key_in_place() {
 
     // Scrub with the real scanner: it matches the key's JSON-escaped form and excises it in place.
     std::env::remove_var("FUNES_TRUFFLEHOG");
-    funes::scrub::run().await.unwrap();
+    funes::commands::scrub::run().await.unwrap();
 
-    let after_key = funes::recall::get(funes::memory::hub::Memory::local(), session.into(), "t2".into(), 0)
+    let after_key = funes::commands::recall::get(funes::memory::hub::Memory::local(), session.into(), "t2".into(), 0)
         .await
         .unwrap_or_default();
     assert!(
@@ -89,7 +91,7 @@ async fn scrub_redacts_an_escaped_key_in_place() {
     );
 
     // The clean turn is untouched.
-    let clean = funes::recall::get(funes::memory::hub::Memory::local(), session.into(), "t1".into(), 0)
+    let clean = funes::commands::recall::get(funes::memory::hub::Memory::local(), session.into(), "t1".into(), 0)
         .await
         .unwrap();
     assert!(

@@ -17,14 +17,15 @@
 //!   retries), or eagerly with `--force-reindex` (retried until it lands).
 //!
 //! A **project memory** — a memory whose schema metadata names its project (see
-//! [`crate::curate`]) — ships only the sessions marked include; any other memory is a **personal
+//! [`super::curate`]) — ships only the sessions marked include; any other memory is a **personal
 //! memory** and takes everything, as ever.
 
+use super::curate;
 use crate::memory::card::{self, CardAction, CardCtx};
 use crate::memory::dataset;
 use crate::memory::hf_dataset::{self, Appended, Reindexed};
 use crate::memory::hub::{self, Memory};
-use crate::{chunk, curate, scan};
+use crate::{chunk, scan};
 use anyhow::{bail, Context, Result};
 use arrow_array::{BooleanArray, RecordBatch, StringArray};
 use arrow_select::filter::filter_record_batch;
@@ -307,7 +308,7 @@ pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm) -> 
     let first_publish = remote.is_none();
 
     // 2. The local side. A project memory ships exactly the sessions marked include — your
-    // review alone decides what ships (see [`crate::curate`]); anything undecided stays local
+    // review alone decides what ships (see [`super::curate`]); anything undecided stays local
     // and is counted for the report. A personal memory takes everything.
     let (candidates, not_reviewed) = match &project {
         Some(project) => {
@@ -644,7 +645,7 @@ async fn reindex_auto(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index;
+    use crate::commands::index;
     use arrow_array::RecordBatchIterator;
     use lance::dataset::WriteParams;
 

@@ -4,8 +4,8 @@
 //! format; `recall_hits`/`get_turns` return the structured results for other renderings
 //! (see `render`).
 
+use super::curate;
 use crate::chunk;
-use crate::curate;
 use crate::inference::{self, Embedder, Reranker};
 use crate::memory::dataset;
 use crate::memory::hub::{self, Memory, Reachability};
@@ -803,7 +803,7 @@ async fn session_count(ds: &Dataset) -> Option<usize> {
 }
 
 fn index_coverage_line() -> Option<String> {
-    let coverage = crate::index::local_index_coverage()?;
+    let coverage = super::index::local_index_coverage()?;
     (coverage.pending > 0).then(|| {
         format!(
             "pending indexing: {} source session{} — run `funes index`\n",
@@ -881,7 +881,7 @@ pub async fn status(memory: Memory) -> Result<String> {
                         // memories use the local receipt maintained by push; project memories have
                         // their decision-aware pending-review report above.
                         if project.is_none() {
-                            if let Some(coverage) = crate::push::local_push_coverage(&local, uri).await
+                            if let Some(coverage) = super::push::local_push_coverage(&local, uri).await
                             {
                                 if coverage.pending == 0 {
                                     let _ = writeln!(

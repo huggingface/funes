@@ -1,6 +1,6 @@
 //! Trace sources: where the indexer reads agent sessions from. A [`TraceSource`] enumerates the
 //! discrete artifacts it indexes ([`Unit`]s — typically files) and parses one on demand into turns.
-//! The indexer ([`crate::index`]) drives any source through one generic loop, so adding a new
+//! The indexer ([`crate::commands::index`]) drives any source through one generic loop, so adding a new
 //! transcript format is: implement [`TraceSource`] and add a branch to [`open`].
 //!
 //! A unit is both the incremental-tracking granule (skipped when its [`Unit::signature`] still

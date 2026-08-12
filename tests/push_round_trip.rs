@@ -20,8 +20,8 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use funes::commands::push::Confirm;
 use funes::memory::hub::Memory;
-use funes::push::Confirm;
 use hf_hub::{HFClient, HFError, HFRepository, RepoTypeDataset};
 
 const OWNER: &str = "optimum-internal-testing";
@@ -60,7 +60,7 @@ async fn root_readme(repo: &HFRepository<RepoTypeDataset>) -> Option<String> {
 }
 
 async fn recall_remote(uri: &str, query: &str) -> String {
-    funes::recall::recall(Memory::parse(uri), query.into(), 5, 30, 0.0, 0, None, None)
+    funes::commands::recall::recall(Memory::parse(uri), query.into(), 5, 30, 0.0, 0, None, None)
         .await
         .unwrap_or_else(|e| format!("<recall error: {e}>"))
 }
@@ -116,11 +116,13 @@ async fn push_round_trip_create_append_recall() {
     let src = tempfile::tempdir().unwrap();
     std::env::set_var("FUNES_HOME", db_dir.path());
     write_session(src.path(), &[("s1", "SYNCSMOKE parsing transcripts into turns")]);
-    funes::index::run_index(src.path(), false, None).await.unwrap();
+    funes::commands::index::run_index(src.path(), false, None)
+        .await
+        .unwrap();
 
     // Gate: the local index shares nothing with the (empty) remote, so a first publish is prompted.
     // Declining must abort and upload nothing — the "don't publish to the wrong memory" promise.
-    let declined = funes::push::run_push(Memory::parse(&uri), false, Confirm::Ask(decline)).await;
+    let declined = funes::commands::push::run_push(Memory::parse(&uri), false, Confirm::Ask(decline)).await;
     // Verify via a *successful* Hub query that the declined push published nothing: get_paths_info
     // returns the entries present under the path (Ok([]) when absent) and Err on a transport failure,
     // so an unreachable remote fails the test loudly instead of masquerading as "nothing uploaded".
@@ -134,7 +136,7 @@ async fn push_round_trip_create_append_recall() {
     // create (first publish): accept the same gate → grow → append (data-only, no reindex) → recall
     // both. The appended turn is left unindexed, so recalling it back exercises Lance's brute-force
     // fallback. Then force a reindex and recall it again, now served by the index.
-    let create = funes::push::run_push(Memory::parse(&uri), false, Confirm::Ask(accept)).await;
+    let create = funes::commands::push::run_push(Memory::parse(&uri), false, Confirm::Ask(accept)).await;
     write_session(
         src.path(),
         &[
@@ -142,17 +144,19 @@ async fn push_round_trip_create_append_recall() {
             ("s2", "SYNCSMOKE2 the continuation adds only this new turn"),
         ],
     );
-    funes::index::run_index(src.path(), false, None).await.unwrap();
+    funes::commands::index::run_index(src.path(), false, None)
+        .await
+        .unwrap();
     // append: the grown local memory now shares chunks with the remote, so the gate must NOT fire —
     // pass a prompt that would decline and assert it is never consulted.
     let prompts_before_append = PROMPTS.load(Ordering::SeqCst);
-    let append = funes::push::run_push(Memory::parse(&uri), false, Confirm::Ask(decline)).await;
+    let append = funes::commands::push::run_push(Memory::parse(&uri), false, Confirm::Ask(decline)).await;
     let prompts_after_append = PROMPTS.load(Ordering::SeqCst);
     let recall_base = recall_remote(&uri, "SYNCSMOKE parsing").await;
     let recall_new = recall_remote(&uri, "SYNCSMOKE2 continuation").await;
     // Nothing new to push, so this is a pure forced reindex: fold the unindexed appended turn into
     // the index as its own commit (capture_reindex + a separate commit), then recall it again.
-    let reindex = funes::push::run_push(Memory::parse(&uri), true, Confirm::Yes).await;
+    let reindex = funes::commands::push::run_push(Memory::parse(&uri), true, Confirm::Yes).await;
     let recall_reindexed = recall_remote(&uri, "SYNCSMOKE2 continuation").await;
     let readme_after = root_readme(&repo).await;
     // The model id must travel with the memory (stamped in the schema metadata, uploaded by push).
@@ -222,7 +226,7 @@ async fn push_round_trip_create_append_recall() {
     );
     assert_eq!(
         remote_model.as_deref(),
-        Some(funes::index::MODEL),
+        Some(funes::commands::index::MODEL),
         "the model id should travel with the memory via push"
     );
     assert_eq!(

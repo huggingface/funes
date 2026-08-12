@@ -18,7 +18,7 @@
 //! Human- and agent-editable. A decision flipped to `exclude` later does not retract what
 //! already shipped — the remote is append-only; curation prevents, it does not undo.
 
-use crate::index;
+use super::index;
 use crate::memory::hub::{self, Memory};
 use crate::memory::{dataset, hf_dataset};
 use crate::traces::jsonl;

@@ -5,7 +5,7 @@
 //! a terminal: tool chunks compressed to a deterministic one-liner, prose wrapped, marks
 //! highlighted.
 
-use crate::recall::{Hit, Turn};
+use crate::commands::recall::{Hit, Turn};
 use std::fmt::Write as _;
 
 /// Longest scent ever built — beyond any line budget, so final truncation is [`ellipsize`]'s job.
@@ -371,7 +371,7 @@ fn write_wrapped(out: &mut String, line: &str, width: usize, indent: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::recall::Neighbor;
+    use crate::commands::recall::Neighbor;
 
     fn hit(ts: &str, block_type: &str, text: &str) -> Hit {
         Hit {

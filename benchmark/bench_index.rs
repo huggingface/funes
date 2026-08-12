@@ -16,7 +16,7 @@
 use anyhow::Result;
 use arrow_array::{Array, StringArray};
 use clap::Parser;
-use funes::index::run_index;
+use funes::commands::index::run_index;
 use funes::memory::hub::Memory;
 use futures::TryStreamExt;
 use std::collections::HashSet;

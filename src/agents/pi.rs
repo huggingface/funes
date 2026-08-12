@@ -11,7 +11,7 @@
 //! `.pi/extensions`, so the explicit register is required.
 
 use super::{remove_empty_dir, remove_tree, run_remove, shell_command, RemoveCommand};
-use crate::update::parse_semver;
+use crate::commands::update::parse_semver;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
