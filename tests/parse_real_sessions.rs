@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use funes::trace::Turn;
+use funes::traces::Turn;
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -66,7 +66,7 @@ fn ids_are_stable(turns: &[Turn], reparse: &[Turn]) {
 #[test]
 fn parse_real_codex_session() {
     let p = fixture("codex_session.jsonl");
-    let turns = funes::codex_traces::turns_from_jsonl_file(&p, "proj").expect("parse codex");
+    let turns = funes::traces::codex::turns_from_jsonl_file(&p, "proj").expect("parse codex");
     assert!(!turns.is_empty());
     // The full block vocabulary is exercised on real records.
     for want in ["text", "thinking", "tool_use", "tool_result"] {
@@ -90,13 +90,16 @@ fn parse_real_codex_session() {
     for (i, t) in turns.iter().enumerate() {
         assert_eq!(t.turn_uuid, format!("{prefix}-{i}"));
     }
-    ids_are_stable(&turns, &funes::codex_traces::turns_from_jsonl_file(&p, "proj").unwrap());
+    ids_are_stable(
+        &turns,
+        &funes::traces::codex::turns_from_jsonl_file(&p, "proj").unwrap(),
+    );
 }
 
 #[test]
 fn parse_real_pi_session() {
     let p = fixture("pi_session.jsonl");
-    let turns = funes::pi_traces::turns_from_jsonl_file(&p, "sess", "proj").expect("parse pi");
+    let turns = funes::traces::pi::turns_from_jsonl_file(&p, "sess", "proj").expect("parse pi");
     assert!(!turns.is_empty());
     for want in ["text", "thinking", "tool_use", "tool_result"] {
         assert!(
@@ -112,14 +115,14 @@ fn parse_real_pi_session() {
     // Pi uses the native line `id` as `turn_uuid`; stable across a re-parse.
     ids_are_stable(
         &turns,
-        &funes::pi_traces::turns_from_jsonl_file(&p, "sess", "proj").unwrap(),
+        &funes::traces::pi::turns_from_jsonl_file(&p, "sess", "proj").unwrap(),
     );
 }
 
 #[test]
 fn parse_real_claude_session() {
     let p = fixture("claude_session.jsonl");
-    let turns = funes::claude_traces::turns_from_jsonl_file(&p, "sess", "proj").expect("parse claude");
+    let turns = funes::traces::claude::turns_from_jsonl_file(&p, "sess", "proj").expect("parse claude");
     assert!(!turns.is_empty());
     // This Fable-derived dataset redacts thinking (empty `thinking` field), so the real vocabulary
     // here is text/tool_use/tool_result; thinking-with-content is covered by the unit test.
@@ -140,6 +143,6 @@ fn parse_real_claude_session() {
     // Claude uses its native `uuid` as `turn_uuid`; stable across a re-parse.
     ids_are_stable(
         &turns,
-        &funes::claude_traces::turns_from_jsonl_file(&p, "sess", "proj").unwrap(),
+        &funes::traces::claude::turns_from_jsonl_file(&p, "sess", "proj").unwrap(),
     );
 }

@@ -1,5 +1,5 @@
 //! Format-agnostic JSONL machinery shared by the per-harness transcript parsers
-//! ([`crate::claude_traces`], `codex_traces`, `pi_traces`): the recursive file walk, whole-file
+//! ([`super::claude`], `codex`, `pi`): the recursive file walk, whole-file
 //! read+parse, and tool-name back-fill. Each parser keeps only its record→[`Turn`] mapping.
 
 use serde_json::Value;
@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use walkdir::WalkDir;
 
-use crate::trace::Turn;
+use super::Turn;
 
 /// All `*.jsonl` under `root`, recursively, sorted by path.
 pub fn iter_jsonl_files(root: &Path) -> Vec<PathBuf> {
@@ -184,13 +184,13 @@ mod tests {
 
     #[test]
     fn backfill_tool_names_fills_from_matching_id() {
-        let block = |bt: &str, name: Option<&str>, id: &str| crate::trace::Block {
+        let block = |bt: &str, name: Option<&str>, id: &str| crate::traces::Block {
             block_type: bt.into(),
             text: String::new(),
             tool_name: name.map(str::to_string),
             tool_use_id: Some(id.into()),
         };
-        let turn = |uuid: &str, blocks: Vec<crate::trace::Block>| Turn {
+        let turn = |uuid: &str, blocks: Vec<crate::traces::Block>| Turn {
             session_id: "s".into(),
             workdir: "p".into(),
             turn_uuid: uuid.into(),

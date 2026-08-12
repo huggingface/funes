@@ -708,7 +708,7 @@ mod tests {
         assert!(note.contains("left untouched"), "note: {note}");
     }
 
-    use crate::trace::{Block, Turn};
+    use crate::traces::{Block, Turn};
     use std::process::Command;
 
     /// Mint a throwaway key (never committed, so funes ships no secret) of the given type, or None

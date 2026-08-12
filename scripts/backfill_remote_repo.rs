@@ -12,7 +12,8 @@
 use anyhow::{bail, Context, Result};
 use arrow_array::{RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
-use funes::{dataset, hf_dataset, hub, repo};
+use funes::traces::repo;
+use funes::{dataset, hf_dataset, hub};
 use hf_hub::HFClient;
 use lance::dataset::{BatchUDF, Dataset, NewColumnTransform};
 use std::collections::HashMap;

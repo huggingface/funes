@@ -1,5 +1,5 @@
 //! Parse hermes sessions from its SQLite state store (`~/.hermes/state.db`) into the shared
-//! [`crate::trace`] turn/block model. Unlike Claude/Codex/pi (one JSONL file per session), hermes
+//! [`crate::traces`] turn/block model. Unlike Claude/Codex/pi (one JSONL file per session), hermes
 //! keeps every session's messages in one WAL SQLite DB: a `sessions` table (one row per session,
 //! optionally carrying `cwd`) and a `messages` table (one row per message, ordered by the `id`).
 //!
@@ -20,8 +20,8 @@ use chrono::{TimeZone, Utc};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 
-use crate::jsonl;
-use crate::trace::{Block, Turn};
+use super::jsonl;
+use super::{Block, Turn};
 
 /// One indexable hermes session: its id, resolved workdir facet, and the high-water `messages.id`
 /// used as the incremental signature (a session is re-read only once a newer message lands).
@@ -63,7 +63,7 @@ fn session_workdir(conn: &Connection, session_id: &str) -> Result<Option<String>
 }
 
 /// Every session that has at least one message, each signed by its high-water `messages.id`. The
-/// caller ([`crate::source`]) turns these into incremental units; a session whose watermark is
+/// caller ([`super::source`]) turns these into incremental units; a session whose watermark is
 /// unchanged since the last index is skipped.
 pub fn sessions_with_watermark(db: &Path) -> Result<Vec<SessionUnit>> {
     let conn = open_ro(db)?;

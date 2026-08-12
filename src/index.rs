@@ -1,4 +1,4 @@
-//! The `index` command: read a [`crate::source::TraceSource`] → parse → chunk → embed → write to a
+//! The `index` command: read a [`crate::traces::source::TraceSource`] → parse → chunk → embed → write to a
 //! local Lance dataset. One generic loop drives every source — a JSONL tree today, new formats by
 //! implementing the trait — indexing each of its units in a single append.
 //!
@@ -8,9 +8,10 @@
 //! nothing is re-embedded or deleted.
 
 use crate::chunk::{self, Tier};
-use crate::harness::Harness;
 use crate::inference::{self, Embedder};
-use crate::{dataset, hub, lock, repo, scan, source, trace};
+use crate::traces::harness::Harness;
+use crate::traces::{self, repo, source};
+use crate::{dataset, hub, lock, scan};
 use anyhow::{anyhow, Context, Result};
 use arrow_array::types::Float32Type;
 use arrow_array::{Array, FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator, StringArray};
@@ -157,7 +158,7 @@ async fn stored_ids(ds: &Dataset) -> Result<HashSet<String>> {
 /// screenshot's entropy trips detectors on values that are not secrets, and excising one of those
 /// plants a marker mid-payload that strands the rest of it in the store. Runs whether or not a
 /// scanner is installed — the payload is unrecallable either way.
-fn elide_turns(turns: &mut [trace::Turn]) {
+fn elide_turns(turns: &mut [traces::Turn]) {
     for b in turns.iter_mut().flat_map(|t| t.blocks.iter_mut()) {
         if let Cow::Owned(elided) = chunk::elide_data_uris(&b.text) {
             b.text = elided;
@@ -173,13 +174,13 @@ fn elide_turns(turns: &mut [trace::Turn]) {
 /// real newlines); anything that resists is caught downstream by the fail-closed push gate.
 /// Reports to stderr what it removed.
 fn redact_turns(
-    turns: &mut [trace::Turn],
+    turns: &mut [traces::Turn],
     scanner: &dyn scan::SecretScanner,
     tiers: &[Tier],
     include_thinking: bool,
 ) -> Result<()> {
     let removed: Vec<String> = {
-        let mut blocks: Vec<&mut trace::Block> = turns
+        let mut blocks: Vec<&mut traces::Block> = turns
             .iter_mut()
             .flat_map(|t| t.blocks.iter_mut())
             .filter(|b| chunk::block_selected(&b.block_type, tiers, include_thinking))
@@ -214,7 +215,7 @@ fn redact_turns(
 /// A unit's distinct-session count and a log label: `"<sid> (<workdir>)"` for a single session (a
 /// JSONL file), `"<n> sessions"` for a bulk unit (many sessions in one artifact), and the unit's `key` (its
 /// path) when it has no turns at all. The borrow of `turns` is confined here so callers keep it mutable.
-fn unit_summary(turns: &[trace::Turn], key: &str) -> (u64, String) {
+fn unit_summary(turns: &[traces::Turn], key: &str) -> (u64, String) {
     let mut sids: Vec<&str> = turns.iter().map(|t| t.session_id.as_str()).collect();
     sids.sort_unstable();
     sids.dedup();
@@ -940,7 +941,7 @@ mod tests {
                 })
                 .collect())
         }
-        fn read(&self, _: &source::Unit) -> Result<Vec<trace::Turn>> {
+        fn read(&self, _: &source::Unit) -> Result<Vec<traces::Turn>> {
             Ok(vec![])
         }
     }
@@ -1184,7 +1185,7 @@ mod tests {
                 decoder: "PLAIN".into(),
             },
         ]);
-        let mut turns = vec![trace::Turn {
+        let mut turns = vec![traces::Turn {
             session_id: "sess".into(),
             workdir: "proj".into(),
             turn_uuid: "turn".into(),
@@ -1192,7 +1193,7 @@ mod tests {
             seq: 0,
             ts: String::new(),
             role: "user".into(),
-            blocks: vec![trace::Block {
+            blocks: vec![traces::Block {
                 block_type: "text".into(),
                 text: "key=TOPSECRET hash=cafef00d".into(),
                 tool_name: None,
@@ -1221,13 +1222,13 @@ mod tests {
                 }])
             }
         }
-        let block = |bt: &str, text: &str| trace::Block {
+        let block = |bt: &str, text: &str| traces::Block {
             block_type: bt.into(),
             text: text.into(),
             tool_name: None,
             tool_use_id: None,
         };
-        let mut turns = vec![trace::Turn {
+        let mut turns = vec![traces::Turn {
             session_id: "sess".into(),
             workdir: "proj".into(),
             turn_uuid: "turn".into(),
@@ -1263,7 +1264,7 @@ mod tests {
                 Ok(Vec::new())
             }
         }
-        let mut turns = vec![trace::Turn {
+        let mut turns = vec![traces::Turn {
             session_id: "sess".into(),
             workdir: "proj".into(),
             turn_uuid: "turn".into(),
@@ -1271,7 +1272,7 @@ mod tests {
             seq: 0,
             ts: String::new(),
             role: "tool".into(),
-            blocks: vec![trace::Block {
+            blocks: vec![traces::Block {
                 block_type: "tool_result".into(),
                 text: r#"{"image_url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUg=="}"#.into(),
                 tool_name: None,

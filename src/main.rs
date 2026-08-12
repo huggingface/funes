@@ -5,7 +5,7 @@
 //! `$FUNES_HOME` or `~/.funes`.
 
 use funes::agents::{claude, codex, hermes, pi};
-use funes::harness::Harness;
+use funes::traces::harness::Harness;
 use funes::{ask, curate, hub, index, mcp, push, recall, render, scan, scrub, update};
 
 use anyhow::{anyhow, Context, Result};
@@ -405,7 +405,7 @@ async fn main() -> Result<()> {
                 // per-target form a session-end hook uses (index only its own harness's sessions).
                 None if harness.is_some() => {
                     let h = harness.unwrap();
-                    funes::harness::known_harness_roots()
+                    funes::traces::harness::known_harness_roots()
                         .into_iter()
                         .find(|(_, kh)| *kh == h)
                         .map(|(dir, _)| vec![(dir, Some(h))])
@@ -421,7 +421,7 @@ async fn main() -> Result<()> {
                              refusing to index all harness roots unattended"
                         ));
                     }
-                    funes::harness::known_harness_roots()
+                    funes::traces::harness::known_harness_roots()
                         .into_iter()
                         .map(|(dir, h)| (dir, Some(h)))
                         .collect()
@@ -878,7 +878,7 @@ async fn ensure_local_index(harness: Harness) -> bool {
     if hub::Memory::local().open().await.is_ok() {
         return true; // already have a local index
     }
-    let Some(root) = funes::harness::known_harness_roots()
+    let Some(root) = funes::traces::harness::known_harness_roots()
         .into_iter()
         .find(|(_, h)| *h == harness)
     else {

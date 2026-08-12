@@ -8,7 +8,7 @@
 //! Reads at the source level (resolve + download + parse), not the full index pipeline — the
 //! end-to-end `funes index` + status run is `tests/index_real_repo.rs`.
 
-use funes::source;
+use funes::traces::source;
 
 const OWNER: &str = "julien-c";
 const NAME: &str = "pi-sessions";

@@ -46,7 +46,7 @@ async fn seed_finishes_a_small_history_and_a_rerun_is_a_noop() {
 
     // The seed `funes add` runs: budgeted, tier-major. This history fits the budget, so every
     // tier lands and the unit is stamped at the top one.
-    funes::index::run_index_seed(src.path(), funes::harness::Harness::Claude)
+    funes::index::run_index_seed(src.path(), funes::traces::harness::Harness::Claude)
         .await
         .unwrap();
     let full = chunk_count().await;
@@ -58,7 +58,7 @@ async fn seed_finishes_a_small_history_and_a_rerun_is_a_noop() {
     );
 
     // The budgeted no-path run (the per-turn hook): nothing owed, nothing added.
-    let roots = [(src.path().to_path_buf(), Some(funes::harness::Harness::Claude))];
+    let roots = [(src.path().to_path_buf(), Some(funes::traces::harness::Harness::Claude))];
     funes::index::run_index_budgeted(&roots, false, None, false)
         .await
         .unwrap();

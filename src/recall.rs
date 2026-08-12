@@ -7,9 +7,9 @@
 use crate::chunk;
 use crate::curate;
 use crate::dataset;
-use crate::harness::Harness;
 use crate::hub::{self, Memory, Reachability};
 use crate::inference::{self, Embedder, Reranker};
+use crate::traces::harness::Harness;
 use anyhow::{anyhow, Context, Result};
 use arrow_array::{Float32Array, Int64Array, RecordBatch, StringArray, UInt64Array};
 use chrono::{DateTime, Utc};

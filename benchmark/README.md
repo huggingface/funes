@@ -118,7 +118,7 @@ FUNES_HOME=./bench-home funes push <org>/<repo> --yes
 ```
 
 `funes index <file>.parquet` indexes the whole file as a bulk import (one append, so the memory stays
-compact); see `src/hf_traces.rs`. The push gate redacts/holds back any rows containing secrets before
+compact); see `src/traces/parquet.rs`. The push gate redacts/holds back any rows containing secrets before
 upload.
 
 ## `bench_index` — index build

@@ -1,11 +1,11 @@
-//! Parse Claude Code session transcripts (`*.jsonl`) into the shared [`crate::trace`] turn/block
+//! Parse Claude Code session transcripts (`*.jsonl`) into the shared [`crate::traces`] turn/block
 //! model. This is the Claude Code source parser; the model itself lives in `trace.rs`.
 
 use serde_json::Value;
 use std::path::Path;
 
-use crate::jsonl;
-use crate::trace::{Block, Turn};
+use super::jsonl;
+use super::{Block, Turn};
 
 /// Path-derived workdir fallback for a transcript that records no cwd: the segment right after a
 /// `projects` dir, else the parent dir name.

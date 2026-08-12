@@ -1,5 +1,5 @@
 //! Parse Codex native rollout transcripts (`~/.codex/sessions/rollout-*.jsonl`) into the shared
-//! [`crate::trace`] turn/block model. Codex writes the OpenAI Responses "rollout" format: one
+//! [`crate::traces`] turn/block model. Codex writes the OpenAI Responses "rollout" format: one
 //! `{timestamp, type, payload}` envelope per line. Only `response_item` lines carry conversation
 //! (`session_meta`/`event_msg`/`turn_context` are session metadata and telemetry); each retained
 //! item becomes its own turn, keyed `<session_id>-<seq>` (the id from the `session_meta` line) so
@@ -8,8 +8,8 @@
 use serde_json::{Map, Value};
 use std::path::Path;
 
-use crate::jsonl;
-use crate::trace::{Block, Turn};
+use super::jsonl;
+use super::{Block, Turn};
 
 pub fn turns_from_jsonl_file(p: &Path, fallback_workdir: &str) -> std::io::Result<Vec<Turn>> {
     let records = jsonl::read_jsonl_records(p)?;

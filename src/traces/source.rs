@@ -8,16 +8,16 @@
 //! commit). JSONL is one session per file; a parquet dataset — or a hermes `state.db` — is many
 //! sessions in one file.
 
-use crate::claude_traces;
-use crate::codex_traces;
-use crate::harness::Harness;
-use crate::hermes_traces;
+use super::claude;
+use super::codex;
+use super::harness::Harness;
+use super::hermes;
+use super::jsonl;
+use super::parquet;
+use super::pi;
+use super::Turn;
 use crate::hf_dataset;
-use crate::hf_traces;
 use crate::hub;
-use crate::jsonl;
-use crate::pi_traces;
-use crate::trace::Turn;
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -171,11 +171,11 @@ impl TraceSource for JsonlTree {
         let p = Path::new(&unit.key);
         // Each parser derives the workdir facet from the session's recorded cwd; the path-derived
         // value is only the fallback for transcripts that never recorded one.
-        let fallback = claude_traces::workdir_of(p);
+        let fallback = claude::workdir_of(p);
         let turns = match self.harness {
-            Harness::Claude => claude_traces::turns_from_jsonl_file(p, &jsonl::session_id_of(p), &fallback)?,
-            Harness::Codex => codex_traces::turns_from_jsonl_file(p, &fallback)?,
-            Harness::Pi => pi_traces::turns_from_jsonl_file(p, &jsonl::session_id_of(p), &fallback)?,
+            Harness::Claude => claude::turns_from_jsonl_file(p, &jsonl::session_id_of(p), &fallback)?,
+            Harness::Codex => codex::turns_from_jsonl_file(p, &fallback)?,
+            Harness::Pi => pi::turns_from_jsonl_file(p, &jsonl::session_id_of(p), &fallback)?,
             // hermes keeps its sessions in a SQLite state.db, not a JSONL tree, so it's read by a
             // dedicated source and never reaches here.
             Harness::Hermes => anyhow::bail!("hermes sessions are read from state.db, not a JSONL tree"),
@@ -198,7 +198,7 @@ impl TraceSource for HermesDb {
     }
 
     fn units(&self) -> Result<Vec<Unit>> {
-        let mut sessions = hermes_traces::sessions_with_watermark(&self.path)?;
+        let mut sessions = hermes::sessions_with_watermark(&self.path)?;
         // Most-recently-active first (highest high-water id); `--limit` then keeps the recent N.
         sessions.sort_by_key(|s| std::cmp::Reverse(s.watermark));
         if let Some(n) = self.limit {
@@ -217,7 +217,7 @@ impl TraceSource for HermesDb {
     fn read(&self, unit: &Unit) -> Result<Vec<Turn>> {
         // The workdir is derived from the session's recorded cwd inside the parser; "hermes" is only
         // the fallback for a session that never recorded one.
-        hermes_traces::turns_from_state_db(&self.path, &unit.key, "hermes")
+        hermes::turns_from_state_db(&self.path, &unit.key, "hermes")
     }
 }
 
@@ -247,7 +247,7 @@ impl TraceSource for ParquetDataset {
         let p = Path::new(&unit.key);
         // Fallback workdir for rows without a recorded cwd: the dataset's file stem.
         let fallback = p.file_stem().and_then(|s| s.to_str()).unwrap_or("parquet").to_string();
-        hf_traces::turns_from_parquet(p, &fallback, self.limit)
+        parquet::turns_from_parquet(p, &fallback, self.limit)
     }
 
     fn fatal_on_read_error(&self) -> bool {
@@ -338,7 +338,7 @@ impl TraceSource for RemoteParquetDataset {
             .iter()
             .find(|s| s.key == unit.key)
             .context("unknown remote shard")?;
-        hf_traces::turns_from_parquet(&shard.local, &shard.workdir, None)
+        parquet::turns_from_parquet(&shard.local, &shard.workdir, None)
     }
 
     fn fatal_on_read_error(&self) -> bool {

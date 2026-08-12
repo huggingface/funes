@@ -1,7 +1,7 @@
 //! Render blocks to text and split into chunks.
 //! All indexing is by Unicode code point (char), not bytes.
 
-use crate::trace::Turn;
+use crate::traces::Turn;
 use arrow_array::{Array, Int64Array, RecordBatch, StringArray};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
@@ -360,7 +360,7 @@ pub fn chunks_from_turns(turns: &[Turn], tiers: &[Tier], include_thinking: bool)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trace::{Block, Turn};
+    use crate::traces::{Block, Turn};
 
     fn block(block_type: &str, text: &str, tool_name: Option<&str>) -> Block {
         Block {

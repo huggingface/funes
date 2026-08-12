@@ -19,7 +19,8 @@
 //! already shipped — the remote is append-only; curation prevents, it does not undo.
 
 use crate::hub::{self, Memory};
-use crate::{dataset, hf_dataset, index, jsonl};
+use crate::traces::jsonl;
+use crate::{dataset, hf_dataset, index};
 use anyhow::{bail, Context, Result};
 use arrow_array::{Int64Array, RecordBatch, RecordBatchIterator, StringArray};
 use arrow_schema::Schema;

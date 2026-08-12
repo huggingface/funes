@@ -1,5 +1,5 @@
 //! Parse pi native session transcripts (`~/.pi/agent/sessions/*.jsonl`) into the shared
-//! [`crate::trace`] turn/block model. pi writes one linked event per line; conversation lives in
+//! [`crate::traces`] turn/block model. pi writes one linked event per line; conversation lives in
 //! `type:"message"` lines — a nested `message` with a typed `content` part list. Control events
 //! (`session`/`model_change`/`thinking_level_change`) carry no turn. pi names its tool results
 //! inline (`toolName`), so — unlike Claude/Codex — no `tool_use_id → name` back-fill is needed.
@@ -7,8 +7,8 @@
 use serde_json::{Map, Value};
 use std::path::Path;
 
-use crate::jsonl;
-use crate::trace::{Block, Turn};
+use super::jsonl;
+use super::{Block, Turn};
 
 /// The workdir a session's records name: the `session` line's `cwd`, munged. `None` when
 /// no record carries one.
@@ -187,7 +187,7 @@ fn tool_result_block(msg: &Map<String, Value>) -> Option<Block> {
 }
 
 /// Flatten a tool-result `content` — a string, or an array of `{type:"text", text}` parts — into
-/// one string. Mirrors the helper in [`crate::claude_traces`]; kept local as pi is its only other
+/// one string. Mirrors the helper in [`super::claude`]; kept local as pi is its only other
 /// user for now.
 fn flatten_tool_result(content: &Value) -> String {
     if let Some(s) = content.as_str() {

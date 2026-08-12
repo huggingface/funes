@@ -10,8 +10,8 @@
 //! normalizer surfaces the session's working directory) — the same derivation as the JSONL
 //! parsers.
 
-use crate::jsonl;
-use crate::trace::{Block, Turn};
+use super::jsonl;
+use super::{Block, Turn};
 
 use anyhow::{anyhow, Context, Result};
 use arrow_array::{Array, LargeStringArray, ListArray, RecordBatch, StringArray};
@@ -23,7 +23,7 @@ use std::path::Path;
 /// Read agent-trace sessions from a parquet file as a flat stream of turns — at most `limit`
 /// sessions (one row each), skipping rows whose messages yield no indexable block. Each `Turn`
 /// carries its own `session_id`, so the index pipeline groups them without a per-session wrapper —
-/// mirroring `claude_traces::turns_from_jsonl_file`, which also returns `Vec<Turn>`.
+/// mirroring `claude::turns_from_jsonl_file`, which also returns `Vec<Turn>`.
 pub fn turns_from_parquet(path: &Path, fallback_workdir: &str, limit: Option<usize>) -> Result<Vec<Turn>> {
     let file = File::open(path).with_context(|| format!("open parquet {}", path.display()))?;
     let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
