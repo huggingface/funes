@@ -26,7 +26,7 @@ fn remove_claude_unregisters_both_surfaces_and_deletes_the_extracted_plugin() {
     assert_eq!(
         fs::read_to_string(&log).unwrap(),
         "mcp remove funes -s user\n\
-         plugin uninstall funes@huggingface -s user\n\
+         plugin uninstall funes@huggingface\n\
          plugin marketplace remove huggingface\n"
     );
 
