@@ -16,6 +16,8 @@
 //! the file the same way. Both files are written atomically (temp + rename) since hermes may be
 //! running.
 
+use super::hooks;
+use super::{remove_empty_dir, remove_file, run_remove, shell_command, RemoveCommand};
 use anyhow::{Context, Result};
 use serde_json::json;
 use std::io::Write;
@@ -38,7 +40,7 @@ pub fn install(memory: Option<String>) -> Result<()> {
 pub fn uninstall() -> Result<()> {
     // These surfaces are independent: attempt MCP removal before propagating any malformed hook
     // config error, and still attempt hook cleanup if the CLI removal itself fails.
-    let registration = crate::integration::run_remove(
+    let registration = run_remove(
         "hermes",
         &["mcp", "remove", "funes"],
         &["Server 'funes' not found in config"],
@@ -55,7 +57,7 @@ pub fn uninstall() -> Result<()> {
         }
     };
 
-    if outcome == crate::integration::RemoveCommand::MissingCli {
+    if outcome == RemoveCommand::MissingCli {
         println!("`hermes` isn't on PATH — hooks were removed; once it is, run:  hermes mcp remove funes");
     } else {
         println!("removed funes from hermes — recall registration, hook entries, approvals, and hook scripts.");
@@ -70,9 +72,9 @@ pub fn uninstall() -> Result<()> {
 /// command drives a detached script and is the exact string the allowlist must match.
 fn desired(hooks_dir: &Path, memory: Option<&str>) -> Vec<(&'static str, String)> {
     let index_script = hooks_dir.join("funes-index.sh").display().to_string();
-    let mut out = vec![("post_llm_call", crate::hooks::command(&index_script, "hermes"))];
+    let mut out = vec![("post_llm_call", hooks::command(&index_script, "hermes"))];
     if let Some(s) = memory {
-        let push = crate::hooks::command(&hooks_dir.join("funes-push.sh").display().to_string(), s);
+        let push = hooks::command(&hooks_dir.join("funes-push.sh").display().to_string(), s);
         out.push(("on_session_start", push.clone()));
         out.push(("on_session_finalize", push));
     }
@@ -83,7 +85,7 @@ fn install_hooks(memory: Option<&str>) -> Result<()> {
     let home = PathBuf::from(std::env::var_os("HOME").context("resolving $HOME for the hermes hooks dir")?);
     let hermes = home.join(".hermes");
     let hooks_dir = hermes.join("hooks");
-    crate::hooks::write_scripts(&hooks_dir)?;
+    hooks::write_scripts(&hooks_dir)?;
 
     let entries = desired(&hooks_dir, memory);
     let config = hermes.join("config.yaml");
@@ -168,9 +170,9 @@ fn uninstall_hooks() -> Result<()> {
 
     let hooks_dir = hermes.join("hooks");
     for name in ["funes-index.sh", "funes-push.sh", "funes-sync.log"] {
-        crate::integration::remove_file(&hooks_dir.join(name))?;
+        remove_file(&hooks_dir.join(name))?;
     }
-    crate::integration::remove_empty_dir(&hooks_dir)?;
+    remove_empty_dir(&hooks_dir)?;
     Ok(())
 }
 
@@ -348,7 +350,7 @@ fn mcp_add_args(funes: &str, memory: Option<&str>) -> Vec<String> {
 fn register_recall(memory: Option<&str>) -> Result<()> {
     let funes = std::env::var("FUNES_BIN").unwrap_or_else(|_| "funes".to_string());
     let args = mcp_add_args(&funes, memory);
-    let manual = crate::integration::shell_command("hermes", &args);
+    let manual = shell_command("hermes", &args);
     let mut child = match Command::new("hermes").args(&args).stdin(Stdio::piped()).spawn() {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {

@@ -10,13 +10,14 @@
 //! registered with `pi install`. pi >= 0.80 no longer auto-loads
 //! `.pi/extensions`, so the explicit register is required.
 
+use super::{remove_empty_dir, remove_tree, run_remove, shell_command, RemoveCommand};
 use crate::update::parse_semver;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const INDEX_TS: &str = include_str!("../integrations/pi/index.ts");
-const PACKAGE_JSON: &str = include_str!("../integrations/pi/package.json");
+const INDEX_TS: &str = include_str!("../../integrations/pi/index.ts");
+const PACKAGE_JSON: &str = include_str!("../../integrations/pi/package.json");
 
 /// The pi version funes' extension API (`pi.extensions` manifest, `registerTool`, the
 /// provided `typebox`) was validated against — the `@earendil-works/pi-coding-agent` line
@@ -36,7 +37,7 @@ pub fn install(memory: Option<String>, force: bool) -> Result<()> {
     let dir = PathBuf::from(home).join(".funes/integrations/pi");
     extract(&dir, memory.as_deref(), force)?;
     let dir = dir.to_string_lossy().into_owned();
-    let install_command = crate::integration::shell_command("pi", &["install", &dir]);
+    let install_command = shell_command("pi", &["install", &dir]);
 
     // Probe pi: this confirms it's on PATH (else extract-and-instruct) and lets us flag a
     // version older than the one the extension API was validated against.
@@ -83,22 +84,20 @@ pub fn uninstall() -> Result<()> {
     let home = std::env::var_os("HOME").context("resolving $HOME for the pi install dir")?;
     let dir = PathBuf::from(home).join(".funes/integrations/pi");
     let source = dir.display().to_string();
-    let remove_command = crate::integration::shell_command("pi", &["remove", &source]);
-    if crate::integration::run_remove("pi", &["remove", &source], &["No matching package found for"])?
-        == crate::integration::RemoveCommand::MissingCli
-    {
-        crate::integration::remove_tree(&dir)?;
+    let remove_command = shell_command("pi", &["remove", &source]);
+    if run_remove("pi", &["remove", &source], &["No matching package found for"])? == RemoveCommand::MissingCli {
+        remove_tree(&dir)?;
         if let Some(parent) = dir.parent() {
-            crate::integration::remove_empty_dir(parent)?;
+            remove_empty_dir(parent)?;
         }
         println!(
             "`pi` isn't on PATH — extracted integration files were removed. Once it is, remove the registration manually:  {remove_command}"
         );
         return Ok(());
     }
-    crate::integration::remove_tree(&dir)?;
+    remove_tree(&dir)?;
     if let Some(parent) = dir.parent() {
-        crate::integration::remove_empty_dir(parent)?;
+        remove_empty_dir(parent)?;
     }
     println!("removed funes from pi — extension registration and extracted integration files.");
     Ok(())

@@ -10,6 +10,8 @@
 //! completed turn and, with a bound memory, `SessionStart` publishes it. funes merges only its own
 //! hook groups and installs the scripts under `~/.codex/hooks/`.
 
+use super::hooks;
+use super::{remove_empty_dir, remove_file, run_remove, shell_command, RemoveCommand};
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -38,7 +40,7 @@ pub fn install(memory: Option<String>) -> Result<()> {
 
     let funes = std::env::var("FUNES_BIN").unwrap_or_else(|_| "funes".to_string());
     let args = mcp_add_args(&funes, memory.as_deref());
-    let manual = crate::integration::shell_command("codex", &args);
+    let manual = shell_command("codex", &args);
     let status = match Command::new("codex").args(&args).status() {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -64,7 +66,7 @@ pub fn install(memory: Option<String>) -> Result<()> {
 /// Reverse [`install`] without touching the memory. MCP unregistering and hook cleanup are both
 /// attempted, so a malformed hooks file cannot leave recall registered.
 pub fn uninstall() -> Result<()> {
-    let registration = crate::integration::run_remove(
+    let registration = run_remove(
         "codex",
         &["mcp", "remove", "funes"],
         &["No MCP server named 'funes' found"],
@@ -81,7 +83,7 @@ pub fn uninstall() -> Result<()> {
         }
     };
 
-    if outcome == crate::integration::RemoveCommand::MissingCli {
+    if outcome == RemoveCommand::MissingCli {
         println!("`codex` isn't on PATH — hooks were removed; once it is, run:  codex mcp remove funes");
     } else {
         println!("removed funes from Codex — recall registration, hook entries, and hook scripts.");
@@ -89,16 +91,16 @@ pub fn uninstall() -> Result<()> {
     Ok(())
 }
 
-fn desired_hooks(hooks_dir: &Path, memory: Option<&str>) -> Vec<crate::hooks::Hook> {
-    let mut hooks = vec![crate::hooks::Hook {
+fn desired_hooks(hooks_dir: &Path, memory: Option<&str>) -> Vec<hooks::Hook> {
+    let mut hooks = vec![hooks::Hook {
         event: "Stop",
-        command: crate::hooks::command(&hooks_dir.join("funes-index.sh").display().to_string(), "codex"),
+        command: hooks::command(&hooks_dir.join("funes-index.sh").display().to_string(), "codex"),
         status: INDEX_STATUS,
     }];
     if let Some(memory) = memory {
-        hooks.push(crate::hooks::Hook {
+        hooks.push(hooks::Hook {
             event: "SessionStart",
-            command: crate::hooks::command(&hooks_dir.join("funes-push.sh").display().to_string(), memory),
+            command: hooks::command(&hooks_dir.join("funes-push.sh").display().to_string(), memory),
             status: PUSH_STATUS,
         });
     }
@@ -111,7 +113,7 @@ fn install_hooks(memory: Option<&str>) -> Result<()> {
     let home = PathBuf::from(std::env::var_os("HOME").context("resolving $HOME for the hooks dir")?);
     let base = home.join(".codex");
     let hooks_dir = base.join("hooks");
-    crate::hooks::write_scripts(&hooks_dir)?;
+    hooks::write_scripts(&hooks_dir)?;
     let desired = desired_hooks(&hooks_dir, memory);
 
     let config = base.join("hooks.json");
@@ -122,7 +124,7 @@ fn install_hooks(memory: Option<&str>) -> Result<()> {
         },
         _ => json!({}),
     };
-    let out = crate::hooks::apply_funes_hooks(cfg, &desired);
+    let out = hooks::apply_funes_hooks(cfg, &desired);
     if let Some(dir) = config.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
@@ -143,8 +145,8 @@ fn install_hooks(memory: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn manual_hook_instructions(path: &Path, desired: &[crate::hooks::Hook]) -> Result<()> {
-    let block = serde_json::to_string_pretty(&crate::hooks::apply_funes_hooks(json!({}), desired))?;
+fn manual_hook_instructions(path: &Path, desired: &[hooks::Hook]) -> Result<()> {
+    let block = serde_json::to_string_pretty(&hooks::apply_funes_hooks(json!({}), desired))?;
     println!(
         "{} isn't plain JSON — leaving it untouched. Merge this in to enable funes hooks:\n{block}",
         path.display()
@@ -176,7 +178,7 @@ fn uninstall_hooks() -> Result<()> {
         Err(e) => return Err(anyhow::Error::new(e).context(format!("reading {}", config.display()))),
     };
     if let Some(current) = current {
-        let out = crate::hooks::apply_funes_hooks(current.clone(), &[]);
+        let out = hooks::apply_funes_hooks(current.clone(), &[]);
         if out != current {
             std::fs::write(&config, format!("{}\n", serde_json::to_string_pretty(&out)?))
                 .with_context(|| format!("writing {}", config.display()))?;
@@ -185,9 +187,9 @@ fn uninstall_hooks() -> Result<()> {
 
     let hooks_dir = base.join("hooks");
     for name in ["funes-index.sh", "funes-push.sh", "funes-sync.log"] {
-        crate::integration::remove_file(&hooks_dir.join(name))?;
+        remove_file(&hooks_dir.join(name))?;
     }
-    crate::integration::remove_empty_dir(&hooks_dir)?;
+    remove_empty_dir(&hooks_dir)?;
     Ok(())
 }
 

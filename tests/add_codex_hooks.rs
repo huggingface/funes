@@ -2,7 +2,7 @@
 //! append-or-replace merge leaves any hooks already there alone. Own test binary: it sets `$HOME`
 //! and `$PATH` (process-global), so it can't share a binary with other env-setting tests.
 
-use funes::codex;
+use funes::agents::codex;
 use serde_json::Value;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;

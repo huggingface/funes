@@ -10,8 +10,8 @@ use serde_json::{json, Value};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-const INDEX_SH: &str = include_str!("../scripts/automation/funes-index.sh");
-const PUSH_SH: &str = include_str!("../scripts/automation/funes-push.sh");
+const INDEX_SH: &str = include_str!("../../scripts/automation/funes-index.sh");
+const PUSH_SH: &str = include_str!("../../scripts/automation/funes-push.sh");
 
 /// The hook's per-run timeout (seconds). Short because both scripts hand off to a detached worker
 /// and return in well under a second — the index/push happen off the hook's critical path.

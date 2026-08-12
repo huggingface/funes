@@ -1,4 +1,11 @@
-//! Small shared helpers for installing and removing agent integrations.
+//! `funes add <agent>` / `funes remove <agent>`: the per-agent integrations, one module each, plus
+//! the small helpers they share for installing and removing themselves.
+
+pub mod claude;
+pub mod codex;
+pub mod hermes;
+pub mod hooks;
+pub mod pi;
 
 use anyhow::{bail, Context, Result};
 use std::path::Path;

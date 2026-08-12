@@ -10,13 +10,15 @@
 //! `hooks/hooks.json` indexes each completed turn and, with a bound memory, publishes at session
 //! start and end. funes never edits the user's `settings.json`.
 
+use super::hooks;
+use super::{remove_empty_dir, remove_tree, run_remove, shell_command, RemoveCommand};
 use anyhow::{bail, Context, Result};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const MARKETPLACE_JSON: &str = include_str!("../integrations/claude-plugin/.claude-plugin/marketplace.json");
-const PLUGIN_JSON: &str = include_str!("../integrations/claude-plugin/funes/.claude-plugin/plugin.json");
+const MARKETPLACE_JSON: &str = include_str!("../../integrations/claude-plugin/.claude-plugin/marketplace.json");
+const PLUGIN_JSON: &str = include_str!("../../integrations/claude-plugin/funes/.claude-plugin/plugin.json");
 const PLUGIN_ID: &str = "funes@huggingface";
 const INDEX_STATUS: &str = "Indexing turn into funes memory";
 const PUSH_STATUS: &str = "Publishing funes memory";
@@ -41,7 +43,7 @@ pub fn install(memory: Option<String>) -> Result<()> {
 
     let funes = std::env::var("FUNES_BIN").unwrap_or_else(|_| "funes".to_string());
     let args = mcp_add_args(&funes, memory.as_deref());
-    let manual = crate::integration::shell_command("claude", &args);
+    let manual = shell_command("claude", &args);
 
     // `claude mcp add` errors if `funes` is already registered, so a re-run — e.g. to change the
     // memory — would fail. Remove any existing registration first (silenced and ignored: it errors
@@ -76,8 +78,6 @@ pub fn install(memory: Option<String>) -> Result<()> {
 /// Reverse [`install`] without touching the memory: remove both user-scoped registrations and the
 /// extracted hooks plugin source.
 pub fn uninstall() -> Result<()> {
-    use crate::integration::RemoveCommand;
-
     let registrations = uninstall_registrations();
     let files = uninstall_hooks();
     let outcome = match (registrations, files) {
@@ -110,9 +110,7 @@ fn remove_instructions() -> &'static str {
      claude plugin marketplace remove huggingface"
 }
 
-fn uninstall_registrations() -> Result<crate::integration::RemoveCommand> {
-    use crate::integration::{run_remove, RemoveCommand};
-
+fn uninstall_registrations() -> Result<RemoveCommand> {
     let outcome = run_remove(
         "claude",
         &["mcp", "remove", "funes", "-s", "user"],
@@ -137,27 +135,27 @@ fn uninstall_registrations() -> Result<crate::integration::RemoveCommand> {
 fn uninstall_hooks() -> Result<()> {
     let home = PathBuf::from(std::env::var_os("HOME").context("resolving $HOME for the plugin dir")?);
     let root = home.join(".funes/integrations/claude-plugin");
-    crate::integration::remove_tree(&root)?;
+    remove_tree(&root)?;
     if let Some(parent) = root.parent() {
-        crate::integration::remove_empty_dir(parent)?;
+        remove_empty_dir(parent)?;
     }
     Ok(())
 }
 
-fn desired_hooks(memory: Option<&str>) -> Vec<crate::hooks::Hook> {
-    let mut hooks = vec![crate::hooks::Hook {
+fn desired_hooks(memory: Option<&str>) -> Vec<hooks::Hook> {
+    let mut hooks = vec![hooks::Hook {
         event: "Stop",
-        command: crate::hooks::command("${CLAUDE_PLUGIN_ROOT}/scripts/funes-index.sh", "claude"),
+        command: hooks::command("${CLAUDE_PLUGIN_ROOT}/scripts/funes-index.sh", "claude"),
         status: INDEX_STATUS,
     }];
     if let Some(memory) = memory {
-        let command = crate::hooks::command("${CLAUDE_PLUGIN_ROOT}/scripts/funes-push.sh", memory);
-        hooks.push(crate::hooks::Hook {
+        let command = hooks::command("${CLAUDE_PLUGIN_ROOT}/scripts/funes-push.sh", memory);
+        hooks.push(hooks::Hook {
             event: "SessionStart",
             command: command.clone(),
             status: PUSH_STATUS,
         });
-        hooks.push(crate::hooks::Hook {
+        hooks.push(hooks::Hook {
             event: "SessionEnd",
             command,
             status: PUSH_STATUS,
@@ -174,14 +172,14 @@ fn install_hooks(memory: Option<&str>) -> Result<()> {
     let plugin = root.join("funes");
     let hooks_json = format!(
         "{}\n",
-        serde_json::to_string_pretty(&crate::hooks::apply_funes_hooks(json!({}), &desired_hooks(memory),))?
+        serde_json::to_string_pretty(&hooks::apply_funes_hooks(json!({}), &desired_hooks(memory),))?
     );
 
     let mut dirty = false;
-    dirty |= crate::hooks::write_if_changed(&root.join(".claude-plugin/marketplace.json"), MARKETPLACE_JSON)?;
-    dirty |= crate::hooks::write_if_changed(&plugin.join(".claude-plugin/plugin.json"), PLUGIN_JSON)?;
-    dirty |= crate::hooks::write_if_changed(&plugin.join("hooks/hooks.json"), &hooks_json)?;
-    dirty |= crate::hooks::write_scripts(&plugin.join("scripts"))?;
+    dirty |= hooks::write_if_changed(&root.join(".claude-plugin/marketplace.json"), MARKETPLACE_JSON)?;
+    dirty |= hooks::write_if_changed(&plugin.join(".claude-plugin/plugin.json"), PLUGIN_JSON)?;
+    dirty |= hooks::write_if_changed(&plugin.join("hooks/hooks.json"), &hooks_json)?;
+    dirty |= hooks::write_scripts(&plugin.join("scripts"))?;
 
     register_hooks(&root, memory.is_some(), dirty)
 }
@@ -190,8 +188,8 @@ fn install_hooks(memory: Option<&str>) -> Result<()> {
 /// plugin and update is version-gated, so changed content is refreshed by uninstalling first.
 fn register_hooks(root: &Path, has_memory: bool, dirty: bool) -> Result<()> {
     let root_str = root.display().to_string();
-    let marketplace = crate::integration::shell_command("claude", &["plugin", "marketplace", "add", &root_str]);
-    let install = crate::integration::shell_command("claude", &["plugin", "install", PLUGIN_ID]);
+    let marketplace = shell_command("claude", &["plugin", "marketplace", "add", &root_str]);
+    let install = shell_command("claude", &["plugin", "install", PLUGIN_ID]);
     let manual = format!("  {marketplace}\n  {install}");
     match Command::new("claude").args(["plugin", "marketplace", "add", &root_str]).status() {
         Ok(s) if s.success() => {}

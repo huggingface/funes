@@ -4,8 +4,9 @@
 //! harness session dirs (Claude Code, Codex, pi) or an explicit path/parquet/repo. funes's home is
 //! `$FUNES_HOME` or `~/.funes`.
 
+use funes::agents::{claude, codex, hermes, pi};
 use funes::harness::Harness;
-use funes::{ask, claude, codex, curate, hermes, hub, index, mcp, pi, push, recall, render, scan, scrub, update};
+use funes::{ask, curate, hub, index, mcp, push, recall, render, scan, scrub, update};
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};

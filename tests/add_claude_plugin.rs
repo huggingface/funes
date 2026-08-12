@@ -4,7 +4,7 @@
 //! files are written regardless, which is what we assert (registering with `claude` is exercised
 //! manually, not here).
 
-use funes::claude;
+use funes::agents::claude;
 use serde_json::Value;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
