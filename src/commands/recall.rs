@@ -15,7 +15,6 @@ use arrow_array::{Float32Array, Int64Array, RecordBatch, StringArray, UInt64Arra
 use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
 use lance::dataset::{Dataset, ROW_ID};
-use lance::Error as LanceError;
 use lance_index::scalar::FullTextSearchQuery;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
@@ -162,9 +161,9 @@ async fn open_for_read(memory: &Memory) -> Result<ReadOutcome> {
     match memory.open().await {
         Ok(ds) => Ok(ReadOutcome::Ready(ds)),
         // The default local memory with no dataset yet → NoIndex (a clear "run funes add" error
-        // below). Gated on `is_missing_dataset` so a real open failure (permissions, corruption, an
+        // below). Gated on `dataset_absent` so a real open failure (permissions, corruption, an
         // incompatible schema) isn't masked as "no index" — it falls through to surface as itself.
-        Err(e) if memory.is_default_local() && is_missing_dataset(&e) => Ok(ReadOutcome::NoIndex),
+        Err(e) if memory.is_default_local() && hub::dataset_absent(&e) => Ok(ReadOutcome::NoIndex),
         // The Hub refused the read on auth (401/403): a clear message beats lance's opendal dump.
         Err(e) if is_auth_error(&e) => match memory {
             Memory::Remote { uri } => Err(hub::unauthorized_remote(uri)),
@@ -172,7 +171,7 @@ async fn open_for_read(memory: &Memory) -> Result<ReadOutcome> {
         },
         // Opened to nothing: a reachable remote never pushed to, or a local path with no dataset.
         // Either way, a clear message beats lance's internal path error.
-        Err(e) if is_missing_dataset(&e) => match memory {
+        Err(e) if hub::dataset_absent(&e) => match memory {
             Memory::Remote { uri } => Err(hub::empty_remote(uri)),
             Memory::Local { path } => Err(anyhow::anyhow!("no index found at {}", path.display())),
         },
@@ -191,14 +190,6 @@ pub async fn check_readable(memory: &Memory) -> Result<()> {
             memory.label()
         )),
     }
-}
-
-/// True if `e` is lance reporting the `chunks.lance` dataset isn't there — the memory opened to no
-/// index (an empty or never-pushed remote, or a path with no dataset). Lets reads report an empty
-/// memory instead of leaking lance's internal path/`_versions` error.
-fn is_missing_dataset(e: &anyhow::Error) -> bool {
-    e.chain()
-        .any(|c| matches!(c.downcast_ref::<LanceError>(), Some(LanceError::DatasetNotFound { .. })))
 }
 
 /// True if `e` is the Hub refusing a remote read on auth (401/403). lance has no typed auth variant
@@ -961,20 +952,6 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 7, 9, 12, 0, 0).unwrap();
         let t = Utc.with_ymd_and_hms(2026, 7, 7, 13, 30, 0).unwrap();
         assert_eq!(stamp(t, now), "2026-07-07 13:30 UTC (46 hours ago)");
-    }
-
-    #[tokio::test]
-    async fn missing_dataset_is_detected() {
-        // Opening a path with no dataset is lance's DatasetNotFound — the empty/absent case.
-        let err = dataset::open("/nonexistent/funes-empty-memory/chunks.lance", HashMap::new())
-            .await
-            .unwrap_err();
-        assert!(is_missing_dataset(&err));
-    }
-
-    #[test]
-    fn unrelated_error_is_not_missing_dataset() {
-        assert!(!is_missing_dataset(&anyhow::anyhow!("some other failure")));
     }
 
     #[test]

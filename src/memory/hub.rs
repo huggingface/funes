@@ -338,10 +338,20 @@ mod tests {
     #[test]
     fn dataset_absent_matches_the_type_not_the_message() {
         // Chain-typed only — text that merely mentions "not found" is not an absence signal.
-        // (The positive paths carry #[non_exhaustive] errors that can't be built here; the
-        // gated round-trip exercises them live — its first publish runs through this.)
+        // (The Hub-side positive path carries a #[non_exhaustive] error that can't be built here;
+        // the gated round-trip exercises it live — its first publish runs through this.)
         assert!(!dataset_absent(&anyhow::anyhow!("404 Entry not found")));
         assert!(!dataset_absent(&anyhow::anyhow!("Dataset not found: chunks")));
+    }
+
+    #[tokio::test]
+    async fn dataset_absent_matches_a_real_missing_dataset() {
+        // Opening a path with no dataset is lance's DatasetNotFound — the absent case every read
+        // and the first publish classify on.
+        let err = dataset::open("/nonexistent/funes-empty-memory/chunks.lance", HashMap::new())
+            .await
+            .unwrap_err();
+        assert!(dataset_absent(&err));
     }
     use arrow_schema::{DataType, Field, Schema};
 
