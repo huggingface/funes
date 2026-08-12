@@ -27,7 +27,7 @@ fn remove_claude_unregisters_both_surfaces_and_deletes_the_extracted_plugin() {
         fs::read_to_string(&log).unwrap(),
         "mcp remove funes -s user\n\
          plugin uninstall funes@huggingface -s user\n\
-         plugin marketplace remove huggingface --scope user\n"
+         plugin marketplace remove huggingface\n"
     );
 
     // Already absent remains a successful no-op locally.

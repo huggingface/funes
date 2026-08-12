@@ -107,7 +107,7 @@ pub fn uninstall() -> Result<()> {
 fn remove_instructions() -> &'static str {
     "  claude mcp remove funes -s user\n  \
      claude plugin uninstall funes@huggingface -s user\n  \
-     claude plugin marketplace remove huggingface --scope user"
+     claude plugin marketplace remove huggingface"
 }
 
 fn uninstall_registrations() -> Result<crate::integration::RemoveCommand> {
@@ -128,7 +128,7 @@ fn uninstall_registrations() -> Result<crate::integration::RemoveCommand> {
     )?;
     run_remove(
         "claude",
-        &["plugin", "marketplace", "remove", "huggingface", "--scope", "user"],
+        &["plugin", "marketplace", "remove", "huggingface"],
         &["Marketplace 'huggingface' not found"],
     )?;
     Ok(outcome)
