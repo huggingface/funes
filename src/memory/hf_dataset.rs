@@ -60,7 +60,7 @@ use object_store::ObjectStore as OSObjectStore;
 use super::capture_store::{CaptureStore, Captured};
 use super::dataset;
 use super::fetch_store::{FetchStore, FileFetcher};
-use super::hub;
+use crate::hub;
 
 /// Outcome of an [`append`] commit.
 pub(crate) enum Appended {

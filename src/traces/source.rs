@@ -16,8 +16,8 @@ use super::jsonl;
 use super::parquet;
 use super::pi;
 use super::Turn;
+use crate::hub;
 use crate::memory::hf_dataset;
-use crate::memory::hub;
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};

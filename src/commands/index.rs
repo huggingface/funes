@@ -8,9 +8,10 @@
 //! nothing is re-embedded or deleted.
 
 use crate::chunk::{self, Tier};
+use crate::hub;
 use crate::inference::{self, embed_batched, Embedder};
 use crate::memory::dataset::{self, build_batch, schema, MODEL};
-use crate::memory::{hub, lock};
+use crate::memory::lock;
 use crate::scan;
 use crate::traces::harness::Harness;
 use crate::traces::{self, repo, source};

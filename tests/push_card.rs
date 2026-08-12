@@ -74,7 +74,7 @@ async fn card_created_refreshed_and_a_hand_card_respected() {
     // A throwaway ROOT memory: unique repo name so concurrent/repeated runs don't collide.
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
     let name = format!("funes-test-card-{}-{nanos}", std::process::id());
-    if let Err(e) = funes::memory::hub::create_dataset_repo(OWNER, &name).await {
+    if let Err(e) = funes::hub::create_dataset_repo(OWNER, &name).await {
         eprintln!("skip: cannot create a scratch repo under {OWNER}: {e}");
         return;
     }

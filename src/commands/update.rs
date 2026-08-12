@@ -6,7 +6,7 @@
 //! made executable. Replacement uses a same-filesystem rename, so the live process keeps its old
 //! inode and the next run picks up the new binary.
 
-use crate::memory::hub;
+use crate::hub;
 use anyhow::{anyhow, bail, Context, Result};
 use hf_hub::buckets::BucketDownload;
 use hf_hub::HFBucket;

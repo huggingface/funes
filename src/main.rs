@@ -6,7 +6,8 @@
 
 use funes::agents::{claude, codex, hermes, pi};
 use funes::commands::{ask, curate, index, mcp, push, recall, scrub, update};
-use funes::memory::{self, hub};
+use funes::hub;
+use funes::memory;
 use funes::scan;
 use funes::traces::harness::Harness;
 use funes::ui::render;

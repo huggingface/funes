@@ -12,8 +12,10 @@
 //! - [`chunk`], [`scan`] — the two models the layers share: chunk text and its ids, and secret
 //!   findings.
 //! - [`inference`] — embedding and reranking behind traits, so a backend swaps at build time.
-//! - [`memory`] — the memory itself, in three sublayers: Lance and object-store *mechanics*, the
-//!   Hub *transport*, and the *domain* — what a memory is and what state it's in.
+//! - [`hub`] — *transport*: the Hugging Face Hub's client, credentials, and dataset-repo identity
+//!   and lifecycle. Knows nothing about memories; four layers call it.
+//! - [`memory`] — the memory itself: Lance and object-store *mechanics* under a *domain* that says
+//!   what a memory is and what state it's in.
 //! - [`commands`] — what funes does when you run it: orchestration and decisions.
 //! - [`ui`] — how a result reaches the terminal.
 //! - [`agents`] — registering funes with a coding agent (MCP + automation hooks).
@@ -31,6 +33,7 @@ compile_error!("funes is unix-only (Linux/macOS)");
 pub mod agents;
 pub mod chunk;
 pub mod commands;
+pub mod hub;
 pub mod inference;
 pub mod memory;
 pub mod scan;

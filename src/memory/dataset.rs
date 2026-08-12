@@ -27,7 +27,7 @@ use lance_linalg::distance::MetricType;
 pub const TABLE: &str = "chunks";
 
 /// The embedding model a memory's vectors are built with, and their width. Pinned in the schema
-/// metadata and enforced on open ([`super::hub::Memory::open`]): a memory built with another model
+/// metadata and enforced on open ([`super::Memory::open`]): a memory built with another model
 /// can't be queried with funes's embeddings.
 pub const MODEL: &str = "BAAI/bge-small-en-v1.5";
 pub const DIM: i32 = 384;

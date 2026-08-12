@@ -18,7 +18,6 @@ pub mod card;
 pub mod dataset;
 pub mod fetch_store;
 pub mod hf_dataset;
-pub mod hub;
 pub mod lock;
 
 use std::collections::HashMap;
@@ -29,8 +28,8 @@ use anyhow::{anyhow, Result};
 use hf_hub::HFError;
 use lance::dataset::Dataset;
 
+use crate::hub::{client, hf_token, is_offline_error, is_remote_shorthand, parse_hf};
 use dataset::{DIM, MODEL};
-use hub::{client, hf_token, is_offline_error, is_remote_shorthand, parse_hf};
 
 /// A memory to recall from: a local Lance directory or a remote dataset on the HF Hub.
 #[derive(Debug, Clone)]
