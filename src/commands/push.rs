@@ -4,14 +4,14 @@
 //! delta is `local_ids − remote_ids` — the same primitive `index` uses. `push` is orchestration:
 //! it computes the delta, holds back any row that still contains a secret (redaction happens at
 //! index time; this is the egress backstop — the rows wait for `funes scrub`), and drives the HF
-//! write operations in [`crate::memory::hf_dataset`], which own the atomic, parent-commit-guarded commits.
+//! write operations in [`crate::memory::remote`], which own the atomic, parent-commit-guarded commits.
 //!
 //! - **First publish:** build the dataset locally (data + FTS/IVF indexes) and upload every file in
 //!   one commit.
-//! - **Append:** [`hf_dataset::append`] lands the new fragment + manifest + transaction in one
+//! - **Append:** [`remote::append`] lands the new fragment + manifest + transaction in one
 //!   guarded `create_commit`, retried against a fresh head if a concurrent push moved it. The new
 //!   rows are left unindexed (a query still finds them by brute force).
-//! - **Reindex:** a *separate* guarded commit ([`hf_dataset::reindex`]), kept off the data commit so
+//! - **Reindex:** a *separate* guarded commit ([`remote::reindex`]), kept off the data commit so
 //!   the data commit stays small. `push` runs it after the data commit when the unindexed backlog
 //!   crosses [`REINDEX_THRESHOLD`] (best-effort: a head-moved conflict is a warning, the next push
 //!   retries), or eagerly with `--force-reindex` (retried until it lands).
@@ -24,7 +24,7 @@ use super::curate;
 use crate::hub;
 use crate::memory::card::{self, CardAction, CardCtx};
 use crate::memory::dataset;
-use crate::memory::hf_dataset::{self, Appended, Reindexed};
+use crate::memory::remote::{self, Appended, Reindexed};
 use crate::memory::{self, Memory};
 use crate::{chunk, scan};
 use anyhow::{bail, Context, Result};
@@ -42,7 +42,7 @@ use std::sync::Arc;
 
 /// Reindex the remote once this many appended rows are sitting unindexed (answered by a
 /// brute-force scan until folded in). Bounds per-query cost, not push count, and is stateless —
-/// [`hf_dataset::append`] reads it straight from Lance's index stats. Nonzero so tiny per-push
+/// [`remote::append`] reads it straight from Lance's index stats. Nonzero so tiny per-push
 /// deltas don't pile up between compactions.
 const REINDEX_THRESHOLD: u64 = 500;
 
@@ -424,7 +424,7 @@ pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm) -> 
         date: &date,
     };
     let (card_body, card_note) = if prefix.is_empty() {
-        card_file(hf_dataset::fetch_readme(&repo, &rev).await, &ctx)
+        card_file(remote::fetch_readme(&repo, &rev).await, &ctx)
     } else {
         (None, String::new())
     };
@@ -435,11 +435,11 @@ pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm) -> 
         .map(|body| BTreeMap::from([("README.md".to_string(), Bytes::from(body))]))
         .unwrap_or_default();
 
-    // 5. First publish: hf_dataset builds the dataset locally (data + indexes) and uploads it in
+    // 5. First publish: `remote` builds the dataset locally (data + indexes) and uploads it in
     // one commit; the card rides along.
     if first_publish {
         eprintln!("building the dataset to publish…");
-        let oid = hf_dataset::first_publish(
+        let oid = remote::first_publish(
             &repo,
             &prefix,
             batches,
@@ -467,7 +467,7 @@ pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm) -> 
     eprintln!("uploading {n_chunks} chunk(s) to {}…", target.label());
     let mut attempts = 0u32;
     let (oid, unindexed) = loop {
-        let attempt = hf_dataset::append(
+        let attempt = remote::append(
             &repo,
             &dataset_uri,
             opts.clone(),
@@ -607,7 +607,7 @@ fn drop_secret_rows(batches: Vec<RecordBatch>) -> Result<(Vec<RecordBatch>, Skip
     Ok((clean, Skipped { rows: dropped, summary }))
 }
 
-/// Forced reindex: ask [`hf_dataset::reindex`] to refresh and commit, retrying on a head-moved
+/// Forced reindex: ask [`remote::reindex`] to refresh and commit, retrying on a head-moved
 /// conflict (it re-reads the head each call) until it lands or [`MAX_COMMIT_RETRIES`] is exceeded.
 async fn reindex_forced(
     repo: &HFRepository<RepoTypeDataset>,
@@ -616,7 +616,7 @@ async fn reindex_forced(
     rev: &str,
 ) -> Result<String> {
     for _ in 0..=MAX_COMMIT_RETRIES {
-        match hf_dataset::reindex(repo, dataset_uri, opts.clone(), rev, "funes push: reindex".to_string()).await? {
+        match remote::reindex(repo, dataset_uri, opts.clone(), rev, "funes push: reindex".to_string()).await? {
             Reindexed::Committed(oid) => return Ok(format!("  reindexed (commit {oid})\n")),
             Reindexed::AlreadyCurrent => return Ok("  index already current\n".to_string()),
             Reindexed::Conflict => continue,
@@ -633,7 +633,7 @@ async fn reindex_auto(
     opts: &HashMap<String, String>,
     rev: &str,
 ) -> String {
-    match hf_dataset::reindex(repo, dataset_uri, opts.clone(), rev, "funes push: reindex".to_string()).await {
+    match remote::reindex(repo, dataset_uri, opts.clone(), rev, "funes push: reindex".to_string()).await {
         Ok(Reindexed::Committed(oid)) => format!("  reindexed (commit {oid})\n"),
         Ok(Reindexed::AlreadyCurrent) => String::new(),
         Ok(Reindexed::Conflict) => {

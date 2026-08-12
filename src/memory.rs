@@ -17,8 +17,8 @@ pub mod capture_store;
 pub mod card;
 pub mod dataset;
 pub mod fetch_store;
-pub mod hf_dataset;
 pub mod lock;
+pub mod remote;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -113,7 +113,7 @@ impl Memory {
                 // Pin reads to the head commit and install the read wrapper. The pin is re-resolved
                 // on every open, so a new push is picked up by the next command. If the head can't
                 // be resolved (offline/transient), degrade to a plain live open rather than fail.
-                match hf_dataset::fetch_wrapper(&owner, &name, token.as_deref(), READ_BRANCH).await {
+                match remote::fetch_wrapper(&owner, &name, token.as_deref(), READ_BRANCH).await {
                     Ok((wrapper, sha)) => {
                         opts.insert("hf_revision".to_string(), sha);
                         dataset::open_wrapped(&table, opts, wrapper).await?

@@ -1,4 +1,4 @@
-//! Append and reindex for the remote HF Lance dataset.
+//! The remote side of a memory: how its Lance dataset is read from and written to a Hub repo.
 //!
 //! [`append`] adds rows; [`reindex`] folds the unindexed backlog into the FTS/IVF indexes. Each
 //! runs a native Lance op and lands the result in one `create_commit` on the branch, guarded by a

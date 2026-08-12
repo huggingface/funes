@@ -845,7 +845,7 @@ pub async fn status(memory: Memory) -> Result<String> {
                     if t.timestamp() > 0 {
                         let _ = writeln!(out, "last push: {}", stamp(t, now));
                     }
-                    let unindexed = crate::memory::hf_dataset::max_unindexed_rows(&ds).await;
+                    let unindexed = crate::memory::remote::max_unindexed_rows(&ds).await;
                     if unindexed > 0 {
                         let _ = writeln!(
                             out,

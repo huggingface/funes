@@ -20,7 +20,7 @@
 
 use crate::hub;
 use crate::memory::{self, Memory};
-use crate::memory::{dataset, hf_dataset};
+use crate::memory::{dataset, remote};
 use crate::traces::jsonl;
 use anyhow::{bail, Context, Result};
 use arrow_array::{Int64Array, RecordBatch, RecordBatchIterator, StringArray};
@@ -154,7 +154,7 @@ async fn promote(uri: &str, project: &str) -> Result<()> {
     let dataset_uri = format!("{uri}/{}.lance", dataset::TABLE);
     let opts = HashMap::from([("hf_token".to_string(), token), ("revision".to_string(), rev.clone())]);
     let updates = HashMap::from([("project".to_string(), project.to_string())]);
-    hf_dataset::amend_schema_metadata(
+    remote::amend_schema_metadata(
         &repo,
         &dataset_uri,
         opts,

@@ -82,7 +82,7 @@ name = "bench_backends"
 path = "benchmark/bench_backends.rs"
 
 # One-off backfill of the `repo` column (local: add_columns; remote: add_columns via a guarded
-# commit). Delete both, and `hf_dataset::add_column`, once every store carries `repo`.
+# commit). Delete both, and `memory::remote::add_column`, once every store carries `repo`.
 [[example]]
 name = "backfill_repo"
 path = "scripts/backfill_repo.rs"
