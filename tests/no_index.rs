@@ -2,7 +2,7 @@
 //! onboarding) instead of returning canned content — there is no built-in corpus anymore. Points
 //! `$FUNES_HOME` at an empty temp dir and exercises the no-index paths.
 
-use funes::hub::Memory;
+use funes::memory::hub::Memory;
 
 #[tokio::test]
 async fn recall_without_an_index_guides_to_funes_add() {

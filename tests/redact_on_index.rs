@@ -52,7 +52,7 @@ async fn planted_key_is_redacted_at_index_time() {
     funes::index::run_index(source.path(), false, None).await.unwrap();
 
     // Read the stored turn back: the marker is present, the key body is gone.
-    let got = funes::recall::get(funes::hub::Memory::local(), session.into(), "t1".into(), 3)
+    let got = funes::recall::get(funes::memory::hub::Memory::local(), session.into(), "t1".into(), 3)
         .await
         .unwrap();
     assert!(

@@ -3,7 +3,7 @@
 //! [`FetchStore`] wraps an inner [`ObjectStore`](object_store::ObjectStore): it serves every `get*`
 //! from a whole local file supplied by a [`FileFetcher`] — fetched once, then sliced to the requested
 //! range — and delegates every other method (listing, writes) to the inner store. It is the read
-//! mirror of [`CaptureStore`](crate::capture_store::CaptureStore), the write decorator.
+//! mirror of [`CaptureStore`](super::capture_store::CaptureStore), the write decorator.
 //!
 //! It owns no cache. The [`FileFetcher`] decides where the file comes from and whether it persists: a
 //! fetcher backed by a disk cache turns this into a read-through cache; a fetcher that re-downloads

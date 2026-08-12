@@ -20,7 +20,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use funes::hub::Memory;
+use funes::memory::hub::Memory;
 use funes::push::Confirm;
 use hf_hub::{HFClient, HFError, HFRepository, RepoTypeDataset};
 

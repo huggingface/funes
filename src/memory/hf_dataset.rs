@@ -16,7 +16,7 @@
 //! ```
 //!
 //! A multi-file write would then be several commits — non-atomic, no CAS. So the op runs through a
-//! [`CaptureStore`](crate::capture_store::CaptureStore) installed via Lance's
+//! [`CaptureStore`](super::capture_store::CaptureStore) installed via Lance's
 //! [`WrappingObjectStore`] seam: Lance's writes are captured in memory instead of hitting the Hub,
 //! and we ship the whole set as one guarded `create_commit`.
 //!
@@ -57,10 +57,10 @@ use lance_index::optimize::OptimizeOptions;
 use lance_io::object_store::WrappingObjectStore;
 use object_store::ObjectStore as OSObjectStore;
 
-use crate::capture_store::{CaptureStore, Captured};
-use crate::dataset;
-use crate::fetch_store::{FetchStore, FileFetcher};
-use crate::hub;
+use super::capture_store::{CaptureStore, Captured};
+use super::dataset;
+use super::fetch_store::{FetchStore, FileFetcher};
+use super::hub;
 
 /// Outcome of an [`append`] commit.
 pub(crate) enum Appended {

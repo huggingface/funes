@@ -9,9 +9,10 @@
 
 use crate::chunk::{self, Tier};
 use crate::inference::{self, Embedder};
+use crate::memory::{dataset, hub, lock};
+use crate::scan;
 use crate::traces::harness::Harness;
 use crate::traces::{self, repo, source};
-use crate::{dataset, hub, lock, scan};
 use anyhow::{anyhow, Context, Result};
 use arrow_array::types::Float32Type;
 use arrow_array::{Array, FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator, StringArray};

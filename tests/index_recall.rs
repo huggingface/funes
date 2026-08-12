@@ -36,12 +36,14 @@ async fn index_then_read_surface() {
     funes::index::run_index(source.path(), false, None).await.unwrap();
 
     // status: non-empty chunk count.
-    let status = funes::recall::status(funes::hub::Memory::local()).await.unwrap();
+    let status = funes::recall::status(funes::memory::hub::Memory::local())
+        .await
+        .unwrap();
     assert!(status.contains("chunks:"), "status missing chunk count: {status}");
 
     // recall: the parsing turn surfaces, and the `→ get` line carries the full session id.
     let out = funes::recall::recall(
-        funes::hub::Memory::local(),
+        funes::memory::hub::Memory::local(),
         "parse transcripts into turns".into(),
         5,
         30,
@@ -64,7 +66,7 @@ async fn index_then_read_surface() {
 
     // type filter: restrict to tool_use → the Bash call.
     let tu = funes::recall::recall(
-        funes::hub::Memory::local(),
+        funes::memory::hub::Memory::local(),
         "cargo test".into(),
         5,
         30,
@@ -78,7 +80,7 @@ async fn index_then_read_surface() {
     assert!(tu.contains("tool_use"), "type filter should keep tool_use rows: {tu}");
 
     // get: reassemble the assistant turn by its uuid.
-    let got = funes::recall::get(funes::hub::Memory::local(), session.clone(), "t2".into(), 3)
+    let got = funes::recall::get(funes::memory::hub::Memory::local(), session.clone(), "t2".into(), 3)
         .await
         .unwrap();
     assert!(got.contains("typed blocks"), "get should return the turn text: {got}");
@@ -92,7 +94,7 @@ async fn index_then_read_surface() {
     let memory2 = db_dir.path().join("memory2");
     copy_dir(&db_dir.path().join("memory"), &memory2);
     let out2 = funes::recall::recall(
-        funes::hub::Memory::parse(&memory2.to_string_lossy()),
+        funes::memory::hub::Memory::parse(&memory2.to_string_lossy()),
         "parse transcripts into turns".into(),
         5,
         30,

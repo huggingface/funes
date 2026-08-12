@@ -4,7 +4,7 @@
 //! process can hold the lock and then observe the contention paths without spawning `funes`
 //! subprocesses.
 
-use funes::lock::MemoryLock;
+use funes::memory::lock::MemoryLock;
 
 #[tokio::test]
 async fn memory_lock_fails_loudly_on_contention() {

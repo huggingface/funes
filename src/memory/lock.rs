@@ -8,7 +8,7 @@ use std::fs::{File, TryLockError};
 
 use anyhow::{anyhow, Context, Result};
 
-use crate::dataset;
+use super::dataset;
 
 /// An exclusive advisory lock on the local memory, released on drop (and on process death).
 #[derive(Debug)]

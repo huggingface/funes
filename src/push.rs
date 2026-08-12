@@ -20,10 +20,11 @@
 //! [`crate::curate`]) — ships only the sessions marked include; any other memory is a **personal
 //! memory** and takes everything, as ever.
 
-use crate::card::{self, CardAction, CardCtx};
-use crate::hf_dataset::{self, Appended, Reindexed};
-use crate::hub::{self, Memory};
-use crate::{chunk, curate, dataset, scan};
+use crate::memory::card::{self, CardAction, CardCtx};
+use crate::memory::dataset;
+use crate::memory::hf_dataset::{self, Appended, Reindexed};
+use crate::memory::hub::{self, Memory};
+use crate::{chunk, curate, scan};
 use anyhow::{bail, Context, Result};
 use arrow_array::{BooleanArray, RecordBatch, StringArray};
 use arrow_select::filter::filter_record_batch;

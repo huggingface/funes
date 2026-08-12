@@ -56,7 +56,7 @@ async fn scrub_redacts_an_existing_secret_in_place() {
     // Index with a no-op scanner so the secret lands in the memory unredacted.
     std::env::set_var("FUNES_TRUFFLEHOG", "/usr/bin/true");
     funes::index::run_index(source.path(), false, None).await.unwrap();
-    let dirty = funes::recall::get(funes::hub::Memory::local(), session.into(), "t1".into(), 3)
+    let dirty = funes::recall::get(funes::memory::hub::Memory::local(), session.into(), "t1".into(), 3)
         .await
         .unwrap();
     assert!(
@@ -67,7 +67,7 @@ async fn scrub_redacts_an_existing_secret_in_place() {
     // Scrub with the real scanner: it must redact the key in place.
     std::env::remove_var("FUNES_TRUFFLEHOG");
     funes::scrub::run().await.unwrap();
-    let clean = funes::recall::get(funes::hub::Memory::local(), session.into(), "t1".into(), 3)
+    let clean = funes::recall::get(funes::memory::hub::Memory::local(), session.into(), "t1".into(), 3)
         .await
         .unwrap();
     assert!(

@@ -14,7 +14,7 @@ use std::io::{BufRead, BufReader, IsTerminal, Read};
 use std::process::{Command, ExitStatus, Stdio};
 
 use crate::banner::{accent, band_width, Banner};
-use crate::hub::Memory;
+use crate::memory::hub::Memory;
 use crate::recall::{check_readable, memory_hint, recall_hits};
 use crate::render;
 

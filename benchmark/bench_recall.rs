@@ -19,7 +19,7 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use funes::hub::Memory;
+use funes::memory::hub::Memory;
 use funes::recall::recall;
 use hf_hub::HFClient;
 use std::path::Path;

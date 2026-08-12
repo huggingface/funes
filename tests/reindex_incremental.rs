@@ -19,7 +19,9 @@ fn write_session(source: &std::path::Path, n_turns: usize) {
 }
 
 async fn chunk_count() -> usize {
-    let s = funes::recall::status(funes::hub::Memory::local()).await.unwrap();
+    let s = funes::recall::status(funes::memory::hub::Memory::local())
+        .await
+        .unwrap();
     s.lines()
         .find_map(|l| l.strip_prefix("chunks: "))
         .and_then(|n| n.trim().parse().ok())

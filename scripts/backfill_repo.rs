@@ -11,8 +11,8 @@
 use anyhow::{Context, Result};
 use arrow_array::{RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
+use funes::memory::{dataset, lock};
 use funes::traces::repo;
-use funes::{dataset, lock};
 use lance::dataset::{BatchUDF, Dataset, NewColumnTransform};
 use std::collections::HashMap;
 use std::path::Path;

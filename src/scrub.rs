@@ -4,7 +4,8 @@
 
 use crate::index::{build_batch, embed_batched, schema};
 use crate::inference::{self, Embedder};
-use crate::{chunk, dataset, lock, scan};
+use crate::memory::{dataset, lock};
+use crate::{chunk, scan};
 use anyhow::Result;
 use arrow_array::{BooleanArray, RecordBatch, RecordBatchIterator};
 use arrow_select::filter::filter_record_batch;

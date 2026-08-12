@@ -2,7 +2,7 @@
 //! so any MCP client (Claude Code, Cursor, …) can call funes as a first-class tool.
 //! stdout is the JSON-RPC channel — logs must go to stderr.
 
-use crate::hub::Memory;
+use crate::memory::hub::Memory;
 use crate::recall;
 use anyhow::Result;
 use rmcp::handler::server::router::tool::ToolRouter;

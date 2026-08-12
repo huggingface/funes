@@ -18,7 +18,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arrow_array::{Array, StringArray};
-use funes::hub::Memory;
+use funes::memory::hub::Memory;
 use funes::push::Confirm;
 use hf_hub::{HFClient, RepoTypeDataset};
 
@@ -50,7 +50,7 @@ fn tool_ok(bin: &str, arg: &str) -> bool {
 /// The distinct `session_id`s stored on the remote dataset at `uri`.
 async fn remote_sessions(uri: &str) -> HashSet<String> {
     let ds = Memory::parse(uri).open().await.expect("opening the remote dataset");
-    let batches = funes::dataset::scan_rows(&ds, &["session_id"], None, None)
+    let batches = funes::memory::dataset::scan_rows(&ds, &["session_id"], None, None)
         .await
         .expect("scanning the remote dataset");
     let mut set = HashSet::new();
@@ -86,7 +86,7 @@ async fn a_project_memory_ships_only_included_sessions() {
     // A throwaway memory: unique repo name so concurrent/repeated runs don't collide.
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
     let name = format!("funes-test-curate-{}-{nanos}", std::process::id());
-    if let Err(e) = funes::hub::create_dataset_repo(OWNER, &name).await {
+    if let Err(e) = funes::memory::hub::create_dataset_repo(OWNER, &name).await {
         eprintln!("skip: cannot create a scratch repo under {OWNER}: {e}");
         return;
     }

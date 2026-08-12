@@ -30,9 +30,13 @@ async fn grounding_embeds_memory_passages_in_the_prompt() {
     let session = write_transcript(source.path());
     funes::index::run_index(source.path(), false, None).await.unwrap();
 
-    let prompt = funes::ask::grounding(funes::hub::Memory::local(), "why reciprocal rank fusion", &|_| ())
-        .await
-        .unwrap();
+    let prompt = funes::ask::grounding(
+        funes::memory::hub::Memory::local(),
+        "why reciprocal rank fusion",
+        &|_| (),
+    )
+    .await
+    .unwrap();
 
     assert!(
         prompt.starts_with("Answer the question below"),

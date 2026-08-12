@@ -66,8 +66,8 @@ async fn scrub_dropping_every_block_leaves_a_valid_empty_memory() {
     funes::scrub::run().await.unwrap();
 
     // The empty Overwrite must leave a valid, reopenable memory with zero rows.
-    let uri = funes::dataset::table_uri(&funes::dataset::local_memory_dir());
-    let ds = funes::dataset::open(&uri, HashMap::new())
+    let uri = funes::memory::dataset::table_uri(&funes::memory::dataset::local_memory_dir());
+    let ds = funes::memory::dataset::open(&uri, HashMap::new())
         .await
         .expect("memory must reopen after an all-dropped scrub");
     assert_eq!(

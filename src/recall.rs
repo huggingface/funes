@@ -6,9 +6,9 @@
 
 use crate::chunk;
 use crate::curate;
-use crate::dataset;
-use crate::hub::{self, Memory, Reachability};
 use crate::inference::{self, Embedder, Reranker};
+use crate::memory::dataset;
+use crate::memory::hub::{self, Memory, Reachability};
 use crate::traces::harness::Harness;
 use anyhow::{anyhow, Context, Result};
 use arrow_array::{Float32Array, Int64Array, RecordBatch, StringArray, UInt64Array};
@@ -854,7 +854,7 @@ pub async fn status(memory: Memory) -> Result<String> {
                     if t.timestamp() > 0 {
                         let _ = writeln!(out, "last push: {}", stamp(t, now));
                     }
-                    let unindexed = crate::hf_dataset::max_unindexed_rows(&ds).await;
+                    let unindexed = crate::memory::hf_dataset::max_unindexed_rows(&ds).await;
                     if unindexed > 0 {
                         let _ = writeln!(
                             out,
