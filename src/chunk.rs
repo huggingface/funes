@@ -97,7 +97,9 @@ fn elide_data_uris(text: &str) -> Cow<'_, str> {
     if !text.contains(BASE64_MARKER) {
         return Cow::Borrowed(text);
     }
-    let mut out = String::with_capacity(text.len());
+    // Not `with_capacity(text.len())`: this path runs only when something is elided, so the output
+    // is typically a fraction of the input — a screenshot's megabytes collapse to a marker.
+    let mut out = String::new();
     let mut rest = text;
     while let Some(at) = rest.find(BASE64_MARKER) {
         let (head, tail) = rest.split_at(at + BASE64_MARKER.len());
@@ -120,7 +122,6 @@ fn is_base64_char(c: char) -> bool {
 
 fn render(block_type: &str, text: &str, tool_name: &Option<String>) -> String {
     let text = elide_data_uris(text);
-    let text = text.as_ref();
     match block_type {
         "tool_use" => format!("[tool_use {}] {}", py_opt(tool_name), text).trim().to_string(),
         "tool_result" => {
@@ -130,7 +131,7 @@ fn render(block_type: &str, text: &str, tool_name: &Option<String>) -> String {
             };
             format!("[{label}] {text}").trim().to_string()
         }
-        _ => text.to_string(),
+        _ => text.into_owned(),
     }
 }
 
