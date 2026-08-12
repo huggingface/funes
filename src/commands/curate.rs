@@ -18,7 +18,6 @@
 //! Human- and agent-editable. A decision flipped to `exclude` later does not retract what
 //! already shipped — the remote is append-only; curation prevents, it does not undo.
 
-use super::index;
 use crate::memory::hub::{self, Memory};
 use crate::memory::{dataset, hf_dataset};
 use crate::traces::jsonl;
@@ -43,7 +42,7 @@ pub fn project(ds: &Dataset) -> Option<String> {
 
 /// The funes chunk schema with the project stamped beside the embedding-model pin.
 fn project_schema(project: &str) -> Arc<Schema> {
-    let base = index::schema();
+    let base = dataset::schema();
     let mut metadata = base.metadata().clone();
     metadata.insert("project".to_string(), project.to_string());
     Arc::new(Schema::new_with_metadata(base.fields().clone(), metadata))
@@ -914,7 +913,7 @@ exclude ddd # later";
             Some("huggingface/funes")
         );
         assert!(schema.metadata().contains_key("embedding_model"), "the pin survives");
-        assert_eq!(schema.fields(), index::schema().fields(), "fields unchanged");
+        assert_eq!(schema.fields(), dataset::schema().fields(), "fields unchanged");
     }
 
     /// An empty local dataset written with `schema`, opened back.
@@ -934,7 +933,7 @@ exclude ddd # later";
         assert_eq!(project(&ds).as_deref(), Some("huggingface/funes"));
 
         let personal = tempfile::tempdir().unwrap();
-        let ds = empty_ds(personal.path(), index::schema()).await;
+        let ds = empty_ds(personal.path(), dataset::schema()).await;
         assert!(project(&ds).is_none(), "a plain memory is a personal memory");
     }
 
@@ -1040,8 +1039,8 @@ exclude ddd # later";
                 repo: (*repo).into(),
             })
             .collect();
-        let vectors = vec![vec![0.0f32; index::DIM as usize]; chunks.len()];
-        let batch = index::build_batch(&chunks, &vectors).unwrap();
+        let vectors = vec![vec![0.0f32; dataset::DIM as usize]; chunks.len()];
+        let batch = dataset::build_batch(&chunks, &vectors).unwrap();
         let schema = batch.schema();
         let uri = dataset::table_uri(&dir.to_string_lossy());
         let reader = RecordBatchIterator::new(vec![Ok(batch)], schema);

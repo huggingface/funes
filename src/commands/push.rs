@@ -645,7 +645,6 @@ async fn reindex_auto(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::index;
     use arrow_array::RecordBatchIterator;
     use lance::dataset::WriteParams;
 
@@ -760,8 +759,8 @@ mod tests {
     /// Build a to-push batch the way the memory stores it: chunk the turns, stamp zero vectors.
     fn batch(turns: &[Turn]) -> (RecordBatch, Vec<chunk::Chunk>) {
         let chunks = chunk::chunks_from_turns(turns, &chunk::Tier::ALL, true);
-        let vectors = vec![vec![0.0f32; index::DIM as usize]; chunks.len()];
-        (index::build_batch(&chunks, &vectors).unwrap(), chunks)
+        let vectors = vec![vec![0.0f32; dataset::DIM as usize]; chunks.len()];
+        (dataset::build_batch(&chunks, &vectors).unwrap(), chunks)
     }
 
     #[test]

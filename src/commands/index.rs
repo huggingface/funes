@@ -8,27 +8,21 @@
 //! nothing is re-embedded or deleted.
 
 use crate::chunk::{self, Tier};
-use crate::inference::{self, Embedder};
-use crate::memory::{dataset, hub, lock};
+use crate::inference::{self, embed_batched, Embedder};
+use crate::memory::dataset::{self, build_batch, schema, MODEL};
+use crate::memory::{hub, lock};
 use crate::scan;
 use crate::traces::harness::Harness;
 use crate::traces::{self, repo, source};
 use anyhow::{anyhow, Context, Result};
-use arrow_array::types::Float32Type;
-use arrow_array::{Array, FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator, StringArray};
-use arrow_schema::{DataType, Field, Schema};
+use arrow_array::{Array, RecordBatchIterator, StringArray};
 use lance::dataset::{Dataset, WriteParams};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io::{IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-pub const MODEL: &str = "BAAI/bge-small-en-v1.5";
-pub const DIM: i32 = 384;
-const EMBED_BATCH: usize = 256;
 
 /// Take the memory lock. An interactive caller (a human at `funes index`/`funes add`) waits out a
 /// brief contention — up to 3 retries, 5s apart — since a memory operation rarely runs long; an
@@ -50,89 +44,6 @@ async fn acquire_lock(interactive: bool) -> Result<lock::MemoryLock> {
     Err(anyhow!(
         "another funes memory operation is in progress; retry in a moment"
     ))
-}
-
-/// The table schema (column order is load-bearing for Lance).
-pub(crate) fn schema() -> Arc<Schema> {
-    let utf8 = |name: &str| Field::new(name, DataType::Utf8, true);
-    let i64f = |name: &str| Field::new(name, DataType::Int64, true);
-    Arc::new(Schema::new_with_metadata(
-        vec![
-            utf8("id"),
-            utf8("text"),
-            utf8("session_id"),
-            utf8("workdir"),
-            utf8("turn_uuid"),
-            utf8("parent_uuid"),
-            i64f("seq"),
-            utf8("ts"),
-            utf8("role"),
-            utf8("block_type"),
-            utf8("tool_name"),
-            utf8("source_path"),
-            i64f("block_idx"),
-            i64f("split_idx"),
-            Field::new(
-                "vector",
-                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), DIM),
-                true,
-            ),
-            // After `vector`: `add_columns` appends a migrated column at the end, so a
-            // freshly-built memory must match that order (the tripwire test pins it). `harness`
-            // came first, then `repo` — each appended in turn.
-            utf8("harness"),
-            utf8("repo"),
-        ],
-        HashMap::from([("embedding_model".to_string(), MODEL.to_string())]),
-    ))
-}
-
-pub(crate) fn build_batch(chunks: &[chunk::Chunk], vectors: &[Vec<f32>]) -> Result<RecordBatch> {
-    let s = |f: &dyn Fn(&chunk::Chunk) -> Option<String>| -> StringArray { chunks.iter().map(f).collect() };
-    let i = |f: &dyn Fn(&chunk::Chunk) -> i64| -> Int64Array { chunks.iter().map(|c| Some(f(c))).collect() };
-    let vector = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
-        vectors
-            .iter()
-            .map(|v| Some(v.iter().map(|&x| Some(x)).collect::<Vec<_>>())),
-        DIM,
-    );
-    Ok(RecordBatch::try_new(
-        schema(),
-        vec![
-            Arc::new(s(&|c| Some(c.id.clone()))),
-            Arc::new(s(&|c| Some(c.text.clone()))),
-            Arc::new(s(&|c| Some(c.session_id.clone()))),
-            Arc::new(s(&|c| Some(c.workdir.clone()))),
-            Arc::new(s(&|c| Some(c.turn_uuid.clone()))),
-            Arc::new(s(&|c| c.parent_uuid.clone())),
-            Arc::new(i(&|c| c.seq)),
-            Arc::new(s(&|c| Some(c.ts.clone()))),
-            Arc::new(s(&|c| Some(c.role.clone()))),
-            Arc::new(s(&|c| Some(c.block_type.clone()))),
-            Arc::new(s(&|c| c.tool_name.clone())),
-            Arc::new(s(&|c| Some(c.source_path.clone()))),
-            Arc::new(i(&|c| c.block_idx)),
-            Arc::new(i(&|c| c.split_idx)),
-            Arc::new(vector),
-            Arc::new(s(&|c| Some(c.harness.clone()))),
-            Arc::new(s(&|c| Some(c.repo.clone()))),
-        ],
-    )?)
-}
-
-/// Embed `texts` in batches of [`EMBED_BATCH`], calling `on_batch(embedded_so_far)` after each so a
-/// caller can report progress (or pass a no-op).
-pub(crate) fn embed_batched(
-    embedder: &mut dyn Embedder,
-    texts: &[&str],
-    mut on_batch: impl FnMut(usize),
-) -> Result<Vec<Vec<f32>>> {
-    let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
-    for group in texts.chunks(EMBED_BATCH) {
-        vectors.extend(embedder.embed(group)?);
-        on_batch(vectors.len());
-    }
-    Ok(vectors)
 }
 
 /// Every chunk id already stored. Re-indexing keeps only the chunks whose id isn't here, so a grown
@@ -1132,36 +1043,6 @@ mod tests {
         // >= 90 min → hours with one decimal.
         assert_eq!(fmt_eta(Duration::from_secs(5400)), "1.5 h");
         assert_eq!(fmt_eta(Duration::from_secs(9000)), "2.5 h");
-    }
-
-    #[test]
-    fn schema_column_order_is_load_bearing() {
-        // Column order must match build_batch's array order exactly, or Lance writes the
-        // wrong column. Pin it so a reorder can't slip through.
-        let s = schema();
-        let names: Vec<&str> = s.fields().iter().map(|f| f.name().as_str()).collect();
-        assert_eq!(
-            names,
-            vec![
-                "id",
-                "text",
-                "session_id",
-                "workdir",
-                "turn_uuid",
-                "parent_uuid",
-                "seq",
-                "ts",
-                "role",
-                "block_type",
-                "tool_name",
-                "source_path",
-                "block_idx",
-                "split_idx",
-                "vector",
-                "harness",
-                "repo",
-            ]
-        );
     }
 
     #[test]

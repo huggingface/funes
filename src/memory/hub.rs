@@ -12,9 +12,8 @@ use anyhow::{anyhow, Context, Result};
 use hf_hub::{HFClient, HFError, RepoTypeDataset};
 use lance::dataset::Dataset;
 
-use super::dataset;
+use super::dataset::{self, DIM, MODEL};
 use super::hf_dataset;
-use crate::commands::index::{DIM, MODEL};
 
 /// A memory to recall from: a local Lance directory or a remote dataset on the HF Hub.
 #[derive(Debug, Clone)]

@@ -2,9 +2,9 @@
 //! rows themselves — so it cleans sessions whose source transcripts are already gone, which
 //! re-indexing cannot. Operates only on the local memory; it does not touch a published remote.
 
-use super::index::{build_batch, embed_batched, schema};
-use crate::inference::{self, Embedder};
-use crate::memory::{dataset, lock};
+use crate::inference::{self, embed_batched, Embedder};
+use crate::memory::dataset::{self, build_batch, schema};
+use crate::memory::lock;
 use crate::{chunk, scan};
 use anyhow::Result;
 use arrow_array::{BooleanArray, RecordBatch, RecordBatchIterator};
