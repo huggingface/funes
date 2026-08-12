@@ -19,8 +19,8 @@
 //! already shipped — the remote is append-only; curation prevents, it does not undo.
 
 use crate::hub;
-use crate::memory::{self, Memory, MemoryState};
 use crate::memory::{dataset, remote};
+use crate::memory::{Memory, MemoryState};
 use crate::traces::jsonl;
 use anyhow::{bail, Context, Result};
 use arrow_array::{Int64Array, RecordBatch, RecordBatchIterator, StringArray};
@@ -78,8 +78,8 @@ pub async fn name_project(target: &Memory, project: &str) -> Result<Named> {
         ))
     })? {
         MemoryState::Offline => bail!("{uri} is unreachable — can't curate it while offline"),
-        MemoryState::Missing => Err(memory::missing_remote(&uri)),
-        MemoryState::Unauthorized => Err(memory::unauthorized_remote(&uri)),
+        MemoryState::Missing => Err(target.missing_error()),
+        MemoryState::Unauthorized => Err(target.unauthorized_error()),
         MemoryState::Ready(ds) => match self::project(&ds) {
             Some(existing) if existing == project => Ok(Named::Unchanged),
             Some(existing) => bail!(
@@ -628,8 +628,8 @@ pub async fn prepare(memory: &Memory, project: Option<&str>) -> Result<Prepared>
         .map_err(|e| e.context(format!("can't read {}", memory.label())))?
     {
         MemoryState::Offline => bail!("{} is unreachable — can't curate it while offline", memory.label()),
-        MemoryState::Missing => Err(memory::missing_remote(&uri)),
-        MemoryState::Unauthorized => Err(memory::unauthorized_remote(&uri)),
+        MemoryState::Missing => Err(memory.missing_error()),
+        MemoryState::Unauthorized => Err(memory.unauthorized_error()),
         MemoryState::Ready(ds) => match (self::project(&ds), project) {
             (Some(existing), Some(given)) if existing != given => bail!(
                 "{} is already the project memory of {existing} — refusing to rename it to {given}",

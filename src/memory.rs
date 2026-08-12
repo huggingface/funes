@@ -156,6 +156,43 @@ impl Memory {
     }
 }
 
+/// How the states that always refuse read to the user. One method per [`MemoryState`] variant that
+/// a command can only stop on, so the state and its wording are named the same thing at the call
+/// site and can't drift apart: `MemoryState::Missing => Err(memory.missing_error())`.
+impl Memory {
+    /// [`MemoryState::Missing`]: the repo isn't on the Hub, and funes never creates it.
+    pub fn missing_error(&self) -> anyhow::Error {
+        anyhow!(
+            "{} doesn't exist on the Hub, and funes won't create it — create the dataset repo \
+             first (https://huggingface.co/new-dataset)",
+            self.label()
+        )
+    }
+
+    /// [`MemoryState::Unauthorized`]: the Hub refused the read (401/403) — no token, a token
+    /// without access to this dataset, or terms not accepted.
+    pub fn unauthorized_error(&self) -> anyhow::Error {
+        anyhow!(
+            "not authorized to read {} — set a Hugging Face token with read access to this dataset \
+             (HF_TOKEN, or `hf auth login`), or check the token you have can read it.",
+            self.label()
+        )
+    }
+
+    /// [`MemoryState::Empty`]: there's nothing to read. A remote is one push away from useful; a
+    /// local path just isn't a memory yet. (The *default* local memory means a fresh install, which
+    /// the read verbs answer with their own onboarding line.)
+    pub fn empty_error(&self) -> anyhow::Error {
+        match self {
+            Memory::Remote { uri } => anyhow!(
+                "{uri} exists on the Hub but holds no index yet — `funes push {uri}` to publish \
+                 your local index there, or drop `--memory` to read your local memory"
+            ),
+            Memory::Local { path } => anyhow!("no index found at {}", path.display()),
+        }
+    }
+}
+
 /// What state a memory is in. Produced by [`Memory::state`] — the one classifier — so a command
 /// matches on facts instead of sniffing error shapes.
 // A transient return value, never stored en masse, so the `Ready(Dataset)`/unit size gap is fine —
@@ -217,32 +254,6 @@ pub async fn remote_reachability(uri: &str) -> Reachability {
         Ok(Err(e)) if is_offline_error(&e) => Reachability::Offline,
         Ok(Err(_)) => Reachability::Ok,
     }
-}
-
-/// The active remote repo doesn't exist on the Hub — funes never creates it. Shared by recall,
-/// `push`, and `use` so the message is identical everywhere.
-pub fn missing_remote(uri: &str) -> anyhow::Error {
-    anyhow!(
-        "{uri} doesn't exist on the Hub, and funes won't create it — create the dataset repo \
-         first (https://huggingface.co/new-dataset)"
-    )
-}
-
-/// The remote repo exists but holds no index yet.
-pub fn empty_remote(uri: &str) -> anyhow::Error {
-    anyhow!(
-        "{uri} exists on the Hub but holds no index yet — `funes push {uri}` to publish your local \
-         index there, or drop `--memory` to read your local memory"
-    )
-}
-
-/// The Hub refused the read on auth (HTTP 401/403): no HF token, or one that can't read this
-/// dataset. Shared so the message is identical everywhere.
-pub fn unauthorized_remote(uri: &str) -> anyhow::Error {
-    anyhow!(
-        "not authorized to read {uri} — set a Hugging Face token with read access to this dataset \
-         (HF_TOKEN, or `hf auth login`), or check the token you have can read it."
-    )
 }
 
 /// Whether a [`Memory::open`] failure means the dataset does not exist (a missing table in an

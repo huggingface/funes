@@ -25,7 +25,7 @@ use crate::hub;
 use crate::memory::card::{self, CardAction, CardCtx};
 use crate::memory::dataset;
 use crate::memory::remote::{self, Appended, Reindexed};
-use crate::memory::{self, Memory, MemoryState};
+use crate::memory::{Memory, MemoryState};
 use crate::{chunk, scan};
 use anyhow::{bail, Context, Result};
 use arrow_array::{BooleanArray, RecordBatch, StringArray};
@@ -291,8 +291,8 @@ pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm) -> 
         MemoryState::Offline => {
             bail!("{uri} is unreachable — can't push while offline (check your connection)")
         }
-        MemoryState::Missing => return Err(memory::missing_remote(&uri)),
-        MemoryState::Unauthorized => return Err(memory::unauthorized_remote(&uri)),
+        MemoryState::Missing => return Err(target.missing_error()),
+        MemoryState::Unauthorized => return Err(target.unauthorized_error()),
         MemoryState::Empty => None,
         MemoryState::Ready(ds) => Some(ds),
     };

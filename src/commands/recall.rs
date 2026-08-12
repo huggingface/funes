@@ -8,7 +8,7 @@ use super::curate;
 use crate::chunk;
 use crate::inference::{self, Embedder, Reranker};
 use crate::memory::dataset;
-use crate::memory::{self, Memory, MemoryState};
+use crate::memory::{Memory, MemoryState};
 use crate::traces::harness::Harness;
 use anyhow::{anyhow, Context, Result};
 use arrow_array::{Float32Array, Int64Array, RecordBatch, StringArray, UInt64Array};
@@ -152,15 +152,12 @@ async fn open_for_read(memory: &Memory) -> Result<ReadOutcome> {
     match memory.state().await? {
         MemoryState::Ready(ds) => Ok(ReadOutcome::Ready(ds)),
         MemoryState::Offline => Ok(ReadOutcome::Offline),
-        MemoryState::Missing => Err(memory::missing_remote(&memory.label())),
-        MemoryState::Unauthorized => Err(memory::unauthorized_remote(&memory.label())),
+        MemoryState::Missing => Err(memory.missing_error()),
+        MemoryState::Unauthorized => Err(memory.unauthorized_error()),
         // Nothing there yet. The default local memory is a fresh install (onboarding, below); an
         // explicit path or a never-pushed remote says so instead.
         MemoryState::Empty if memory.is_default_local() => Ok(ReadOutcome::NoIndex),
-        MemoryState::Empty => match memory {
-            Memory::Remote { uri } => Err(memory::empty_remote(uri)),
-            Memory::Local { path } => Err(anyhow::anyhow!("no index found at {}", path.display())),
-        },
+        MemoryState::Empty => Err(memory.empty_error()),
     }
 }
 

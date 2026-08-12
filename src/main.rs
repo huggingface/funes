@@ -738,17 +738,18 @@ async fn create_project_memory(
 /// **no**, to catch typos); warn but proceed if the Hub is unreachable. Returns whether it created
 /// the repo.
 async fn ensure_remote_exists(remote: &str) -> Result<bool> {
-    let memory::Memory::Remote { uri } = memory::Memory::parse(remote) else {
+    let target = memory::Memory::parse(remote);
+    let memory::Memory::Remote { uri } = &target else {
         return Ok(false); // a local path — nothing to check on the Hub
     };
-    match memory::remote_reachability(&uri).await {
+    match memory::remote_reachability(uri).await {
         memory::Reachability::Ok => Ok(false),
         memory::Reachability::Offline => {
             eprintln!("note: can't reach {remote} right now — proceeding; it'll be used once it's back.");
             Ok(false)
         }
         memory::Reachability::Missing => {
-            let (owner, name, _) = hub::parse_hf(&uri)?;
+            let (owner, name, _) = hub::parse_hf(uri)?;
             if std::io::stdin().is_terminal()
                 && confirm(
                     &format!("{remote} doesn't exist on the Hub. Create it as a private dataset? [y/N] "),
@@ -759,7 +760,7 @@ async fn ensure_remote_exists(remote: &str) -> Result<bool> {
                 eprintln!("created {owner}/{name} as a private dataset.");
                 Ok(true)
             } else {
-                Err(memory::missing_remote(&uri))
+                Err(target.missing_error())
             }
         }
     }
