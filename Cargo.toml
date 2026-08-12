@@ -59,7 +59,7 @@ multiversion = { version = "0.8", optional = true }  # per-CPU clones of the vec
 [features]
 default = ["blas"]
 vendored-openssl = ["openssl-sys/vendored"]
-# BLAS inference backend (src/blas.rs), the default: macOS wires it to Accelerate (see build.rs),
+# BLAS inference backend (src/inference/blas.rs), the default: macOS wires it to Accelerate (see build.rs),
 # Linux to faer + a polynomial exp.
 blas = ["dep:tokenizers", "dep:safetensors", "dep:faer", "dep:multiversion"]
 # ONNX inference backend (fastembed/ort). When both backends are compiled in, `blas` is the one

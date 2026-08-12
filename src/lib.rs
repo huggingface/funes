@@ -14,8 +14,6 @@ compile_error!("funes is unix-only (Linux/macOS)");
 pub mod agents;
 pub mod ask;
 pub mod banner;
-#[cfg(feature = "blas")]
-pub mod blas;
 pub mod chunk;
 pub mod curate;
 pub mod index;

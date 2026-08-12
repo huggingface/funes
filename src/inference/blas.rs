@@ -11,7 +11,7 @@ use anyhow::{anyhow, Context, Result};
 use safetensors::SafeTensors;
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 
-use crate::inference::{Embedder, Reranker};
+use super::{Embedder, Reranker};
 
 // ---------------------------------------------------------------------------------------------
 // Platform seam: the ONLY OS-specific code. A platform backend implements just these two
