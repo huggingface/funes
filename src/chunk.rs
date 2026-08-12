@@ -92,8 +92,9 @@ fn is_data_uri_head(head: &str) -> bool {
 
 /// `text` with every inline base64 `data:` URI payload replaced by `[elided]`. A pasted screenshot
 /// is megabytes of base64 that swamp its block, carry nothing recallable, and trip secret detectors
-/// on values that are not secrets.
-fn elide_data_uris(text: &str) -> Cow<'_, str> {
+/// on values that are not secrets. Applied before a block is scanned: a redaction marker planted
+/// inside a payload ends the run this walks, stranding the rest of it.
+pub(crate) fn elide_data_uris(text: &str) -> Cow<'_, str> {
     if !text.contains(BASE64_MARKER) {
         return Cow::Borrowed(text);
     }
@@ -121,7 +122,6 @@ fn is_base64_char(c: char) -> bool {
 }
 
 fn render(block_type: &str, text: &str, tool_name: &Option<String>) -> String {
-    let text = elide_data_uris(text);
     match block_type {
         "tool_use" => format!("[tool_use {}] {}", py_opt(tool_name), text).trim().to_string(),
         "tool_result" => {
@@ -131,7 +131,7 @@ fn render(block_type: &str, text: &str, tool_name: &Option<String>) -> String {
             };
             format!("[{label}] {text}").trim().to_string()
         }
-        _ => text.into_owned(),
+        _ => text.to_string(),
     }
 }
 
@@ -402,27 +402,27 @@ mod tests {
     }
 
     #[test]
-    fn render_elides_inline_base64_payloads() {
+    fn elides_inline_base64_payloads() {
         let text = r#"{"image_url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==","detail":"original"}"#;
         assert_eq!(
-            render("tool_result", text, &None),
-            r#"[tool_result] {"image_url":"data:image/png;base64,[elided]","detail":"original"}"#
+            elide_data_uris(text),
+            r#"{"image_url":"data:image/png;base64,[elided]","detail":"original"}"#
         );
         assert_eq!(
-            render("text", "a data:image/gif;base64,R0lGOD b data:;base64,QUJD c", &None),
+            elide_data_uris("a data:image/gif;base64,R0lGOD b data:;base64,QUJD c"),
             "a data:image/gif;base64,[elided] b data:;base64,[elided] c"
         );
     }
 
     #[test]
-    fn render_leaves_a_base64_mention_that_is_not_a_data_uri() {
+    fn leaves_a_base64_mention_that_is_not_a_data_uri() {
         for text in [
             "encode it as ;base64,AAAA",
             "Content-Transfer-Encoding;base64,AAAA",
             "data: image/png;base64,AAAA",
             "metadata:image/png;base64,AAAA",
         ] {
-            assert_eq!(render("text", text, &None), text, "must not elide: {text}");
+            assert_eq!(elide_data_uris(text), text, "must not elide: {text}");
         }
     }
 

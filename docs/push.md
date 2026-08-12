@@ -71,12 +71,16 @@ block, then makes one replacement commit:
   block is re-chunked and its replacement chunks are re-embedded.
 - If a finding cannot be reconstructed safely—for example, an encoded value with no reliable byte
   match—the entire block is dropped instead of risking a partial redaction.
+- A redaction is kept only if the redacted block scans clean. Excising one match can expose another
+  (removing one from a long base64 run re-aligns the window the next is found in), and such a block
+  is dropped rather than stored.
 - Clean rows retain their existing embeddings. The vector and full-text indexes are rebuilt after
   the replacement.
 
 The source transcripts are never modified. Scrub reports how many secrets and blocks it redacted and
-how many rows it had to drop. Run `funes push <memory>` afterward; the repaired local rows then pass
-through the independent egress gate.
+how many rows it had to drop. A completed scrub leaves a memory that scans clean, so the next
+`funes push <memory>` has nothing left to hold back; the repaired local rows pass through the
+independent egress gate.
 
 Scrub does **not** alter an already-published remote. If a live credential reached the Hub, revoke or
 rotate it first, then remediate the dataset separately; funes can prevent another upload but does not
