@@ -16,8 +16,8 @@ use std::time::Instant;
 
 /// Reconstruct each block, scan them all in one pass, and for any block holding a secret either
 /// redact the matching values in place (re-chunked, re-embedded) or — when a value can't be matched
-/// (e.g. a key stored with escaped `\n`) — drop the block whole. Fail-closed on the scanner:
-/// scrubbing is the whole point.
+/// (e.g. a key stored with escaped `\n`), or the redaction doesn't scan clean — drop the block
+/// whole. Fail-closed on the scanner: scrubbing is the whole point.
 pub async fn run() -> Result<()> {
     // scrub rewrites the whole table, so hold the memory lock to be the sole writer.
     let _lock = lock::MemoryLock::acquire()?;
@@ -61,7 +61,10 @@ pub async fn run() -> Result<()> {
             remove[i] = true;
         }
         let r = scan::excise(text, findings);
-        if r.fully_redacted {
+        // Excising one match can expose another: removing it from a long base64 run re-aligns the
+        // window the next is found in. So a redaction counts only if the result scans clean.
+        let clean = r.fully_redacted && scan::scan_blocks(&[r.text.as_str()], &scanner)?[0].is_empty();
+        if clean {
             replacements.extend(chunk::resplit(&chunks[idxs[0]], &r.text));
             redacted_detectors.extend(r.removed_detectors);
             redacted_blocks += 1;
