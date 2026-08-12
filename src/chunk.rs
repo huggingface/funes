@@ -75,13 +75,17 @@ fn py_opt(o: &Option<String>) -> &str {
 const BASE64_MARKER: &str = ";base64,";
 
 /// Whether `head`, which ends in [`BASE64_MARKER`], is a `data:` URI up to its payload: the marker
-/// also occurs in prose, so everything back to the scheme must still be the media type.
+/// also occurs in prose, so the scheme must start a URI rather than end a word (`metadata:`), and
+/// everything after it must still be the media type.
 fn is_data_uri_head(head: &str) -> bool {
     let media = &head[..head.len() - BASE64_MARKER.len()];
     match media.rfind("data:") {
-        Some(i) => media[i + "data:".len()..]
-            .chars()
-            .all(|c| !c.is_whitespace() && !matches!(c, ',' | '"' | '\'')),
+        Some(i) => {
+            !media[..i].ends_with(|c: char| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+                && media[i + "data:".len()..]
+                    .chars()
+                    .all(|c| !c.is_whitespace() && !matches!(c, ',' | '"' | '\''))
+        }
         None => false,
     }
 }
@@ -415,6 +419,7 @@ mod tests {
             "encode it as ;base64,AAAA",
             "Content-Transfer-Encoding;base64,AAAA",
             "data: image/png;base64,AAAA",
+            "metadata:image/png;base64,AAAA",
         ] {
             assert_eq!(render("text", text, &None), text, "must not elide: {text}");
         }
