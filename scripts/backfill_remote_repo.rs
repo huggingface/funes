@@ -12,7 +12,7 @@
 use anyhow::{bail, Context, Result};
 use arrow_array::{RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
-use funes::memory::{dataset, hf_dataset, hub};
+use funes::memory::{dataset, hf_dataset, hub, Memory};
 use funes::traces::repo;
 use hf_hub::HFClient;
 use lance::dataset::{BatchUDF, Dataset, NewColumnTransform};
@@ -45,9 +45,9 @@ async fn main() -> Result<()> {
 }
 
 async fn backfill_one(spec: &str, token: &str) -> Result<String> {
-    let uri = match hub::Memory::parse(spec) {
-        hub::Memory::Remote { uri } => uri,
-        hub::Memory::Local { .. } => bail!("not a remote memory — use `backfill_repo` for the local memory"),
+    let uri = match Memory::parse(spec) {
+        Memory::Remote { uri } => uri,
+        Memory::Local { .. } => bail!("not a remote memory — use `backfill_repo` for the local memory"),
     };
     let (owner, name, _prefix) = hub::parse_hf(&uri)?;
     let dataset_uri = format!("{uri}/{}.lance", dataset::TABLE);

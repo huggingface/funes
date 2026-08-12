@@ -3,7 +3,7 @@
 //! stdout is the JSON-RPC channel — logs must go to stderr.
 
 use super::recall;
-use crate::memory::hub::Memory;
+use crate::memory::Memory;
 use anyhow::Result;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;

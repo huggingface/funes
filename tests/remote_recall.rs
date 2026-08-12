@@ -6,7 +6,7 @@
 //!
 //! The fixture is a stable, synthetic, read-only dataset (no real data).
 
-use funes::memory::hub::Memory;
+use funes::memory::Memory;
 
 const FIXTURE_URI: &str = "hf://datasets/optimum-internal-testing/funes-test/fixture/lancedb";
 const MARKER: &str = "UNIQUEMARKERXYZZY";

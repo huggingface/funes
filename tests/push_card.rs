@@ -16,7 +16,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use funes::commands::push::Confirm;
-use funes::memory::hub::Memory;
+use funes::memory::Memory;
 use hf_hub::repository::CommitOperation;
 use hf_hub::{HFClient, HFError, HFRepository, RepoTypeDataset};
 

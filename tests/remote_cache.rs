@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use funes::memory::hub::Memory;
+use funes::memory::Memory;
 
 const FIXTURE_URI: &str = "hf://datasets/optimum-internal-testing/funes-test/fixture/lancedb";
 const MARKER: &str = "UNIQUEMARKERXYZZY";

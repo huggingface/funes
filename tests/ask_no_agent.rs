@@ -7,7 +7,7 @@
 async fn ask_errors_when_the_agent_cli_is_missing() {
     std::env::set_var("PATH", "");
 
-    let err = funes::commands::ask::claude("q".into(), funes::memory::hub::Memory::local())
+    let err = funes::commands::ask::claude("q".into(), funes::memory::Memory::local())
         .await
         .unwrap_err()
         .to_string();

@@ -66,7 +66,7 @@ async fn scrub_redacts_an_escaped_key_in_place() {
     funes::commands::index::run_index(source.path(), false, None)
         .await
         .unwrap();
-    let dirty = funes::commands::recall::get(funes::memory::hub::Memory::local(), session.into(), "t2".into(), 0)
+    let dirty = funes::commands::recall::get(funes::memory::Memory::local(), session.into(), "t2".into(), 0)
         .await
         .unwrap();
     assert!(
@@ -78,7 +78,7 @@ async fn scrub_redacts_an_escaped_key_in_place() {
     std::env::remove_var("FUNES_TRUFFLEHOG");
     funes::commands::scrub::run().await.unwrap();
 
-    let after_key = funes::commands::recall::get(funes::memory::hub::Memory::local(), session.into(), "t2".into(), 0)
+    let after_key = funes::commands::recall::get(funes::memory::Memory::local(), session.into(), "t2".into(), 0)
         .await
         .unwrap_or_default();
     assert!(
@@ -91,7 +91,7 @@ async fn scrub_redacts_an_escaped_key_in_place() {
     );
 
     // The clean turn is untouched.
-    let clean = funes::commands::recall::get(funes::memory::hub::Memory::local(), session.into(), "t1".into(), 0)
+    let clean = funes::commands::recall::get(funes::memory::Memory::local(), session.into(), "t1".into(), 0)
         .await
         .unwrap();
     assert!(

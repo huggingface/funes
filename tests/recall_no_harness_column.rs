@@ -44,7 +44,7 @@ async fn recall_tolerates_a_memory_without_the_harness_column() {
     );
 
     let out = funes::commands::recall::recall(
-        funes::memory::hub::Memory::local(),
+        funes::memory::Memory::local(),
         "parse transcripts into turns".into(),
         5,
         30,
@@ -63,7 +63,7 @@ async fn recall_tolerates_a_memory_without_the_harness_column() {
     // But a `--harness` filter needs the column: refuse with a clear message, not an opaque Lance
     // schema error.
     let err = funes::commands::recall::recall(
-        funes::memory::hub::Memory::local(),
+        funes::memory::Memory::local(),
         "parse transcripts into turns".into(),
         5,
         30,

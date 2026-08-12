@@ -19,7 +19,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use arrow_array::{Array, StringArray};
 use funes::commands::push::Confirm;
-use funes::memory::hub::Memory;
+use funes::memory::Memory;
 use hf_hub::{HFClient, RepoTypeDataset};
 
 const OWNER: &str = "optimum-internal-testing";

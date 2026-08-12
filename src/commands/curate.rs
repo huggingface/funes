@@ -18,7 +18,8 @@
 //! Human- and agent-editable. A decision flipped to `exclude` later does not retract what
 //! already shipped — the remote is append-only; curation prevents, it does not undo.
 
-use crate::memory::hub::{self, Memory};
+use crate::memory::hub;
+use crate::memory::{self, Memory};
 use crate::memory::{dataset, hf_dataset};
 use crate::traces::jsonl;
 use anyhow::{bail, Context, Result};
@@ -70,10 +71,10 @@ pub async fn name_project(target: &Memory, project: &str) -> Result<Named> {
             bail!("a project memory must be remote — pass `<org>/<repo>` or an `hf://…` URI")
         }
     };
-    match hub::remote_reachability(&uri).await {
-        hub::Reachability::Offline => bail!("{uri} is unreachable — can't curate it while offline"),
-        hub::Reachability::Missing => return Err(hub::missing_remote(&uri)),
-        hub::Reachability::Ok => {}
+    match memory::remote_reachability(&uri).await {
+        memory::Reachability::Offline => bail!("{uri} is unreachable — can't curate it while offline"),
+        memory::Reachability::Missing => return Err(memory::missing_remote(&uri)),
+        memory::Reachability::Ok => {}
     }
 
     match target.open().await {
@@ -88,7 +89,7 @@ pub async fn name_project(target: &Memory, project: &str) -> Result<Named> {
                 Ok(Named::Promoted)
             }
         },
-        Err(e) if hub::dataset_absent(&e) => {
+        Err(e) if memory::dataset_absent(&e) => {
             create_memory(&uri, project).await?;
             Ok(Named::Created)
         }
@@ -636,7 +637,7 @@ pub async fn prepare(memory: &Memory, project: Option<&str>) -> Result<Prepared>
                 memory.label()
             ),
         },
-        Err(e) if hub::dataset_absent(&e) => match project {
+        Err(e) if memory::dataset_absent(&e) => match project {
             Some(given) => Ok(Prepared::Absent { uri, project: given.to_string() }),
             None => bail!("{} doesn't exist", memory.label()),
         },

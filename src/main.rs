@@ -6,7 +6,7 @@
 
 use funes::agents::{claude, codex, hermes, pi};
 use funes::commands::{ask, curate, index, mcp, push, recall, scrub, update};
-use funes::memory::hub;
+use funes::memory::{self, hub};
 use funes::scan;
 use funes::traces::harness::Harness;
 use funes::ui::render;
@@ -275,8 +275,8 @@ struct MemoryOpts {
 }
 
 impl MemoryOpts {
-    fn resolve(self) -> hub::Memory {
-        hub::Memory::resolve(self.memory)
+    fn resolve(self) -> memory::Memory {
+        memory::Memory::resolve(self.memory)
     }
 }
 
@@ -398,7 +398,7 @@ async fn main() -> Result<()> {
                 Some(p) if p.starts_with("hf://") || hub::is_remote_shorthand(&p) => {
                     // A Hub trace dataset: resolve to `hf://datasets/<owner>/<name>` and index its
                     // auto-converted parquet.
-                    let hub::Memory::Remote { uri } = hub::Memory::parse(&p) else {
+                    let memory::Memory::Remote { uri } = memory::Memory::parse(&p) else {
                         return Err(anyhow!("expected a Hub repo, got {p:?}"));
                     };
                     return index::run_index_remote(&uri, no_thinking).await;
@@ -442,7 +442,7 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Status { memory } => {
-            print!("{}", recall::status(hub::Memory::resolve(memory)).await?);
+            print!("{}", recall::status(memory::Memory::resolve(memory)).await?);
             // Show the status body before the (bounded, best-effort) update check, so a slow or
             // offline Hub can't delay the useful output.
             std::io::stdout().flush().ok();
@@ -461,7 +461,7 @@ async fn main() -> Result<()> {
             } else {
                 push::Confirm::Ask(prompt_new_memory)
             };
-            match push::run_push(hub::Memory::parse(&remote), force_reindex, confirm).await {
+            match push::run_push(memory::Memory::parse(&remote), force_reindex, confirm).await {
                 Ok(pushed) => {
                     print!("{}", pushed.report);
                     // Secrets held back everything — surface a non-zero exit so automation can react.
@@ -482,7 +482,7 @@ async fn main() -> Result<()> {
             include,
             exclude,
         } => {
-            let memory = hub::Memory::parse(&memory);
+            let memory = memory::Memory::parse(&memory);
             // A project memory is of a git repo — funes attributes sessions to it by their
             // checkout's remotes, so the project must be a repo identity (`owner/name`). A bare
             // name gets a "did you mean", inferring the owner from local repos with that name.
@@ -562,7 +562,7 @@ struct Resolved {
 
 impl Resolved {
     fn is_remote(&self) -> bool {
-        matches!(hub::Memory::parse(&self.memory), hub::Memory::Remote { .. })
+        matches!(memory::Memory::parse(&self.memory), memory::Memory::Remote { .. })
     }
 }
 
@@ -599,7 +599,7 @@ fn require_scanner(memory: &str, harness: Harness) -> Result<()> {
 /// (the same arrow again clears to pending), the preview showing each session's user prompts.
 /// Decisions persist as they're made; leaving summarizes, and — once something is included — offers
 /// the push, materializing the memory as the project memory first when it isn't one yet.
-async fn curate_review(memory: &hub::Memory, project: Option<&str>) -> Result<()> {
+async fn curate_review(memory: &memory::Memory, project: Option<&str>) -> Result<()> {
     // Resolve without creating: `materialize` is None when the memory is already the project memory,
     // else Some(create_repo) — the deferred creation to run at the close if anything is included.
     let (uri, project, materialize) = match curate::prepare(memory, project).await? {
@@ -622,7 +622,7 @@ async fn curate_review(memory: &hub::Memory, project: Option<&str>) -> Result<()
     // Pre-render each candidate's user prompts (scaffolding dropped) — the preview pane, and
     // (whitespace-collapsed) the surface the fuzzy filter searches beyond the visible row.
     let ids: Vec<String> = found.matched.iter().map(|s| s.session_id.clone()).collect();
-    let mut previews = recall::session_prompts(&hub::Memory::local(), &ids).await?;
+    let mut previews = recall::session_prompts(&memory::Memory::local(), &ids).await?;
     for turns in previews.values_mut() {
         for turn in turns.iter_mut() {
             turn.blocks.retain(|b| !curate::is_scaffolding(b));
@@ -700,12 +700,12 @@ async fn curate_review(memory: &hub::Memory, project: Option<&str>) -> Result<()
 }
 
 async fn create_project_memory(
-    memory: &hub::Memory,
+    memory: &memory::Memory,
     project: &str,
     create_repo: bool,
     includes: usize,
 ) -> Result<bool> {
-    let hub::Memory::Remote { uri } = memory else {
+    let memory::Memory::Remote { uri } = memory else {
         return Ok(false);
     };
     let prompt = if create_repo {
@@ -737,16 +737,16 @@ async fn create_project_memory(
 /// **no**, to catch typos); warn but proceed if the Hub is unreachable. Returns whether it created
 /// the repo.
 async fn ensure_remote_exists(remote: &str) -> Result<bool> {
-    let hub::Memory::Remote { uri } = hub::Memory::parse(remote) else {
+    let memory::Memory::Remote { uri } = memory::Memory::parse(remote) else {
         return Ok(false); // a local path — nothing to check on the Hub
     };
-    match hub::remote_reachability(&uri).await {
-        hub::Reachability::Ok => Ok(false),
-        hub::Reachability::Offline => {
+    match memory::remote_reachability(&uri).await {
+        memory::Reachability::Ok => Ok(false),
+        memory::Reachability::Offline => {
             eprintln!("note: can't reach {remote} right now — proceeding; it'll be used once it's back.");
             Ok(false)
         }
-        hub::Reachability::Missing => {
+        memory::Reachability::Missing => {
             let (owner, name, _) = hub::parse_hf(&uri)?;
             if std::io::stdin().is_terminal()
                 && confirm(
@@ -758,7 +758,7 @@ async fn ensure_remote_exists(remote: &str) -> Result<bool> {
                 eprintln!("created {owner}/{name} as a private dataset.");
                 Ok(true)
             } else {
-                Err(hub::missing_remote(&uri))
+                Err(memory::missing_remote(&uri))
             }
         }
     }
@@ -793,16 +793,16 @@ async fn offer_hub_memory() -> Result<Option<Resolved>> {
     };
     let memory = format!("{user}/funes-memory");
     let uri = format!("hf://datasets/{memory}");
-    match hub::remote_reachability(&uri).await {
-        hub::Reachability::Ok => {
+    match memory::remote_reachability(&uri).await {
+        memory::Reachability::Ok => {
             Ok(confirm(&format!("Use your memory {memory}? [Y/n] "), true)
                 .then_some(Resolved { memory, created: false }))
         }
-        hub::Reachability::Offline => {
+        memory::Reachability::Offline => {
             eprintln!("can't reach the Hub right now — staying local; re-run when you're online.");
             Ok(None)
         }
-        hub::Reachability::Missing => {
+        memory::Reachability::Missing => {
             if confirm(
                 &format!("Create {memory} as a private dataset for your memory? [Y/n] "),
                 true,
@@ -863,7 +863,7 @@ async fn bootstrap_add(
     // build, or no sessions yet) there's nothing to push, and running it would just error on the
     // absent memory.
     if let Some(Resolved { memory, created }) = resolved {
-        if hub::Memory::local().open().await.is_ok() {
+        if memory::Memory::local().open().await.is_ok() {
             first_push(&memory, created).await?;
         } else {
             eprintln!("funes: nothing indexed yet — nothing to publish to {memory} yet. Run `funes index`, and the hooks keep it current from there.");
@@ -878,7 +878,7 @@ async fn bootstrap_add(
 /// dir or a build error is a note, not a decline: the hooks still go in and `funes index` builds
 /// it later.
 async fn ensure_local_index(harness: Harness) -> bool {
-    if hub::Memory::local().open().await.is_ok() {
+    if memory::Memory::local().open().await.is_ok() {
         return true; // already have a local index
     }
     let Some(root) = funes::traces::harness::known_harness_roots()
@@ -920,7 +920,7 @@ async fn first_push(remote: &str, created: bool) -> Result<()> {
     } else {
         push::Confirm::Ask(prompt_new_memory)
     };
-    match push::run_push(hub::Memory::parse(remote), false, confirm).await {
+    match push::run_push(memory::Memory::parse(remote), false, confirm).await {
         Ok(pushed) => {
             print!("{}", pushed.report);
             Ok(())

@@ -24,7 +24,8 @@ use super::curate;
 use crate::memory::card::{self, CardAction, CardCtx};
 use crate::memory::dataset;
 use crate::memory::hf_dataset::{self, Appended, Reindexed};
-use crate::memory::hub::{self, Memory};
+use crate::memory::hub;
+use crate::memory::{self, Memory};
 use crate::{chunk, scan};
 use anyhow::{bail, Context, Result};
 use arrow_array::{BooleanArray, RecordBatch, StringArray};
@@ -275,12 +276,12 @@ pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm) -> 
 
     // Fail fast, before any local build or scan: an unreachable or missing remote otherwise looks
     // like a first publish, so push scans + builds the whole dataset before the commit finally fails.
-    match hub::remote_reachability(&uri).await {
-        hub::Reachability::Offline => {
+    match memory::remote_reachability(&uri).await {
+        memory::Reachability::Offline => {
             bail!("{uri} is unreachable — can't push while offline (check your connection)")
         }
-        hub::Reachability::Missing => return Err(hub::missing_remote(&uri)),
-        hub::Reachability::Ok => {}
+        memory::Reachability::Missing => return Err(memory::missing_remote(&uri)),
+        memory::Reachability::Ok => {}
     }
 
     // 1. What the remote *is*, and what's on it. An unreadable dataset is a hard error, never
@@ -292,7 +293,7 @@ pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm) -> 
     let local = Memory::local().open().await?;
     let remote = match target.open().await {
         Ok(ds) => Some(ds),
-        Err(e) if hub::dataset_absent(&e) => None,
+        Err(e) if memory::dataset_absent(&e) => None,
         Err(e) => {
             return Err(e.context(format!(
                 "{} exists but can't be read — refusing to treat it as empty",

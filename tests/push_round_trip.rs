@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use funes::commands::push::Confirm;
-use funes::memory::hub::Memory;
+use funes::memory::Memory;
 use hf_hub::{HFClient, HFError, HFRepository, RepoTypeDataset};
 
 const OWNER: &str = "optimum-internal-testing";
