@@ -307,7 +307,7 @@ pub async fn recall(
     if hits.is_empty() {
         return Ok(format!("{note}no results"));
     }
-    Ok(crate::render::recall_agent(
+    Ok(crate::ui::render::recall_agent(
         &note,
         &memory_hint(memory_label.as_deref()),
         &hits,
@@ -611,7 +611,7 @@ pub async fn get(memory: Memory, session_id: String, turn_uuid: String, window: 
     if turns.is_empty() {
         return Ok(format!("{note}turn {turn_uuid} not found in session {session_id}\n"));
     }
-    Ok(crate::render::get_agent(&note, &turns))
+    Ok(crate::ui::render::get_agent(&note, &turns))
 }
 
 /// The turns behind `get`: the named one plus those within `window` of it, each reassembled

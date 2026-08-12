@@ -7,7 +7,8 @@
 use funes::agents::{claude, codex, hermes, pi};
 use funes::memory::hub;
 use funes::traces::harness::Harness;
-use funes::{ask, curate, index, mcp, push, recall, render, scan, scrub, update};
+use funes::ui::render;
+use funes::{ask, curate, index, mcp, push, recall, scan, scrub, update};
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -593,7 +594,7 @@ fn require_scanner(memory: &str, harness: Harness) -> Result<()> {
 /// (the memory was absent); otherwise it exists (a personal memory) and we only stamp it. Returns
 /// whether it happened — declining stops cleanly, publishing nothing.
 /// The interactive review behind `funes curate <memory>` in a terminal: the project's candidate
-/// sessions in the in-process [`funes::tui`] picker where `→` includes a session and `←` excludes it
+/// sessions in the in-process [`funes::ui::tui`] picker where `→` includes a session and `←` excludes it
 /// (the same arrow again clears to pending), the preview showing each session's user prompts.
 /// Decisions persist as they're made; leaving summarizes, and — once something is included — offers
 /// the push, materializing the memory as the project memory first when it isn't one yet.
@@ -628,7 +629,7 @@ async fn curate_review(memory: &hub::Memory, project: Option<&str>) -> Result<()
         turns.retain(|turn| !turn.blocks.is_empty());
     }
     let (color, width) = human_io();
-    let items: Vec<funes::tui::curate::Candidate> = found
+    let items: Vec<funes::ui::tui::curate::Candidate> = found
         .matched
         .iter()
         .map(|s| {
@@ -643,18 +644,18 @@ async fn curate_review(memory: &hub::Memory, project: Option<&str>) -> Result<()
                 .chars()
                 .take(2000)
                 .collect();
-            funes::tui::curate::Candidate {
+            funes::ui::tui::curate::Candidate {
                 id: s.session_id.clone(),
                 date: s.date().to_string(),
                 prompt: s.first_prompt.clone(),
                 comment: format!("{} {}", s.date(), s.first_prompt).trim().to_string(),
                 filter,
                 chunks: s.chunks,
-                preview: funes::tui::ansi_to_text(&body),
+                preview: funes::ui::tui::ansi_to_text(&body),
             }
         })
         .collect();
-    funes::tui::curate::run(uri.clone(), project.clone(), items)?;
+    funes::ui::tui::curate::run(uri.clone(), project.clone(), items)?;
 
     // The review persisted every decision, so leaving just summarizes and offers the push.
     let curation = curate::load(&uri)?.unwrap_or_default();

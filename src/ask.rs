@@ -6,17 +6,17 @@
 //! misses, at several times the latency and cost; instead, a miss makes the answer say so and
 //! point at rephrasing — or at `funes add`, whose persistent wiring is where self-directed
 //! recall lives. Both agents stream JSONL events: the events animate the wait
-//! ([`crate::banner`]) and only the final answer reaches stdout.
+//! ([`crate::ui::banner`]) and only the final answer reaches stdout.
 
 use anyhow::{anyhow, bail, Result};
 use serde_json::Value;
 use std::io::{BufRead, BufReader, IsTerminal, Read};
 use std::process::{Command, ExitStatus, Stdio};
 
-use crate::banner::{accent, band_width, Banner};
 use crate::memory::hub::Memory;
 use crate::recall::{check_readable, memory_hint, recall_hits};
-use crate::render;
+use crate::ui::banner::{accent, band_width, Banner};
+use crate::ui::render;
 
 // Recall's CLI defaults; ask exposes no tuning of its own.
 const K: usize = 8;

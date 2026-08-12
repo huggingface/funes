@@ -13,7 +13,6 @@ compile_error!("funes is unix-only (Linux/macOS)");
 
 pub mod agents;
 pub mod ask;
-pub mod banner;
 pub mod chunk;
 pub mod curate;
 pub mod index;
@@ -22,9 +21,8 @@ pub mod mcp;
 pub mod memory;
 pub mod push;
 pub mod recall;
-pub mod render;
 pub mod scan;
 pub mod scrub;
 pub mod traces;
-pub mod tui;
+pub mod ui;
 pub mod update;
