@@ -12,13 +12,98 @@
 
 use super::jsonl;
 use super::{Block, Turn};
-
-use anyhow::{anyhow, Context, Result};
+use crate::hub;
+use anyhow::{anyhow, ensure, Context, Result};
 use arrow_array::{Array, LargeStringArray, ListArray, RecordBatch, StringArray};
+use futures::TryStreamExt;
+use hf_hub::repository::files::RepoTreeEntry;
+use hf_hub::repository::GitRefs;
+use hf_hub::{HFRepository, RepoTypeDataset};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde_json::Value;
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+/// A resolved Hub trace dataset's parquet: the `refs/convert/parquet` commit and its `*.parquet`
+/// shard paths, plus a repo handle to download them. Built by [`resolve_parquet`].
+pub(crate) struct RemoteParquet {
+    /// The `refs/convert/parquet` commit SHA — pins every shard read, and is the incremental
+    /// signature (an unchanged repo skips without re-downloading).
+    pub(crate) revision: String,
+    pub(crate) shards: Vec<String>,
+    pub(crate) repo: Arc<HFRepository<RepoTypeDataset>>,
+}
+
+/// The `refs/convert/parquet` commit SHA from a repo's refs, if that auto-converted branch exists
+/// (agent-traces datasets have it; a plain dataset does not).
+pub(crate) fn pick_convert_oid(refs: &GitRefs) -> Option<String> {
+    refs.converts
+        .iter()
+        .find(|r| r.name == "parquet" || r.git_ref.ends_with("convert/parquet"))
+        .map(|r| r.target_commit.clone())
+}
+
+/// The `*.parquet` paths among tree `entries`, sorted for a deterministic shard order.
+pub(crate) fn parquet_paths(entries: &[RepoTreeEntry]) -> Vec<String> {
+    let mut paths: Vec<String> = entries
+        .iter()
+        .filter_map(|e| match e {
+            RepoTreeEntry::File { path, .. } if path.ends_with(".parquet") => Some(path.clone()),
+            _ => None,
+        })
+        .collect();
+    paths.sort();
+    paths
+}
+
+/// Resolve a Hub trace dataset's auto-converted parquet: the `refs/convert/parquet` commit and its
+/// `*.parquet` shards, via the public `list_refs` + `list_tree` API (no datasets-server HTTP dep).
+pub(crate) async fn resolve_parquet(owner: &str, name: &str, token: Option<&str>) -> Result<RemoteParquet> {
+    let repo = Arc::new(hub::client(token, true)?.dataset(owner, name));
+
+    let refs = repo.list_refs().send().await.context("listing dataset refs")?;
+    let revision = pick_convert_oid(&refs)
+        .with_context(|| format!("{owner}/{name} has no refs/convert/parquet branch (not an agent-traces dataset?)"))?;
+
+    // Scope the stream: it borrows `repo` (`impl Stream + '_`), so it must drop before `repo` moves
+    // into the returned struct.
+    let shards = {
+        let stream = repo
+            .list_tree()
+            .revision(revision.clone())
+            .recursive(true)
+            .send()
+            .context("listing the parquet branch")?;
+        futures::pin_mut!(stream);
+        let mut entries = Vec::new();
+        while let Some(entry) = stream.try_next().await.context("reading a tree entry")? {
+            entries.push(entry);
+        }
+        parquet_paths(&entries)
+    };
+    ensure!(
+        !shards.is_empty(),
+        "{owner}/{name}: no *.parquet on refs/convert/parquet"
+    );
+
+    Ok(RemoteParquet { revision, shards, repo })
+}
+
+/// Download one shard whole-file at the pinned `revision` into hf-hub's cache; returns its local
+/// path. Mirrors [`HubFetcher::fetch`] — a warm re-download is zero-network.
+pub(crate) async fn download_shard(
+    repo: &HFRepository<RepoTypeDataset>,
+    filename: &str,
+    revision: &str,
+) -> Result<PathBuf> {
+    repo.download_file()
+        .filename(filename.to_string())
+        .revision(revision.to_string())
+        .send()
+        .await
+        .with_context(|| format!("downloading {filename}@{revision}"))
+}
 
 /// Read agent-trace sessions from a parquet file as a flat stream of turns — at most `limit`
 /// sessions (one row each), skipping rows whose messages yield no indexable block. Each `Turn`
@@ -404,5 +489,48 @@ mod tests {
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].session_id, "s1");
         assert_eq!(turns[0].blocks[0].text, "hello");
+    }
+    #[test]
+    fn pick_convert_oid_finds_the_parquet_convert() {
+        let refs: GitRefs = serde_json::from_value(serde_json::json!({
+            "branches": [{"name": "main", "ref": "refs/heads/main", "targetCommit": "main-oid"}],
+            "tags": [],
+            "converts": [{"name": "parquet", "ref": "refs/convert/parquet", "targetCommit": "conv-oid"}],
+        }))
+        .unwrap();
+        assert_eq!(pick_convert_oid(&refs).as_deref(), Some("conv-oid"));
+
+        let no_convert: GitRefs = serde_json::from_value(serde_json::json!({"branches": [], "tags": []})).unwrap();
+        assert!(pick_convert_oid(&no_convert).is_none());
+    }
+
+    #[test]
+    fn parquet_paths_keeps_only_parquet_files_sorted() {
+        let file = |p: &str| RepoTreeEntry::File {
+            oid: "o".into(),
+            size: 0,
+            path: p.into(),
+            lfs: None,
+            last_commit: None,
+            xet_hash: None,
+            security: None,
+        };
+        let entries = vec![
+            file("default/train/0001.parquet"),
+            RepoTreeEntry::Directory {
+                oid: "o".into(),
+                path: "default".into(),
+                last_commit: None,
+            },
+            file(".gitattributes"),
+            file("default/train/0000.parquet"),
+        ];
+        assert_eq!(
+            parquet_paths(&entries),
+            vec![
+                "default/train/0000.parquet".to_string(),
+                "default/train/0001.parquet".to_string()
+            ]
+        );
     }
 }

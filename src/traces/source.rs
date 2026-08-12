@@ -17,7 +17,6 @@ use super::parquet;
 use super::pi;
 use super::Turn;
 use crate::hub;
-use crate::memory::hf_dataset;
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -284,14 +283,14 @@ struct RemoteParquetDataset {
 /// are downloaded and indexed (for the gated live test); all sessions within each are read.
 pub async fn open_remote(owner: &str, name: &str, max_shards: Option<usize>) -> Result<Box<dyn TraceSource>> {
     let token = hub::hf_token();
-    let remote = hf_dataset::resolve_parquet(owner, name, token.as_deref()).await?;
+    let remote = parquet::resolve_parquet(owner, name, token.as_deref()).await?;
     let mut paths = remote.shards;
     if let Some(n) = max_shards {
         paths.truncate(n);
     }
     let mut shards = Vec::with_capacity(paths.len());
     for shard in &paths {
-        let local = hf_dataset::download_shard(&remote.repo, shard, &remote.revision).await?;
+        let local = parquet::download_shard(&remote.repo, shard, &remote.revision).await?;
         let workdir = Path::new(shard)
             .file_stem()
             .and_then(|s| s.to_str())
