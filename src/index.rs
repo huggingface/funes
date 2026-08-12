@@ -17,6 +17,7 @@ use arrow_array::{Array, FixedSizeListArray, Int64Array, RecordBatch, RecordBatc
 use arrow_schema::{DataType, Field, Schema};
 use lance::dataset::{Dataset, WriteParams};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io::{IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
@@ -150,6 +151,18 @@ async fn stored_ids(ds: &Dataset) -> Result<HashSet<String>> {
         }
     }
     Ok(ids)
+}
+
+/// Elide every block's inline base64 `data:` URI payloads, before [`redact_turns`] scans them: a
+/// screenshot's entropy trips detectors on values that are not secrets, and excising one of those
+/// plants a marker mid-payload that strands the rest of it in the store. Runs whether or not a
+/// scanner is installed — the payload is unrecallable either way.
+fn elide_turns(turns: &mut [trace::Turn]) {
+    for b in turns.iter_mut().flat_map(|t| t.blocks.iter_mut()) {
+        if let Cow::Owned(elided) = chunk::elide_data_uris(&b.text) {
+            b.text = elided;
+        }
+    }
 }
 
 /// Redact secrets from a session's turns *before* chunking — so a long key that chunking would
@@ -505,6 +518,7 @@ impl Indexer {
         };
 
         let (sessions, label) = unit_summary(&turns, &key);
+        elide_turns(&mut turns);
         if let Some(scanner) = &self.scanner {
             redact_turns(&mut turns, scanner, tiers, self.include_thinking)?;
         }
@@ -1237,6 +1251,45 @@ mod tests {
         assert_eq!(
             turns[0].blocks[1].text, "output SECRET dump",
             "unindexed tool_result untouched"
+        );
+    }
+
+    #[test]
+    fn elide_turns_strips_payloads_before_anything_scans_them() {
+        struct Recorder(std::cell::RefCell<String>);
+        impl scan::SecretScanner for Recorder {
+            fn scan(&self, blob: &str) -> Result<Vec<scan::Finding>> {
+                self.0.borrow_mut().push_str(blob);
+                Ok(Vec::new())
+            }
+        }
+        let mut turns = vec![trace::Turn {
+            session_id: "sess".into(),
+            workdir: "proj".into(),
+            turn_uuid: "turn".into(),
+            parent_uuid: None,
+            seq: 0,
+            ts: String::new(),
+            role: "tool".into(),
+            blocks: vec![trace::Block {
+                block_type: "tool_result".into(),
+                text: r#"{"image_url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUg=="}"#.into(),
+                tool_name: None,
+                tool_use_id: None,
+            }],
+            source_path: String::new(),
+            harness: "codex".into(),
+        }];
+        let scanner = Recorder(std::cell::RefCell::new(String::new()));
+        elide_turns(&mut turns);
+        redact_turns(&mut turns, &scanner, &chunk::Tier::ALL, true).unwrap();
+        assert_eq!(
+            turns[0].blocks[0].text,
+            r#"{"image_url":"data:image/png;base64,[elided]"}"#
+        );
+        assert!(
+            !scanner.0.borrow().contains("iVBORw0KGgo"),
+            "the scanner must never see the payload: excising a match inside it would strand the rest"
         );
     }
 }

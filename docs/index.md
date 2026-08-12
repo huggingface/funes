@@ -98,7 +98,7 @@ bounded step at a time. `--no-thinking` drops thinking blocks from the `text` ti
 or Hub repo skips the budget and indexes all tiers in one pass.
 
 Inline `data:` URI payloads are elided to `data:image/png;base64,[elided]` before a block is
-stored: a pasted screenshot is megabytes of base64 with nothing recallable in it.
+scanned or stored: a pasted screenshot is megabytes of base64 with nothing recallable in it.
 
 ## Flags
 
