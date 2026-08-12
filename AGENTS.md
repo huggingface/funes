@@ -100,6 +100,10 @@ Building needs `protoc` (lance compiles protobuf at build time): system package,
 calling work done: `cargo fmt && cargo clippy && cargo test` (the integration tests download the
 embedder/reranker weights on first run).
 
+`src/` is one directory per layer — traces, memory, commands, ui, agents, inference — and where a
+new function belongs follows from that; the layers and the placement test are in
+[CONTRIBUTING.md](CONTRIBUTING.md#style), also as the crate doc in `src/lib.rs`.
+
 Inference has two backends behind the `Embedder`/`Reranker` traits (`src/inference.rs`): the
 default `blas` (src/inference/blas.rs, hand-written forward on Accelerate/faer) and the opt-in `onnx`
 (fastembed/ort). CI lints both on every PR, so also run

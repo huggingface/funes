@@ -4,7 +4,7 @@
 //! delta is `local_ids − remote_ids` — the same primitive `index` uses. `push` is orchestration:
 //! it computes the delta, holds back any row that still contains a secret (redaction happens at
 //! index time; this is the egress backstop — the rows wait for `funes scrub`), and drives the HF
-//! write operations in [`crate::hf_dataset`], which own the atomic, parent-commit-guarded commits.
+//! write operations in [`crate::memory::hf_dataset`], which own the atomic, parent-commit-guarded commits.
 //!
 //! - **First publish:** build the dataset locally (data + FTS/IVF indexes) and upload every file in
 //!   one commit.

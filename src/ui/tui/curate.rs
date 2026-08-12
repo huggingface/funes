@@ -1,4 +1,4 @@
-//! The `funes curate` interactive review over the generic [`crate::tui`] engine: a fuzzy-filterable
+//! The `funes curate` interactive review over the generic [`crate::ui::tui`] engine: a fuzzy-filterable
 //! list of the project's candidate sessions, each carrying a decision glyph, where `→` includes a
 //! session and `←` excludes it (the same arrow again clears to pending). The preview shows the
 //! session's user prompts. Decisions persist to the memory's curation file as they're made; Enter or

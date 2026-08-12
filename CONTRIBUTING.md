@@ -65,6 +65,25 @@ fine; CI runs them with the repository secret.
 
 - Doc-comment the public surface; comments carry the non-obvious *why*, not a restatement of
   the code.
+
+- **One directory per layer**, each with one job — `src/` holds `main.rs`, `lib.rs` and the layer
+  roots, nothing else:
+
+  | Layer | Job |
+  |---|---|
+  | `traces/` | where sessions come from, how each harness's transcript is parsed, and the `Turn`/`Block` model they produce |
+  | `chunk.rs`, `scan.rs` | the models the layers share: chunk text and ids, secret findings |
+  | `inference/` | embedding and reranking behind traits (backend chosen at build time) |
+  | `memory/` | the memory, in three sublayers: Lance/object-store **mechanics**, the Hub **transport**, and the **domain** — what a memory is and what state it's in |
+  | `commands/` | what funes does when you run it: orchestration and decisions |
+  | `ui/` | how a result reaches the terminal |
+  | `agents/` | registering funes with a coding agent (MCP + automation hooks) |
+
+  Where does a new function go? Names an HF concept → transport. Names Lance → mechanics.
+  Answers *what is this memory, what state is it in* → domain. Decides *what to do about it* →
+  command. Commands **ask** the layers below for state; they never infer it from error shapes,
+  which is how four different answers to "does this memory exist" grew in the first place.
+
 - Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/)
   (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`): short imperative subject, the
   "why" in the body when it isn't obvious.
