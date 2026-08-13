@@ -74,15 +74,20 @@ fine; CI runs them with the repository secret.
   | `traces/` | where sessions come from, how each harness's transcript is parsed, and the `Turn`/`Block` model they produce |
   | `chunk.rs`, `scan.rs` | the models the layers share: chunk text and ids, secret findings |
   | `inference/` | embedding and reranking behind traits (backend chosen at build time) |
-  | `memory/` | the memory, in three sublayers: Lance/object-store **mechanics**, the Hub **transport**, and the **domain** — what a memory is and what state it's in |
+  | `hub.rs` | **transport**: the Hub's client, credentials, and dataset-repo identity and lifecycle. Knows nothing about memories — `memory`, `traces` and `commands` all call it |
+  | `memory/` | the memory itself: Lance and object-store **mechanics** (`dataset`, `fetch_store`, `capture_store`), its remote side (`remote`), under a **domain** (`memory.rs`) that says what a memory is and what state it's in |
   | `commands/` | what funes does when you run it: orchestration and decisions |
   | `ui/` | how a result reaches the terminal |
   | `agents/` | registering funes with a coding agent (MCP + automation hooks) |
 
   Where does a new function go? Names an HF concept → transport. Names Lance → mechanics.
   Answers *what is this memory, what state is it in* → domain. Decides *what to do about it* →
-  command. Commands **ask** the layers below for state; they never infer it from error shapes,
-  which is how four different answers to "does this memory exist" grew in the first place.
+  command.
+
+  Commands **ask** the domain for state — `Memory::state()` returns a `MemoryState`, and the
+  message for a state a command can only stop on comes from the memory itself
+  (`memory.missing_error()`). Don't read state out of an error shape: four different answers to
+  "does this memory exist" grew that way, and collapsing them was the point of the layering.
 
 - Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/)
   (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`): short imperative subject, the
