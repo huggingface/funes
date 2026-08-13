@@ -49,14 +49,12 @@ from. `no results` prints when nothing matched. The exact shape is a contract â€
 ## Drilling in with `get`
 
 ```bash
-funes get <session_id> <turn_uuid> [--window 3] [--memory <label>] [--highlight <text>] [--format human|agent]
+funes get <session_id> <turn_uuid> [--window 3] [--memory <label>]
 ```
 
 `get` returns the named turn plus the turns within the seq window, with splits reassembled into whole
 blocks. Pass the same `--memory` the recall hint named, so the drill-down reads the memory the hit came
-from. Unlike `recall`, `get` has a **human** rendering in addition to the agent format â€” chosen when
-both stdin and stdout are terminals, overridable with `--format`. `--highlight` marks text in that
-human rendering (whitespace-insensitive; no effect on the agent format). It prints `turn <uuid> not
+from. The output is the agent format, the same in a terminal as when piped. It prints `turn <uuid> not
 found in session <id>` when the turn is absent.
 
 ## Reading a different memory

@@ -13,7 +13,7 @@ use funes::traces::harness::Harness;
 use funes::ui::render;
 
 use anyhow::{anyhow, Context, Result};
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand};
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -66,12 +66,6 @@ enum Cmd {
         /// Turns within this seq window of the target are included.
         #[arg(long, default_value_t = DEFAULT_WINDOW)]
         window: i64,
-        /// Output format. Default: human in a terminal, agent when piped.
-        #[arg(long, value_enum)]
-        format: Option<OutputFormat>,
-        /// Highlight this text in the human rendering (matched whitespace-insensitively).
-        #[arg(long)]
-        highlight: Option<String>,
         #[command(flatten)]
         memory: MemoryOpts,
     },
@@ -281,29 +275,6 @@ impl MemoryOpts {
     }
 }
 
-/// The two output layouts for `get`.
-#[derive(Clone, Copy, ValueEnum)]
-enum OutputFormat {
-    /// A numbered list with a hit selector.
-    Human,
-    /// The stable agent layout: multi-line hits with provenance, previews, and neighbors.
-    Agent,
-}
-
-impl OutputFormat {
-    /// Resolve the effective format: an explicit flag wins; otherwise human when both stdin and
-    /// stdout are terminals (the hit selector needs both), agent when piped or scripted.
-    fn resolve(flag: Option<OutputFormat>) -> OutputFormat {
-        flag.unwrap_or_else(|| {
-            if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-                OutputFormat::Human
-            } else {
-                OutputFormat::Agent
-            }
-        })
-    }
-}
-
 /// Color and width for the human renderings: color needs a terminal and no `NO_COLOR`; width
 /// follows `$COLUMNS` when exported, else 100.
 fn human_io() -> (bool, usize) {
@@ -356,22 +327,13 @@ async fn main() -> Result<()> {
             session_id,
             turn_uuid,
             window,
-            format,
-            highlight,
             memory,
         } => {
-            let format = OutputFormat::resolve(format);
             let (note, turns) =
                 recall::get_turns(memory.resolve(), session_id.clone(), turn_uuid.clone(), window).await?;
             if turns.is_empty() {
                 print!("{note}");
                 println!("turn {turn_uuid} not found in session {session_id}");
-            } else if matches!(format, OutputFormat::Human) {
-                let (color, width) = human_io();
-                print!(
-                    "{}",
-                    render::get_human(&note, &turns, color, width, highlight.as_deref())
-                );
             } else {
                 print!("{}", render::get_agent(&note, &turns));
             }

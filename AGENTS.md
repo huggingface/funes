@@ -42,9 +42,7 @@ fell back to).
 
 `funes get <session_id> <turn_uuid> [--window 3] [--memory <label>]` — the named turn plus turns
 within the seq window, splits reassembled into whole blocks. Pass the `--memory` a recall hint
-names so the drill-down reads the same memory the hit came from. `--highlight <text>` marks the
-text in the human rendering (matched whitespace-insensitively; no effect on the agent format).
-Agent format, per turn:
+names so the drill-down reads the same memory the hit came from. Agent format, per turn:
 
 ```
 [<ts>] <role> seq<N> turn=<turn_uuid>
