@@ -46,6 +46,9 @@ from. `no results` prints when nothing matched. The exact shape is a contract �
 | `--harness` | — | restrict to `claude \| codex \| pi \| hermes` |
 | `--memory` | local | the memory to read (see below) |
 
+The MCP `recall` tool takes the same parameters and defaults, so an agent can widen a search it finds
+too narrow — most usefully `half_life: 0` when the answer may be old.
+
 ## Reading turns with `get`
 
 ```bash

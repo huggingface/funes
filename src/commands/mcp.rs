@@ -17,6 +17,18 @@ pub struct RecallRequest {
     pub query: String,
     #[schemars(description = "Number of results to return (default 8)")]
     pub k: Option<usize>,
+    #[schemars(
+        description = "Recency half-life in days: a hit this old keeps half its score (default 30). Pass 0 to weigh every age alike — do that when the memory spans months and the answer may be old, such as a founding decision."
+    )]
+    pub half_life: Option<f64>,
+    #[schemars(
+        description = "Adjacent chunks to attach to each hit for context (default 1). Raise it to read more around a hit without a follow-up `get`; 0 returns the hits alone."
+    )]
+    pub neighbors: Option<i64>,
+    #[schemars(
+        description = "How many fused candidates to rerank (default 30). Raise it when a topic is rare and the first pass may not surface it."
+    )]
+    pub candidates: Option<usize>,
     #[schemars(description = "Restrict to a block type: text | thinking | tool_use | tool_result")]
     pub block_type: Option<String>,
     #[schemars(description = "Restrict to a harness: claude | codex | pi | hermes")]
@@ -83,6 +95,9 @@ impl Funes {
         Parameters(RecallRequest {
             query,
             k,
+            half_life,
+            neighbors,
+            candidates,
             block_type,
             harness,
             memory,
@@ -92,9 +107,9 @@ impl Funes {
             self.memory(memory),
             query,
             k.unwrap_or(8),
-            30,
-            30.0,
-            1,
+            candidates.unwrap_or(30),
+            half_life.unwrap_or(30.0),
+            neighbors.unwrap_or(1),
             block_type,
             harness,
         )
