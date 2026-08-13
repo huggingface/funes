@@ -15,8 +15,8 @@ use std::io::Write;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use funes::hub::Memory;
-use funes::push::Confirm;
+use funes::commands::push::Confirm;
+use funes::memory::Memory;
 use hf_hub::repository::CommitOperation;
 use hf_hub::{HFClient, HFError, HFRepository, RepoTypeDataset};
 
@@ -86,10 +86,12 @@ async fn card_created_refreshed_and_a_hand_card_respected() {
     let src = tempfile::tempdir().unwrap();
     std::env::set_var("FUNES_HOME", db_dir.path());
     write_session(src.path(), &[("s1", "CARDSMOKE the first turn")]);
-    funes::index::run_index(src.path(), false, None).await.unwrap();
+    funes::commands::index::run_index(src.path(), false, None)
+        .await
+        .unwrap();
 
     // First publish → the card rides the initial commit.
-    let create = funes::push::run_push(Memory::parse(&uri), false, Confirm::Yes).await;
+    let create = funes::commands::push::run_push(Memory::parse(&uri), false, Confirm::Yes).await;
     let card_created = root_readme(&repo).await;
 
     // Grow by one turn → the append must refresh the stats in the same data commit.
@@ -97,8 +99,10 @@ async fn card_created_refreshed_and_a_hand_card_respected() {
         src.path(),
         &[("s1", "CARDSMOKE the first turn"), ("s2", "CARDSMOKE2 the second turn")],
     );
-    funes::index::run_index(src.path(), false, None).await.unwrap();
-    let append = funes::push::run_push(Memory::parse(&uri), false, Confirm::Yes).await;
+    funes::commands::index::run_index(src.path(), false, None)
+        .await
+        .unwrap();
+    let append = funes::commands::push::run_push(Memory::parse(&uri), false, Confirm::Yes).await;
     let card_refreshed = root_readme(&repo).await;
 
     // Hand-write the README: from here on funes must keep its hands off.
@@ -121,8 +125,10 @@ async fn card_created_refreshed_and_a_hand_card_respected() {
             ("s3", "CARDSMOKE3 the third turn"),
         ],
     );
-    funes::index::run_index(src.path(), false, None).await.unwrap();
-    let append_past_hand = funes::push::run_push(Memory::parse(&uri), false, Confirm::Yes).await;
+    funes::commands::index::run_index(src.path(), false, None)
+        .await
+        .unwrap();
+    let append_past_hand = funes::commands::push::run_push(Memory::parse(&uri), false, Confirm::Yes).await;
     let card_after_hand = root_readme(&repo).await;
 
     // Cleanup before asserting, so a failed assertion can't leave the scratch repo behind.

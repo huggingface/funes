@@ -4,6 +4,9 @@
 //! build time in one place — the `Default*` aliases below: default build → BLAS (a from-scratch
 //! forward on Accelerate/faer); `--no-default-features --features onnx` → fastembed/ort.
 
+#[cfg(feature = "blas")]
+pub mod blas;
+
 use anyhow::Result;
 
 // The single backend-selection point. One of these alias pairs is compiled; the factories below
@@ -12,9 +15,12 @@ use anyhow::Result;
 #[cfg(all(feature = "onnx", not(feature = "blas")))]
 use self::{OnnxEmbedder as DefaultEmbedder, OnnxReranker as DefaultReranker};
 #[cfg(feature = "blas")]
-use crate::blas::{BlasEmbedder as DefaultEmbedder, BlasReranker as DefaultReranker};
+use blas::{BlasEmbedder as DefaultEmbedder, BlasReranker as DefaultReranker};
 #[cfg(not(any(feature = "blas", feature = "onnx")))]
 compile_error!("funes needs an inference backend: feature `blas` (default) or `onnx`");
+
+/// How many texts one `embed` call takes.
+const EMBED_BATCH: usize = 256;
 
 /// Embed each text into a dense vector, in input order.
 pub trait Embedder: Send {
@@ -82,4 +88,19 @@ impl Reranker for OnnxReranker {
         }
         Ok(scores)
     }
+}
+
+/// Embed `texts` in batches of [`EMBED_BATCH`], calling `on_batch(embedded_so_far)` after each so a
+/// caller can report progress (or pass a no-op).
+pub(crate) fn embed_batched(
+    embedder: &mut dyn Embedder,
+    texts: &[&str],
+    mut on_batch: impl FnMut(usize),
+) -> Result<Vec<Vec<f32>>> {
+    let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
+    for group in texts.chunks(EMBED_BATCH) {
+        vectors.extend(embedder.embed(group)?);
+        on_batch(vectors.len());
+    }
+    Ok(vectors)
 }

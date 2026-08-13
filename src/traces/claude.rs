@@ -1,0 +1,297 @@
+//! Parse Claude Code session transcripts (`*.jsonl`) into the shared [`crate::traces`] turn/block
+//! model. This is the Claude Code source parser; the model itself lives in `trace.rs`.
+
+use serde_json::Value;
+use std::path::Path;
+
+use super::jsonl;
+use super::{Block, Turn};
+
+/// Path-derived workdir fallback for a transcript that records no cwd: the segment right after a
+/// `projects` dir, else the parent dir name.
+pub fn workdir_of(p: &Path) -> String {
+    let parts: Vec<&str> = p.iter().filter_map(|s| s.to_str()).collect();
+    if let Some(i) = parts.iter().position(|&s| s == "projects") {
+        if i + 1 < parts.len() {
+            return parts[i + 1].to_string();
+        }
+    }
+    p.parent()
+        .and_then(|d| d.file_name())
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn flatten_tool_result(content: &Value) -> String {
+    if let Some(s) = content.as_str() {
+        return s.to_string();
+    }
+    if let Some(arr) = content.as_array() {
+        let mut parts = Vec::new();
+        for c in arr {
+            if let Some(obj) = c.as_object() {
+                if obj.get("type").and_then(|t| t.as_str()) == Some("text") {
+                    parts.push(obj.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string());
+                }
+            } else if let Some(s) = c.as_str() {
+                parts.push(s.to_string());
+            }
+        }
+        return parts.join("\n");
+    }
+    String::new()
+}
+
+fn normalize_blocks(content: &Value) -> Vec<Block> {
+    let mut out = Vec::new();
+    if let Some(s) = content.as_str() {
+        if !s.trim().is_empty() {
+            out.push(Block {
+                block_type: "text".into(),
+                text: s.to_string(),
+                tool_name: None,
+                tool_use_id: None,
+            });
+        }
+        return out;
+    }
+    let arr = match content.as_array() {
+        Some(a) => a,
+        None => return out,
+    };
+    for b in arr {
+        let obj = match b.as_object() {
+            Some(o) => o,
+            None => continue,
+        };
+        match obj.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+            "text" => {
+                let t = obj.get("text").and_then(|x| x.as_str()).unwrap_or("");
+                if !t.trim().is_empty() {
+                    out.push(Block {
+                        block_type: "text".into(),
+                        text: t.to_string(),
+                        tool_name: None,
+                        tool_use_id: None,
+                    });
+                }
+            }
+            "thinking" => {
+                let t = obj.get("thinking").and_then(|x| x.as_str()).unwrap_or("");
+                if !t.trim().is_empty() {
+                    out.push(Block {
+                        block_type: "thinking".into(),
+                        text: t.to_string(),
+                        tool_name: None,
+                        tool_use_id: None,
+                    });
+                }
+            }
+            "tool_use" => {
+                let input = obj
+                    .get("input")
+                    .cloned()
+                    .unwrap_or_else(|| Value::Object(Default::default()));
+                // Compact JSON, literal UTF-8, keys in source order.
+                let text = serde_json::to_string(&input).unwrap_or_else(|_| "{}".into());
+                let name = obj.get("name").and_then(|x| x.as_str()).map(str::to_string);
+                let id = obj.get("id").and_then(|x| x.as_str()).map(str::to_string);
+                out.push(Block {
+                    block_type: "tool_use".into(),
+                    text,
+                    tool_name: name,
+                    tool_use_id: id,
+                });
+            }
+            "tool_result" => {
+                let content = obj.get("content").cloned().unwrap_or(Value::Null);
+                let text = flatten_tool_result(&content);
+                if !text.trim().is_empty() {
+                    let id = obj.get("tool_use_id").and_then(|x| x.as_str()).map(str::to_string);
+                    out.push(Block {
+                        block_type: "tool_result".into(),
+                        text,
+                        tool_name: None,
+                        tool_use_id: id,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The workdir a session's records name: the first usable `cwd`, munged (Claude Code
+/// stamps one on every entry). `None` when no record carries one.
+pub fn workdir_from_records(records: &[Value]) -> Option<String> {
+    records
+        .iter()
+        .find_map(|r| r.get("cwd").and_then(Value::as_str).and_then(jsonl::workdir_of_cwd))
+}
+
+pub fn turns_from_jsonl_file(p: &Path, session_id: &str, fallback_workdir: &str) -> std::io::Result<Vec<Turn>> {
+    let records = jsonl::read_jsonl_records(p)?;
+    // The workdir facet is the munged recorded cwd — the same value as the transcript's
+    // `projects` dir segment; the path-derived fallback covers transcripts without one.
+    let workdir = workdir_from_records(&records).unwrap_or_else(|| fallback_workdir.to_string());
+
+    let mut turns = Vec::new();
+    let mut seq = 0i64; // index among RETAINED turns, file order
+    for rec in &records {
+        let obj = match rec.as_object() {
+            Some(o) => o,
+            None => continue,
+        };
+        let rtype = obj.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        if rtype != "user" && rtype != "assistant" {
+            continue;
+        }
+        let msg = obj.get("message").and_then(|m| m.as_object());
+        let content = msg.and_then(|m| m.get("content")).cloned().unwrap_or(Value::Null);
+        let blocks = normalize_blocks(&content);
+        if blocks.is_empty() {
+            continue;
+        }
+        let role = msg
+            .and_then(|m| m.get("role"))
+            .and_then(|r| r.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| rtype.to_string());
+        turns.push(Turn {
+            session_id: session_id.to_string(),
+            workdir: workdir.to_string(),
+            turn_uuid: obj.get("uuid").and_then(|u| u.as_str()).unwrap_or("").to_string(),
+            parent_uuid: obj.get("parentUuid").and_then(|u| u.as_str()).map(str::to_string),
+            seq,
+            ts: obj.get("timestamp").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+            role,
+            blocks,
+            source_path: p.to_string_lossy().into_owned(),
+            harness: "claude_code".into(),
+        });
+        seq += 1;
+    }
+
+    jsonl::backfill_tool_names(&mut turns);
+    Ok(turns)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn workdir_of_uses_segment_after_projects() {
+        let p = Path::new("/home/u/.claude/projects/-home-u-dev-funes/abc.jsonl");
+        assert_eq!(workdir_of(p), "-home-u-dev-funes");
+    }
+
+    #[test]
+    fn workdir_of_falls_back_to_parent_dir() {
+        let p = Path::new("/tmp/some-dir/abc.jsonl");
+        assert_eq!(workdir_of(p), "some-dir");
+    }
+
+    fn write_jsonl(lines: &[&str]) -> tempfile::NamedTempFile {
+        let mut f = tempfile::Builder::new().suffix(".jsonl").tempfile().unwrap();
+        for l in lines {
+            writeln!(f, "{l}").unwrap();
+        }
+        f.flush().unwrap();
+        f
+    }
+
+    #[test]
+    fn parses_text_thinking_and_correlates_tool_names() {
+        // assistant turn: thinking + tool_use; user turn: tool_result whose name is
+        // back-filled from the matching tool_use id. A non-user/assistant record and a
+        // blank line are skipped; seq counts only retained turns.
+        let f = write_jsonl(&[
+            r#"{"type":"summary","summary":"ignore me"}"#,
+            r#"{"type":"assistant","uuid":"u1","timestamp":"2026-01-01T00:00:00Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hmm"},{"type":"tool_use","id":"call_1","name":"Bash","input":{"command":"ls"}}]}}"#,
+            "",
+            r#"{"type":"user","uuid":"u2","parentUuid":"u1","timestamp":"2026-01-01T00:00:01Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":[{"type":"text","text":"file.txt"}]}]}}"#,
+        ]);
+        let turns = turns_from_jsonl_file(f.path(), "sess", "proj").unwrap();
+
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].seq, 0);
+        assert_eq!(turns[1].seq, 1);
+        assert_eq!(turns[0].session_id, "sess");
+        assert_eq!(turns[0].workdir, "proj");
+        assert_eq!(turns[1].parent_uuid.as_deref(), Some("u1"));
+
+        let blocks0 = &turns[0].blocks;
+        assert_eq!(blocks0.len(), 2);
+        assert_eq!(blocks0[0].block_type, "thinking");
+        assert_eq!(blocks0[1].block_type, "tool_use");
+        assert_eq!(blocks0[1].tool_name.as_deref(), Some("Bash"));
+        // tool_use input is compact JSON with source key order preserved.
+        assert_eq!(blocks0[1].text, r#"{"command":"ls"}"#);
+
+        let result = &turns[1].blocks[0];
+        assert_eq!(result.block_type, "tool_result");
+        assert_eq!(result.text, "file.txt");
+        // name correlated from the tool_use with the same id.
+        assert_eq!(result.tool_name.as_deref(), Some("Bash"));
+    }
+
+    #[test]
+    fn project_prefers_the_recorded_cwd_first_usable_wins() {
+        let f = write_jsonl(&[
+            r#"{"type":"user","uuid":"u1","cwd":"/Users/d/dev/funes","message":{"role":"user","content":"hi"}}"#,
+            r#"{"type":"assistant","uuid":"a1","cwd":"/Users/d/dev/elsewhere","message":{"role":"assistant","content":"yo"}}"#,
+        ]);
+        let turns = turns_from_jsonl_file(f.path(), "s", "fallback").unwrap();
+        assert!(turns.iter().all(|t| t.workdir == "-Users-d-dev-funes"));
+    }
+
+    #[test]
+    fn recorded_cwd_facet_agrees_with_the_transcripts_path_segment() {
+        // A real Claude transcript sits under `projects/<munge(cwd)>/…`, so the cwd-derived facet
+        // and the path-derived fallback must be the same value — rows indexed from a transcript
+        // with and without a recorded cwd never diverge.
+        let f = write_jsonl(&[
+            r#"{"type":"user","uuid":"u1","cwd":"/home/u/dev/llama.cpp","message":{"role":"user","content":"hi"}}"#,
+        ]);
+        let turns = turns_from_jsonl_file(f.path(), "s", "-home-u-dev-llama-cpp").unwrap();
+        assert_eq!(turns[0].workdir, "-home-u-dev-llama-cpp");
+    }
+
+    #[test]
+    fn string_content_becomes_single_text_block() {
+        let f = write_jsonl(&[r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"hello there"}}"#]);
+        let turns = turns_from_jsonl_file(f.path(), "s", "p").unwrap();
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].blocks.len(), 1);
+        assert_eq!(turns[0].blocks[0].block_type, "text");
+        assert_eq!(turns[0].blocks[0].text, "hello there");
+    }
+
+    #[test]
+    fn turn_with_only_blank_text_is_dropped() {
+        let f = write_jsonl(&[
+            r#"{"type":"assistant","uuid":"u1","message":{"role":"assistant","content":[{"type":"text","text":"   "}]}}"#,
+        ]);
+        assert!(turns_from_jsonl_file(f.path(), "s", "p").unwrap().is_empty());
+    }
+
+    #[test]
+    fn missing_file_is_an_error_not_empty() {
+        // A read failure must surface as Err so the indexer skips it without recording
+        // state, rather than silently treating it as an empty (fully indexed) file.
+        let err = turns_from_jsonl_file(Path::new("/no/such/file.jsonl"), "s", "p");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn flatten_tool_result_handles_string_and_array() {
+        assert_eq!(flatten_tool_result(&Value::String("plain".into())), "plain");
+        let arr = serde_json::json!([{"type":"text","text":"a"},{"type":"image"},{"type":"text","text":"b"}]);
+        assert_eq!(flatten_tool_result(&arr), "a\nb");
+        assert_eq!(flatten_tool_result(&Value::Null), "");
+    }
+}

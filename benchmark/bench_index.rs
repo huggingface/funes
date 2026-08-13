@@ -16,8 +16,8 @@
 use anyhow::Result;
 use arrow_array::{Array, StringArray};
 use clap::Parser;
-use funes::hub::Memory;
-use funes::index::run_index;
+use funes::commands::index::run_index;
+use funes::memory::Memory;
 use futures::TryStreamExt;
 use std::collections::HashSet;
 use std::path::PathBuf;

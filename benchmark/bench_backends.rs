@@ -67,7 +67,7 @@ fn backends() -> Result<Vec<Backend>> {
     }
     #[cfg(feature = "blas")]
     {
-        use funes::blas::{BlasEmbedder, BlasReranker};
+        use funes::inference::blas::{BlasEmbedder, BlasReranker};
         v.push(Backend {
             name: "blas",
             emb: Box::new(BlasEmbedder::new()?),

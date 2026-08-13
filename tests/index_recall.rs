@@ -33,15 +33,19 @@ async fn index_then_read_surface() {
     let (session, workdir) = write_transcript(source.path());
 
     // Build the index for real: parse → chunk → embed → Lance + FTS.
-    funes::index::run_index(source.path(), false, None).await.unwrap();
+    funes::commands::index::run_index(source.path(), false, None)
+        .await
+        .unwrap();
 
     // status: non-empty chunk count.
-    let status = funes::recall::status(funes::hub::Memory::local()).await.unwrap();
+    let status = funes::commands::recall::status(funes::memory::Memory::local())
+        .await
+        .unwrap();
     assert!(status.contains("chunks:"), "status missing chunk count: {status}");
 
     // recall: the parsing turn surfaces, and the `→ get` line carries the full session id.
-    let out = funes::recall::recall(
-        funes::hub::Memory::local(),
+    let out = funes::commands::recall::recall(
+        funes::memory::Memory::local(),
         "parse transcripts into turns".into(),
         5,
         30,
@@ -63,8 +67,8 @@ async fn index_then_read_surface() {
     );
 
     // type filter: restrict to tool_use → the Bash call.
-    let tu = funes::recall::recall(
-        funes::hub::Memory::local(),
+    let tu = funes::commands::recall::recall(
+        funes::memory::Memory::local(),
         "cargo test".into(),
         5,
         30,
@@ -78,7 +82,7 @@ async fn index_then_read_surface() {
     assert!(tu.contains("tool_use"), "type filter should keep tool_use rows: {tu}");
 
     // get: reassemble the assistant turn by its uuid.
-    let got = funes::recall::get(funes::hub::Memory::local(), session.clone(), "t2".into(), 3)
+    let got = funes::commands::recall::get(funes::memory::Memory::local(), session.clone(), "t2".into(), 3)
         .await
         .unwrap();
     assert!(got.contains("typed blocks"), "get should return the turn text: {got}");
@@ -91,8 +95,8 @@ async fn index_then_read_surface() {
     );
     let memory2 = db_dir.path().join("memory2");
     copy_dir(&db_dir.path().join("memory"), &memory2);
-    let out2 = funes::recall::recall(
-        funes::hub::Memory::parse(&memory2.to_string_lossy()),
+    let out2 = funes::commands::recall::recall(
+        funes::memory::Memory::parse(&memory2.to_string_lossy()),
         "parse transcripts into turns".into(),
         5,
         30,

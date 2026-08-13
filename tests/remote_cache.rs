@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use funes::hub::Memory;
+use funes::memory::Memory;
 
 const FIXTURE_URI: &str = "hf://datasets/optimum-internal-testing/funes-test/fixture/lancedb";
 const MARKER: &str = "UNIQUEMARKERXYZZY";
@@ -39,7 +39,7 @@ fn cache_footprint(dir: &Path) -> (usize, u64) {
 }
 
 async fn recall(query: &str) -> String {
-    funes::recall::recall(Memory::parse(FIXTURE_URI), query.to_string(), 5, 30, 0.0, 0, None, None)
+    funes::commands::recall::recall(Memory::parse(FIXTURE_URI), query.to_string(), 5, 30, 0.0, 0, None, None)
         .await
         .expect("recall over remote fixture")
 }

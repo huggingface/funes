@@ -6,13 +6,15 @@
 //!
 //!   cargo run --example backfill_remote_repo -- <org/repo> [<org/repo>…]
 //!
-//! Disposable: delete this file (and `backfill_repo`, `hf_dataset::add_column`) once every memory
+//! Disposable: delete this file (and `backfill_repo`, `remote::add_column`) once every memory
 //! carries `repo`.
 
 use anyhow::{bail, Context, Result};
 use arrow_array::{RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
-use funes::{dataset, hf_dataset, hub, repo};
+use funes::hub;
+use funes::memory::{dataset, remote, Memory};
+use funes::traces::repo;
 use hf_hub::HFClient;
 use lance::dataset::{BatchUDF, Dataset, NewColumnTransform};
 use std::collections::HashMap;
@@ -44,9 +46,9 @@ async fn main() -> Result<()> {
 }
 
 async fn backfill_one(spec: &str, token: &str) -> Result<String> {
-    let uri = match hub::Memory::parse(spec) {
-        hub::Memory::Remote { uri } => uri,
-        hub::Memory::Local { .. } => bail!("not a remote memory — use `backfill_repo` for the local memory"),
+    let uri = match Memory::parse(spec) {
+        Memory::Remote { uri } => uri,
+        Memory::Local { .. } => bail!("not a remote memory — use `backfill_repo` for the local memory"),
     };
     let (owner, name, _prefix) = hub::parse_hf(&uri)?;
     let dataset_uri = format!("{uri}/{}.lance", dataset::TABLE);
@@ -91,7 +93,7 @@ async fn backfill_one(spec: &str, token: &str) -> Result<String> {
         .token(token.to_string())
         .build()?
         .dataset(owner, name);
-    let oid = hf_dataset::add_column(
+    let oid = remote::add_column(
         &repo_handle,
         &dataset_uri,
         opts.clone(),

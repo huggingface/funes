@@ -59,15 +59,17 @@ async fn scrub_dropping_every_block_leaves_a_valid_empty_memory() {
 
     // Index with a no-op scanner so the escaped key lands in the memory unredacted.
     std::env::set_var("FUNES_TRUFFLEHOG", "/usr/bin/true");
-    funes::index::run_index(source.path(), false, None).await.unwrap();
+    funes::commands::index::run_index(source.path(), false, None)
+        .await
+        .unwrap();
 
     // Scrub with the real scanner: every block is unredactable, so the memory is rewritten empty.
     std::env::remove_var("FUNES_TRUFFLEHOG");
-    funes::scrub::run().await.unwrap();
+    funes::commands::scrub::run().await.unwrap();
 
     // The empty Overwrite must leave a valid, reopenable memory with zero rows.
-    let uri = funes::dataset::table_uri(&funes::dataset::local_memory_dir());
-    let ds = funes::dataset::open(&uri, HashMap::new())
+    let uri = funes::memory::dataset::table_uri(&funes::memory::dataset::local_memory_dir());
+    let ds = funes::memory::dataset::open(&uri, HashMap::new())
         .await
         .expect("memory must reopen after an all-dropped scrub");
     assert_eq!(

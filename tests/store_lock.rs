@@ -4,7 +4,7 @@
 //! process can hold the lock and then observe the contention paths without spawning `funes`
 //! subprocesses.
 
-use funes::lock::MemoryLock;
+use funes::memory::lock::MemoryLock;
 
 #[tokio::test]
 async fn memory_lock_fails_loudly_on_contention() {
@@ -23,7 +23,7 @@ async fn memory_lock_fails_loudly_on_contention() {
     );
 
     // scrub refuses while the lock is held (its guard is the same acquire).
-    let err = funes::scrub::run().await.unwrap_err();
+    let err = funes::commands::scrub::run().await.unwrap_err();
     assert!(
         err.to_string()
             .contains("another funes memory operation is in progress"),

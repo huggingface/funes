@@ -19,7 +19,9 @@ fn write_session(source: &std::path::Path, n_turns: usize) {
 }
 
 async fn chunk_count() -> usize {
-    let s = funes::recall::status(funes::hub::Memory::local()).await.unwrap();
+    let s = funes::commands::recall::status(funes::memory::Memory::local())
+        .await
+        .unwrap();
     s.lines()
         .find_map(|l| l.strip_prefix("chunks: "))
         .and_then(|n| n.trim().parse().ok())
@@ -33,12 +35,16 @@ async fn incremental_reindex_matches_from_scratch() {
     let inc_db = tempfile::tempdir().unwrap();
     std::env::set_var("FUNES_HOME", inc_db.path());
     write_session(inc_src.path(), 4);
-    funes::index::run_index(inc_src.path(), false, None).await.unwrap();
+    funes::commands::index::run_index(inc_src.path(), false, None)
+        .await
+        .unwrap();
     let after_first = chunk_count().await;
     assert!(after_first > 0, "first index produced no chunks");
 
     write_session(inc_src.path(), 6); // append 2 turns
-    funes::index::run_index(inc_src.path(), false, None).await.unwrap();
+    funes::commands::index::run_index(inc_src.path(), false, None)
+        .await
+        .unwrap();
     let incremental = chunk_count().await;
     assert!(
         incremental > after_first,
@@ -50,7 +56,9 @@ async fn incremental_reindex_matches_from_scratch() {
     let scratch_db = tempfile::tempdir().unwrap();
     write_session(scratch_src.path(), 6);
     std::env::set_var("FUNES_HOME", scratch_db.path());
-    funes::index::run_index(scratch_src.path(), false, None).await.unwrap();
+    funes::commands::index::run_index(scratch_src.path(), false, None)
+        .await
+        .unwrap();
     let from_scratch = chunk_count().await;
 
     assert_eq!(

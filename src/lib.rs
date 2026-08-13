@@ -4,6 +4,25 @@
 //! `recall` (hybrid → rerank → recency → neighbors), `get`, `status`.
 //! The binary ([`main`]) is a thin CLI over these modules; integration tests drive
 //! them directly.
+//!
+//! One directory per layer, each with one job:
+//!
+//! - [`traces`] — where sessions come from and how each harness's transcript is parsed, plus the
+//!   `Turn`/`Block` model every parser produces.
+//! - [`chunk`], [`scan`] — the two models the layers share: chunk text and its ids, and secret
+//!   findings.
+//! - [`inference`] — embedding and reranking behind traits, so a backend swaps at build time.
+//! - [`hub`] — *transport*: the Hugging Face Hub's client, credentials, and dataset-repo identity
+//!   and lifecycle. Knows nothing about memories; four layers call it.
+//! - [`memory`] — the memory itself: Lance and object-store *mechanics* under a *domain* that says
+//!   what a memory is and what state it's in.
+//! - [`commands`] — what funes does when you run it: orchestration and decisions.
+//! - [`ui`] — how a result reaches the terminal.
+//! - [`agents`] — registering funes with a coding agent (MCP + automation hooks).
+//!
+//! Where a new function goes: names an HF concept → transport; names Lance → mechanics; answers
+//! *what is this memory, what state is it in* → domain; decides *what to do about it* → command.
+//! Commands ask the layers below for state; they never infer it from error shapes.
 
 // funes is unix-only (Linux/macOS): the release targets, install.sh, and the in-place
 // self-update all assume unix semantics. Fail with a clear message on other platforms rather
@@ -11,42 +30,12 @@
 #[cfg(not(unix))]
 compile_error!("funes is unix-only (Linux/macOS)");
 
-pub mod ask;
-pub mod banner;
-#[cfg(feature = "blas")]
-pub mod blas;
-pub mod capture_store;
-pub mod card;
+pub mod agents;
 pub mod chunk;
-pub mod claude;
-pub mod claude_traces;
-pub mod codex;
-pub mod codex_traces;
-pub mod curate;
-pub mod dataset;
-pub mod fetch_store;
-pub mod harness;
-pub mod hermes;
-pub mod hermes_traces;
-pub mod hf_dataset;
-pub mod hf_traces;
-pub mod hooks;
+pub mod commands;
 pub mod hub;
-pub mod index;
 pub mod inference;
-mod integration;
-pub mod jsonl;
-pub mod lock;
-pub mod mcp;
-pub mod pi;
-pub mod pi_traces;
-pub mod push;
-pub mod recall;
-pub mod render;
-pub mod repo;
+pub mod memory;
 pub mod scan;
-pub mod scrub;
-pub mod source;
-pub mod trace;
-pub mod tui;
-pub mod update;
+pub mod traces;
+pub mod ui;

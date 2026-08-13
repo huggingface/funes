@@ -6,7 +6,7 @@
 //!
 //! The fixture is a stable, synthetic, read-only dataset (no real data).
 
-use funes::hub::Memory;
+use funes::memory::Memory;
 
 const FIXTURE_URI: &str = "hf://datasets/optimum-internal-testing/funes-test/fixture/lancedb";
 const MARKER: &str = "UNIQUEMARKERXYZZY";
@@ -36,7 +36,7 @@ async fn recall_from_remote_fixture() {
     // End-to-end: the full recall pipeline (hybrid vector + BM25 → rerank → recency → format) over
     // the remote memory surfaces the marker chunk — exercising both the remote IVF_PQ and inverted-
     // index reads (lazy, Xet-cached). recency off, no neighbors, to keep the assertion tight.
-    let out = funes::recall::recall(
+    let out = funes::commands::recall::recall(
         Memory::parse(FIXTURE_URI),
         MARKER.to_string(),
         5,

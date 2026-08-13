@@ -65,6 +65,30 @@ fine; CI runs them with the repository secret.
 
 - Doc-comment the public surface; comments carry the non-obvious *why*, not a restatement of
   the code.
+
+- **One directory per layer**, each with one job — `src/` holds `main.rs`, `lib.rs` and the layer
+  roots, nothing else:
+
+  | Layer | Job |
+  |---|---|
+  | `traces/` | where sessions come from, how each harness's transcript is parsed, and the `Turn`/`Block` model they produce |
+  | `chunk.rs`, `scan.rs` | the models the layers share: chunk text and ids, secret findings |
+  | `inference/` | embedding and reranking behind traits (backend chosen at build time) |
+  | `hub.rs` | **transport**: the Hub's client, credentials, and dataset-repo identity and lifecycle. Knows nothing about memories — `memory`, `traces` and `commands` all call it |
+  | `memory/` | the memory itself: Lance and object-store **mechanics** (`dataset`, `fetch_store`, `capture_store`), its remote side (`remote`), under a **domain** (`memory.rs`) that says what a memory is and what state it's in |
+  | `commands/` | what funes does when you run it: orchestration and decisions |
+  | `ui/` | how a result reaches the terminal |
+  | `agents/` | registering funes with a coding agent (MCP + automation hooks) |
+
+  Where does a new function go? Names an HF concept → transport. Names Lance → mechanics.
+  Answers *what is this memory, what state is it in* → domain. Decides *what to do about it* →
+  command.
+
+  Commands **ask** the domain for state — `Memory::state()` returns a `MemoryState`, and the
+  message for a state a command can only stop on comes from the memory itself
+  (`memory.missing_error()`). Don't read state out of an error shape: four different answers to
+  "does this memory exist" grew that way, and collapsing them was the point of the layering.
+
 - Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/)
   (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`): short imperative subject, the
   "why" in the body when it isn't obvious.
