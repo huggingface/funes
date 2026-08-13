@@ -275,12 +275,9 @@ pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm) -> 
     };
 
     // 1. What the remote *is*, and what's on it — asked before any local build or scan, so an
-    // unreachable or missing remote costs nothing (it would otherwise look like a first publish,
-    // and push would scan + build the whole dataset before the commit failed). An unreadable
-    // dataset is a hard error, never "empty": treating it as a first publish would commit a fresh
-    // dataset's files into a repo that already holds one (`check_compat` rejections land here too
-    // — a mixed-version teammate must stop, not clobber). An empty remote is a personal memory's
-    // first publish; a project memory always exists (born empty when named).
+    // unreachable or missing remote fails fast. An unreadable dataset (a `check_compat` rejection
+    // included) is a hard error, never "empty": treating it as a first publish would commit a fresh
+    // dataset's files into a repo that already holds one.
     let state = target.state().await.map_err(|e| {
         e.context(format!(
             "{} exists but can't be read — refusing to treat it as empty",
