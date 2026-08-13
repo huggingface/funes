@@ -24,7 +24,7 @@ Each hit carries its provenance and a ready-to-run drill-down line:
 
 ```
 [<ts>] <harness> <workdir>/<session8> <block_type>  score=<s.sss>
-  → get <session_id> <turn_uuid> --memory <label>
+  → get <session_id> --from <seq> --to <seq> --memory <label>
 <the full chunk text>
   ~ [<role> <block_type> seq<N>] <neighbor chunk, first 160 chars>
 ---
@@ -46,18 +46,46 @@ from. `no results` prints when nothing matched. The exact shape is a contract �
 | `--harness` | — | restrict to `claude \| codex \| pi \| hermes` |
 | `--memory` | local | the memory to read (see below) |
 
-## Drilling in with `get`
+## Reading turns with `get`
 
 ```bash
-funes get <session_id> <turn_uuid> [--window 3] [--memory <label>] [--highlight <text>] [--format human|agent]
+funes get <session_id> [--from <seq>] [--to <seq>] [--memory <label>]
 ```
 
-`get` returns the named turn plus the turns within the seq window, with splits reassembled into whole
-blocks. Pass the same `--memory` the recall hint named, so the drill-down reads the memory the hit came
-from. Unlike `recall`, `get` has a **human** rendering in addition to the agent format — chosen when
-both stdin and stdout are terminals, overridable with `--format`. `--highlight` marks text in that
-human rendering (whitespace-insensitive; no effect on the agent format). It prints `turn <uuid> not
-found in session <id>` when the turn is absent.
+`get` returns a range of a session's turns, with their splits reassembled into whole blocks. Pass the
+same `--memory` the recall hint named, so the drill-down reads the memory the hit came from. The
+output is the agent format, the same in a terminal as when piped.
+
+**Turns are addressed by `seq`** — the session's own dense counter over its turns — so `--from 40
+--to 60` is exactly "turns 40 through 60". There is one way to name a turn, and a hit's `→ get` line
+hands it to you already formed:
+
+```bash
+funes get 987a1e04-… --from 37 --to 43   # printed by the hit; run it as it stands
+funes get 987a1e04-… --from 40 --to 60   # or move and widen, by editing two numbers
+funes get 987a1e04-…                     # or start at the beginning of a session you just chose
+```
+
+That last form matters as much as the first. `sessions` hands you a session id, so without a
+coordinate read there is no way to *start* reading a session you picked — which is how you end up
+dumping one to a file and paging it by line number. `--from` alone reads 20 turns on.
+
+The turn uuid is provenance, not an address: it identifies a turn across re-indexing, and is printed
+with every turn, but nothing takes it as input.
+
+Every read closes with the coordinates it covered and the session's size, so a partial read says
+what it is part of and the next range is obvious:
+
+```
+---
+turns 0-19 of 786
+```
+
+A single turn can carry a whole file, so rendering stops at around 40,000 characters and states the
+remainder with the coordinate to resume from — `9 more turn(s) in range not shown — read them with
+--from 12`. One turn always renders however large, since a read that answers nothing cannot be
+narrowed further. It prints `no turns in that range of session <id>` when the coordinates land
+outside it.
 
 ## Reading a different memory
 

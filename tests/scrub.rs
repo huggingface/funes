@@ -58,9 +58,13 @@ async fn scrub_redacts_an_existing_secret_in_place() {
     funes::commands::index::run_index(source.path(), false, None)
         .await
         .unwrap();
-    let dirty = funes::commands::recall::get(funes::memory::Memory::local(), session.into(), "t1".into(), 3)
-        .await
-        .unwrap();
+    let dirty = funes::commands::recall::get(
+        funes::memory::Memory::local(),
+        session.into(),
+        funes::commands::recall::TurnRange::default(),
+    )
+    .await
+    .unwrap();
     assert!(
         dirty.contains(&key_body),
         "setup: the key should be in the memory before scrub"
@@ -69,9 +73,13 @@ async fn scrub_redacts_an_existing_secret_in_place() {
     // Scrub with the real scanner: it must redact the key in place.
     std::env::remove_var("FUNES_TRUFFLEHOG");
     funes::commands::scrub::run().await.unwrap();
-    let clean = funes::commands::recall::get(funes::memory::Memory::local(), session.into(), "t1".into(), 3)
-        .await
-        .unwrap();
+    let clean = funes::commands::recall::get(
+        funes::memory::Memory::local(),
+        session.into(),
+        funes::commands::recall::TurnRange::default(),
+    )
+    .await
+    .unwrap();
     assert!(
         clean.contains("[REDACTED:PrivateKey]"),
         "expected a redaction marker after scrub: {clean}"

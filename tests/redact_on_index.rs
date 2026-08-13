@@ -54,9 +54,13 @@ async fn planted_key_is_redacted_at_index_time() {
         .unwrap();
 
     // Read the stored turn back: the marker is present, the key body is gone.
-    let got = funes::commands::recall::get(funes::memory::Memory::local(), session.into(), "t1".into(), 3)
-        .await
-        .unwrap();
+    let got = funes::commands::recall::get(
+        funes::memory::Memory::local(),
+        session.into(),
+        funes::commands::recall::TurnRange::default(),
+    )
+    .await
+    .unwrap();
     assert!(
         got.contains("[REDACTED:PrivateKey]"),
         "expected a redaction marker, got: {got}"

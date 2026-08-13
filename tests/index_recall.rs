@@ -82,9 +82,13 @@ async fn index_then_read_surface() {
     assert!(tu.contains("tool_use"), "type filter should keep tool_use rows: {tu}");
 
     // get: reassemble the assistant turn by its uuid.
-    let got = funes::commands::recall::get(funes::memory::Memory::local(), session.clone(), "t2".into(), 3)
-        .await
-        .unwrap();
+    let got = funes::commands::recall::get(
+        funes::memory::Memory::local(),
+        session.clone(),
+        funes::commands::recall::TurnRange::default(),
+    )
+    .await
+    .unwrap();
     assert!(got.contains("typed blocks"), "get should return the turn text: {got}");
 
     // Every hit names the memory it was read from — the default memory and an explicit one alike.
