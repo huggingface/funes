@@ -22,6 +22,8 @@ This directory contains the user guides and design notes for
 - [Configuration and local files](configuration.md) — state paths, caches, authentication,
   integration files, and environment overrides.
 - [Remote-memory caching](hub-caching.md) — how `hf://` recall caches immutable Lance files.
+- [Extracting a corpus from a memory](corpus-extraction.md) — the spec for delegating session
+  selection to an agent, and why it prescribes no method.
 
 ## Design and reference
 
