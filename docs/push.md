@@ -56,6 +56,10 @@ $ echo $?
 2
 ```
 
+A hold-back is easy to miss when the hooks push in the background, so `funes status <memory>`
+scans this host's pending rows the same way and reports what a push would hold back, until a
+scrub lets them publish.
+
 `funes push` and `funes scrub` refuse to run unscanned when TruffleHog is unavailable. See the
 [upstream installation documentation](https://github.com/trufflesecurity/trufflehog#installation).
 funes looks for it on `PATH`, or at the path set by `FUNES_TRUFFLEHOG`; see
