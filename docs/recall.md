@@ -110,7 +110,54 @@ $ funes sessions --memory huggingface/funes-memory
 ```
 
 Turns are counted distinct rather than by row, since a long turn is stored as several chunks. The
-session id is printed in full, so the line feeds `funes get` or `funes curate --include` as is.
+session id is printed in full, so the line feeds `funes get` or `funes scan` as is.
+
+## Finding a literal with `scan`
+
+```bash
+funes scan <needle> <session_id> [--from <seq>] [--to <seq>] [--ignore-case] [--context <chars>] [--memory <label>]
+```
+
+Recall proves presence. It ranks passages by similarity and returns the best few, so it can show
+that a memory discusses something — never that it does not. `scan` is the other half: a literal
+string checked against **every** block of one session, so a zero means the string is nowhere in
+that session.
+
+```console
+$ funes scan "acme-internal" af33dfe0-8576-435d-bc7a-016595b65402 --memory huggingface/funes-memory
+scan "acme-internal" in af33dfe0-8576-435d-bc7a-016595b65402 — 2 hits
+[2026-07-07T11:34:19.737Z] tool_result seq214
+  → get af33dfe0-8576-435d-bc7a-016595b65402 4c1e… --memory huggingface/funes-memory
+  … remote add upstream git@github.com:acme-internal/pipeline.git …
+```
+
+**A session at a time**, because that is the shape of the question. "Does this session mention an
+internal project" is answerable; "is this term anywhere in the memory" was never a clearance for any
+particular session, and the verb no longer offers it. Use [`sessions`](#listing-a-memorys-sessions)
+to enumerate what to screen, and scan each one you care about — a session read costs a filtered scan
+of its own rows, not a pass over the memory.
+
+It is **literal, not a regex** — deliberately. The whole point of the verb is that zero hits reads
+as *clean*, and a pattern that silently matches nothing is a false clearance. `--ignore-case` covers
+case variation. For the same reason a session id that isn't in the memory is an error rather than an
+empty result: a mistyped id must never read as absence.
+
+Splits are stitched back into their block before matching, so a needle spanning a chunk boundary is
+still found, and a long block reports one hit rather than one per chunk.
+
+Listing stops at 200 hits, and says where to pick up: `4202 more hits not shown — continue with
+--from 3891`. A common word in a long session really does run that far — `"the"` finds 4,402 hits in
+a 10,000-turn session — so a cap you could not walk past would turn the count into a dead end. The
+resume coordinate is the first hit that was dropped rather than one past the last shown, because a
+turn can hold several matching blocks: continuing may repeat a hit, but it never skips one.
+
+`--from`/`--to` take the same `seq` coordinate as [`get`](#reading-turns-with-get), and scan a
+stretch of a session on their own — useful for the part you have not screened yet. A window scopes
+what a zero means: over `--from 500 --to 999` the reply names those turns and clears only them. A
+window that falls outside the session says `no turns in that range` rather than reporting absence.
+
+Absence of a match clears only the literal you passed, in the session you named — pick the spellings
+that matter.
 
 ## Reading a different memory
 

@@ -64,6 +64,30 @@ pub struct SessionsRequest {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ScanRequest {
+    #[schemars(
+        description = "The literal string to find. Not regex — a pattern that silently matched nothing would read as a clean result."
+    )]
+    pub needle: String,
+    #[schemars(description = "Session to scan — the id from a `sessions` row or a recall hit's `→ get` line")]
+    pub session_id: String,
+    #[schemars(
+        description = "First turn to scan, as the session's own seq. Omit to start at the session's beginning; pass the seq a capped scan told you to continue from."
+    )]
+    pub from: Option<i64>,
+    #[schemars(description = "Last turn to scan, as the session's own seq. Omit to scan to the end of the session.")]
+    pub to: Option<i64>,
+    #[schemars(description = "Match regardless of case (default false)")]
+    pub ignore_case: Option<bool>,
+    #[schemars(description = "Characters of surrounding text shown on each side of a match (default 100)")]
+    pub context: Option<usize>,
+    #[schemars(
+        description = "Memory to scan — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Defaults to the server's memory."
+    )]
+    pub memory: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct StatusRequest {
     #[schemars(
         description = "Memory to inspect — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Defaults to the server's memory."
@@ -157,6 +181,38 @@ impl Funes {
             Ok(s) if !s.is_empty() => s,
             Ok(_) => "no results".to_string(),
             Err(e) => format!("sessions error: {e}"),
+        }
+    }
+
+    #[tool(
+        description = "Find a literal string in every block of one session — exhaustive and unranked, where `recall` is ranked and partial. This is what answers questions of absence about a session: `recall` can show that something is present, never that it is nowhere, so a claim that a session does not mention some term has to be settled here. Use it to screen a session against a criterion — does this one name an internal project, a customer, a credential — and to locate where a term you already expect actually occurs. Splits are stitched back together first, so a needle straddling a chunk boundary is still found, and each hit carries a `→ get` line to read the turn around it. Scanning is per session by design: name the session with `session_id`, and use `sessions` to enumerate the ones to screen. A needle that returns nothing is absent from that session and says nothing about any other; absence clears only the exact spelling you passed, so pick the ones that matter and use `ignore_case` for case variation. Listing stops at 200 hits and names the `from` to continue at, so a common term in a long session is still walkable; `from`/`to` also scan just a stretch of a session — and then a zero clears only that stretch."
+    )]
+    async fn scan(
+        &self,
+        Parameters(ScanRequest {
+            needle,
+            session_id,
+            from,
+            to,
+            ignore_case,
+            context,
+            memory,
+        }): Parameters<ScanRequest>,
+    ) -> String {
+        match recall::scan(
+            self.memory(memory),
+            needle,
+            session_id,
+            from,
+            to,
+            ignore_case.unwrap_or(false),
+            context.unwrap_or(100),
+        )
+        .await
+        {
+            Ok(s) if !s.is_empty() => s,
+            Ok(_) => "no results".to_string(),
+            Err(e) => format!("scan error: {e}"),
         }
     }
 

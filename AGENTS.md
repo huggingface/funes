@@ -87,8 +87,60 @@ answers how much a memory holds or how much of it a pass covered. Agent format:
 ```
 
 Turns are counted distinct, not as rows: chunking is an indexing artifact. The session id is
-printed whole, so it feeds `get`, `curate --include/--exclude`, and any other id-taking command
+printed whole, so it feeds `get`, `scan`, and any other id-taking command
 directly. `no sessions in <label>` when the memory is empty.
+
+### scan
+
+`funes scan <needle> <session_id> [--from <seq>] [--to <seq>] [--ignore-case] [--context <chars>]
+[--memory <label>]` — a literal string found in every block of **one session**. Exhaustive and unranked, where `recall` is
+ranked and partial: this is what settles a question of absence, which recall cannot. Both the needle
+and the session are required; there is no projection mode.
+
+**One session, by design.** Every question worth asking of a literal is a claim about a session —
+does *this* one name an internal project, quote a credential, mention a customer. A memory-wide hit
+was never a clearance for any particular session, so the verb cannot make that shape of claim.
+Enumerate with `sessions`, then scan the ones you mean to screen.
+
+**Literal, never a pattern.** The step this exists for reads zero hits as clean, so a regex that
+silently matched nothing would be a false clearance. `--ignore-case` covers case variation. A
+session id that isn't in the memory is an **error**, for the same reason: a typo must not read as
+absence.
+
+Splits are stitched back into their block before matching, so a needle straddling a chunk boundary
+is still found and a split block reports once rather than once per chunk. Agent format:
+
+```
+scan "<needle>" in <session_id> — <m> hits
+[<ts>] <block_type> seq<N>
+  → get <session_id> --from <seq> --to <seq> --memory <label>
+  … <context chars each side of the match, whitespace-collapsed> …
+---
+```
+
+Hits come in reading order. `no matches for "<needle>" in <session_id>` when zero — needle and
+session are both echoed, so a zero is attributable to a specific query against a specific session.
+
+**A cap you can walk past.** Listing stops at 200 hits and names the coordinate to continue at:
+`<k> more hits not shown — continue with --from <seq>`. A common word in a long session runs to
+thousands of hits (4,402 for `"the"` in a 10,000-turn session), so an elision you cannot reach past
+would make the count a dead end. The resume coordinate is the first *dropped* hit's seq, not one past
+the last shown: a turn can hold several matching blocks, and `last + 1` would skip the rest of it —
+so continuing may repeat a hit but never skips one. The header count is always what was found, not
+what was listed.
+
+`--from`/`--to` also scan a stretch of a session on their own, in the same `seq` coordinate `get`
+uses. **A window scopes the clearance**: a zero over `--from 500 --to 999` reads `no matches for
+"<needle>" in <session_id> turns 500-999`, and clears only those turns. A window that lands outside
+the session reports `no turns in that range`, never absence.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--ignore-case` / `-i` | off | fold case when matching |
+| `--context` | 100 | chars of surrounding text shown each side of a match |
+| `--memory` | local memory | the memory holding the session |
+
+Absence of a match clears only the literal actually passed, in the session actually named.
 
 ### ask
 
@@ -125,9 +177,10 @@ claude/codex/hermes also installs the automation hooks — see [docs/automation.
 positional `memory` binds the server to a memory; `funes add <agent> <memory>` bakes it into the
 registration. `funes remove <agent>` reverses that agent integration without deleting memories or
 transcripts. Tools: `recall` (query, k, half_life, neighbors, candidates, block_type/harness
-filters, memory), `get` (session_id, from, to, memory), `sessions` (memory), `status` (memory) —
-each returns the corresponding agent-format string verbatim. A tool call's `memory` overrides the
-server's; with neither, it reads the local memory.
+filters, memory), `get` (session_id, from, to, memory), `sessions` (memory), `scan` (needle,
+session_id, ignore_case, context, memory), `status` (memory) — each returns the corresponding
+agent-format string verbatim. A tool call's `memory` overrides the server's; with neither, it reads
+the local memory.
 
 ## Working on the repo
 

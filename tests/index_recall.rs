@@ -1,5 +1,5 @@
 //! End-to-end: build a real index from a tiny transcript in a temp dir, then exercise
-//! the read surface (recall / get / status). No mocking — this runs the real
+//! the read surface (recall / get / sessions / scan / status). No mocking — this runs the real
 //! BGE embedder + reranker (downloaded to the fastembed cache on first run) against a
 //! real Lance memory under a temp `$FUNES_HOME`.
 
@@ -17,11 +17,23 @@ fn write_transcript(source: &std::path::Path) -> (String, String) {
         r#"{"type":"user","uuid":"t1","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"how do we parse transcripts into turns"}}"#,
         r#"{"type":"assistant","uuid":"t2","parentUuid":"t1","timestamp":"2026-01-01T00:00:05Z","message":{"role":"assistant","content":[{"type":"text","text":"We parse each JSONL line into a turn with typed blocks."},{"type":"tool_use","id":"c1","name":"Bash","input":{"command":"cargo test"}}]}}"#,
         r#"{"type":"user","uuid":"t3","parentUuid":"t2","timestamp":"2026-01-01T00:00:10Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"c1","content":[{"type":"text","text":"22 passed"}]}]}}"#,
+        &format!(
+            r#"{{"type":"assistant","uuid":"t4","parentUuid":"t3","timestamp":"2026-01-01T00:00:15Z","message":{{"role":"assistant","content":[{{"type":"text","text":"{}"}}]}}}}"#,
+            seam_block()
+        ),
     ];
     for l in lines {
         writeln!(f, "{l}").unwrap();
     }
     (session.to_string(), workdir.to_string())
+}
+
+/// A block long enough to split (over the 1200-char chunk cap), with `SPLITSEAMMARKER` placed in
+/// the 150-char region consecutive chunks overlap — so the marker is stored in two chunks. A scan
+/// that matched raw chunks would report it twice.
+fn seam_block() -> String {
+    let filler = |from: usize, to: usize| (from..to).map(|i| format!("w{i:03} ")).collect::<String>();
+    format!("{}SPLITSEAMMARKER {}", filler(0, 220), filler(220, 320))
 }
 
 #[tokio::test]
@@ -96,12 +108,161 @@ async fn index_then_read_surface() {
         .await
         .unwrap();
     assert!(
-        listed.contains(&format!("{workdir}/{session} 3 turns")),
+        listed.contains(&format!("{workdir}/{session} 4 turns")),
         "sessions should list the session with its distinct turn count: {listed}"
     );
     assert!(
         listed.trim_end().ends_with("1 sessions"),
         "the listing should close with the total: {listed}"
+    );
+
+    // scan: an exhaustive literal search of one session, and a zero that names the needle it
+    // cleared.
+    let scanned = funes::commands::recall::scan(
+        funes::memory::Memory::local(),
+        "typed blocks".into(),
+        session.clone(),
+        None,
+        None,
+        false,
+        40,
+    )
+    .await
+    .unwrap();
+    assert!(
+        scanned.contains(&format!("scan \"typed blocks\" in {session} — 1 hits")),
+        "scan should find the literal exactly once: {scanned}"
+    );
+    assert!(
+        scanned.contains(&format!("→ get {session} --from 0 --to 4")),
+        "a scan hit should carry a runnable range around its turn, clamped at the start: {scanned}"
+    );
+    let zero = funes::commands::recall::scan(
+        funes::memory::Memory::local(),
+        "nothing anywhere says this".into(),
+        session.clone(),
+        None,
+        None,
+        false,
+        40,
+    )
+    .await
+    .unwrap();
+    assert!(
+        zero.contains(&format!("no matches for \"nothing anywhere says this\" in {session}")),
+        "a zero should echo the needle and the session it cleared: {zero}"
+    );
+
+    // A session that isn't in the memory is an error, not a clearance — a mistyped id must never
+    // read as "the term is absent".
+    let unknown = funes::commands::recall::scan(
+        funes::memory::Memory::local(),
+        "typed blocks".into(),
+        "no-such-session".into(),
+        None,
+        None,
+        false,
+        40,
+    )
+    .await;
+    let err = unknown.expect_err("an unknown session must be an error").to_string();
+    assert!(err.contains("no session no-such-session"), "names the session: {err}");
+
+    // A window scopes what a zero clears: the same needle is present in the session and absent from
+    // a stretch that excludes it, and the reply says which stretch it cleared.
+    let windowed = funes::commands::recall::scan(
+        funes::memory::Memory::local(),
+        "typed blocks".into(),
+        session.clone(),
+        Some(2),
+        None,
+        false,
+        40,
+    )
+    .await
+    .unwrap();
+    assert!(
+        windowed.starts_with(&format!("no matches for \"typed blocks\" in {session} turns 2 on")),
+        "a window must scope the clearance it reports: {windowed}"
+    );
+    let covering = funes::commands::recall::scan(
+        funes::memory::Memory::local(),
+        "typed blocks".into(),
+        session.clone(),
+        Some(0),
+        Some(1),
+        false,
+        40,
+    )
+    .await
+    .unwrap();
+    assert!(
+        covering.contains("turns 0-1 — 1 hits"),
+        "a window that covers the hit still finds it: {covering}"
+    );
+
+    // A range outside the session is not a clearance — it reports the session's size instead.
+    let outside = funes::commands::recall::scan(
+        funes::memory::Memory::local(),
+        "typed blocks".into(),
+        session.clone(),
+        Some(900),
+        Some(910),
+        false,
+        40,
+    )
+    .await
+    .unwrap();
+    assert!(
+        outside.contains("no turns in that range"),
+        "an empty window must not read as absence: {outside}"
+    );
+
+    // A needle inside the region two chunks overlap is one hit, not one per chunk — splits are
+    // stitched back into their block before anything is matched.
+    let seam = funes::commands::recall::scan(
+        funes::memory::Memory::local(),
+        "SPLITSEAMMARKER".into(),
+        session.clone(),
+        None,
+        None,
+        false,
+        40,
+    )
+    .await
+    .unwrap();
+    assert!(
+        seam.contains("— 1 hits"),
+        "a split block should report one hit, not one per chunk: {seam}"
+    );
+
+    // --ignore-case covers case variation; the same needle misses without it.
+    let folded = funes::commands::recall::scan(
+        funes::memory::Memory::local(),
+        "TYPED BLOCKS".into(),
+        session.clone(),
+        None,
+        None,
+        true,
+        40,
+    )
+    .await
+    .unwrap();
+    assert!(folded.contains("— 1 hits"), "ignore_case should fold: {folded}");
+    let exact = funes::commands::recall::scan(
+        funes::memory::Memory::local(),
+        "TYPED BLOCKS".into(),
+        session.clone(),
+        None,
+        None,
+        false,
+        40,
+    )
+    .await
+    .unwrap();
+    assert!(
+        exact.starts_with("no matches for"),
+        "a literal scan is case-sensitive by default: {exact}"
     );
 
     // Every hit names the memory it was read from — the default memory and an explicit one alike.

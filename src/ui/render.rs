@@ -1,11 +1,11 @@
 //! Rendering for the read commands, over `recall`'s structured results.
 //!
-//! [`recall_agent`]/[`get_agent`]/[`sessions_agent`] are the machine format — byte-stable, its
-//! layout is a published contract (the `→ get` lines are parsed) and must not change.
-//! [`get_human`] renders a turn for a terminal: tool chunks compressed to a deterministic
+//! [`recall_agent`]/[`get_agent`]/[`sessions_agent`]/[`scan_agent`] are the machine format —
+//! byte-stable, its layout is a published contract (the `→ get` lines are parsed) and must not
+//! change. [`get_human`] renders a turn for a terminal: tool chunks compressed to a deterministic
 //! one-liner, prose wrapped, marks highlighted.
 
-use crate::commands::recall::{Hit, Session, Turn};
+use crate::commands::recall::{Hit, ScanCut, ScanResult, Session, Turn};
 use std::fmt::Write as _;
 
 /// Turns each side of a hit that a `→ get` line reaches for. A hint is meant to be run as it
@@ -70,6 +70,71 @@ pub fn sessions_agent(note: &str, sessions: &[Session]) -> String {
 /// wide range would otherwise answer past any tool-result ceiling; what the budget left out is
 /// always stated, with the coordinates to ask for it.
 const GET_BUDGET: usize = 40_000;
+
+/// The agent `scan` format: a header echoing the needle and what it was cleared against — the
+/// session, and the window when one was asked for, since a zero over a window clears only the
+/// window — then one line per carrying block with the `→ get` that reads it. A cap is stated with
+/// the coordinate that continues past it, never silent. Byte-stable.
+pub fn scan_agent(note: &str, memory_arg: &str, r: &ScanResult, context: usize) -> String {
+    let mut out = note.to_string();
+    let scanned = match (r.from, r.to) {
+        (None, None) => String::new(),
+        (Some(a), Some(b)) => format!(" turns {a}-{b}"),
+        (Some(a), None) => format!(" turns {a} on"),
+        (None, Some(b)) => format!(" turns up to {b}"),
+    };
+    if r.hits.is_empty() {
+        let _ = writeln!(out, "no matches for {:?} in {}{scanned}\n---", r.needle, r.session_id);
+        return out;
+    }
+    let _ = writeln!(
+        out,
+        "scan {:?} in {}{scanned} — {} hits",
+        r.needle,
+        r.session_id,
+        r.hits.len() + r.dropped
+    );
+    for h in &r.hits {
+        let _ = writeln!(out, "[{}] {} seq{}", h.ts, h.block_type, h.seq);
+        let _ = writeln!(out, "  → get {}{}{}", r.session_id, hint_range(h.seq), memory_arg);
+        let _ = writeln!(out, "  {}", excerpt(&h.text, h.at, h.len, context));
+    }
+    match &r.cut {
+        Some(ScanCut::Resume(seq)) => {
+            let _ = writeln!(out, "{} more hits not shown — continue with --from {seq}", r.dropped);
+        }
+        Some(ScanCut::Crowded(seq)) => {
+            let _ = writeln!(
+                out,
+                "{} more hits not shown, all in turn {seq} — read it with --from {seq} --to {seq}",
+                r.dropped
+            );
+        }
+        None => {}
+    }
+    let _ = writeln!(out, "---");
+    out
+}
+
+/// `context` chars of the block on each side of the match, whitespace-collapsed onto one line so a
+/// section stays scannable. A `…` marks each end the block runs past.
+fn excerpt(text: &str, at: usize, len: usize, context: usize) -> String {
+    let start = text[..at]
+        .char_indices()
+        .rev()
+        .nth(context.saturating_sub(1))
+        .map_or(0, |(j, _)| j);
+    let end = text[at..]
+        .char_indices()
+        .nth(len + context)
+        .map_or(text.len(), |(j, _)| at + j);
+    format!(
+        "{}{}{}",
+        if start > 0 { "… " } else { "" },
+        text[start..end].split_whitespace().collect::<Vec<_>>().join(" "),
+        if end < text.len() { " …" } else { "" }
+    )
+}
 
 /// The agent `get` format: `[ts] role seqN turn=…` headers over reassembled blocks, closed by the
 /// coordinates read and the session's size — so a partial read says what it is part of, and the
@@ -420,7 +485,19 @@ fn write_wrapped(out: &mut String, line: &str, width: usize, indent: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::recall::Neighbor;
+    use crate::commands::recall::{Neighbor, ScanHit};
+
+    fn scan_hit() -> ScanHit {
+        ScanHit {
+            turn_uuid: "aaaa-bbbb".to_string(),
+            ts: "2026-06-19T01:29:59.000Z".to_string(),
+            block_type: "tool_result".to_string(),
+            seq: 7,
+            at: 6,
+            len: 9,
+            text: "?? ../acme-internal/README.md".to_string(),
+        }
+    }
 
     fn hit(ts: &str, block_type: &str, text: &str) -> Hit {
         Hit {
@@ -520,6 +597,139 @@ mod tests {
         assert_eq!(word_span(text, "nope delta"), None);
         // A long mark cut mid-word at its start still anchors via the skip.
         assert_eq!(word_span(text, "pha beta gamma delta epsilon zeta eta"), Some(1..7));
+    }
+
+    #[test]
+    fn sessions_agent_is_byte_stable() {
+        let s = Session {
+            session_id: "0123456789abcdef".to_string(),
+            ts: "2026-06-19T01:29:59.000Z".to_string(),
+            workdir: "-home-u-funes".to_string(),
+            harness: "claude_code".to_string(),
+            turns: 47,
+        };
+        assert_eq!(
+            sessions_agent("", &[s]),
+            "[2026-06-19T01:29:59.000Z] claude_code -home-u-funes/0123456789abcdef 47 turns\n\
+             ---\n\
+             1 sessions\n"
+        );
+        // An empty listing still closes with its total.
+        assert_eq!(sessions_agent("", &[]), "---\n0 sessions\n");
+    }
+
+    #[test]
+    fn scan_agent_is_byte_stable() {
+        let r = ScanResult {
+            needle: "acme-internal".to_string(),
+            session_id: "0123456789abcdef".to_string(),
+            hits: vec![scan_hit()],
+            dropped: 0,
+            cut: None,
+            from: None,
+            to: None,
+        };
+        assert_eq!(
+            scan_agent("", " --memory local", &r, 40),
+            "scan \"acme-internal\" in 0123456789abcdef — 1 hits\n\
+             [2026-06-19T01:29:59.000Z] tool_result seq7\n\
+             \x20 → get 0123456789abcdef --from 4 --to 10 --memory local\n\
+             \x20 ?? ../acme-internal/README.md\n\
+             ---\n"
+        );
+    }
+
+    #[test]
+    fn scan_agent_states_a_zero_and_a_cap() {
+        let empty = ScanResult {
+            needle: "Acme Corp".to_string(),
+            session_id: "0123456789abcdef".to_string(),
+            hits: vec![],
+            dropped: 0,
+            cut: None,
+            from: None,
+            to: None,
+        };
+        assert_eq!(
+            scan_agent("", "", &empty, 40),
+            "no matches for \"Acme Corp\" in 0123456789abcdef\n---\n"
+        );
+        // A zero over a window clears the window, not the session — so the window is named in it.
+        let windowed = ScanResult {
+            from: Some(500),
+            to: Some(999),
+            ..empty
+        };
+        assert_eq!(
+            scan_agent("", "", &windowed, 40),
+            "no matches for \"Acme Corp\" in 0123456789abcdef turns 500-999\n---\n"
+        );
+        // An open-ended window says which end is open, so the claim it clears stays readable.
+        let onward = ScanResult {
+            needle: "Acme Corp".to_string(),
+            session_id: "0123456789abcdef".to_string(),
+            hits: vec![],
+            dropped: 0,
+            cut: None,
+            from: Some(500),
+            to: None,
+        };
+        assert!(
+            scan_agent("", "", &onward, 40)
+                .starts_with("no matches for \"Acme Corp\" in 0123456789abcdef turns 500 on"),
+            "got: {}",
+            scan_agent("", "", &onward, 40)
+        );
+        // A cap is stated, never silent — and the header counts what was found, not what is listed.
+        let capped = ScanResult {
+            needle: "the".to_string(),
+            session_id: "0123456789abcdef".to_string(),
+            hits: vec![scan_hit()],
+            dropped: 12,
+            cut: Some(ScanCut::Resume(41)),
+            from: None,
+            to: None,
+        };
+        let out = scan_agent("", "", &capped, 40);
+        assert!(
+            out.starts_with("scan \"the\" in 0123456789abcdef — 13 hits\n"),
+            "got: {out}"
+        );
+        // A cap the caller cannot walk past is a dead end: the elision names where to resume.
+        assert!(
+            out.contains("\n12 more hits not shown — continue with --from 41\n"),
+            "got: {out}"
+        );
+        // One turn holding more matches than the cap has no coordinate that both progresses and
+        // keeps every hit, so the reply says so instead of offering a resume that would loop.
+        let crowded = ScanResult {
+            needle: "the".to_string(),
+            session_id: "0123456789abcdef".to_string(),
+            hits: vec![scan_hit()],
+            dropped: 99,
+            cut: Some(ScanCut::Crowded(7)),
+            from: None,
+            to: None,
+        };
+        let out = scan_agent("", "", &crowded, 40);
+        assert!(
+            out.contains("99 more hits not shown, all in turn 7 — read it with --from 7 --to 7"),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn excerpt_windows_the_match_and_marks_the_cuts() {
+        let text = "alpha ".repeat(20) + "NEEDLE" + &" omega".repeat(20);
+        let at = text.find("NEEDLE").unwrap();
+        let e = excerpt(&text, at, 6, 12);
+        assert!(e.starts_with("… "), "a cut head is marked: {e}");
+        assert!(e.ends_with(" …"), "a cut tail is marked: {e}");
+        assert!(e.contains("NEEDLE"), "the match is in the window: {e}");
+        // A block shorter than the window is shown whole, with no ellipses.
+        assert_eq!(excerpt("a NEEDLE b", 2, 6, 40), "a NEEDLE b");
+        // Newlines collapse, so a hit stays one line.
+        assert_eq!(excerpt("a\n\nNEEDLE\tb", 3, 6, 40), "a NEEDLE b");
     }
 
     #[test]
