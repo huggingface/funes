@@ -52,6 +52,22 @@ names so the drill-down reads the same memory the hit came from. Agent format, p
 
 `turn <uuid> not found in session <id>` when absent.
 
+### sessions
+
+`funes sessions [--memory <label>]` — every session in the memory, oldest first. Recall is ranked
+retrieval and reaches only what a query reaches; this is the enumerator, and the only thing that
+answers how much a memory holds or how much of it a pass covered. Agent format:
+
+```
+[<first_ts>] <harness> <workdir>/<session_id> <n> turns
+---
+<n> sessions
+```
+
+Turns are counted distinct, not as rows: chunking is an indexing artifact. The session id is
+printed whole, so it feeds `get`, `curate --include/--exclude`, and any other id-taking command
+directly. `no sessions in <label>` when the memory is empty.
+
 ### ask
 
 `funes ask claude|codex "<question>" [--memory <label>]` — one grounded answer from a coding
@@ -87,8 +103,8 @@ claude/codex/hermes also installs the automation hooks — see [docs/automation.
 positional `memory` binds the server to a memory; `funes add <agent> <memory>` bakes it into the
 registration. `funes remove <agent>` reverses that agent integration without deleting memories or
 transcripts. Tools: `recall` (query, k, half_life, neighbors, candidates, block_type/harness
-filters, memory), `get` (session_id, turn_uuid, window, memory), `status` (memory) — each returns
-the corresponding agent-format string verbatim. A tool call's `memory` overrides the server's; with
+filters, memory), `get` (session_id, turn_uuid, window, memory), `sessions` (memory), `status`
+(memory) — each returns the corresponding agent-format string verbatim. A tool call's `memory` overrides the server's; with
 neither, it reads the local memory.
 
 ## Working on the repo

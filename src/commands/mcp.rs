@@ -54,6 +54,14 @@ pub struct GetRequest {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SessionsRequest {
+    #[schemars(
+        description = "Memory to list — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Defaults to the server's memory."
+    )]
+    pub memory: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct StatusRequest {
     #[schemars(
         description = "Memory to inspect — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Defaults to the server's memory."
@@ -135,6 +143,17 @@ impl Funes {
             Ok(s) if !s.is_empty() => s,
             Ok(_) => "no results".to_string(),
             Err(e) => format!("get error: {e}"),
+        }
+    }
+
+    #[tool(
+        description = "List every session in a memory, oldest first: first timestamp, harness, workdir, full session id, and how many turns it holds, closed by the total. `recall` is ranked retrieval — it surfaces what a query reaches and says nothing about the rest, so it can never tell you how much a memory holds or how much of it you have looked at. Call this whenever coverage is the question: sizing a memory before a sweep, reporting how many sessions you actually examined, or checking whether a session you heard about by id is in there at all."
+    )]
+    async fn sessions(&self, Parameters(SessionsRequest { memory }): Parameters<SessionsRequest>) -> String {
+        match recall::sessions(self.memory(memory)).await {
+            Ok(s) if !s.is_empty() => s,
+            Ok(_) => "no results".to_string(),
+            Err(e) => format!("sessions error: {e}"),
         }
     }
 

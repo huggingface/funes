@@ -60,6 +60,28 @@ blocks. Pass the same `--memory` the recall hint named, so the drill-down reads 
 from. The output is the agent format, the same in a terminal as when piped. It prints `turn <uuid> not
 found in session <id>` when the turn is absent.
 
+## Enumerating with `sessions`
+
+```bash
+funes sessions [--memory <label>]
+```
+
+Recall ranks: it returns the passages closest to a query and says nothing about everything it did
+not reach. So it cannot answer *how much is in here* or *how much of it have I looked at*.
+`sessions` can — it lists every session in the memory, oldest first, with its provenance and turn
+count:
+
+```console
+$ funes sessions --memory huggingface/funes-memory
+[2026-06-19T01:29:59.000Z] claude_code -home-u-funes/0123456789abcdef 47 turns
+…
+---
+28 sessions
+```
+
+Turns are counted distinct rather than by row, since a long turn is stored as several chunks. The
+session id is printed in full, so the line feeds `funes get` or `funes curate --include` as is.
+
 ## Reading a different memory
 
 `--memory` takes an `<org>/<repo>` shorthand, a full `hf://…` URI, a local path, or `local`. This is
