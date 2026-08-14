@@ -914,18 +914,28 @@ mod tests {
         let uri = dataset::table_uri(&dir.path().to_string_lossy());
         let schema = b.schema();
         let reader = RecordBatchIterator::new(vec![Ok(b)], schema);
-        Dataset::write(reader, &uri, Some(WriteParams::default())).await.unwrap();
+        Dataset::write(reader, &uri, Some(WriteParams::default()))
+            .await
+            .unwrap();
         let ds = dataset::open(&uri, HashMap::new()).await.unwrap();
         let by_session = curate::ids_by_session(&ds).await.unwrap();
 
         let all: HashSet<String> = by_session.values().flatten().cloned().collect();
-        let held = held_among(&ds, &all).await.expect("the dirty pending block should be reported");
+        let held = held_among(&ds, &all)
+            .await
+            .expect("the dirty pending block should be reported");
         assert!(held.rows >= 1);
         assert!(held.summary.contains("PrivateKey"), "summary: {}", held.summary);
 
         let clean_only: HashSet<String> = by_session["clean"].iter().cloned().collect();
-        assert!(held_among(&ds, &clean_only).await.is_none(), "clean pending rows are not held");
-        assert!(held_among(&ds, &HashSet::new()).await.is_none(), "nothing pending, nothing scanned");
+        assert!(
+            held_among(&ds, &clean_only).await.is_none(),
+            "clean pending rows are not held"
+        );
+        assert!(
+            held_among(&ds, &HashSet::new()).await.is_none(),
+            "nothing pending, nothing scanned"
+        );
     }
 
     #[test]
