@@ -1,11 +1,11 @@
 //! Rendering for the read commands, over `recall`'s structured results.
 //!
-//! [`recall_agent`]/[`get_agent`] are the machine format — byte-stable, its layout is a published
-//! contract (the `→ get` lines are parsed) and must not change. [`get_human`] renders a turn for
-//! a terminal: tool chunks compressed to a deterministic one-liner, prose wrapped, marks
-//! highlighted.
+//! [`recall_agent`]/[`get_agent`]/[`sessions_agent`] are the machine format — byte-stable, its
+//! layout is a published contract (the `→ get` lines are parsed) and must not change.
+//! [`get_human`] renders a turn for a terminal: tool chunks compressed to a deterministic
+//! one-liner, prose wrapped, marks highlighted.
 
-use crate::commands::recall::{Hit, Turn};
+use crate::commands::recall::{Hit, Session, Turn};
 use std::fmt::Write as _;
 
 /// Turns each side of a hit that a `→ get` line reaches for. A hint is meant to be run as it
@@ -47,6 +47,22 @@ pub fn recall_agent(note: &str, memory_arg: &str, hits: &[(Hit, f64)]) -> String
         }
         let _ = writeln!(out, "---");
     }
+    out
+}
+
+/// The agent `sessions` format: one line per session, oldest first, closed by the total. The
+/// session id is printed whole — it is the payload here, not a pointer into a longer hint line.
+/// Byte-stable.
+pub fn sessions_agent(note: &str, sessions: &[Session]) -> String {
+    let mut out = note.to_string();
+    for s in sessions {
+        let _ = writeln!(
+            out,
+            "[{}] {} {}/{} {} turns",
+            s.ts, s.harness, s.workdir, s.session_id, s.turns
+        );
+    }
+    let _ = writeln!(out, "---\n{} sessions", sessions.len());
     out
 }
 

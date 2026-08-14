@@ -91,6 +91,19 @@ async fn index_then_read_surface() {
     .unwrap();
     assert!(got.contains("typed blocks"), "get should return the turn text: {got}");
 
+    // sessions: the memory enumerates to the one indexed session, counted in turns not rows.
+    let listed = funes::commands::recall::sessions(funes::memory::Memory::local())
+        .await
+        .unwrap();
+    assert!(
+        listed.contains(&format!("{workdir}/{session} 3 turns")),
+        "sessions should list the session with its distinct turn count: {listed}"
+    );
+    assert!(
+        listed.trim_end().ends_with("1 sessions"),
+        "the listing should close with the total: {listed}"
+    );
+
     // Every hit names the memory it was read from — the default memory and an explicit one alike.
     let default_hint = format!("--memory {}", db_dir.path().join("memory").display());
     assert!(

@@ -1,7 +1,7 @@
-//! The read surface: `recall`, `get`, `status` over the existing index.
+//! The read surface: `recall`, `get`, `sessions`, `status` over the existing index.
 //! Recall pipeline: hybrid (vector + BM25, fused by reciprocal rank) → cross-encoder rerank →
-//! recency reweight → neighbor expansion. `recall`/`get` return results rendered in the agent
-//! format; `recall_hits`/`get_turns` return the structured results for other renderings
+//! recency reweight → neighbor expansion. `recall`/`get`/`sessions` return results rendered in the
+//! agent format; `recall_hits`/`get_turns` return the structured results for other renderings
 //! (see `render`).
 
 use super::curate;
@@ -57,6 +57,17 @@ pub struct Hit {
     pub block_type: String,
     pub harness: String,
     pub neighbors: Vec<Neighbor>,
+}
+
+/// One session in a memory's listing: where and when it started, and how much it holds.
+pub struct Session {
+    pub session_id: String,
+    /// First timestamp in the session.
+    pub ts: String,
+    pub workdir: String,
+    pub harness: String,
+    /// Distinct turns, not rows: chunking is an indexing artifact, a turn is what `get` reads.
+    pub turns: usize,
 }
 
 /// One reassembled turn from `get`: its blocks in order, splits stitched back together.
@@ -592,6 +603,71 @@ pub async fn get(memory: Memory, session_id: String, range: TurnRange) -> Result
         ));
     }
     Ok(crate::ui::render::get_agent(&note, &turns, total))
+}
+
+/// Every session in a memory, oldest first, rendered in the agent format. Ranked retrieval reaches
+/// what a query reaches and says nothing about the rest, so enumeration is the only thing that
+/// answers what a memory holds and how much of it a pass has covered.
+pub async fn sessions(memory: Memory) -> Result<String> {
+    let read = open_read(&memory).await?;
+    let note = read.note.clone().unwrap_or_default();
+    let label = read.memory_label.clone().unwrap_or_else(|| memory.label());
+    let sessions = scan_sessions(&read.ds).await?;
+    if sessions.is_empty() {
+        return Ok(format!("{note}no sessions in {label}\n"));
+    }
+    Ok(crate::ui::render::sessions_agent(&note, &sessions))
+}
+
+/// Fold every row into its session: earliest timestamp, provenance, and distinct turn count.
+async fn scan_sessions(ds: &Dataset) -> Result<Vec<Session>> {
+    let mut cols = vec!["session_id", "ts", "workdir", "turn_uuid"];
+    if has_harness_col(ds) {
+        cols.push("harness");
+    }
+    let batches = dataset::scan_rows(ds, &cols, None, None).await?;
+
+    let mut by_id: HashMap<String, (Session, HashSet<String>)> = HashMap::new();
+    for batch in &batches {
+        let (sid, ts, wd, turn, harness) = (
+            scol(batch, "session_id"),
+            scol(batch, "ts"),
+            scol(batch, "workdir"),
+            scol(batch, "turn_uuid"),
+            scol(batch, "harness"),
+        );
+        for i in 0..batch.num_rows() {
+            let id = sval(sid, i);
+            let (session, turns) = by_id.entry(id.clone()).or_insert_with(|| {
+                (
+                    Session {
+                        session_id: id,
+                        ts: sval(ts, i),
+                        workdir: sval(wd, i),
+                        harness: sval(harness, i),
+                        turns: 0,
+                    },
+                    HashSet::new(),
+                )
+            });
+            // Rows arrive in scan order, not time order, so the first one seen isn't the earliest.
+            let row_ts = sval(ts, i);
+            if row_ts < session.ts {
+                session.ts = row_ts;
+            }
+            turns.insert(sval(turn, i));
+        }
+    }
+
+    let mut out: Vec<Session> = by_id
+        .into_values()
+        .map(|(session, turns)| Session {
+            turns: turns.len(),
+            ..session
+        })
+        .collect();
+    out.sort_by(|a, b| (&a.ts, &a.session_id).cmp(&(&b.ts, &b.session_id)));
+    Ok(out)
 }
 
 /// The turns behind `get`, each reassembled (blocks in order, splits de-overlapped). Returns the

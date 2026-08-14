@@ -67,6 +67,11 @@ enum Cmd {
         #[command(flatten)]
         memory: MemoryOpts,
     },
+    /// List a memory's sessions, oldest first.
+    Sessions {
+        #[command(flatten)]
+        memory: MemoryOpts,
+    },
     /// Ask a coding agent one question, grounded in a memory — nothing installed.
     ///
     /// Borrows the agent for a single answer: funes recalls from the memory and hands the agent
@@ -329,6 +334,10 @@ async fn main() -> Result<()> {
         } => {
             let range = recall::TurnRange { from, to };
             print!("{}", recall::get(memory.resolve(), session_id, range).await?);
+            Ok(())
+        }
+        Cmd::Sessions { memory } => {
+            print!("{}", recall::sessions(memory.resolve()).await?);
             Ok(())
         }
         Cmd::Ask { agent } => match agent {
