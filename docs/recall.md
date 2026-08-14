@@ -82,6 +82,34 @@ $ funes sessions --memory huggingface/funes-memory
 Turns are counted distinct rather than by row, since a long turn is stored as several chunks. The
 session id is printed in full, so the line feeds `funes get` or `funes curate --include` as is.
 
+## Finding a literal with `scan`
+
+```bash
+funes scan <needle>... [--ignore-case] [--context <chars>] [--memory <label>]
+```
+
+Recall proves presence. It ranks passages by similarity and returns the best few, so it can show
+that a memory discusses something — never that it does not. `scan` is the other half: a literal
+string checked against **every** block, so a zero means the string is nowhere in the memory.
+
+```console
+$ funes scan "acme-internal" --memory huggingface/funes-memory
+scan "acme-internal" — 4 hits in 2 sessions
+[2026-07-07T11:34:19.737Z] claude_code -home-u-funes/af33dfe0 tool_result
+  → get af33dfe0-8576-435d-bc7a-016595b65402 4c1e… --memory huggingface/funes-memory
+  … remote add upstream git@github.com:acme-internal/pipeline.git …
+```
+
+It is **literal, not a regex** — deliberately. The whole point of the verb is that zero hits reads
+as *clean*, and a pattern that silently matches nothing is a false clearance. `--ignore-case` covers
+case variation; pass several needles to run several scans in one call.
+
+Splits are stitched back into their block before matching, so a needle spanning a chunk boundary is
+still found, and a long block reports one hit rather than one per chunk. Listing stops at 200 hits
+per needle and says so; the header count is always the full number found.
+
+Absence of a match clears only the literals you passed — pick the spellings that matter.
+
 ## Reading a different memory
 
 `--memory` takes an `<org>/<repo>` shorthand, a full `hf://…` URI, a local path, or `local`. This is

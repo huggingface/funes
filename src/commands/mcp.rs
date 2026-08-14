@@ -62,6 +62,22 @@ pub struct SessionsRequest {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ScanRequest {
+    #[schemars(
+        description = "Literal strings to find. Not regex — a pattern that silently matched nothing would read as a clean result. Pass several to run several scans in one call."
+    )]
+    pub needle: Vec<String>,
+    #[schemars(description = "Match regardless of case (default false)")]
+    pub ignore_case: Option<bool>,
+    #[schemars(description = "Characters of surrounding text shown on each side of a match (default 100)")]
+    pub context: Option<usize>,
+    #[schemars(
+        description = "Memory to scan — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Defaults to the server's memory."
+    )]
+    pub memory: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct StatusRequest {
     #[schemars(
         description = "Memory to inspect — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Defaults to the server's memory."
@@ -154,6 +170,32 @@ impl Funes {
             Ok(s) if !s.is_empty() => s,
             Ok(_) => "no results".to_string(),
             Err(e) => format!("sessions error: {e}"),
+        }
+    }
+
+    #[tool(
+        description = "Find a literal string in every block of a memory — exhaustive and unranked, where `recall` is ranked and partial. This is what answers questions of absence: `recall` can show that something is present, never that it is nowhere, so a claim that a memory does not mention some term has to be settled here. Splits are stitched back together first, so a needle straddling a chunk boundary is still found. Results group by session, each with a `→ get` line to read the turn around it. Use it to check whether a name, path, or phrase survives anywhere in a memory, and to find the sessions that quote another session's content. Absence of a match clears only the literals you actually passed — pick the spellings that matter, and use `ignore_case` for case variation."
+    )]
+    async fn scan(
+        &self,
+        Parameters(ScanRequest {
+            needle,
+            ignore_case,
+            context,
+            memory,
+        }): Parameters<ScanRequest>,
+    ) -> String {
+        match recall::scan(
+            self.memory(memory),
+            needle,
+            ignore_case.unwrap_or(false),
+            context.unwrap_or(100),
+        )
+        .await
+        {
+            Ok(s) if !s.is_empty() => s,
+            Ok(_) => "no results".to_string(),
+            Err(e) => format!("scan error: {e}"),
         }
     }
 

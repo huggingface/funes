@@ -68,6 +68,40 @@ Turns are counted distinct, not as rows: chunking is an indexing artifact. The s
 printed whole, so it feeds `get`, `curate --include/--exclude`, and any other id-taking command
 directly. `no sessions in <label>` when the memory is empty.
 
+### scan
+
+`funes scan <needle>… [--ignore-case] [--context <chars>] [--memory <label>]` — a literal string
+found in every block of the memory. Exhaustive and unranked, where `recall` is ranked and partial:
+this is what settles a question of absence, which recall cannot. A needle is required; there is no
+projection mode.
+
+**Literal, never a pattern.** The step this exists for reads zero hits as clean, so a regex that
+silently matched nothing would be a false clearance. `--ignore-case` covers case variation.
+
+Splits are stitched back into their block before matching, so a needle straddling a chunk boundary
+is still found and a split block reports once rather than once per chunk. Agent format, one section
+per needle:
+
+```
+scan "<needle>" — <m> hits in <n> sessions
+[<ts>] <harness> <workdir>/<session8> <block_type>
+  → get <session_id> <turn_uuid> --memory <label>
+  … <context chars each side of the match, whitespace-collapsed> …
+---
+```
+
+Sessions come oldest first, a session's carriers together. `no matches for "<needle>"` when zero —
+the needle is echoed, so a zero is attributable to a specific query. Listing stops at 200 hits per
+needle and says `<k> more hits not shown`; the header count is what was found, not what was listed.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--ignore-case` / `-i` | off | fold case when matching |
+| `--context` | 100 | chars of surrounding text shown each side of a match |
+| `--memory` | local memory | the memory to scan |
+
+Absence of a match clears only the literals actually passed.
+
 ### ask
 
 `funes ask claude|codex "<question>" [--memory <label>]` — one grounded answer from a coding
@@ -103,8 +137,9 @@ claude/codex/hermes also installs the automation hooks — see [docs/automation.
 positional `memory` binds the server to a memory; `funes add <agent> <memory>` bakes it into the
 registration. `funes remove <agent>` reverses that agent integration without deleting memories or
 transcripts. Tools: `recall` (query, k, half_life, neighbors, candidates, block_type/harness
-filters, memory), `get` (session_id, turn_uuid, window, memory), `sessions` (memory), `status`
-(memory) — each returns the corresponding agent-format string verbatim. A tool call's `memory` overrides the server's; with
+filters, memory), `get` (session_id, turn_uuid, window, memory), `sessions` (memory), `scan`
+(needle, ignore_case, context, memory), `status` (memory) — each returns the corresponding
+agent-format string verbatim. A tool call's `memory` overrides the server's; with
 neither, it reads the local memory.
 
 ## Working on the repo

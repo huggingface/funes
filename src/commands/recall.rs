@@ -1,8 +1,8 @@
-//! The read surface: `recall`, `get`, `sessions`, `status` over the existing index.
+//! The read surface: `recall`, `get`, `sessions`, `scan`, `status` over the existing index.
 //! Recall pipeline: hybrid (vector + BM25, fused by reciprocal rank) → cross-encoder rerank →
-//! recency reweight → neighbor expansion. `recall`/`get`/`sessions` return results rendered in the
-//! agent format; `recall_hits`/`get_turns` return the structured results for other renderings
-//! (see `render`).
+//! recency reweight → neighbor expansion. `recall`/`get`/`sessions`/`scan` return results rendered
+//! in the agent format; `recall_hits`/`get_turns` return the structured results for other
+//! renderings (see `render`).
 
 use super::curate;
 use crate::chunk;
@@ -57,6 +57,37 @@ pub struct Hit {
     pub block_type: String,
     pub harness: String,
     pub neighbors: Vec<Neighbor>,
+}
+
+/// Matching blocks `scan` lists per needle before it stops. A literal scan for a common word would
+/// otherwise return the whole memory; what the cap dropped is always reported.
+const SCAN_HIT_CAP: usize = 200;
+
+/// One block of a memory carrying a `scan` needle.
+pub struct ScanHit {
+    pub session_id: String,
+    pub turn_uuid: String,
+    pub ts: String,
+    pub workdir: String,
+    pub harness: String,
+    pub block_type: String,
+    /// Byte offset of the match within `text`.
+    pub at: usize,
+    /// Chars the match spans — its own length, which case folding leaves unchanged.
+    pub len: usize,
+    /// The whole reassembled block, for the caller to excerpt around `at`.
+    pub text: String,
+}
+
+/// What one `scan` needle found across a memory.
+pub struct ScanResult {
+    pub needle: String,
+    /// Matching blocks, sessions oldest first, capped at [`SCAN_HIT_CAP`].
+    pub hits: Vec<ScanHit>,
+    /// Matching blocks past the cap, absent from `hits`.
+    pub dropped: usize,
+    /// Distinct sessions carrying the needle, counted before the cap.
+    pub sessions: usize,
 }
 
 /// One session in a memory's listing: where and when it started, and how much it holds.
@@ -653,6 +684,197 @@ async fn scan_sessions(ds: &Dataset) -> Result<Vec<Session>> {
     Ok(out)
 }
 
+/// One block of a memory, its splits stitched back together, with the facets a `scan` hit prints.
+struct Block {
+    session_id: String,
+    turn_uuid: String,
+    ts: String,
+    workdir: String,
+    harness: String,
+    block_type: String,
+    seq: i64,
+    block_idx: i64,
+    text: String,
+}
+
+/// Blocks under assembly, keyed by (session_id, turn_uuid, block_idx): each one's facets, and the
+/// split rows still to be stitched into its `text`.
+type BlockParts = HashMap<(String, String, i64), (Block, Vec<(i64, String)>)>;
+
+/// Find each needle everywhere in a memory, rendered in the agent format. Where recall ranks and
+/// can only show what is present, this is exhaustive: a needle that returns nothing is absent from
+/// every block. Literal, never a pattern — a regex that silently matches nothing would read as
+/// exactly that clearance.
+pub async fn scan(memory: Memory, needles: Vec<String>, ignore_case: bool, context: usize) -> Result<String> {
+    let read = open_read(&memory).await?;
+    let note = read.note.clone().unwrap_or_default();
+    let blocks = reassembled_blocks(&read.ds).await?;
+    let results: Vec<ScanResult> = needles.iter().map(|n| find_needle(&blocks, n, ignore_case)).collect();
+    Ok(crate::ui::render::scan_agent(
+        &note,
+        &memory_hint(read.memory_label.as_deref()),
+        &results,
+        context,
+    ))
+}
+
+/// Every block of the memory, splits de-overlapped. Matching raw chunks would miss a needle that
+/// straddles a split boundary, so the whole table is bucketed by block before anything is matched.
+/// Ordered by session, then position within it.
+async fn reassembled_blocks(ds: &Dataset) -> Result<Vec<Block>> {
+    let mut cols = vec![
+        "session_id",
+        "turn_uuid",
+        "seq",
+        "ts",
+        "workdir",
+        "block_type",
+        "block_idx",
+        "split_idx",
+        "text",
+    ];
+    if has_harness_col(ds) {
+        cols.push("harness");
+    }
+    let batches = dataset::scan_rows(ds, &cols, None, None).await?;
+
+    // Splits of one block can land in different batches, so every row is bucketed before any of it
+    // is stitched.
+    let mut blocks: BlockParts = HashMap::new();
+    for batch in &batches {
+        let (sid, turn, ts, wd, bt, text, harness) = (
+            scol(batch, "session_id"),
+            scol(batch, "turn_uuid"),
+            scol(batch, "ts"),
+            scol(batch, "workdir"),
+            scol(batch, "block_type"),
+            scol(batch, "text"),
+            scol(batch, "harness"),
+        );
+        let (seq, bi, si) = (icol(batch, "seq"), icol(batch, "block_idx"), icol(batch, "split_idx"));
+        for i in 0..batch.num_rows() {
+            let key = (sval(sid, i), sval(turn, i), ival(bi, i));
+            let entry = blocks.entry(key).or_insert_with(|| {
+                (
+                    Block {
+                        session_id: sval(sid, i),
+                        turn_uuid: sval(turn, i),
+                        ts: sval(ts, i),
+                        workdir: sval(wd, i),
+                        harness: sval(harness, i),
+                        block_type: sval(bt, i),
+                        seq: ival(seq, i),
+                        block_idx: ival(bi, i),
+                        text: String::new(),
+                    },
+                    Vec::new(),
+                )
+            });
+            entry.1.push((ival(si, i), sval(text, i)));
+        }
+    }
+    drop(batches);
+
+    let mut out: Vec<Block> = blocks
+        .into_values()
+        .map(|(mut block, mut splits)| {
+            splits.sort_by_key(|(si, _)| *si);
+            let mut pieces = splits.into_iter().map(|(_, t)| t);
+            block.text = pieces.next().unwrap_or_default();
+            for piece in pieces {
+                block.text = chunk::stitch(&block.text, &piece);
+            }
+            block
+        })
+        .collect();
+    out.sort_by(|a, b| (&a.session_id, a.seq, a.block_idx).cmp(&(&b.session_id, b.seq, b.block_idx)));
+    Ok(out)
+}
+
+/// Every block carrying `needle`, grouped by session with the oldest session first, capped at
+/// [`SCAN_HIT_CAP`].
+fn find_needle(blocks: &[Block], needle: &str, ignore_case: bool) -> ScanResult {
+    let folded: Vec<char> = if ignore_case {
+        needle.chars().map(fold).collect()
+    } else {
+        Vec::new()
+    };
+    let mut hits: Vec<ScanHit> = Vec::new();
+    let mut sessions: HashSet<&str> = HashSet::new();
+    for b in blocks {
+        let at = if ignore_case {
+            find_folded(&b.text, &folded)
+        } else {
+            b.text.find(needle)
+        };
+        let Some(at) = at else { continue };
+        sessions.insert(b.session_id.as_str());
+        hits.push(ScanHit {
+            session_id: b.session_id.clone(),
+            turn_uuid: b.turn_uuid.clone(),
+            ts: b.ts.clone(),
+            workdir: b.workdir.clone(),
+            harness: b.harness.clone(),
+            block_type: b.block_type.clone(),
+            at,
+            len: needle.chars().count(),
+            text: b.text.clone(),
+        });
+    }
+
+    // `blocks` order already keeps a session's carriers together and in position order; a stable
+    // re-sort on the session's earliest hit puts the sessions themselves oldest first.
+    let mut earliest: HashMap<&str, &str> = HashMap::new();
+    for h in &hits {
+        let e = earliest.entry(&h.session_id).or_insert(&h.ts);
+        if h.ts.as_str() < *e {
+            *e = &h.ts;
+        }
+    }
+    let order: HashMap<String, String> = earliest
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    hits.sort_by(|a, b| (&order[&a.session_id], &a.session_id).cmp(&(&order[&b.session_id], &b.session_id)));
+
+    let dropped = hits.len().saturating_sub(SCAN_HIT_CAP);
+    hits.truncate(SCAN_HIT_CAP);
+    ScanResult {
+        needle: needle.to_string(),
+        hits,
+        dropped,
+        sessions: sessions.len(),
+    }
+}
+
+/// Byte offset of the first case-folded occurrence of `needle` (already folded) in `text`. Folding
+/// is per char, so the offset stays an offset into the original.
+fn find_folded(text: &str, needle: &[char]) -> Option<usize> {
+    if needle.is_empty() {
+        return None;
+    }
+    let hay: Vec<(usize, char)> = text.char_indices().collect();
+    if hay.len() < needle.len() {
+        return None;
+    }
+    hay.windows(needle.len()).find_map(|w| {
+        w.iter()
+            .zip(needle)
+            .all(|(&(_, c), &want)| fold(c) == want)
+            .then_some(w[0].0)
+    })
+}
+
+/// Lowercase `c` when that is a single char — which covers the case variation `--ignore-case` is
+/// for. A char whose lowercase is several (`İ`) stays as it is and simply won't fold-match.
+fn fold(c: char) -> char {
+    let mut lower = c.to_lowercase();
+    match (lower.next(), lower.next()) {
+        (Some(l), None) => l,
+        _ => c,
+    }
+}
+
 /// The turns behind `get`: the named one plus those within `window` of it, each reassembled
 /// (blocks in order, splits de-overlapped). Returns the degradation note and the turns — empty
 /// when the turn isn't in the session; rendering is the caller's choice.
@@ -1029,6 +1251,30 @@ mod tests {
         );
         // values are escaped against filter-string injection.
         assert_eq!(build_where(None, Some("a'b")).as_deref(), Some("harness = 'a''b'"));
+    }
+
+    #[test]
+    fn find_folded_matches_case_insensitively_at_original_offsets() {
+        let folded = |n: &str| -> Vec<char> { n.chars().map(fold).collect() };
+        let text = "the Cache is Pinned to a Commit";
+        // The offset indexes the original text, not a lowercased copy.
+        assert_eq!(find_folded(text, &folded("PINNED")), Some(13));
+        assert_eq!(&text[13..19], "Pinned");
+        assert_eq!(find_folded(text, &folded("cache")), Some(4));
+        assert_eq!(find_folded(text, &folded("absent")), None);
+        // An empty needle never matches, so it can't report the whole memory as a hit.
+        assert_eq!(find_folded(text, &[]), None);
+        // A needle longer than the text is not a match rather than a panic.
+        assert_eq!(find_folded("ab", &folded("abc")), None);
+    }
+
+    #[test]
+    fn fold_lowercases_only_one_to_one_mappings() {
+        assert_eq!(fold('A'), 'a');
+        assert_eq!(fold('É'), 'é');
+        assert_eq!(fold('a'), 'a');
+        // `İ` lowercases to two chars, which would break offset arithmetic — left as it is.
+        assert_eq!(fold('İ'), 'İ');
     }
 
     #[test]

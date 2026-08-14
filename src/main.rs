@@ -22,6 +22,9 @@ use std::sync::{Arc, Mutex};
 /// Turns around a `get` target when no window is given.
 const DEFAULT_WINDOW: i64 = 3;
 
+/// Characters shown each side of a `scan` match when no context is given.
+const DEFAULT_CONTEXT: usize = 100;
+
 #[derive(Parser)]
 #[command(name = "funes", version, about = "Recall over your past AI agent sessions.")]
 struct Cli {
@@ -71,6 +74,20 @@ enum Cmd {
     },
     /// List a memory's sessions, oldest first.
     Sessions {
+        #[command(flatten)]
+        memory: MemoryOpts,
+    },
+    /// Find a literal string everywhere in a memory — exhaustive, unranked.
+    Scan {
+        /// The literal(s) to find. Not a regex; give several to run several scans.
+        #[arg(required = true, num_args = 1.., value_name = "NEEDLE")]
+        needle: Vec<String>,
+        /// Match regardless of case.
+        #[arg(short, long)]
+        ignore_case: bool,
+        /// Characters of surrounding text to show on each side of a match.
+        #[arg(long, default_value_t = DEFAULT_CONTEXT)]
+        context: usize,
         #[command(flatten)]
         memory: MemoryOpts,
     },
@@ -346,6 +363,18 @@ async fn main() -> Result<()> {
         }
         Cmd::Sessions { memory } => {
             print!("{}", recall::sessions(memory.resolve()).await?);
+            Ok(())
+        }
+        Cmd::Scan {
+            needle,
+            ignore_case,
+            context,
+            memory,
+        } => {
+            print!(
+                "{}",
+                recall::scan(memory.resolve(), needle, ignore_case, context).await?
+            );
             Ok(())
         }
         Cmd::Ask { agent } => match agent {
