@@ -9,7 +9,8 @@ This directory contains the user guides and design notes for
   Codex, pi, or Hermes.
 - [Building the memory](index.md) — index session transcripts and understand the indexing
   pipeline.
-- [Recalling](recall.md) — retrieve passages and drill into their surrounding turns.
+- [Recalling](recall.md) — retrieve passages, drill into their surrounding turns, enumerate a
+  memory's sessions, and search it for a literal.
 - [Asking](ask.md) — borrow a coding agent for one answer grounded in a memory.
 
 ## Sharing and automation
