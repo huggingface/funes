@@ -152,6 +152,7 @@ fn record_pushed<'a>(memory_uri: &str, ids: impl IntoIterator<Item = &'a String>
 pub(crate) struct PushCoverage {
     pub total: usize,
     pub pending: usize,
+    pub held: Option<Skipped>,
 }
 
 fn push_coverage(batches: &[RecordBatch], pushed_ids: &HashSet<String>) -> Option<PushCoverage> {
@@ -174,6 +175,7 @@ fn push_coverage(batches: &[RecordBatch], pushed_ids: &HashSet<String>) -> Optio
     Some(PushCoverage {
         total: complete.len(),
         pending: complete.len() - pushed,
+        held: None,
     })
 }
 
@@ -182,7 +184,22 @@ pub(crate) async fn local_push_coverage(local: &Dataset, memory_uri: &str) -> Op
     let batches = dataset::scan_rows(local, &["id", "session_id"], None, None)
         .await
         .ok()?;
-    push_coverage(&batches, &pushed_ids)
+    let mut coverage = push_coverage(&batches, &pushed_ids)?;
+    if coverage.pending > 0 {
+        let pending: HashSet<String> = ids_in_batches(&batches).difference(&pushed_ids).cloned().collect();
+        coverage.held = held_among(local, &pending).await;
+    }
+    Some(coverage)
+}
+
+/// What the secret gate would hold back of the `pending` rows, scanned exactly as a push would.
+async fn held_among(local: &Dataset, pending: &HashSet<String>) -> Option<Skipped> {
+    if pending.is_empty() {
+        return None;
+    }
+    let rows = rows_to_push(local, pending, false).await.ok()?;
+    let (_, skipped) = drop_secret_rows(rows).ok()?;
+    (skipped.rows > 0).then_some(skipped)
 }
 
 fn ids_in_batches(batches: &[RecordBatch]) -> HashSet<String> {
@@ -533,10 +550,10 @@ fn card_file(remote_readme: Result<Option<String>>, ctx: &CardCtx) -> (Option<St
 }
 
 /// Rows held back from a push because their text still contained a secret.
-struct Skipped {
-    rows: usize,
+pub(crate) struct Skipped {
+    pub rows: usize,
     /// Detectors that fired, e.g. `PrivateKey×1, AWS×2` — empty when nothing was held back.
-    summary: String,
+    pub summary: String,
 }
 
 impl Skipped {
@@ -880,6 +897,45 @@ mod tests {
         let coverage = push_coverage(&batches, &pushed).unwrap();
         assert_eq!(coverage.total, 2);
         assert_eq!(coverage.pending, 1);
+    }
+
+    #[tokio::test]
+    async fn held_among_reports_the_pending_rows_a_push_would_hold() {
+        if scan::Trufflehog::find().is_err() {
+            eprintln!("skip: trufflehog not found");
+            return;
+        }
+        let Some(key) = keygen(&["-t", "ed25519"]) else {
+            eprintln!("skip: ssh-keygen unavailable");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (b, _) = batch(&[turn_sess("clean", 0, "notes on parsers"), turn_sess("dirty", 1, &key)]);
+        let uri = dataset::table_uri(&dir.path().to_string_lossy());
+        let schema = b.schema();
+        let reader = RecordBatchIterator::new(vec![Ok(b)], schema);
+        Dataset::write(reader, &uri, Some(WriteParams::default()))
+            .await
+            .unwrap();
+        let ds = dataset::open(&uri, HashMap::new()).await.unwrap();
+        let by_session = curate::ids_by_session(&ds).await.unwrap();
+
+        let all: HashSet<String> = by_session.values().flatten().cloned().collect();
+        let held = held_among(&ds, &all)
+            .await
+            .expect("the dirty pending block should be reported");
+        assert!(held.rows >= 1);
+        assert!(held.summary.contains("PrivateKey"), "summary: {}", held.summary);
+
+        let clean_only: HashSet<String> = by_session["clean"].iter().cloned().collect();
+        assert!(
+            held_among(&ds, &clean_only).await.is_none(),
+            "clean pending rows are not held"
+        );
+        assert!(
+            held_among(&ds, &HashSet::new()).await.is_none(),
+            "nothing pending, nothing scanned"
+        );
     }
 
     #[test]

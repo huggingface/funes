@@ -862,6 +862,13 @@ pub async fn status(memory: Memory) -> Result<String> {
                                         if coverage.total == 1 { "" } else { "s" },
                                         memory.label()
                                     );
+                                    if let Some(held) = &coverage.held {
+                                        let _ = writeln!(
+                                            out,
+                                            "  {} pending row(s) hold secrets ({}) — run `funes scrub` first",
+                                            held.rows, held.summary
+                                        );
+                                    }
                                 }
                             } else {
                                 let _ = writeln!(
