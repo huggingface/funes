@@ -144,7 +144,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           # Keyed by profile: fat-LTO deps have different fingerprints than the fast profile's, so a
           # shared key would make each profile's build restore the other's artifacts and recompile.
@@ -154,7 +154,7 @@ jobs:
 
       # Faster, lower-memory linker — keeps the heavy lance link in budget. The action runs as
       # root inside the container (no sudo) and downloads with wget, installed above.
-      - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
+      - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
 
       # 22.04's packaged protoc is too old for the lance protos; bootstrap the pinned one.
       - name: Install protoc
@@ -237,7 +237,7 @@ jobs:
         with:
           targets: aarch64-apple-darwin
 
-      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           key: release-aarch64-apple-darwin-${{ env.PROFILE }}
 
