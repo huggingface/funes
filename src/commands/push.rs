@@ -16,11 +16,9 @@
 //!   crosses [`REINDEX_THRESHOLD`] (best-effort: a head-moved conflict is a warning, the next push
 //!   retries), or eagerly with `--force-reindex` (retried until it lands).
 //!
-//! A **project memory** — a memory whose schema metadata names its project (see
-//! [`super::curate`]) — ships only the sessions marked include; any other memory is a **personal
-//! memory** and takes everything, as ever.
+//! What a push ships is either everything the local memory holds that the remote doesn't, or —
+//! with `--sessions` — exactly the sessions named. The list is the decision; nothing else gates it.
 
-use super::curate;
 use crate::hub;
 use crate::memory::card::{self, CardAction, CardCtx};
 use crate::memory::dataset;
@@ -89,7 +87,7 @@ async fn all_ids(ds: &Dataset) -> Result<HashSet<String>> {
 /// Per-remote local receipt of chunk ids this host has observed on that remote. It is deliberately
 /// local: a shared remote's sessions from other hosts say nothing about this host's push backlog.
 fn pushed_path(memory_uri: &str) -> PathBuf {
-    dataset::funes_dir().join("pushed").join(curate::sanitize(memory_uri))
+    dataset::funes_dir().join("pushed").join(sanitize(memory_uri))
 }
 
 fn load_pushed_from(path: &Path) -> Option<HashSet<String>> {
@@ -218,8 +216,7 @@ fn ids_in_batches(batches: &[RecordBatch]) -> HashSet<String> {
 }
 
 /// The to-push rows (all columns) from the local memory. An append reads just the missing ids via an
-/// `id IN (…)` predicate (already decision-scoped, since `to_push` is). A personal memory's first
-/// publish reads everything — a project memory is never first-published (it is born empty).
+/// `id IN (…)` predicate (already scoped, since `to_push` is). A first publish reads everything.
 async fn rows_to_push(local: &Dataset, to_push: &HashSet<String>, first_publish: bool) -> Result<Vec<RecordBatch>> {
     let filter = (!first_publish).then(|| {
         let list = to_push
@@ -230,14 +227,6 @@ async fn rows_to_push(local: &Dataset, to_push: &HashSet<String>, first_publish:
         format!("id IN ({list})")
     });
     dataset::scan_rows(local, &[], filter.as_deref(), None).await
-}
-
-/// The hold-back line a report carries when sessions are pending review — empty when none are.
-fn pending_note(pending: usize, memory: &str) -> String {
-    if pending == 0 {
-        return String::new();
-    }
-    format!("  {pending} session(s) on this machine pending review — run `funes curate {memory}`\n")
 }
 
 /// The outcome of a [`run_push`]: the report to print, and `blocked` — true when the secret gate
@@ -279,6 +268,43 @@ fn must_confirm(local: usize, to_push: usize) -> bool {
     to_push > 0 && to_push == local
 }
 
+/// A memory URI as one path-safe filename — the push receipt's key.
+pub(crate) fn sanitize(uri: &str) -> String {
+    uri.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// A memory's rows as session → chunk ids, the shape a selection is resolved against.
+pub(crate) async fn ids_by_session(ds: &Dataset) -> Result<HashMap<String, Vec<String>>> {
+    let batches = dataset::scan_rows(ds, &["id", "session_id"], None, None).await?;
+    let mut by_session: HashMap<String, Vec<String>> = HashMap::new();
+    for batch in batches {
+        let ids = batch
+            .column_by_name("id")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+        let sessions = batch
+            .column_by_name("session_id")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+        let (Some(ids), Some(sessions)) = (ids, sessions) else {
+            continue;
+        };
+        for i in 0..batch.num_rows() {
+            by_session
+                .entry(sessions.value(i).to_string())
+                .or_default()
+                .push(ids.value(i).to_string());
+        }
+    }
+    Ok(by_session)
+}
+
 /// The chunk ids of exactly `sessions`, from a memory's rows grouped as `by_session`. Every named
 /// session must be in the memory: a mistyped id would otherwise publish a subset silently, and a
 /// publication is not a place to guess.
@@ -303,8 +329,7 @@ fn named_ids(by_session: &HashMap<String, Vec<String>>, sessions: &[String]) -> 
 /// index refresh. `confirm` gates a publish to a memory the local index shares no chunks with.
 ///
 /// `sessions`, when non-empty, is the publication itself: exactly those sessions' chunks are
-/// candidates, whatever the memory is and whatever any curation records. Empty keeps the standing
-/// behaviour — a project memory ships what it has `include`d, a personal memory ships everything.
+/// candidates. Empty publishes everything the local memory holds that the remote does not.
 pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm, sessions: &[String]) -> Result<Pushed> {
     let uri = match &target {
         Memory::Remote { uri } => uri.clone(),
@@ -335,7 +360,6 @@ pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm, ses
 
     eprintln!("comparing local and remote indexes…");
     let local = Memory::local().open().await?;
-    let project = remote.as_ref().and_then(curate::project);
     let remote_ids = match &remote {
         Some(ds) => all_ids(ds).await?,
         None => HashSet::new(),
@@ -343,32 +367,14 @@ pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm, ses
     let first_publish = remote.is_none();
 
     // 2. The local side. Named sessions are the selection outright: the caller has said what to
-    // publish, so nothing is undecided and nothing is pending. Otherwise a project memory ships
-    // exactly the sessions marked include — your review alone decides what ships (see
-    // [`super::curate`]) — and anything undecided stays local and is counted for the report; a
-    // personal memory takes everything.
-    let (candidates, not_reviewed) = if !sessions.is_empty() {
-        let by_session = curate::ids_by_session(&local).await?;
-        eprintln!("publishing {} named session(s)", sessions.len());
-        (named_ids(&by_session, sessions)?, Vec::new())
+    // publish. Otherwise everything local is a candidate, and the remote's own ids decide what of
+    // it is new.
+    let candidates = if sessions.is_empty() {
+        all_ids(&local).await?
     } else {
-        match &project {
-            Some(project) => {
-                eprintln!("project memory of {project} — ships only sessions you've included");
-                let decisions = curate::load(&uri)?.unwrap_or_default();
-                let by_session = curate::candidate_sessions(&local).await?;
-                let (shipped, pending) = curate::partition(&by_session, &decisions, &remote_ids);
-                // Report pending only for sessions that belong to this project — the same repo rule
-                // the review scopes to. Undecided sessions of other repos (or with no resolvable
-                // checkout) never ship here and aren't this memory's to-do.
-                let matched = curate::project_sessions(&local, project).await?;
-                let pending: Vec<String> = pending.into_iter().filter(|s| matched.contains(s)).collect();
-                (shipped, pending)
-            }
-            None => (all_ids(&local).await?, Vec::new()),
-        }
+        eprintln!("publishing {} named session(s)", sessions.len());
+        named_ids(&ids_by_session(&local).await?, sessions)?
     };
-    let held_back = pending_note(not_reviewed.len(), &target.label());
     let to_push: HashSet<String> = candidates.difference(&remote_ids).cloned().collect();
 
     // Bootstrap/refresh the local receipt from facts the push comparison has already established.
@@ -380,16 +386,7 @@ pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm, ses
     // Nothing to push => done (no token needed), unless this is a forced reindex of an existing
     // remote, which is still work.
     if to_push.is_empty() && (first_publish || !force_reindex) {
-        let base = if not_reviewed.is_empty() {
-            format!("{}: already up to date ({} chunks)\n", target.label(), remote_ids.len())
-        } else {
-            format!(
-                "{}: nothing published ({} chunks on the remote)\n",
-                target.label(),
-                remote_ids.len()
-            )
-        };
-        return Ok(format!("{base}{held_back}").into());
+        return Ok(format!("{}: already up to date ({} chunks)\n", target.label(), remote_ids.len()).into());
     }
 
     // 2. HF repo handle. Resolve the target and token before the confirmation, so a bad URI or a
@@ -413,12 +410,7 @@ pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm, ses
     if to_push.is_empty() {
         eprintln!("refreshing the remote index…");
         let note = reindex_forced(&repo, &dataset_uri, &opts, &rev).await?;
-        return Ok(format!(
-            "{}: up to date ({} chunks)\n{note}{held_back}",
-            target.label(),
-            remote_ids.len()
-        )
-        .into());
+        return Ok(format!("{}: up to date ({} chunks)\n{note}", target.label(), remote_ids.len()).into());
     }
 
     // 4. Rows, then hold back any that still contain a secret. Re-stamp each batch with the local
@@ -497,7 +489,7 @@ pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm, ses
         };
         record_pushed(&uri, &pushed_ids)?;
         return Ok(format!(
-            "{}: pushed {n_chunks} chunks (commit {oid})\n{card_note}{held_back}{}",
+            "{}: pushed {n_chunks} chunks (commit {oid})\n{card_note}{}",
             target.label(),
             skipped.warning()
         )
@@ -533,7 +525,6 @@ pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm, ses
     record_pushed(&uri, &pushed_ids)?;
     let mut out = format!("{}: pushed {n_chunks} chunks (commit {oid})\n", target.label());
     out.push_str(&card_note);
-    out.push_str(&held_back);
 
     // 7. Reindex as a separate commit: forced (retried until it lands) or, past the threshold,
     // best-effort (one shot, warn on a conflict — the next push retries).
@@ -791,7 +782,7 @@ mod tests {
         }
     }
 
-    /// Like [`turn`], but in a named session — for exercising session-level curation.
+    /// Like [`turn`], but in a named session — for exercising a session-level selection.
     fn turn_sess(session: &str, idx: i64, block_text: &str) -> Turn {
         Turn {
             session_id: session.into(),
@@ -890,7 +881,7 @@ mod tests {
         );
     }
 
-    /// A two-session local dataset for the curation tests.
+    /// A two-session local dataset for the selection tests.
     async fn two_session_ds(dir: &std::path::Path) -> Dataset {
         let (b, _) = batch(&[
             turn_sess("reviewed", 0, "a decision we can share"),
@@ -909,7 +900,7 @@ mod tests {
     async fn ids_by_session_groups_the_scan() {
         let dir = tempfile::tempdir().unwrap();
         let ds = two_session_ds(dir.path()).await;
-        let by_session = curate::ids_by_session(&ds).await.unwrap();
+        let by_session = ids_by_session(&ds).await.unwrap();
         assert_eq!(by_session.len(), 2, "one entry per session");
         assert!(by_session.contains_key("reviewed") && by_session.contains_key("private"));
         assert!(by_session.values().all(|ids| !ids.is_empty()));
@@ -919,7 +910,7 @@ mod tests {
     async fn push_coverage_requires_every_current_chunk_of_a_session() {
         let dir = tempfile::tempdir().unwrap();
         let ds = two_session_ds(dir.path()).await;
-        let by_session = curate::ids_by_session(&ds).await.unwrap();
+        let by_session = ids_by_session(&ds).await.unwrap();
         let pushed: HashSet<String> = by_session["reviewed"].iter().cloned().collect();
         let batches = dataset::scan_rows(&ds, &["id", "session_id"], None, None)
             .await
@@ -948,7 +939,7 @@ mod tests {
             .await
             .unwrap();
         let ds = dataset::open(&uri, HashMap::new()).await.unwrap();
-        let by_session = curate::ids_by_session(&ds).await.unwrap();
+        let by_session = ids_by_session(&ds).await.unwrap();
 
         let all: HashSet<String> = by_session.values().flatten().cloned().collect();
         let held = held_among(&ds, &all)
@@ -1012,24 +1003,22 @@ mod tests {
 
     #[tokio::test]
     async fn an_append_reads_only_the_included_delta() {
-        // The append path reads exactly the ids in `to_push` — the set your review already
-        // gated — never the sibling session's rows.
+        // The append path reads exactly the ids in `to_push` — never the sibling session's rows.
         let dir = tempfile::tempdir().unwrap();
         let ds = two_session_ds(dir.path()).await;
-        let reviewed = curate::ids_by_session(&ds).await.unwrap()["reviewed"].clone();
+        let reviewed = ids_by_session(&ds).await.unwrap()["reviewed"].clone();
         let to_push: HashSet<String> = reviewed.iter().cloned().collect();
         let rows = rows_to_push(&ds, &to_push, false).await.unwrap();
         let pushed: usize = rows.iter().map(|b| b.num_rows()).sum();
-        assert_eq!(pushed, reviewed.len(), "only the included session's rows are read");
+        assert_eq!(pushed, reviewed.len(), "only that session's rows are read");
     }
 
     #[tokio::test]
     async fn named_sessions_are_the_selection() {
-        // Naming a session publishes exactly its rows — the sibling stays local, with no curation
-        // consulted at all. This is the path that replaces the ledger.
+        // Naming a session publishes exactly its rows — the sibling stays local.
         let dir = tempfile::tempdir().unwrap();
         let ds = two_session_ds(dir.path()).await;
-        let by_session = curate::ids_by_session(&ds).await.unwrap();
+        let by_session = ids_by_session(&ds).await.unwrap();
 
         let selected = named_ids(&by_session, &["reviewed".to_string()]).unwrap();
         let reviewed: HashSet<String> = by_session["reviewed"].iter().cloned().collect();
@@ -1050,22 +1039,11 @@ mod tests {
         // caller would read success and never learn what stayed behind.
         let dir = tempfile::tempdir().unwrap();
         let ds = two_session_ds(dir.path()).await;
-        let by_session = curate::ids_by_session(&ds).await.unwrap();
+        let by_session = ids_by_session(&ds).await.unwrap();
         let err = named_ids(&by_session, &["reviewed".to_string(), "reviewd".to_string()])
             .expect_err("an unknown session id must be an error");
         let msg = format!("{err}");
         assert!(msg.contains("reviewd"), "names the unknown id: {msg}");
         assert!(!msg.contains("reviewed,"), "doesn't blame the id that resolved: {msg}");
-    }
-
-    #[test]
-    fn pending_note_is_actionable_or_absent() {
-        assert!(pending_note(0, "hf://datasets/acme/kb").is_empty());
-        let note = pending_note(2, "hf://datasets/acme/kb");
-        assert!(
-            note.contains("2 session(s) on this machine pending review"),
-            "note: {note}"
-        );
-        assert!(note.contains("funes curate hf://datasets/acme/kb"), "note: {note}");
     }
 }

@@ -90,58 +90,25 @@ Scrub does **not** alter an already-published remote. If a live credential reach
 rotate it first, then remediate the dataset separately; funes can prevent another upload but does not
 automate remote deletion.
 
-## Project memories: `funes curate`
+## Publishing a selection: `--sessions`
 
-A project memory is a memory that ships only the sessions you've reviewed and marked `include` — think
-of it as a `CLAUDE.md`, but the entire searchable history of *why the project is the way it is*
-instead of a page someone maintains.
-
-```bash
-funes curate <memory> huggingface/funes    # name the memory the project memory of a repo, then review
-funes curate <memory>                       # review again later
-```
-
-The project must be a **repo identity** (`owner/name`) — funes attributes sessions to it by their
-checkout's git remotes. In a terminal, `curate` opens an interactive review of the candidate
-sessions: `→` includes a session, `←` excludes it, and the preview shows each session's prompts.
-Your review alone decides what the next `funes push` ships there; leaving the review offers that push.
-
-The preview is evidence for the decision, not the publication unit: **including publishes every
-chunk in that session**. A session left pending stays local, as does an excluded session. Decisions
-are stored per host because each host can publish only the sessions in its own local memory.
-
-An include records how many chunks the session had when it was reviewed. If that session later
-grows, its new state becomes pending again and no additional chunks ship until it is re-reviewed.
-Changing an include to exclude prevents future chunks from shipping, but cannot retract chunks
-already present in the append-only remote. Curation is a pre-publication gate, not a remote undo.
-
-For scripts, decide non-interactively:
-
-```bash
-funes curate <memory> --include <session> --exclude <session>
-```
-
-The decisions are kept under `$FUNES_HOME/curation/` in a line-oriented, human-readable file; see
-[configuration.md](configuration.md#the-funes-home). `funes status <memory>` reports this host's
-pending review count for a project memory.
-
-### Publishing a selection directly
-
-A push can also carry its own selection, naming the sessions to publish:
+A push ships every local chunk the remote doesn't have. To publish a *selection* instead, name the
+sessions:
 
 ```bash
 funes push <memory> --sessions <session> --sessions <session>
 ```
 
-Those sessions' chunks are exactly what ships — for any memory, project or personal, whatever the
-stored decisions say. The list *is* the decision, so nothing is pending and nothing is held back for
-review, and an unrecognized session id fails the push rather than quietly publishing the rest. Omit
-`--sessions` and a push behaves as it always has: a project memory ships what it has included, a
-personal memory ships everything.
+Those sessions' chunks are exactly what ships. The list **is** the decision — funes keeps no record
+of what you meant to publish, so a selection is made where it takes effect, and an unrecognized
+session id fails the push rather than quietly publishing the rest. `funes sessions` lists the ids,
+and a session is published whole: naming it publishes every chunk it holds.
 
-This is the surface an agent-driven curation writes into: the agent reports which sessions qualify,
-and the person publishing passes that list. See
-[curation-verbs.md](curation-verbs.md#the-ledger-and-the-hf-dataset-api).
+The remote is append-only, so a selection is a pre-publication gate and not a remote undo. Nothing
+retracts a session once it is up.
+
+This is the surface an agent-driven curation writes into: an agent selects the qualifying sessions
+against your criteria and reports them, and the person publishing passes that list.
 
 ## Inspecting a memory: `status`
 

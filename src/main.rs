@@ -5,7 +5,7 @@
 //! `$FUNES_HOME` or `~/.funes`.
 
 use funes::agents::{claude, codex, hermes, pi};
-use funes::commands::{ask, curate, index, mcp, push, recall, scrub, update};
+use funes::commands::{ask, index, mcp, push, recall, scrub, update};
 use funes::hub;
 use funes::memory;
 use funes::scan;
@@ -162,26 +162,10 @@ enum Cmd {
         /// backlog is below the auto-reindex threshold. With nothing new to push, reindex only.
         #[arg(long)]
         force_reindex: bool,
-        /// Publish exactly these sessions, whatever the memory records. Omit to publish what the
-        /// memory would anyway: a project memory's included sessions, a personal memory's everything.
+        /// Publish exactly these sessions. Omit to publish everything the remote does not already
+        /// hold.
         #[arg(long, value_name = "SESSION")]
         sessions: Vec<String>,
-    },
-    /// Curate a project memory: a memory that ships only the sessions you've reviewed and marked
-    /// `include`. Your review alone decides what `funes push` ships there.
-    Curate {
-        /// The memory — the Hub dataset it lives in: `<org>/<repo>` or a full `hf://…` URI.
-        #[arg(value_name = "MEMORY")]
-        memory: String,
-        /// The project the memory is of — the git repo it's about (`huggingface/funes`) or a plain
-        /// label. Give it the first time to name the memory; omit to review.
-        project: Option<String>,
-        /// Mark these sessions `include` — they ship on the next push to this memory.
-        #[arg(long, value_name = "SESSION")]
-        include: Vec<String>,
-        /// Mark these sessions `exclude` — held back from this memory.
-        #[arg(long, value_name = "SESSION")]
-        exclude: Vec<String>,
     },
     /// Redact secrets from your local memory in place — for rows indexed before redaction existed (or
     /// flagged by an updated ruleset); needs no source transcript. Cleans the local memory only: it
@@ -316,18 +300,6 @@ impl MemoryOpts {
     fn resolve(self) -> memory::Memory {
         memory::Memory::resolve(self.memory)
     }
-}
-
-/// Color and width for the human renderings: color needs a terminal and no `NO_COLOR`; width
-/// follows `$COLUMNS` when exported, else 100.
-fn human_io() -> (bool, usize) {
-    let color = std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
-    let width = std::env::var("COLUMNS")
-        .ok()
-        .and_then(|c| c.parse::<usize>().ok())
-        .map(|c| c.clamp(40, 120))
-        .unwrap_or(100);
-    (color, width)
 }
 
 #[tokio::main]
@@ -510,41 +482,6 @@ async fn main() -> Result<()> {
                 Err(e) => Err(e),
             }
         }
-        Cmd::Curate {
-            memory,
-            project,
-            include,
-            exclude,
-        } => {
-            let memory = memory::Memory::parse(&memory);
-            // A project memory is of a git repo — funes attributes sessions to it by their
-            // checkout's remotes, so the project must be a repo identity (`owner/name`). A bare
-            // name gets a "did you mean", inferring the owner from local repos with that name.
-            if let Some(project) = project.as_deref() {
-                if !project.contains('/') {
-                    return Err(match curate::projects_named(project).await?.as_slice() {
-                        [] => anyhow!("a project is a repo, like `huggingface/transformers` — got `{project}`"),
-                        [one] => anyhow!(
-                            "a project is a repo — did you mean `{one}`?  run: funes curate {} {one}",
-                            memory.label()
-                        ),
-                        many => anyhow!("a project is a repo — did you mean one of: {}", many.join(", ")),
-                    });
-                }
-            }
-            // With no decision flags, a terminal gets the interactive review; scripts and pipes
-            // (and the FUNES_NO_TUI opt-out) get the plain text listing.
-            let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-            if include.is_empty() && exclude.is_empty() && interactive && std::env::var_os("FUNES_NO_TUI").is_none() {
-                curate_review(&memory, project.as_deref()).await
-            } else {
-                print!(
-                    "{}",
-                    curate::run(&memory, project.as_deref(), &include, &exclude).await?
-                );
-                Ok(())
-            }
-        }
         Cmd::Scrub => scrub::run().await,
         Cmd::Update { force } => update::run(force).await,
         Cmd::Mcp { memory } => mcp::run(memory).await,
@@ -622,149 +559,6 @@ fn require_scanner(memory: &str, harness: Harness) -> Result<()> {
             harness.cli_name(),
         )
     })
-}
-
-/// The deferred creation the interactive review runs once you've included sessions: materialize
-/// `memory` as the project memory of `project`, with consent. `create_repo` makes the Hub repo first
-/// (the memory was absent); otherwise it exists (a personal memory) and we only stamp it. Returns
-/// whether it happened — declining stops cleanly, publishing nothing.
-/// The interactive review behind `funes curate <memory>` in a terminal: the project's candidate
-/// sessions in the in-process [`funes::ui::tui`] picker where `→` includes a session and `←` excludes it
-/// (the same arrow again clears to pending), the preview showing each session's user prompts.
-/// Decisions persist as they're made; leaving summarizes, and — once something is included — offers
-/// the push, materializing the memory as the project memory first when it isn't one yet.
-async fn curate_review(memory: &memory::Memory, project: Option<&str>) -> Result<()> {
-    // Resolve without creating: `materialize` is None when the memory is already the project memory,
-    // else Some(create_repo) — the deferred creation to run at the close if anything is included.
-    let (uri, project, materialize) = match curate::prepare(memory, project).await? {
-        curate::Prepared::Ready { uri, project } => (uri, project, None),
-        curate::Prepared::Absent { uri, project } => (uri, project, Some(true)),
-        curate::Prepared::Personal { uri, project } => (uri, project, Some(false)),
-    };
-    let found = curate::candidates(memory, &uri, &project, true).await?;
-    if found.matched.is_empty() {
-        let skipped = found.other.len() + found.unresolvable.len();
-        if skipped > 0 {
-            println!("project memory of {project} — no local session resolves to {project}");
-            println!("  ({skipped} session(s) resolve to other repos or have no resolvable checkout)");
-        } else {
-            println!("project memory of {project} — nothing new to review");
-        }
-        return Ok(());
-    }
-
-    // Pre-render each candidate's user prompts (scaffolding dropped) — the preview pane, and
-    // (whitespace-collapsed) the surface the fuzzy filter searches beyond the visible row.
-    let ids: Vec<String> = found.matched.iter().map(|s| s.session_id.clone()).collect();
-    let mut previews = recall::session_prompts(&memory::Memory::local(), &ids).await?;
-    for turns in previews.values_mut() {
-        for turn in turns.iter_mut() {
-            turn.blocks.retain(|b| !curate::is_scaffolding(b));
-        }
-        turns.retain(|turn| !turn.blocks.is_empty());
-    }
-    let (color, width) = human_io();
-    let items: Vec<funes::ui::tui::curate::Candidate> = found
-        .matched
-        .iter()
-        .map(|s| {
-            let body = previews
-                .get(&s.session_id)
-                .map(|turns| render::get_human("", turns, color, width, None))
-                .unwrap_or_default();
-            let filter: String = body
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-                .chars()
-                .take(2000)
-                .collect();
-            funes::ui::tui::curate::Candidate {
-                id: s.session_id.clone(),
-                date: s.date().to_string(),
-                prompt: s.first_prompt.clone(),
-                comment: format!("{} {}", s.date(), s.first_prompt).trim().to_string(),
-                filter,
-                chunks: s.chunks,
-                preview: funes::ui::tui::ansi_to_text(&body),
-            }
-        })
-        .collect();
-    funes::ui::tui::curate::run(uri.clone(), project.clone(), items)?;
-
-    // The review persisted every decision, so leaving just summarizes and offers the push.
-    let curation = curate::load(&uri)?.unwrap_or_default();
-    // A stale include (the session grew since it was reviewed) counts as pending here, not as a
-    // fresh include — it won't ship until it's reviewed again.
-    let inc = found
-        .matched
-        .iter()
-        .filter(|s| curation.include.contains(&s.session_id) && !curation.is_stale(&s.session_id, s.chunks))
-        .count();
-    let exc = found
-        .matched
-        .iter()
-        .filter(|s| curation.exclude.contains(&s.session_id))
-        .count();
-    println!(
-        "project memory of {project} — {inc} include, {exc} exclude, {} pending",
-        found.matched.len() - inc - exc
-    );
-    if inc == 0 {
-        return Ok(()); // nothing included — nothing to publish, and no memory created
-    }
-    // Now there's something to publish. A memory that already exists just needs the push; a missing
-    // or personal one is materialized as the project memory first (its consent doubles as the
-    // publish consent). Either way, ship on a yes.
-    let publish = match materialize {
-        None => confirm(&format!("push {} now? [Y/n] ", memory.label()), true),
-        Some(create_repo) => create_project_memory(memory, &project, create_repo, inc).await?,
-    };
-    if publish {
-        match push::run_push(memory.clone(), false, push::Confirm::Yes, &[]).await {
-            Ok(pushed) => print!("{}", pushed.report),
-            Err(e) if push::is_read_only(&e) => eprintln!(
-                "{} is read-only for your token — recall can read it, but publishing needs write access.",
-                memory.label()
-            ),
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(())
-}
-
-async fn create_project_memory(
-    memory: &memory::Memory,
-    project: &str,
-    create_repo: bool,
-    includes: usize,
-) -> Result<bool> {
-    let memory::Memory::Remote { uri } = memory else {
-        return Ok(false);
-    };
-    let prompt = if create_repo {
-        format!(
-            "create {} as a private dataset and publish {includes} session(s) to it as the project memory of {project}? [Y/n] ",
-            memory.label()
-        )
-    } else {
-        format!(
-            "publish {includes} session(s) to {} as the project memory of {project}? [Y/n] ",
-            memory.label()
-        )
-    };
-    if !confirm(&prompt, true) {
-        eprintln!("nothing published; {} left as is.", memory.label());
-        return Ok(false);
-    }
-    if create_repo {
-        let (owner, name, _) = hub::parse_hf(uri)?;
-        hub::create_dataset_repo(&owner, &name).await?;
-        eprintln!("created {owner}/{name} as a private dataset.");
-    }
-    curate::name_project(memory, project).await?;
-    eprintln!("{} is now the project memory of {project}.", memory.label());
-    Ok(true)
 }
 
 /// Validate an explicitly-named memory: fine if it exists; offer to create it if missing (default

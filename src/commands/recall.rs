@@ -4,7 +4,6 @@
 //! format; `recall_hits`/`get_turns` return the structured results for other renderings
 //! (see `render`).
 
-use super::curate;
 use crate::chunk;
 use crate::inference::{self, Embedder, Reranker};
 use crate::memory::dataset;
@@ -816,6 +815,21 @@ pub async fn sessions(memory: Memory, filter: SessionFilter) -> Result<String> {
     Ok(crate::ui::render::sessions_agent(&note, &shown, total, filter.offset))
 }
 
+/// Whether a user text block's start is injected scaffolding rather than the human's words. Harness
+/// wrappers are XML-ish tags (`<ide_opened_file>`, `<command-name>`, `<environment_context>`,
+/// `<system-reminder>`, …); codex/pi agent-notes open with a markdown heading (`# AGENTS.md
+/// instructions…`); a Claude skill loads with the `Base directory for this skill:` preamble; a
+/// compacted session replays its machine-written recap as a user turn opening `This session is being
+/// continued…`. All are recognizable from the block's start (a mid-block split can begin anywhere, so
+/// test split 0).
+fn is_scaffolding(block_start: &str) -> bool {
+    let t = block_start.trim_start();
+    t.starts_with('<')
+        || t.starts_with('#')
+        || t.starts_with("Base directory for this skill")
+        || t.starts_with("This session is being continued from a previous conversation")
+}
+
 /// The opening real prompt of each session in `ids` — its earliest user text block that isn't
 /// injected scaffolding, collapsed to one line. A session whose user turns are all scaffolding is
 /// absent from the map.
@@ -837,7 +851,7 @@ async fn first_prompts(ds: &Dataset, ids: &[String]) -> Result<HashMap<String, S
         let (seq, bi) = (icol(batch, "seq"), icol(batch, "block_idx"));
         for i in 0..batch.num_rows() {
             let body = sval(text, i);
-            if crate::commands::curate::is_scaffolding(&body) {
+            if is_scaffolding(&body) {
                 continue;
             }
             let key = (ival(seq, i), ival(bi, i));
@@ -1163,63 +1177,6 @@ fn turns_from_rows<'a>(rows: impl Iterator<Item = &'a TurnRow>) -> Vec<Turn> {
     turns
 }
 
-/// The reassembled user prompts (role `user`, block type `text`) of each session in `ids`, keyed by
-/// session id — one scan, for previewing candidates before a curation decision. Only user turns
-/// carry the human's judgment; assistant replies and tool results are left out. Sessions with no
-/// prompts (or an empty `ids`) are simply absent from the map.
-pub async fn session_prompts(memory: &Memory, ids: &[String]) -> Result<HashMap<String, Vec<Turn>>> {
-    if ids.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let read = open_read(memory).await?;
-    let cols = [
-        "session_id",
-        "turn_uuid",
-        "seq",
-        "ts",
-        "role",
-        "text",
-        "block_idx",
-        "split_idx",
-    ];
-    let list: Vec<String> = ids.iter().map(|id| format!("'{}'", esc(id))).collect();
-    let filter = format!(
-        "session_id IN ({}) AND role = 'user' AND block_type = 'text'",
-        list.join(", ")
-    );
-    let batches = dataset::scan_rows(&read.ds, &cols, Some(&filter), None).await?;
-    let mut by_session: HashMap<String, Vec<TurnRow>> = HashMap::new();
-    for batch in batches {
-        let sid = scol(&batch, "session_id");
-        let (turn, ts, role, text) = (
-            scol(&batch, "turn_uuid"),
-            scol(&batch, "ts"),
-            scol(&batch, "role"),
-            scol(&batch, "text"),
-        );
-        let (seq, bi, si) = (
-            icol(&batch, "seq"),
-            icol(&batch, "block_idx"),
-            icol(&batch, "split_idx"),
-        );
-        for i in 0..batch.num_rows() {
-            by_session.entry(sval(sid, i)).or_default().push((
-                ival(seq, i),
-                sval(turn, i),
-                sval(ts, i),
-                sval(role, i),
-                ival(bi, i),
-                ival(si, i),
-                sval(text, i),
-            ));
-        }
-    }
-    Ok(by_session
-        .into_iter()
-        .map(|(k, rows)| (k, turns_from_rows(rows.iter())))
-        .collect())
-}
-
 /// `2026-07-07 13:30 UTC (2 days ago)` — a status timestamp with its coarse age.
 fn stamp(t: DateTime<Utc>, now: DateTime<Utc>) -> String {
     format!("{} ({})", t.format("%Y-%m-%d %H:%M UTC"), age(t, now))
@@ -1292,15 +1249,6 @@ pub async fn status(memory: Memory) -> Result<String> {
             match &memory {
                 Memory::Local { .. } => out.push_str(&index_lines(&ds, now).await),
                 Memory::Remote { uri } => {
-                    // A project memory announces itself and this machine's review backlog.
-                    let project = curate::project(&ds);
-                    if let Some(project) = &project {
-                        let _ = writeln!(out, "project memory of {project}");
-                        let pending = curate::pending_count(&ds, uri).await?;
-                        if pending > 0 {
-                            let _ = writeln!(out, "pending review: {pending} session(s) — run `funes curate {}`", memory.label());
-                        }
-                    }
                     // Every write to a remote memory is a `funes push` (data or reindex commit),
                     // so the head version's timestamp is when it was last pushed to.
                     let t = ds.version().timestamp;
@@ -1330,43 +1278,40 @@ pub async fn status(memory: Memory) -> Result<String> {
                         if let Some(line) = index_coverage_line() {
                             out.push_str(&line);
                         }
-                        // A shared remote's total says nothing about this host's backlog. Personal
-                        // memories use the local receipt maintained by push; project memories have
-                        // their decision-aware pending-review report above.
-                        if project.is_none() {
-                            if let Some(coverage) = super::push::local_push_coverage(&local, uri).await
-                            {
-                                if coverage.pending == 0 {
-                                    let _ = writeln!(
-                                        out,
-                                        "local push: up to date ({} session{})",
-                                        coverage.total,
-                                        if coverage.total == 1 { "" } else { "s" }
-                                    );
-                                } else {
-                                    let _ = writeln!(
-                                        out,
-                                        "local push: {} of {} session{} pending — run `funes push {}`",
-                                        coverage.pending,
-                                        coverage.total,
-                                        if coverage.total == 1 { "" } else { "s" },
-                                        memory.label()
-                                    );
-                                    if let Some(held) = &coverage.held {
-                                        let _ = writeln!(
-                                            out,
-                                            "  {} pending row(s) hold secrets ({}) — run `funes scrub` first",
-                                            held.rows, held.summary
-                                        );
-                                    }
-                                }
+                        // A shared remote's total says nothing about this host's backlog, so the
+                        // local receipt push maintains is what reports it.
+                        if let Some(coverage) = super::push::local_push_coverage(&local, uri).await
+                        {
+                            if coverage.pending == 0 {
+                                let _ = writeln!(
+                                    out,
+                                    "local push: up to date ({} session{})",
+                                    coverage.total,
+                                    if coverage.total == 1 { "" } else { "s" }
+                                );
                             } else {
                                 let _ = writeln!(
                                     out,
-                                    "local push coverage: unknown — run `funes push {}` once",
+                                    "local push: {} of {} session{} pending — run `funes push {}`",
+                                    coverage.pending,
+                                    coverage.total,
+                                    if coverage.total == 1 { "" } else { "s" },
                                     memory.label()
                                 );
+                                if let Some(held) = &coverage.held {
+                                    let _ = writeln!(
+                                        out,
+                                        "  {} pending row(s) hold secrets ({}) — run `funes scrub` first",
+                                        held.rows, held.summary
+                                    );
+                                }
                             }
+                        } else {
+                            let _ = writeln!(
+                                out,
+                                "local push coverage: unknown — run `funes push {}` once",
+                                memory.label()
+                            );
                         }
                         let t = local.version().timestamp;
                         if t.timestamp() > 0 {
@@ -1398,6 +1343,22 @@ pub async fn status(memory: Memory) -> Result<String> {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn is_scaffolding_flags_wrappers_and_headings() {
+        assert!(is_scaffolding("<ide_opened_file>/foo/bar.rs</ide_opened_file>"));
+        assert!(is_scaffolding("<environment_context>\n  <cwd>/w</cwd>"));
+        assert!(is_scaffolding("   <system-reminder>be nice"));
+        assert!(is_scaffolding("# AGENTS.md instructions for /w\n\n<INSTRUCTIONS>"));
+        assert!(is_scaffolding(
+            "Base directory for this skill: /home/u/.claude/skills/funes\n\n# funes"
+        ));
+        assert!(is_scaffolding(
+            "This session is being continued from a previous conversation that ran out of context."
+        ));
+        assert!(!is_scaffolding("explain me again why funes push finds secrets"));
+        assert!(!is_scaffolding("why did we drop lancedb for funes"));
+    }
 
     #[test]
     fn age_picks_the_coarsest_readable_unit() {

@@ -106,9 +106,9 @@ installed:
 funes ask claude "why is funes append-only" --memory huggingface/funes-memory   # or: funes ask codex
 ```
 
-See [docs/push.md](docs/push.md) for publishing, the secrets gate, project memories, and inspecting a
-memory; [docs/ask.md](docs/ask.md) for grounded answers; [docs/hub-caching.md](docs/hub-caching.md) for
-how remote recall caches to local speed.
+See [docs/push.md](docs/push.md) for publishing, the secrets gate, selecting what to publish, and
+inspecting a memory; [docs/ask.md](docs/ask.md) for grounded answers;
+[docs/hub-caching.md](docs/hub-caching.md) for how remote recall caches to local speed.
 
 ## Commands
 
@@ -121,7 +121,7 @@ workflow-oriented [documentation index](docs/README.md) for the complete guides.
 | `funes index [path]` | [docs/index.md](docs/index.md) — build/update the memory; sources, incremental, flags |
 | `funes recall "…"` / `funes get …` | [docs/recall.md](docs/recall.md) — recall passages and drill into them |
 | `funes ask <agent> "…"` | [docs/ask.md](docs/ask.md) — borrow an agent for a grounded answer |
-| `funes push <memory>` (+ `curate`, `scrub`, `status`) | [docs/push.md](docs/push.md) — publish and share a memory |
+| `funes push <memory>` (+ `scrub`, `status`) | [docs/push.md](docs/push.md) — publish and share a memory |
 | `funes update` | [installation and updating](#get-funes) — replace the installed binary with a verified release |
 
 The stable agent-facing output contract for the read commands is specified in [AGENTS.md](AGENTS.md).
