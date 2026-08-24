@@ -125,6 +125,24 @@ The decisions are kept under `$FUNES_HOME/curation/` in a line-oriented, human-r
 [configuration.md](configuration.md#the-funes-home). `funes status <memory>` reports this host's
 pending review count for a project memory.
 
+### Publishing a selection directly
+
+A push can also carry its own selection, naming the sessions to publish:
+
+```bash
+funes push <memory> --sessions <session> --sessions <session>
+```
+
+Those sessions' chunks are exactly what ships — for any memory, project or personal, whatever the
+stored decisions say. The list *is* the decision, so nothing is pending and nothing is held back for
+review, and an unrecognized session id fails the push rather than quietly publishing the rest. Omit
+`--sessions` and a push behaves as it always has: a project memory ships what it has included, a
+personal memory ships everything.
+
+This is the surface an agent-driven curation writes into: the agent reports which sessions qualify,
+and the person publishing passes that list. See
+[curation-verbs.md](curation-verbs.md#the-ledger-and-the-hf-dataset-api).
+
 ## Inspecting a memory: `status`
 
 `funes status` takes an optional memory (an `<org>/<repo>`, an `hf://…` URI, a local path, or

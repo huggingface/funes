@@ -108,12 +108,12 @@ async fn a_project_memory_ships_only_included_sessions() {
     let named = funes::commands::curate::name_project(&Memory::parse(&uri), &project).await;
 
     // Push before any decision: everything is held back, nothing ships.
-    let push_ungated = funes::commands::push::run_push(Memory::parse(&uri), false, Confirm::Yes).await;
+    let push_ungated = funes::commands::push::run_push(Memory::parse(&uri), false, Confirm::Yes, &[]).await;
     let sessions_before = remote_sessions(&uri).await;
 
     // Record an `include` decision for exactly one session, then push again.
     let recorded = funes::commands::curate::run(&Memory::parse(&uri), None, &["keep".to_string()], &[]).await;
-    let push_gated = funes::commands::push::run_push(Memory::parse(&uri), false, Confirm::Yes).await;
+    let push_gated = funes::commands::push::run_push(Memory::parse(&uri), false, Confirm::Yes, &[]).await;
     let sessions_after = remote_sessions(&uri).await;
 
     // Cleanup before asserting, so a failed assertion can't leave the scratch repo behind.

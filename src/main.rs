@@ -162,6 +162,10 @@ enum Cmd {
         /// backlog is below the auto-reindex threshold. With nothing new to push, reindex only.
         #[arg(long)]
         force_reindex: bool,
+        /// Publish exactly these sessions, whatever the memory records. Omit to publish what the
+        /// memory would anyway: a project memory's included sessions, a personal memory's everything.
+        #[arg(long, value_name = "SESSION")]
+        sessions: Vec<String>,
     },
     /// Curate a project memory: a memory that ships only the sessions you've reviewed and marked
     /// `include`. Your review alone decides what `funes push` ships there.
@@ -484,13 +488,14 @@ async fn main() -> Result<()> {
             memory: remote,
             yes,
             force_reindex,
+            sessions,
         } => {
             let confirm = if yes {
                 push::Confirm::Yes
             } else {
                 push::Confirm::Ask(prompt_new_memory)
             };
-            match push::run_push(memory::Memory::parse(&remote), force_reindex, confirm).await {
+            match push::run_push(memory::Memory::parse(&remote), force_reindex, confirm, &sessions).await {
                 Ok(pushed) => {
                     print!("{}", pushed.report);
                     // Secrets held back everything — surface a non-zero exit so automation can react.
@@ -716,7 +721,7 @@ async fn curate_review(memory: &memory::Memory, project: Option<&str>) -> Result
         Some(create_repo) => create_project_memory(memory, &project, create_repo, inc).await?,
     };
     if publish {
-        match push::run_push(memory.clone(), false, push::Confirm::Yes).await {
+        match push::run_push(memory.clone(), false, push::Confirm::Yes, &[]).await {
             Ok(pushed) => print!("{}", pushed.report),
             Err(e) if push::is_read_only(&e) => eprintln!(
                 "{} is read-only for your token — recall can read it, but publishing needs write access.",
@@ -950,7 +955,7 @@ async fn first_push(remote: &str, created: bool) -> Result<()> {
     } else {
         push::Confirm::Ask(prompt_new_memory)
     };
-    match push::run_push(memory::Memory::parse(remote), false, confirm).await {
+    match push::run_push(memory::Memory::parse(remote), false, confirm, &[]).await {
         Ok(pushed) => {
             print!("{}", pushed.report);
             Ok(())

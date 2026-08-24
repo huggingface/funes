@@ -279,11 +279,33 @@ fn must_confirm(local: usize, to_push: usize) -> bool {
     to_push > 0 && to_push == local
 }
 
+/// The chunk ids of exactly `sessions`, from a memory's rows grouped as `by_session`. Every named
+/// session must be in the memory: a mistyped id would otherwise publish a subset silently, and a
+/// publication is not a place to guess.
+fn named_ids(by_session: &HashMap<String, Vec<String>>, sessions: &[String]) -> Result<HashSet<String>> {
+    let unknown: Vec<&str> = sessions
+        .iter()
+        .filter(|s| !by_session.contains_key(*s))
+        .map(String::as_str)
+        .collect();
+    if !unknown.is_empty() {
+        bail!(
+            "not in your local memory: {} — `funes sessions` lists what is",
+            unknown.join(", ")
+        );
+    }
+    Ok(sessions.iter().flat_map(|s| by_session[s].iter().cloned()).collect())
+}
+
 /// Publish the local memory's new chunks to `target` (a remote memory on the HF Hub). With
 /// `force_reindex`, refresh the remote index after the data commit (retrying until it lands) even
 /// if the unindexed backlog is below [`REINDEX_THRESHOLD`]; with no new chunks pending it's a pure
 /// index refresh. `confirm` gates a publish to a memory the local index shares no chunks with.
-pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm) -> Result<Pushed> {
+///
+/// `sessions`, when non-empty, is the publication itself: exactly those sessions' chunks are
+/// candidates, whatever the memory is and whatever any curation records. Empty keeps the standing
+/// behaviour — a project memory ships what it has `include`d, a personal memory ships everything.
+pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm, sessions: &[String]) -> Result<Pushed> {
     let uri = match &target {
         Memory::Remote { uri } => uri.clone(),
         Memory::Local { .. } => {
@@ -320,23 +342,31 @@ pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm) -> 
     };
     let first_publish = remote.is_none();
 
-    // 2. The local side. A project memory ships exactly the sessions marked include — your
-    // review alone decides what ships (see [`super::curate`]); anything undecided stays local
-    // and is counted for the report. A personal memory takes everything.
-    let (candidates, not_reviewed) = match &project {
-        Some(project) => {
-            eprintln!("project memory of {project} — ships only sessions you've included");
-            let decisions = curate::load(&uri)?.unwrap_or_default();
-            let by_session = curate::candidate_sessions(&local).await?;
-            let (shipped, pending) = curate::partition(&by_session, &decisions, &remote_ids);
-            // Report pending only for sessions that belong to this project — the same repo rule the
-            // review scopes to. Undecided sessions of other repos (or with no resolvable checkout)
-            // never ship here and aren't this memory's to-do.
-            let matched = curate::project_sessions(&local, project).await?;
-            let pending: Vec<String> = pending.into_iter().filter(|s| matched.contains(s)).collect();
-            (shipped, pending)
+    // 2. The local side. Named sessions are the selection outright: the caller has said what to
+    // publish, so nothing is undecided and nothing is pending. Otherwise a project memory ships
+    // exactly the sessions marked include — your review alone decides what ships (see
+    // [`super::curate`]) — and anything undecided stays local and is counted for the report; a
+    // personal memory takes everything.
+    let (candidates, not_reviewed) = if !sessions.is_empty() {
+        let by_session = curate::ids_by_session(&local).await?;
+        eprintln!("publishing {} named session(s)", sessions.len());
+        (named_ids(&by_session, sessions)?, Vec::new())
+    } else {
+        match &project {
+            Some(project) => {
+                eprintln!("project memory of {project} — ships only sessions you've included");
+                let decisions = curate::load(&uri)?.unwrap_or_default();
+                let by_session = curate::candidate_sessions(&local).await?;
+                let (shipped, pending) = curate::partition(&by_session, &decisions, &remote_ids);
+                // Report pending only for sessions that belong to this project — the same repo rule
+                // the review scopes to. Undecided sessions of other repos (or with no resolvable
+                // checkout) never ship here and aren't this memory's to-do.
+                let matched = curate::project_sessions(&local, project).await?;
+                let pending: Vec<String> = pending.into_iter().filter(|s| matched.contains(s)).collect();
+                (shipped, pending)
+            }
+            None => (all_ids(&local).await?, Vec::new()),
         }
-        None => (all_ids(&local).await?, Vec::new()),
     };
     let held_back = pending_note(not_reviewed.len(), &target.label());
     let to_push: HashSet<String> = candidates.difference(&remote_ids).cloned().collect();
@@ -991,6 +1021,41 @@ mod tests {
         let rows = rows_to_push(&ds, &to_push, false).await.unwrap();
         let pushed: usize = rows.iter().map(|b| b.num_rows()).sum();
         assert_eq!(pushed, reviewed.len(), "only the included session's rows are read");
+    }
+
+    #[tokio::test]
+    async fn named_sessions_are_the_selection() {
+        // Naming a session publishes exactly its rows — the sibling stays local, with no curation
+        // consulted at all. This is the path that replaces the ledger.
+        let dir = tempfile::tempdir().unwrap();
+        let ds = two_session_ds(dir.path()).await;
+        let by_session = curate::ids_by_session(&ds).await.unwrap();
+
+        let selected = named_ids(&by_session, &["reviewed".to_string()]).unwrap();
+        let reviewed: HashSet<String> = by_session["reviewed"].iter().cloned().collect();
+        assert_eq!(selected, reviewed, "exactly the named session's chunks");
+        assert!(
+            by_session["private"].iter().all(|id| !selected.contains(id)),
+            "the session that wasn't named stays local"
+        );
+
+        // Both named: the union, order-independent.
+        let both = named_ids(&by_session, &["private".to_string(), "reviewed".to_string()]).unwrap();
+        assert_eq!(both.len(), by_session["reviewed"].len() + by_session["private"].len());
+    }
+
+    #[tokio::test]
+    async fn a_mistyped_session_fails_the_push() {
+        // Silently publishing the subset that did resolve would be the worst outcome here: the
+        // caller would read success and never learn what stayed behind.
+        let dir = tempfile::tempdir().unwrap();
+        let ds = two_session_ds(dir.path()).await;
+        let by_session = curate::ids_by_session(&ds).await.unwrap();
+        let err = named_ids(&by_session, &["reviewed".to_string(), "reviewd".to_string()])
+            .expect_err("an unknown session id must be an error");
+        let msg = format!("{err}");
+        assert!(msg.contains("reviewd"), "names the unknown id: {msg}");
+        assert!(!msg.contains("reviewed,"), "doesn't blame the id that resolved: {msg}");
     }
 
     #[test]
