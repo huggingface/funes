@@ -198,7 +198,10 @@ fn write_index_coverage(
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default();
-    let snapshot = update_index_coverage(snapshot, units.iter().map(|(_, unit)| unit), state);
+    let mut snapshot = update_index_coverage(snapshot, units.iter().map(|(_, unit)| unit), state);
+    // A carried-over key whose transcript is gone — a deleted worktree's project dir — is never
+    // enumerated again, so nothing else would ever clear it.
+    snapshot.pending.retain(|key| Path::new(key).exists());
     std::fs::write(path, serde_json::to_string(&snapshot)?)
         .with_context(|| format!("writing index coverage at {}", path.display()))
 }
@@ -1002,6 +1005,27 @@ mod tests {
         let snapshot = update_index_coverage(snapshot, &second, &state);
         assert!(snapshot.pending.contains("partial"));
         assert!(snapshot.pending.contains("other-harness"));
+    }
+
+    #[test]
+    fn index_coverage_drops_pending_units_whose_source_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("live.jsonl");
+        std::fs::write(&live, "{}").unwrap();
+        let gone = dir.path().join("gone.jsonl");
+        let key = |p: &Path| p.to_str().unwrap().to_string();
+
+        let coverage = dir.path().join("index-coverage.json");
+        let carried = IndexCoverageSnapshot {
+            pending: [key(&live), key(&gone)].into_iter().collect(),
+        };
+        std::fs::write(&coverage, serde_json::to_string(&carried).unwrap()).unwrap();
+
+        write_index_coverage(&coverage, &[], &HashMap::new()).unwrap();
+
+        let snapshot: IndexCoverageSnapshot =
+            serde_json::from_str(&std::fs::read_to_string(&coverage).unwrap()).unwrap();
+        assert_eq!(snapshot.pending, [key(&live)].into_iter().collect());
     }
 
     #[test]
