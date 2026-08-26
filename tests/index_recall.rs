@@ -21,6 +21,11 @@ fn write_transcript(source: &std::path::Path) -> (String, String) {
             r#"{{"type":"assistant","uuid":"t4","parentUuid":"t3","timestamp":"2026-01-01T00:00:15Z","message":{{"role":"assistant","content":[{{"type":"text","text":"{}"}}]}}}}"#,
             seam_block()
         ),
+        // A compacted transcript replays turns under a uuid it has already used. Real sessions do
+        // this — one 10,000-turn session holds ~3,300 such repeats — and it is the case that breaks
+        // any code treating a turn uuid as a session-unique key.
+        r#"{"type":"assistant","uuid":"replay","parentUuid":"t4","timestamp":"2026-01-01T00:00:20Z","message":{"role":"assistant","content":[{"type":"text","text":"first REPLAYEDMARKER occurrence"}]}}"#,
+        r#"{"type":"assistant","uuid":"replay","parentUuid":"t4","timestamp":"2026-01-01T00:00:25Z","message":{"role":"assistant","content":[{"type":"text","text":"second REPLAYEDMARKER occurrence"}]}}"#,
     ];
     for l in lines {
         writeln!(f, "{l}").unwrap();
@@ -109,7 +114,7 @@ async fn index_then_read_surface() {
         .await
         .unwrap();
     assert!(
-        listed.contains(&format!("{workdir} 4 turns {session}")),
+        listed.contains(&format!("{workdir} 6 turns {session}")),
         "sessions should list the session with its distinct turn count: {listed}"
     );
     assert!(
@@ -289,6 +294,68 @@ async fn index_then_read_surface() {
     assert!(
         outside.contains("no turns in that range"),
         "an empty window must not read as absence: {outside}"
+    );
+
+    // `sessions` and `get` must report the same size, or neither number can be trusted: the
+    // addressable unit is what `--from`/`--to` index, which is what `get` renders.
+    let sized = funes::commands::recall::get(
+        funes::memory::Memory::local(),
+        session.clone(),
+        funes::commands::recall::TurnRange {
+            from: Some(0),
+            to: Some(0),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        sized.contains("of 6"),
+        "get must count the turns sessions listed: {sized}"
+    );
+
+    // A turn uuid recurring at two positions is two turns, not one. Both verbs have to agree with
+    // that, and with each other: `sessions` counts what `get` renders, and a scan of the whole
+    // session finds exactly what its windows find between them.
+    let replayed = funes::commands::recall::scan(
+        funes::memory::Memory::local(),
+        "REPLAYEDMARKER".into(),
+        session.clone(),
+        None,
+        None,
+        false,
+        40,
+    )
+    .await
+    .unwrap();
+    assert!(
+        replayed.contains("— 2 hits"),
+        "a replayed uuid must not merge two blocks into one hit: {replayed}"
+    );
+    let first_half = funes::commands::recall::scan(
+        funes::memory::Memory::local(),
+        "REPLAYEDMARKER".into(),
+        session.clone(),
+        None,
+        Some(4),
+        false,
+        40,
+    )
+    .await
+    .unwrap();
+    let second_half = funes::commands::recall::scan(
+        funes::memory::Memory::local(),
+        "REPLAYEDMARKER".into(),
+        session.clone(),
+        Some(5),
+        None,
+        false,
+        40,
+    )
+    .await
+    .unwrap();
+    assert!(
+        first_half.contains("— 1 hits") && second_half.contains("— 1 hits"),
+        "windows must partition the hits, not double-count or lose them: {first_half}{second_half}"
     );
 
     // A needle inside the region two chunks overlap is one hit, not one per chunk — splits are

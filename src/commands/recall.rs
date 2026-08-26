@@ -113,7 +113,9 @@ pub struct Session {
     pub harness: String,
     /// The session's source repo(s) as `owner/name`, space-joined; empty when unresolvable.
     pub repo: String,
-    /// Distinct turns, not rows: chunking is an indexing artifact, a turn is what `get` reads.
+    /// Distinct turns, not rows: chunking is an indexing artifact, and a turn is what `get` reads —
+    /// so this counts (seq, turn_uuid) pairs, the same unit `get` renders and `--from`/`--to` index.
+    /// A uuid alone would undercount: a compacted transcript replays turns under the same uuid.
     pub turns: usize,
     /// The opening real prompt, scaffolding skipped — what the session was for, in one line.
     pub first_prompt: String,
@@ -811,7 +813,7 @@ async fn first_prompts(ds: &Dataset, ids: &[String]) -> Result<HashMap<String, S
 /// metadata only — the opening prompts cost a `text` read, so they are fetched separately for the
 /// rows that survive the filter.
 async fn scan_sessions(ds: &Dataset) -> Result<Vec<Session>> {
-    let mut cols = vec!["session_id", "ts", "workdir", "turn_uuid"];
+    let mut cols = vec!["session_id", "ts", "workdir", "turn_uuid", "seq"];
     if has_harness_col(ds) {
         cols.push("harness");
     }
@@ -820,7 +822,7 @@ async fn scan_sessions(ds: &Dataset) -> Result<Vec<Session>> {
     }
     let batches = dataset::scan_rows(ds, &cols, None, None).await?;
 
-    let mut by_id: HashMap<String, (Session, HashSet<String>)> = HashMap::new();
+    let mut by_id: HashMap<String, (Session, HashSet<(i64, String)>)> = HashMap::new();
     for batch in &batches {
         let (sid, ts, wd, turn, harness, repo) = (
             scol(batch, "session_id"),
@@ -830,6 +832,7 @@ async fn scan_sessions(ds: &Dataset) -> Result<Vec<Session>> {
             scol(batch, "harness"),
             scol(batch, "repo"),
         );
+        let seq = icol(batch, "seq");
         for i in 0..batch.num_rows() {
             let id = sval(sid, i);
             let (session, turns) = by_id.entry(id.clone()).or_insert_with(|| {
@@ -851,7 +854,7 @@ async fn scan_sessions(ds: &Dataset) -> Result<Vec<Session>> {
             if row_ts < session.ts {
                 session.ts = row_ts;
             }
-            turns.insert(sval(turn, i));
+            turns.insert((ival(seq, i), sval(turn, i)));
         }
     }
 
@@ -876,9 +879,11 @@ struct Block {
     text: String,
 }
 
-/// Blocks under assembly, keyed by (turn_uuid, block_idx): each one's facets, and the split rows
-/// still to be stitched into its `text`.
-type BlockParts = HashMap<(String, i64), (Block, Vec<(i64, String)>)>;
+/// Blocks under assembly, keyed by (seq, turn_uuid, block_idx): each one's facets, and the split
+/// rows still to be stitched into its `text`. The seq is part of the key because a turn uuid can
+/// recur at different positions in a session — a compacted transcript replays turns — and two
+/// blocks that merely share a uuid are two blocks, not one.
+type BlockParts = HashMap<(i64, String, i64), (Block, Vec<(i64, String)>)>;
 
 /// Find `needle` in every block of one session, rendered in the agent format. Where recall ranks
 /// and can only show what is present, this is exhaustive over the session: a needle that returns
@@ -949,7 +954,7 @@ async fn reassembled_blocks(ds: &Dataset, session_id: &str, from: Option<i64>, t
         );
         let (seq, bi, si) = (icol(batch, "seq"), icol(batch, "block_idx"), icol(batch, "split_idx"));
         for i in 0..batch.num_rows() {
-            let key = (sval(turn, i), ival(bi, i));
+            let key = (ival(seq, i), sval(turn, i), ival(bi, i));
             let entry = blocks.entry(key).or_insert_with(|| {
                 (
                     Block {
