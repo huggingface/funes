@@ -93,24 +93,55 @@ outside it.
 ## Enumerating with `sessions`
 
 ```bash
-funes sessions [--memory <label>]
+funes sessions [--repo <owner/name>] [--since <date>] [--until <date>] [--limit <n>] [--offset <n>] [--memory <label>]
 ```
 
 Recall ranks: it returns the passages closest to a query and says nothing about everything it did
-not reach. So it cannot answer *how much is in here* or *how much of it have I looked at*.
-`sessions` can — it lists every session in the memory, oldest first, with its provenance and turn
-count:
+not reach. So it cannot answer *how much is in here*, *which sessions is this about*, or *how much
+of it have I looked at*. `sessions` can — it lists the memory's sessions, oldest first, each with
+its provenance, turn count, and the prompt it opened with:
 
 ```console
-$ funes sessions --memory huggingface/funes-memory
-[2026-06-19T01:29:59.000Z] claude_code -home-u-funes/0123456789abcdef 47 turns
+$ funes sessions --memory huggingface/funes-memory --since 2026-06-01
+[2026-06-19] claude_code huggingface/funes 47 turns 0123456789abcdef
+  why did we switch off the streaming parser
 …
 ---
 28 sessions
 ```
 
+That opening prompt is the point. It is the cheapest triage there is — what a session was for,
+without reading any of it — and it is the first thing a human actually typed, since injected
+scaffolding (`<system-reminder>` wrappers, agent-notes preambles, compaction recaps) is skipped. The
+provenance column is the session's source repo when its checkout resolved at index time, and the
+working directory when it didn't.
+
 Turns are counted distinct rather than by row, since a long turn is stored as several chunks. The
 session id is printed in full, so the line feeds `funes get` or `funes scan` as is.
+
+### Narrowing
+
+Prompts make a row worth reading and also make it longer, so a listing is **bounded to 50 rows by
+default**, keeping the most recent, and tells you both what it held back and how to get it:
+
+```console
+---
+50 of 726 sessions — 676 older: continue with --offset 50, or narrow with --repo/--since/--until
+```
+
+The closing line always states the full match count, so coverage stays knowable even when the
+listing is partial. `--limit` raises the page to at most 200 rows, and the reply stops at around
+40,000 characters regardless — past that it is an answer nobody receives.
+
+To cover the whole population, walk it: `--offset` skips that many of the most recent matches before
+taking `--limit`, and the trailer names the offset to use next. (`--limit 0` used to mean "every
+match", before a listing had a ceiling; it is now an error rather than an empty reply.) Rows are ordered on (timestamp,
+session id), so a given offset always names the same session — a walk neither repeats a row nor skips
+one. Date-stepping cannot promise that, since a single day holds many sessions.
+
+Better still, narrow: `--repo owner/name` keeps the sessions whose checkout resolved to that repo
+(worktrees and scratch directories of the same clone included, which matching on the working
+directory would miss), and `--since`/`--until` bracket the start date inclusively as `YYYY-MM-DD`.
 
 ## Finding a literal with `scan`
 

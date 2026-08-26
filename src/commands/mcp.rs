@@ -57,6 +57,20 @@ pub struct GetRequest {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SessionsRequest {
+    #[schemars(description = "Keep only sessions whose checkout resolved to this repo, as `owner/name`")]
+    pub repo: Option<String>,
+    #[schemars(description = "Keep only sessions that started on or after this date, `YYYY-MM-DD`")]
+    pub since: Option<String>,
+    #[schemars(description = "Keep only sessions that started on or before this date, `YYYY-MM-DD`")]
+    pub until: Option<String>,
+    #[schemars(
+        description = "Rows to list, keeping the most recent (default 50, maximum 200). More than that cannot fit in one reply — walk with `offset` instead. Zero is an error, not every match."
+    )]
+    pub limit: Option<usize>,
+    #[schemars(
+        description = "Skip this many of the most recent matches before taking `limit` — how you walk a listing back through time. The closing line names the offset that continues, and a given offset always names the same session."
+    )]
+    pub offset: Option<usize>,
     #[schemars(
         description = "Memory to list — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Defaults to the server's memory."
     )]
@@ -174,10 +188,27 @@ impl Funes {
     }
 
     #[tool(
-        description = "List every session in a memory, oldest first: first timestamp, harness, workdir, full session id, and how many turns it holds, closed by the total. `recall` is ranked retrieval — it surfaces what a query reaches and says nothing about the rest, so it can never tell you how much a memory holds or how much of it you have looked at. Call this whenever coverage is the question: sizing a memory before a sweep, reporting how many sessions you actually examined, or checking whether a session you heard about by id is in there at all."
+        description = "List a memory's sessions, oldest first: date, harness, source repo (or workdir when the checkout did not resolve), turn count, full session id, and the prompt each session opened with. That prompt is the cheapest triage there is — it says what a session was for without reading any of it. `recall` is ranked retrieval: it surfaces what a query reaches and says nothing about the rest, so it can never tell you how much a memory holds or how much of it you have looked at. Call this whenever the population is the question: sizing a memory before a sweep, picking the sessions a criterion is about, reporting how many you actually examined, or checking whether a session you heard about by id is in there at all. Narrow with `repo`, `since` and `until` rather than listing everything; the closing line always states the full match count, so an elided row is visible and never silently dropped."
     )]
-    async fn sessions(&self, Parameters(SessionsRequest { memory }): Parameters<SessionsRequest>) -> String {
-        match recall::sessions(self.memory(memory)).await {
+    async fn sessions(
+        &self,
+        Parameters(SessionsRequest {
+            repo,
+            since,
+            until,
+            limit,
+            offset,
+            memory,
+        }): Parameters<SessionsRequest>,
+    ) -> String {
+        let filter = recall::SessionFilter {
+            repo,
+            since,
+            until,
+            limit,
+            offset: offset.unwrap_or(0),
+        };
+        match recall::sessions(self.memory(memory), filter).await {
             Ok(s) if !s.is_empty() => s,
             Ok(_) => "no results".to_string(),
             Err(e) => format!("sessions error: {e}"),

@@ -50,20 +50,65 @@ pub fn recall_agent(note: &str, memory_arg: &str, hits: &[(Hit, f64)]) -> String
     out
 }
 
-/// The agent `sessions` format: one line per session, oldest first, closed by the total. The
-/// session id is printed whole — it is the payload here, not a pointer into a longer hint line.
-/// Byte-stable.
-pub fn sessions_agent(note: &str, sessions: &[Session]) -> String {
+/// Chars of a session's opening prompt a row carries. Enough to tell sessions apart; the whole
+/// prompt is a `get` away.
+const PROMPT_CHARS: usize = 120;
+
+/// Characters of rows a `sessions` listing renders before it stops. The row bound and this one are
+/// two sides of the same ceiling: 200 rows carrying prompts is about this many characters, so
+/// neither can be raised into a reply nobody receives.
+const SESSIONS_BUDGET: usize = 40_000;
+
+/// The agent `sessions` format: a row per session, oldest first, each carrying the prompt it opened
+/// with on an indented second line, closed by the total. The session id is printed whole — it is the
+/// payload here, not a pointer into a longer hint line. `total` is every session the filter matched
+/// and `offset` where this page started, so an elided row is not just stated but reachable — the
+/// trailer names the offset that continues. Byte-stable.
+pub fn sessions_agent(note: &str, sessions: &[Session], total: usize, offset: usize) -> String {
     let mut out = note.to_string();
+    let mut shown = 0;
     for s in sessions {
+        if shown > 0 && out.len() >= SESSIONS_BUDGET {
+            break;
+        }
         let _ = writeln!(
             out,
-            "[{}] {} {}/{} {} turns",
-            s.ts, s.harness, s.workdir, s.session_id, s.turns
+            "[{}] {} {} {} turns {}",
+            s.date(),
+            s.harness,
+            s.origin(),
+            s.turns,
+            s.session_id
+        );
+        if !s.first_prompt.is_empty() {
+            let _ = writeln!(out, "  {}", one_line(&s.first_prompt, PROMPT_CHARS));
+        }
+        shown += 1;
+    }
+    // What is left is older than this page: `offset + shown` names the row it starts at, and the
+    // ordering is total, so that offset is the same row on every call.
+    let remaining = total.saturating_sub(offset + shown);
+    if remaining == 0 && offset == 0 {
+        let _ = writeln!(out, "---\n{total} sessions");
+    } else if remaining == 0 {
+        let _ = writeln!(out, "---\n{shown} of {total} sessions — the oldest match reached");
+    } else {
+        let _ = writeln!(
+            out,
+            "---\n{shown} of {total} sessions — {remaining} older: continue with --offset {}, or narrow with --repo/--since/--until",
+            offset + shown
         );
     }
-    let _ = writeln!(out, "---\n{} sessions", sessions.len());
     out
+}
+
+/// `s` collapsed onto one line and cut to `max` chars, `…` marking the cut.
+fn one_line(s: &str, max: usize) -> String {
+    let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    match flat.char_indices().nth(max) {
+        Some((i, _)) => format!("{}…", &flat[..i]),
+        None => flat,
+    }
 }
 
 /// Characters of turns a `get` renders before it stops. A single turn can carry a whole file, so a
@@ -599,23 +644,93 @@ mod tests {
         assert_eq!(word_span(text, "pha beta gamma delta epsilon zeta eta"), Some(1..7));
     }
 
-    #[test]
-    fn sessions_agent_is_byte_stable() {
-        let s = Session {
+    fn session(repo: &str, prompt: &str) -> Session {
+        Session {
             session_id: "0123456789abcdef".to_string(),
             ts: "2026-06-19T01:29:59.000Z".to_string(),
             workdir: "-home-u-funes".to_string(),
             harness: "claude_code".to_string(),
+            repo: repo.to_string(),
             turns: 47,
-        };
+            first_prompt: prompt.to_string(),
+        }
+    }
+
+    #[test]
+    fn sessions_agent_is_byte_stable() {
+        let s = session("huggingface/funes", "why is\n  rerank slow");
         assert_eq!(
-            sessions_agent("", &[s]),
-            "[2026-06-19T01:29:59.000Z] claude_code -home-u-funes/0123456789abcdef 47 turns\n\
+            sessions_agent("", &[s], 1, 0),
+            "[2026-06-19] claude_code huggingface/funes 47 turns 0123456789abcdef\n\
+             \x20 why is rerank slow\n\
              ---\n\
              1 sessions\n"
         );
         // An empty listing still closes with its total.
-        assert_eq!(sessions_agent("", &[]), "---\n0 sessions\n");
+        assert_eq!(sessions_agent("", &[], 0, 0), "---\n0 sessions\n");
+    }
+
+    #[test]
+    fn sessions_agent_falls_back_to_workdir_and_states_what_it_elided() {
+        // No repo resolved at index time: the workdir is the only provenance there is.
+        let out = sessions_agent("", &[session("", "x")], 1, 0);
+        assert!(
+            out.starts_with("[2026-06-19] claude_code -home-u-funes 47 turns"),
+            "got: {out}"
+        );
+        // A bounded listing says so, and says how many matched — a dropped row is never silent.
+        let capped = sessions_agent("", &[session("acme/kb", "x")], 723, 0);
+        assert!(
+            capped.contains("---\n1 of 723 sessions — 722 older: continue with --offset 1, or narrow with"),
+            "got: {capped}"
+        );
+    }
+
+    #[test]
+    fn a_bounded_listing_names_the_offset_that_continues_it() {
+        // A page in the middle of a walk states where it sits and where the next one starts, so the
+        // caller never has to guess and never re-reads a row.
+        let page = sessions_agent("", &[session("acme/kb", "x"), session("acme/kb", "y")], 10, 4);
+        assert!(
+            page.contains("---\n2 of 10 sessions — 4 older: continue with --offset 6"),
+            "got: {page}"
+        );
+        // The oldest page says so rather than offering an offset that would return nothing.
+        let last = sessions_agent("", &[session("acme/kb", "x")], 10, 9);
+        assert!(
+            last.contains("---\n1 of 10 sessions — the oldest match reached"),
+            "got: {last}"
+        );
+    }
+
+    #[test]
+    fn a_listing_stops_at_its_byte_budget() {
+        // The row cap and the byte budget are the same ceiling from two sides: a page of rows whose
+        // prompts are long stops on bytes, and still hands back a usable offset.
+        let long = "word ".repeat(40);
+        let rows: Vec<Session> = (0..400).map(|_| session("acme/kb", &long)).collect();
+        let out = sessions_agent("", &rows, 400, 0);
+        assert!(
+            out.len() < SESSIONS_BUDGET + 400,
+            "the budget holds: {} bytes",
+            out.len()
+        );
+        let shown = out.lines().filter(|l| l.starts_with('[')).count();
+        assert!(shown < 400, "not every row was rendered: {shown}");
+        assert!(
+            out.contains(&format!("continue with --offset {shown}")),
+            "the offset must resume where rendering stopped: {}",
+            out.lines().last().unwrap()
+        );
+    }
+
+    #[test]
+    fn a_prompt_row_is_one_line_and_bounded() {
+        let long = "word ".repeat(60);
+        let out = sessions_agent("", &[session("acme/kb", &long)], 1, 0);
+        let prompt = out.lines().nth(1).unwrap();
+        assert!(prompt.ends_with('…'), "a cut prompt is marked: {prompt}");
+        assert!(prompt.chars().count() <= PROMPT_CHARS + 4, "bounded: {prompt}");
     }
 
     #[test]

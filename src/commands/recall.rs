@@ -103,16 +103,43 @@ pub struct ScanResult {
     pub to: Option<i64>,
 }
 
-/// One session in a memory's listing: where and when it started, and how much it holds.
+/// One session in a memory's listing: when and where it started, how much it holds, and the prompt
+/// it opened with.
 pub struct Session {
     pub session_id: String,
     /// First timestamp in the session.
     pub ts: String,
     pub workdir: String,
     pub harness: String,
+    /// The session's source repo(s) as `owner/name`, space-joined; empty when unresolvable.
+    pub repo: String,
     /// Distinct turns, not rows: chunking is an indexing artifact, a turn is what `get` reads.
     pub turns: usize,
+    /// The opening real prompt, scaffolding skipped — what the session was for, in one line.
+    pub first_prompt: String,
 }
+
+impl Session {
+    /// The `YYYY-MM-DD` the session started.
+    pub fn date(&self) -> &str {
+        self.ts.get(..10).unwrap_or(&self.ts)
+    }
+
+    /// Best available provenance: the repo when the checkout resolved, else the working directory.
+    pub fn origin(&self) -> &str {
+        self.repo.split_whitespace().next().unwrap_or(&self.workdir)
+    }
+}
+
+/// How many sessions a listing renders before it elides the rest. A row carries an opening prompt
+/// now, so a memory of a few hundred sessions would otherwise answer past any tool-result ceiling —
+/// the very failure the filters exist to avoid.
+const SESSIONS_LIMIT: usize = 50;
+
+/// The most rows one listing will render, whatever `limit` asks for. Past this the reply is larger
+/// than a tool result can carry, so a higher `limit` would only produce an answer nobody receives:
+/// walking with `offset` is the way to see more.
+const SESSIONS_LIMIT_MAX: usize = 200;
 
 /// One reassembled turn from `get`: its blocks in order, splits stitched back together.
 pub struct Turn {
@@ -471,9 +498,13 @@ async fn fts_candidates(ds: &Dataset, query: &str, limit: usize, filter: Option<
 /// Whether the memory carries the `harness` column — false for one built before the facet existed
 /// (an un-migrated memory).
 fn has_harness_col(ds: &Dataset) -> bool {
-    arrow_schema::Schema::from(ds.schema())
-        .column_with_name("harness")
-        .is_some()
+    has_col(ds, "harness")
+}
+
+/// Whether the dataset carries `name`. Projecting a column a memory predates errors, so every
+/// migrated column is asked for before it is read.
+fn has_col(ds: &Dataset, name: &str) -> bool {
+    arrow_schema::Schema::from(ds.schema()).column_with_name(name).is_some()
 }
 
 /// `HIT_COLS`, minus `harness` on an un-migrated memory: projecting a column the dataset lacks errors,
@@ -649,36 +680,155 @@ pub async fn get(memory: Memory, session_id: String, range: TurnRange) -> Result
     Ok(crate::ui::render::get_agent(&note, &turns, total))
 }
 
-/// Every session in a memory, oldest first, rendered in the agent format. Ranked retrieval reaches
-/// what a query reaches and says nothing about the rest, so enumeration is the only thing that
-/// answers what a memory holds and how much of it a pass has covered.
-pub async fn sessions(memory: Memory) -> Result<String> {
+/// What narrows a listing: the population a criterion is about, before anything of it is read.
+#[derive(Default)]
+pub struct SessionFilter {
+    /// Keep sessions whose stored repo names this `owner/name`.
+    pub repo: Option<String>,
+    /// Keep sessions that started on or after this `YYYY-MM-DD`.
+    pub since: Option<String>,
+    /// Keep sessions that started on or before this `YYYY-MM-DD`.
+    pub until: Option<String>,
+    /// Rows to render; `None` takes [`SESSIONS_LIMIT`], and anything above [`SESSIONS_LIMIT_MAX`] is
+    /// clamped to it.
+    pub limit: Option<usize>,
+    /// Skip this many of the most recent matches before taking `limit` — how a listing is walked
+    /// back through time. Rows are ordered on (timestamp, session id), so a given offset always
+    /// names the same row: continuing neither repeats a session nor skips one.
+    pub offset: usize,
+}
+
+/// The sessions of a memory that `filter` keeps, oldest first, rendered in the agent format. Ranked
+/// retrieval reaches what a query reaches and says nothing about the rest, so enumeration is the
+/// only thing that answers what a memory holds and how much of it a pass has covered — which is why
+/// an elided row is always counted, never dropped quietly.
+///
+/// The prompts are read after the filter and the bound, so their cost follows the rows that will be
+/// rendered rather than the size of the memory.
+pub async fn sessions(memory: Memory, filter: SessionFilter) -> Result<String> {
+    // Zero once meant "every match", back when a listing had no ceiling. It now means an empty
+    // reply, which is never what a caller wants — so say so instead of returning nothing.
+    if filter.limit == Some(0) {
+        bail!("a limit of 0 would list nothing — omit it for {SESSIONS_LIMIT} rows, raise it to at most {SESSIONS_LIMIT_MAX}, and walk the rest with --offset");
+    }
     let read = open_read(&memory).await?;
     let note = read.note.clone().unwrap_or_default();
     let label = read.memory_label.clone().unwrap_or_else(|| memory.label());
-    let sessions = scan_sessions(&read.ds).await?;
-    if sessions.is_empty() {
+    let all = scan_sessions(&read.ds).await?;
+    if all.is_empty() {
         return Ok(format!("{note}no sessions in {label}\n"));
     }
-    Ok(crate::ui::render::sessions_agent(&note, &sessions))
+    let matched: Vec<Session> = all.into_iter().filter(|s| filter.keeps(s)).collect();
+    if matched.is_empty() {
+        return Ok(format!("{note}no session in {label} matches\n"));
+    }
+
+    // Oldest first is the reading order, but a page is taken from the *recent* end — the tail of a
+    // memory is what a pass is usually catching up on — and `offset` walks back from there.
+    let total = matched.len();
+    let limit = filter.limit.unwrap_or(SESSIONS_LIMIT).min(SESSIONS_LIMIT_MAX);
+    let end = total.saturating_sub(filter.offset);
+    let mut shown: Vec<Session> = matched.into_iter().take(end).skip(end.saturating_sub(limit)).collect();
+    if shown.is_empty() {
+        return Ok(format!(
+            "{note}offset {} is past the {total} session(s) in {label}\n",
+            filter.offset
+        ));
+    }
+    let ids: Vec<String> = shown.iter().map(|s| s.session_id.clone()).collect();
+    let mut prompts = first_prompts(&read.ds, &ids).await?;
+    for s in shown.iter_mut() {
+        s.first_prompt = prompts.remove(&s.session_id).unwrap_or_default();
+    }
+    Ok(crate::ui::render::sessions_agent(&note, &shown, total, filter.offset))
 }
 
-/// Fold every row into its session: earliest timestamp, provenance, and distinct turn count.
+impl SessionFilter {
+    /// Whether `s` survives every filter that was given.
+    fn keeps(&self, s: &Session) -> bool {
+        // A session's repo field can name several checkouts; any of them counts. Empty means the
+        // checkout didn't resolve at index time, which no `--repo` can claim.
+        if let Some(repo) = &self.repo {
+            if !s.repo.split_whitespace().any(|i| i == repo) {
+                return false;
+            }
+        }
+        if let Some(since) = &self.since {
+            if s.date() < since.as_str() {
+                return false;
+            }
+        }
+        if let Some(until) = &self.until {
+            if s.date() > until.as_str() {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// The opening real prompt of each session in `ids` — its earliest user text block that isn't
+/// injected scaffolding, collapsed to one line. A session whose user turns are all scaffolding is
+/// absent from the map.
+async fn first_prompts(ds: &Dataset, ids: &[String]) -> Result<HashMap<String, String>> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let list: Vec<String> = ids.iter().map(|id| format!("'{}'", esc(id))).collect();
+    // Split 0 only: `is_scaffolding` reads a block's start, and a later split begins mid-text.
+    let filter = format!(
+        "session_id IN ({}) AND role = 'user' AND block_type = 'text' AND split_idx = 0",
+        list.join(", ")
+    );
+    let cols = ["session_id", "seq", "block_idx", "text"];
+    let batches = dataset::scan_rows(ds, &cols, Some(&filter), None).await?;
+    let mut best: HashMap<String, ((i64, i64), String)> = HashMap::new();
+    for batch in &batches {
+        let (sid, text) = (scol(batch, "session_id"), scol(batch, "text"));
+        let (seq, bi) = (icol(batch, "seq"), icol(batch, "block_idx"));
+        for i in 0..batch.num_rows() {
+            let body = sval(text, i);
+            if crate::commands::curate::is_scaffolding(&body) {
+                continue;
+            }
+            let key = (ival(seq, i), ival(bi, i));
+            let entry = best.entry(sval(sid, i));
+            match entry {
+                std::collections::hash_map::Entry::Occupied(mut e) if key < e.get().0 => {
+                    e.insert((key, body));
+                }
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert((key, body));
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(best.into_iter().map(|(id, (_, text))| (id, text)).collect())
+}
+
+/// Fold every row into its session: earliest timestamp, provenance, and distinct turn count. Reads
+/// metadata only — the opening prompts cost a `text` read, so they are fetched separately for the
+/// rows that survive the filter.
 async fn scan_sessions(ds: &Dataset) -> Result<Vec<Session>> {
     let mut cols = vec!["session_id", "ts", "workdir", "turn_uuid"];
     if has_harness_col(ds) {
         cols.push("harness");
     }
+    if has_col(ds, "repo") {
+        cols.push("repo");
+    }
     let batches = dataset::scan_rows(ds, &cols, None, None).await?;
 
     let mut by_id: HashMap<String, (Session, HashSet<String>)> = HashMap::new();
     for batch in &batches {
-        let (sid, ts, wd, turn, harness) = (
+        let (sid, ts, wd, turn, harness, repo) = (
             scol(batch, "session_id"),
             scol(batch, "ts"),
             scol(batch, "workdir"),
             scol(batch, "turn_uuid"),
             scol(batch, "harness"),
+            scol(batch, "repo"),
         );
         for i in 0..batch.num_rows() {
             let id = sval(sid, i);
@@ -689,7 +839,9 @@ async fn scan_sessions(ds: &Dataset) -> Result<Vec<Session>> {
                         ts: sval(ts, i),
                         workdir: sval(wd, i),
                         harness: sval(harness, i),
+                        repo: sval(repo, i),
                         turns: 0,
+                        first_prompt: String::new(),
                     },
                     HashSet::new(),
                 )

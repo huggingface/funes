@@ -76,19 +76,50 @@ One turn always renders, however large — a read that answers nothing cannot be
 
 ### sessions
 
-`funes sessions [--memory <label>]` — every session in the memory, oldest first. Recall is ranked
-retrieval and reaches only what a query reaches; this is the enumerator, and the only thing that
-answers how much a memory holds or how much of it a pass covered. Agent format:
+`funes sessions [--repo <owner/name>] [--since <date>] [--until <date>] [--limit <n>] [--offset <n>]
+[--memory <label>]` — the memory's sessions, oldest first. Recall is ranked retrieval and reaches only what a
+query reaches; this is the enumerator, and the only thing that answers how much a memory holds,
+which sessions a criterion is about, or how much of it a pass covered.
+
+Agent format, two lines per session:
 
 ```
-[<first_ts>] <harness> <workdir>/<session_id> <n> turns
+[<date>] <harness> <repo-or-workdir> <n> turns <session_id>
+  <the prompt the session opened with, one line, cut at 120 chars>
 ---
 <n> sessions
 ```
 
-Turns are counted distinct, not as rows: chunking is an indexing artifact. The session id is
-printed whole, so it feeds `get`, `scan`, and any other id-taking command
-directly. `no sessions in <label>` when the memory is empty.
+The opening prompt is the cheapest triage there is: it says what a session was for without reading
+any of it. Injected scaffolding is skipped, so the line is the first thing a human actually typed; a
+session whose user turns are all scaffolding carries no second line. `<repo-or-workdir>` is the
+session's source repo when its checkout resolved at index time, else the working directory.
+
+Turns are counted distinct, not as rows: chunking is an indexing artifact. The session id is printed
+whole, so it feeds `get`, `scan`, and any other id-taking command directly.
+
+**Narrow rather than list everything.** `--repo` keeps the sessions whose checkout resolved to that
+repo — the population question rule 1 of a selection criterion actually asks. `--since`/`--until`
+bracket the start date inclusively, in `YYYY-MM-DD`.
+
+A listing renders **50 rows by default**, keeping the most recent, and is capped at **200 rows and
+~40,000 characters** whatever `--limit` asks for — a larger reply is one nobody receives. What it held
+back is both stated and reachable:
+
+```
+---
+50 of 726 sessions — 676 older: continue with --offset 50, or narrow with --repo/--since/--until
+```
+
+`--limit 0` is an **error**, not every match — it once meant that, before a listing had a ceiling.
+`--offset` skips that many of the most recent matches before taking `--limit`, so a walk covers the
+whole population without repeating or skipping a row: rows are ordered on (timestamp, session id), so
+a given offset always names the same session. Dates cannot do this — a day holds many sessions, so a
+`--until` resume would either repeat that day or skip part of it. The last page says `the oldest match
+reached` rather than offering an offset that returns nothing, and an offset past the matches says so.
+
+`no sessions in <label>` when the memory is empty; `no session in <label> matches` when the filters
+keep nothing.
 
 ### scan
 
@@ -177,10 +208,10 @@ claude/codex/hermes also installs the automation hooks — see [docs/automation.
 positional `memory` binds the server to a memory; `funes add <agent> <memory>` bakes it into the
 registration. `funes remove <agent>` reverses that agent integration without deleting memories or
 transcripts. Tools: `recall` (query, k, half_life, neighbors, candidates, block_type/harness
-filters, memory), `get` (session_id, from, to, memory), `sessions` (memory), `scan` (needle,
-session_id, ignore_case, context, memory), `status` (memory) — each returns the corresponding
-agent-format string verbatim. A tool call's `memory` overrides the server's; with neither, it reads
-the local memory.
+filters, memory), `get` (session_id, from, to, memory), `sessions` (repo, since, until, limit,
+memory), `scan` (needle, session_id, ignore_case, context, memory), `status` (memory) — each returns
+the corresponding agent-format string verbatim. A tool call's `memory` overrides the server's; with
+neither, it reads the local memory.
 
 ## Working on the repo
 

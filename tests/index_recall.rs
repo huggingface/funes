@@ -103,17 +103,90 @@ async fn index_then_read_surface() {
     .unwrap();
     assert!(got.contains("typed blocks"), "get should return the turn text: {got}");
 
-    // sessions: the memory enumerates to the one indexed session, counted in turns not rows.
-    let listed = funes::commands::recall::sessions(funes::memory::Memory::local())
+    // sessions: the memory enumerates to the one indexed session, counted in turns not rows, with
+    // the prompt it opened with — the cheapest triage there is.
+    let listed = funes::commands::recall::sessions(funes::memory::Memory::local(), Default::default())
         .await
         .unwrap();
     assert!(
-        listed.contains(&format!("{workdir}/{session} 4 turns")),
+        listed.contains(&format!("{workdir} 4 turns {session}")),
         "sessions should list the session with its distinct turn count: {listed}"
+    );
+    assert!(
+        listed.contains("how do we parse transcripts into turns"),
+        "a row should carry the opening prompt: {listed}"
     );
     assert!(
         listed.trim_end().ends_with("1 sessions"),
         "the listing should close with the total: {listed}"
+    );
+
+    // A limit of zero is an error, not an empty listing. It used to mean "every match", so a caller
+    // reaching for the old idiom must be told, not handed nothing.
+    let zero_limit = funes::commands::recall::sessions(
+        funes::memory::Memory::local(),
+        funes::commands::recall::SessionFilter {
+            limit: Some(0),
+            ..Default::default()
+        },
+    )
+    .await;
+    let err = zero_limit.expect_err("limit 0 must be an error").to_string();
+    assert!(
+        err.contains("would list nothing") && err.contains("--offset"),
+        "the error must say what to do instead: {err}"
+    );
+
+    // An offset past the matches says so rather than reporting an empty memory: the two are not
+    // the same claim, and only one of them means "nothing is there".
+    let past = funes::commands::recall::sessions(
+        funes::memory::Memory::local(),
+        funes::commands::recall::SessionFilter {
+            offset: 5,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        past.contains("offset 5 is past the 1 session(s)"),
+        "an offset past the end must not read as an empty memory: {past}"
+    );
+
+    // The filters narrow the population before anything of it is read. This fixture has no
+    // resolvable checkout, so `--repo` can claim none of it, and a window that excludes its date
+    // keeps nothing.
+    let filtered = |f| funes::commands::recall::sessions(funes::memory::Memory::local(), f);
+    let by_repo = filtered(funes::commands::recall::SessionFilter {
+        repo: Some("acme/kb".into()),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    assert!(
+        by_repo.contains("no session"),
+        "an unresolved checkout matches no repo: {by_repo}"
+    );
+    let before = filtered(funes::commands::recall::SessionFilter {
+        until: Some("2025-12-31".into()),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    assert!(
+        before.contains("no session"),
+        "--until excludes a later session: {before}"
+    );
+    let window = filtered(funes::commands::recall::SessionFilter {
+        since: Some("2026-01-01".into()),
+        until: Some("2026-01-01".into()),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    assert!(
+        window.contains(&session) && window.trim_end().ends_with("1 sessions"),
+        "an inclusive window keeps the session it brackets: {window}"
     );
 
     // scan: an exhaustive literal search of one session, and a zero that names the needle it
