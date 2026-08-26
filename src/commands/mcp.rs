@@ -269,15 +269,29 @@ impl ServerHandler for Funes {
             .with_server_info(server_info)
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_instructions(
-                "Recall over the user's past AI agent sessions (hybrid search + cross-encoder \
-                 rerank + recency). Call `recall` with a natural-language query when you need prior \
-                 decisions, rationale, or context — and before asserting the history of anything \
-                 (that it was never built, was dropped, or is out of scope): a confident claim \
-                 about a past decision is the cue to recall first. Recall subject-matter too, not \
-                 only decisions: before re-deriving how an API, library, or system behaves — or \
-                 anything a prior session (often a research subagent) investigated — query the \
-                 topic itself; recall surfaces those findings. Drill into a hit with `get`. Both \
-                 take an optional `memory` to read a different memory for one call."
+                "Read the user's past AI agent sessions, stored verbatim (hybrid search + \
+                 cross-encoder rerank + recency). Four verbs, and which one depends on the shape of \
+                 the question.\n\n\
+                 `recall` — a natural-language query, when you need prior decisions, rationale, or \
+                 context. Call it before asserting the history of anything (that it was never \
+                 built, was dropped, or is out of scope): a confident claim about a past decision \
+                 is the cue to recall first. Recall subject-matter too, not only decisions: before \
+                 re-deriving how an API, library, or system behaves — or anything a prior session \
+                 (often a research subagent) investigated — query the topic itself; recall surfaces \
+                 those findings.\n\n\
+                 `get` — read a session's turns. Turns are addressed by `seq`, the session's own \
+                 counter, and a hit's `→ get` line hands you the session and the range around it, \
+                 so drilling into a hit is running what it printed; widen by moving `from`/`to`. A \
+                 session id on its own reads from the start, which is how you read a session you \
+                 picked rather than searched for.\n\n\
+                 `sessions` — what the memory holds: every session, what each one was for, \
+                 narrowed by repo or date. Ranked search reaches what a query reaches and says \
+                 nothing about the rest, so this is the only thing that answers coverage — how much \
+                 is there, and how much of it you have looked at.\n\n\
+                 `scan` — a literal string in every block of one session. Exhaustive where recall \
+                 is ranked and partial, so this is what settles whether a session mentions \
+                 something at all; a zero is the clearance recall cannot give.\n\n\
+                 Every verb takes an optional `memory`, to read a different memory for one call."
                     .to_string(),
             )
     }
