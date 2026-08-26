@@ -190,6 +190,52 @@ window that falls outside the session says `no turns in that range` rather than 
 Absence of a match clears only the literal you passed, in the session you named — pick the spellings
 that matter.
 
+## Digesting a session with `sketch`
+
+```bash
+funes sketch <session_id> [--units <n>] [--max-chars <n>] [--from <seq>] [--to <seq>] [--memory <label>]
+```
+
+Every other read needs you to know what you are looking for: `recall` a query, `scan` a literal,
+`get` coordinates, `sessions` the opening prompt and nothing after it. `sketch` asks the session
+instead — it selects the passages most *distinctive within it*, using the vectors funes already
+stored, with no query at all.
+
+```console
+$ funes sketch 987a1e04-98cc-4d18-a618-8efebca34b0d --units 4
+sketch 987a1e04-98cc-4d18-a618-8efebca34b0d — 4 of 4 places · 2103 of 8000 chars · 164 eligible units
+[2026-08-26T07:27:41.111Z] user text seq0
+  → get 987a1e04-98cc-4d18-a618-8efebca34b0d --from 0 --to 3 --memory local
+retrieve the personas that were used for the last adversarial review of this blog post
+…
+---
+a sketch samples: it shows what it selected, so it cannot show that anything is absent — scan a literal for that
+```
+
+That is the read for an open-ended judgement — *is this session worth publishing, does it reveal
+anything internal, what was actually accomplished here.* The selector picks the largest residual off
+the session's own mean, so it favours what does not belong: an internal codename inside a session
+about refactoring a parser is exactly what it surfaces, and exactly what a summary would drop.
+
+**It is not for reading a session.** Every place carries a `→ get` line, so the surrounding turns are
+one call away, verbatim. Reading a session end to end costs more than everything else together.
+
+`--units` sets how many places (default 8, at most 40), `--max-chars` the total budget (default
+8,000, at most 40,000). They interact: each place is guaranteed 240 characters, so `--units` is
+clamped to what the budget can render — and every clamp is stated in the reply rather than applied
+quietly. No single passage may take more than its share, so one turn carrying a file cannot become
+the whole digest; a shortened passage says so.
+
+For a long session, digest it in stretches with `--from`/`--to`: eight places over 13,000 turns is
+thin, where eight over each 2,000 is proportional. A whole-session digest is cached (it is
+deterministic in the session's content), which takes a 13,000-turn sketch from 1.8 s to 0.15 s on a
+second pass.
+
+A sketch **samples**. It states what it selected and what it left out, so it can never show that
+something is absent — that is [`scan`](#finding-a-literal-with-scan), for the literal you pass. The
+pipeline is: sketch to find out what is there, scan to establish how often a term you found occurs,
+get to read the evidence.
+
 ## Reading a different memory
 
 `--memory` takes an `<org>/<repo>` shorthand, a full `hf://…` URI, a local path, or `local`. This is

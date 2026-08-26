@@ -6,6 +6,7 @@
 //! one-liner, prose wrapped, marks highlighted.
 
 use crate::commands::recall::{Hit, ScanCut, ScanResult, Session, Turn};
+use crate::session_sketch::{Clamped, SessionSketch};
 use std::fmt::Write as _;
 
 /// Turns each side of a hit that a `→ get` line reaches for. A hint is meant to be run as it
@@ -158,6 +159,56 @@ pub fn scan_agent(note: &str, memory_arg: &str, r: &ScanResult, context: usize) 
         None => {}
     }
     let _ = writeln!(out, "---");
+    out
+}
+
+/// The agent `sketch` format: a header stating what the digest covers and cost, then each selected
+/// passage with the `→ get` that reads the turns around it verbatim. What was asked for and not
+/// given — a clamped request, a selection the budget cut short — is stated, never silently applied.
+/// Byte-stable.
+pub fn sketch_agent(note: &str, memory_arg: &str, sketch: &SessionSketch, clamped: Clamped) -> String {
+    let mut out = note.to_string();
+    let d = &sketch.diagnostics;
+    let _ = writeln!(
+        out,
+        "sketch {} — {} of {} places · {} of {} chars · {} eligible units",
+        sketch.session_id,
+        sketch.evidence.len(),
+        d.budget,
+        d.rendered_characters,
+        d.char_budget,
+        sketch.eligible_units
+    );
+    if let Some(units) = clamped.units {
+        let _ = writeln!(out, "  (units clamped to {units})");
+    }
+    if let Some(chars) = clamped.chars {
+        let _ = writeln!(out, "  (max-chars clamped to {chars})");
+    }
+    if let Some(note) = &d.fallback {
+        let _ = writeln!(out, "  ({note})");
+    }
+    for e in &sketch.evidence {
+        let kind = match &e.tool_name {
+            Some(tool) => format!("{} ({tool})", e.block_type),
+            None => e.block_type.clone(),
+        };
+        let _ = writeln!(
+            out,
+            "[{}] {} {} seq{}{}",
+            e.ts,
+            e.role,
+            kind,
+            e.seq,
+            if e.truncated { " · shortened" } else { "" }
+        );
+        let _ = writeln!(out, "  → get {}{}{}", sketch.session_id, hint_range(e.seq), memory_arg);
+        let _ = writeln!(out, "{}", e.text);
+    }
+    let _ = writeln!(
+        out,
+        "---\na sketch samples: it shows what it selected, so it cannot show that anything is absent — scan a literal for that"
+    );
     out
 }
 

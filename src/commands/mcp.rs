@@ -102,6 +102,30 @@ pub struct ScanRequest {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SketchRequest {
+    #[schemars(description = "Session to digest — the id from a `sessions` row or a hit's `→ get` line")]
+    pub session_id: String,
+    #[schemars(
+        description = "How many distinct places to show — breadth (default 8, maximum 40). Also held to what `max_chars` can render at 240 characters apiece, and any narrowing is reported in the reply."
+    )]
+    pub units: Option<usize>,
+    #[schemars(
+        description = "Total characters to render — cost (default 8000, maximum 40000). More than that is a reply no caller receives."
+    )]
+    pub max_chars: Option<usize>,
+    #[schemars(
+        description = "First turn to digest, as the session's own seq. Digest a long session in windows to get coverage proportional to its length rather than a fixed sample of it."
+    )]
+    pub from: Option<i64>,
+    #[schemars(description = "Last turn to digest, as the session's own seq.")]
+    pub to: Option<i64>,
+    #[schemars(
+        description = "Memory to read for this call — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Defaults to the server's memory."
+    )]
+    pub memory: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct StatusRequest {
     #[schemars(
         description = "Memory to inspect — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Defaults to the server's memory."
@@ -248,6 +272,27 @@ impl Funes {
     }
 
     #[tool(
+        description = "A query-independent digest of one session: the passages most distinctive *within* it, chosen from the stored embeddings with no query at all. This is the only read that tells you what a session contains when you do not already know what you are looking for — `recall` needs a query, `scan` needs a literal, `get` needs coordinates. Use it to judge a session against open-ended criteria: is this worth publishing, does it reveal anything internal, what was actually accomplished here. The material that disqualifies a session is usually the material that does not belong in it, which is what a distinctiveness selector surfaces and a summary drops. DO NOT READ THE WHOLE SESSION INSTEAD. Sessions run to thousands of turns; `get`-ing one end to end costs more than every other call together, overflows the reply, and leaves you paging a transcript by line number. A sketch is a handful of places and a few thousand characters, and every one carries a `→ get` line for when you want the surrounding turns verbatim. Sketch to find out what is there, `scan` to establish how often a term you found actually occurs, `get` to read the evidence. A sketch samples: it states what it selected, so it can never show that something is *absent* — that is `scan`, and only for the literal you pass."
+    )]
+    async fn sketch(
+        &self,
+        Parameters(SketchRequest {
+            session_id,
+            units,
+            max_chars,
+            from,
+            to,
+            memory,
+        }): Parameters<SketchRequest>,
+    ) -> String {
+        match super::sketch::run(self.memory(memory), session_id, from, to, units, max_chars).await {
+            Ok(s) if !s.is_empty() => s,
+            Ok(_) => "no results".to_string(),
+            Err(e) => format!("sketch error: {e}"),
+        }
+    }
+
+    #[tool(
         description = "Show funes memory status: chunk and session counts, pending local indexing, and — for a remote memory — last push plus this host's pending push coverage."
     )]
     async fn status(&self, Parameters(StatusRequest { memory }): Parameters<StatusRequest>) -> String {
@@ -270,7 +315,7 @@ impl ServerHandler for Funes {
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_instructions(
                 "Read the user's past AI agent sessions, stored verbatim (hybrid search + \
-                 cross-encoder rerank + recency). Four verbs, and which one depends on the shape of \
+                 cross-encoder rerank + recency). Five verbs, and which one depends on the shape of \
                  the question.\n\n\
                  `recall` — a natural-language query, when you need prior decisions, rationale, or \
                  context. Call it before asserting the history of anything (that it was never \
@@ -291,6 +336,11 @@ impl ServerHandler for Funes {
                  `scan` — a literal string in every block of one session. Exhaustive where recall \
                  is ranked and partial, so this is what settles whether a session mentions \
                  something at all; a zero is the clearance recall cannot give.\n\n\
+                 `sketch` — what one session contains, with no query at all: the passages most \
+                 distinctive within it. The read for when you do not know what to look for, which is \
+                 every open-ended judgement about a session — is this worth publishing, does it \
+                 reveal anything internal, what happened here. Reach for it instead of reading a \
+                 session end to end, which costs more than everything else together.\n\n\
                  Every verb takes an optional `memory`, to read a different memory for one call."
                     .to_string(),
             )

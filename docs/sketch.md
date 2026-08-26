@@ -1,6 +1,6 @@
 # `sketch` — what a session contains, without asking
 
-Status: design proposal — parameters and safeguards
+Status: implemented — this is the design the verb was built to
 
 Scope: a new read verb and MCP tool over the existing `session_sketch` selector; no change to the
 selector's mathematics
@@ -102,8 +102,10 @@ sketch <session_id> — <n> of <m> units · <chars> of <budget> chars · turns <
 ```
 
 Deterministic: the same arguments over the same session return the same digest, so a re-call is
-free and comparable. The cache is keyed on the session's content and the embedding model, and is
-invisible to the caller.
+comparable. A whole-session digest is cached, keyed on the session's content and the embedding
+model, and invisible to the caller — measured, that takes a 13,281-turn session from 1.78 s to
+0.15 s. A windowed digest is not cached: an entry keyed on the session must not answer for a stretch
+of it. On a small session the cache is neither help nor cost (0.12 s either way).
 
 ## The tool description
 

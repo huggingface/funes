@@ -358,6 +358,63 @@ async fn index_then_read_surface() {
         "windows must partition the hits, not double-count or lose them: {first_half}{second_half}"
     );
 
+    // sketch: what the session contains, asked without a query. It is bounded by construction and
+    // says what it left out, and every place it shows is addressable.
+    let sketched = funes::commands::sketch::run(
+        funes::memory::Memory::local(),
+        session.clone(),
+        None,
+        None,
+        Some(3),
+        Some(2_000),
+    )
+    .await
+    .unwrap();
+    assert!(
+        sketched.starts_with(&format!("sketch {session} — ")),
+        "a sketch names the session it digested: {sketched}"
+    );
+    assert!(
+        sketched.contains(&format!("→ get {session} --from 0 --to 3")),
+        "every place must be addressable, in the same coordinate as get: {sketched}"
+    );
+    assert!(
+        sketched.trim_end().ends_with("scan a literal for that"),
+        "a sketch must not read as a clearance: {sketched}"
+    );
+
+    // A request past the bounds is clamped and the clamp is reported — an agent that believes it
+    // saw the whole digest is the failure the bounds exist for.
+    let clamped = funes::commands::sketch::run(
+        funes::memory::Memory::local(),
+        session.clone(),
+        None,
+        None,
+        Some(40),
+        Some(1_000),
+    )
+    .await
+    .unwrap();
+    assert!(
+        clamped.contains("(units clamped to 4)"),
+        "a clamp must be stated, not applied quietly: {clamped}"
+    );
+
+    // An unknown session is an error, not an empty digest.
+    let missing = funes::commands::sketch::run(
+        funes::memory::Memory::local(),
+        "no-such-session".into(),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert!(
+        missing.is_err_and(|e| e.to_string().contains("no-such-session")),
+        "a mistyped session must not read as an empty session"
+    );
+
     // A needle inside the region two chunks overlap is one hit, not one per chunk — splits are
     // stitched back into their block before anything is matched.
     let seam = funes::commands::recall::scan(

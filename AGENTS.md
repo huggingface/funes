@@ -173,6 +173,44 @@ the session reports `no turns in that range`, never absence.
 
 Absence of a match clears only the literal actually passed, in the session actually named.
 
+### sketch
+
+`funes sketch <session_id> [--units <n>] [--max-chars <n>] [--from <seq>] [--to <seq>] [--memory
+<label>]` — what one session **contains**, asked without a query: the passages most distinctive
+within it, chosen from the stored vectors.
+
+**This is the only read that does not need to know what it is looking for.** `recall` needs a query,
+`scan` needs a literal, `get` needs coordinates, `sessions` gives the opening prompt and nothing
+after. Reach for `sketch` for every open-ended judgement about a session — is this worth publishing,
+does it reveal anything internal, what was accomplished here. The material that disqualifies a
+session is usually the material that does not belong in it, and a distinctiveness selector surfaces
+exactly that where a summary drops it.
+
+**Do not read the whole session instead.** A session runs to thousands of turns; reading one end to
+end costs more than every other call together and leaves you paging a transcript. Every place a
+sketch shows carries a `→ get` line for the surrounding turns verbatim.
+
+```
+sketch <session_id> — <n> of <units> places · <chars> of <max-chars> chars · <k> eligible units
+  (units clamped to <n>)
+[<ts>] <role> <block_type> seq<N> · shortened
+  → get <session_id> --from <seq> --to <seq> --memory <label>
+<the passage>
+---
+a sketch samples: it shows what it selected, so it cannot show that anything is absent — scan a literal for that
+```
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--units` | 8 | distinct places to show; clamped to 40, and to what `--max-chars` fits at 240 chars each |
+| `--max-chars` | 8,000 | total characters rendered; clamped to 40,000 |
+| `--from` / `--to` | whole session | digest a stretch instead — a fixed number of places over 13,000 turns is thin, the same number over each 2,000 is proportional |
+| `--memory` | local memory | the memory holding the session |
+
+No passage may take more than its share of the budget, so one turn carrying a file cannot become the
+whole digest; a shortened passage says so. Every clamp is reported rather than applied quietly. It
+**samples**, so a sketch can never establish absence — `scan` a literal for that.
+
 ### ask
 
 `funes ask claude|codex "<question>" [--memory <label>]` — one grounded answer from a coding
@@ -209,7 +247,8 @@ positional `memory` binds the server to a memory; `funes add <agent> <memory>` b
 registration. `funes remove <agent>` reverses that agent integration without deleting memories or
 transcripts. Tools: `recall` (query, k, half_life, neighbors, candidates, block_type/harness
 filters, memory), `get` (session_id, from, to, memory), `sessions` (repo, since, until, limit,
-memory), `scan` (needle, session_id, ignore_case, context, memory), `status` (memory) — each returns
+offset, memory), `scan` (needle, session_id, from, to, ignore_case, context, memory), `sketch`
+(session_id, units, max_chars, from, to, memory), `status` (memory) — each returns
 the corresponding agent-format string verbatim. A tool call's `memory` overrides the server's; with
 neither, it reads the local memory.
 

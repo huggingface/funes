@@ -119,7 +119,7 @@ workflow-oriented [documentation index](docs/README.md) for the complete guides.
 | --- | --- |
 | `funes add <agent> [memory]` / `funes remove <agent>` / `funes mcp [memory]` | [docs/add.md](docs/add.md) — supported agents, integration lifecycle, generic MCP clients, hooks, and memory binding |
 | `funes index [path]` | [docs/index.md](docs/index.md) — build/update the memory; sources, incremental, flags |
-| `funes recall "…"` / `funes get …` / `funes sessions` / `funes scan …` | [docs/recall.md](docs/recall.md) — recall passages and drill into them; enumerate and filter a memory's sessions; find a literal in every block of one |
+| `funes recall "…"` / `funes get …` / `funes sessions` / `funes scan …` / `funes sketch …` | [docs/recall.md](docs/recall.md) — recall passages and drill into them; enumerate and filter a memory's sessions; find a literal in every block of one; digest one without a query |
 | `funes ask <agent> "…"` | [docs/ask.md](docs/ask.md) — borrow an agent for a grounded answer |
 | `funes push <memory>` (+ `curate`, `scrub`, `status`) | [docs/push.md](docs/push.md) — publish and share a memory |
 | `funes update` | [installation and updating](#get-funes) — replace the installed binary with a verified release |

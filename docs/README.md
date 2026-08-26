@@ -10,7 +10,7 @@ This directory contains the user guides and design notes for
 - [Building the memory](index.md) — index session transcripts and understand the indexing
   pipeline.
 - [Recalling](recall.md) — retrieve passages, drill into their surrounding turns, enumerate a
-  memory's sessions, and search one of them for a literal.
+  memory's sessions, search one of them for a literal, and digest one without a query.
 - [Asking](ask.md) — borrow a coding agent for one answer grounded in a memory.
 
 ## Sharing and automation
