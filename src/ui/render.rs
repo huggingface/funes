@@ -8,6 +8,14 @@
 use crate::commands::recall::{Hit, Turn};
 use std::fmt::Write as _;
 
+/// Turns each side of a hit that a `→ get` line reaches for.
+const HINT_WINDOW: i64 = 3;
+
+/// The `--from a --to b` a `→ get` line carries for a hit at `seq`, clamped at the session's start.
+fn hint_range(seq: i64) -> String {
+    format!(" --from {} --to {}", (seq - HINT_WINDOW).max(0), seq + HINT_WINDOW)
+}
+
 /// Longest scent ever built — beyond any line budget, so final truncation is [`ellipsize`]'s job.
 const SCENT_CAP: usize = 240;
 
@@ -28,7 +36,7 @@ pub fn recall_agent(note: &str, memory_arg: &str, hits: &[(Hit, f64)]) -> String
             "[{}] {} {}/{} {}  score={:.3}",
             h.ts, h.harness, h.workdir, s8, h.block_type, score
         );
-        let _ = writeln!(out, "  → get {} {}{}", h.session_id, h.turn_uuid, memory_arg);
+        let _ = writeln!(out, "  → get {}{}{}", h.session_id, hint_range(h.seq), memory_arg);
         let _ = writeln!(out, "{}", h.text);
         for n in &h.neighbors {
             let np: String = n.text.chars().take(160).collect();
@@ -39,13 +47,39 @@ pub fn recall_agent(note: &str, memory_arg: &str, hits: &[(Hit, f64)]) -> String
     out
 }
 
-/// The agent `get` format: `[ts] role seqN turn=…` headers over reassembled blocks. Byte-stable.
-pub fn get_agent(note: &str, turns: &[Turn]) -> String {
+/// Characters a `get` renders. A turn renders whole, so a single turn larger than this is the one
+/// thing that can exceed it.
+const GET_BUDGET: usize = 40_000;
+
+/// The agent `get` format: `[ts] role seqN turn=…` headers over reassembled blocks, closed by the
+/// range read and the session's size. Byte-stable.
+pub fn get_agent(note: &str, turns: &[Turn], total: usize) -> String {
     let mut out = note.to_string();
+    if turns.is_empty() {
+        return out;
+    }
+    let mut shown = 0;
     for t in turns {
-        let _ = writeln!(out, "[{}] {} seq{} turn={}", t.ts, t.role, t.seq, t.turn_uuid);
-        let _ = writeln!(out, "{}", t.blocks.join("\n\n"));
-        let _ = writeln!(out, "---");
+        let mut turn = String::new();
+        let _ = writeln!(turn, "[{}] {} seq{} turn={}", t.ts, t.role, t.seq, t.turn_uuid);
+        let _ = writeln!(turn, "{}", t.blocks.join("\n\n"));
+        let _ = writeln!(turn, "---");
+        // The first turn renders whatever it weighs; after that, only turns that fit.
+        if shown > 0 && out.len() + turn.len() > GET_BUDGET {
+            break;
+        }
+        out.push_str(&turn);
+        shown += 1;
+    }
+    let (first, last) = (turns[0].seq, turns[shown - 1].seq);
+    let _ = writeln!(out, "turns {first}-{last} of {total}");
+    if shown < turns.len() {
+        let _ = writeln!(
+            out,
+            "{} more turn(s) in range not shown — read them with --from {}",
+            turns.len() - shown,
+            last + 1
+        );
     }
     out
 }
@@ -402,14 +436,25 @@ mod tests {
         assert_eq!(
             out,
             "[2026-06-19T01:29:59.000Z] claude_code -home-u-funes/01234567 text  score=0.578\n\
-             \x20 → get 0123456789abcdef aaaa-bbbb --memory hf://datasets/acme/kb\n\
+             \x20 → get 0123456789abcdef --from 4 --to 10 --memory hf://datasets/acme/kb\n\
              the decision was made\n\
              \x20 ~ [assistant text seq5] hello\n\
              ---\n"
         );
         // The built-in guide has no memory to name: an empty suffix keeps the hint bare.
         let bare = recall_agent("", "", &[(hit("2026-06-19T01:29:59.000Z", "text", "x"), 0.5)]);
-        assert!(bare.contains("  → get 0123456789abcdef aaaa-bbbb\n"), "got: {bare}");
+        assert!(
+            bare.contains("  → get 0123456789abcdef --from 4 --to 10\n"),
+            "got: {bare}"
+        );
+    }
+
+    #[test]
+    fn a_hint_range_never_reaches_before_the_session() {
+        // seq 0 has no turns behind it; the hint must stay runnable rather than ask for -3.
+        assert_eq!(hint_range(0), " --from 0 --to 3");
+        assert_eq!(hint_range(2), " --from 0 --to 5");
+        assert_eq!(hint_range(9), " --from 6 --to 12");
     }
 
     #[test]
@@ -472,8 +517,65 @@ mod tests {
             blocks: vec!["first".to_string(), "second".to_string()],
         };
         assert_eq!(
-            get_agent("", &[t]),
-            "[2026-06-19T01:29:59.000Z] assistant seq3 turn=t-1\nfirst\n\nsecond\n---\n"
+            get_agent("", &[t], 70),
+            "[2026-06-19T01:29:59.000Z] assistant seq3 turn=t-1\nfirst\n\nsecond\n---\n\
+             turns 3-3 of 70\n"
+        );
+    }
+
+    fn turn_at(seq: i64, body: &str) -> Turn {
+        Turn {
+            seq,
+            turn_uuid: format!("t-{seq}"),
+            ts: "2026-06-19T01:29:59.000Z".to_string(),
+            role: "assistant".to_string(),
+            blocks: vec![body.to_string()],
+        }
+    }
+
+    #[test]
+    fn get_agent_leaves_a_turn_that_does_not_fit() {
+        // The range is bounded by rendered bytes, not by a turn count: two of these cannot both
+        // fit, so the second is left for the next read with the coordinate to ask for it.
+        let big = "x".repeat(GET_BUDGET * 3 / 4);
+        let turns: Vec<Turn> = (0..3).map(|i| turn_at(i, &big)).collect();
+        let out = get_agent("", &turns, 100);
+        assert!(
+            out.len() <= GET_BUDGET,
+            "a read of fitting turns stays inside: {}",
+            out.len()
+        );
+        assert!(
+            out.contains("\nturns 0-0 of 100\n"),
+            "states what it read: {}",
+            &out[out.len() - 120..]
+        );
+        assert!(
+            out.contains("2 more turn(s) in range not shown — read them with --from 1"),
+            "names the resume coordinate: {}",
+            &out[out.len() - 120..]
+        );
+    }
+
+    #[test]
+    fn get_agent_fits_every_turn_it_can() {
+        // The stop is the byte limit, not a turn count: small turns all render.
+        let turns: Vec<Turn> = (0..6).map(|i| turn_at(i, "small")).collect();
+        let out = get_agent("", &turns, 6);
+        assert!(out.contains("\nturns 0-5 of 6\n"), "got: {out}");
+        assert!(!out.contains("not shown"), "nothing was left out: {out}");
+    }
+
+    #[test]
+    fn get_agent_always_renders_one_turn() {
+        // One turn always renders, however large.
+        let huge = "x".repeat(GET_BUDGET * 2);
+        let out = get_agent("", &[turn_at(4, &huge)], 9);
+        assert!(out.contains(&huge), "the turn is rendered whole");
+        assert!(
+            out.trim_end().ends_with("turns 4-4 of 9"),
+            "got: {}",
+            &out[out.len() - 60..]
         );
     }
 

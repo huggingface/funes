@@ -10,7 +10,7 @@ use crate::inference::{self, Embedder, Reranker};
 use crate::memory::dataset;
 use crate::memory::{Memory, MemoryState};
 use crate::traces::harness::Harness;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use arrow_array::{Float32Array, Int64Array, RecordBatch, StringArray, UInt64Array};
 use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
@@ -567,25 +567,39 @@ async fn attach_neighbors(ds: &Dataset, hits: &mut [&mut Hit], window: i64) -> R
     Ok(())
 }
 
-/// Drill down on a recall hit: the named turn plus the turns within `window` of it, rendered in
-/// the agent format.
-pub async fn get(memory: Memory, session_id: String, turn_uuid: String, window: i64) -> Result<String> {
-    let (note, turns) = get_turns(memory, session_id.clone(), turn_uuid.clone(), window).await?;
-    if turns.is_empty() {
-        return Ok(format!("{note}turn {turn_uuid} not found in session {session_id}\n"));
-    }
-    Ok(crate::ui::render::get_agent(&note, &turns))
+/// Which turns of a session to read, as a `seq` range: `seq` is the session's own dense counter over
+/// its turns, so a range is turns n through m.
+#[derive(Default)]
+pub struct TurnRange {
+    /// First seq to read. Defaults to the session's start.
+    pub from: Option<i64>,
+    /// Last seq to read. Defaults to [`DEFAULT_SPAN`] turns from `from`.
+    pub to: Option<i64>,
 }
 
-/// The turns behind `get`: the named one plus those within `window` of it, each reassembled
-/// (blocks in order, splits de-overlapped). Returns the degradation note and the turns — empty
-/// when the turn isn't in the session; rendering is the caller's choice.
-pub async fn get_turns(
-    memory: Memory,
-    session_id: String,
-    turn_uuid: String,
-    window: i64,
-) -> Result<(String, Vec<Turn>)> {
+/// Turns a read covers when only a start is given. The CLI and the MCP server defer to it rather
+/// than carrying a default of their own.
+pub const DEFAULT_SPAN: i64 = 20;
+
+/// Read a range of a session's turns, rendered in the agent format.
+pub async fn get(memory: Memory, session_id: String, range: TurnRange) -> Result<String> {
+    let label = memory.label();
+    let (note, turns, total) = get_turns(memory, session_id.clone(), range).await?;
+    // A session with no rows is absent, not empty: only a range can come back empty.
+    if total == 0 {
+        bail!("no session {session_id} in {label}");
+    }
+    if turns.is_empty() {
+        return Ok(format!(
+            "{note}no turns in that range of session {session_id} (it holds {total})\n"
+        ));
+    }
+    Ok(crate::ui::render::get_agent(&note, &turns, total))
+}
+
+/// The turns behind `get`, each reassembled (blocks in order, splits de-overlapped). Returns the
+/// degradation note, the turns — empty when the range holds none — and the session's turn count.
+pub async fn get_turns(memory: Memory, session_id: String, range: TurnRange) -> Result<(String, Vec<Turn>, usize)> {
     let read = open_read(&memory).await?;
     let note = read.note.clone().unwrap_or_default();
     let ds = &read.ds;
@@ -621,14 +635,13 @@ pub async fn get_turns(
         }
     }
 
-    let center = match rows.iter().find(|r| r.1 == turn_uuid) {
-        Some(r) => r.0,
-        None => return Ok((note, Vec::new())),
-    };
-    Ok((
-        note,
-        turns_from_rows(rows.iter().filter(|r| (r.0 - center).abs() <= window)),
-    ))
+    let total = rows.iter().map(|r| (r.0, &r.1)).collect::<HashSet<_>>().len();
+    let from = range
+        .from
+        .unwrap_or_else(|| rows.iter().map(|r| r.0).min().unwrap_or(0));
+    let to = range.to.unwrap_or(from + DEFAULT_SPAN - 1);
+    let kept = rows.iter().filter(|r| r.0 >= from && r.0 <= to);
+    Ok((note, turns_from_rows(kept), total))
 }
 
 /// Reassemble rows into turns: group by (seq, turn_uuid), order blocks by (block_idx, split_idx),

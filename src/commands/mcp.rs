@@ -31,10 +31,14 @@ pub struct RecallRequest {
 pub struct GetRequest {
     #[schemars(description = "Session id from a recall hit's `→ get` line")]
     pub session_id: String,
-    #[schemars(description = "Turn uuid from a recall hit's `→ get` line")]
-    pub turn_uuid: String,
-    #[schemars(description = "Turns within this seq window of the target are included (default 3)")]
-    pub window: Option<i64>,
+    #[schemars(
+        description = "First turn to read, as the session's own seq, which a hit's `→ get` line gives you. Defaults to the session's start."
+    )]
+    pub from: Option<i64>,
+    #[schemars(
+        description = "Last turn to read, as the session's own seq. Omit it to read a fixed span from `from`; every reply names the range it covered."
+    )]
+    pub to: Option<i64>,
     #[schemars(
         description = "Memory to read for this call — the one the recall hit's `→ get` line names. Defaults to the server's memory."
     )]
@@ -74,7 +78,7 @@ impl Funes {
     }
 
     #[tool(
-        description = "Recall decisions, rationale, and context from the user's past AI agent sessions. Returns ranked passages with provenance (timestamp, session, block type) plus surrounding neighbor chunks. Each hit carries a `→ get <session_id> <turn_uuid>` line — call `get` with those to read the full surrounding turns. Use when the user references earlier work, or when you lack context that may exist in a prior session. Recall subject-matter, not only decisions: before re-deriving how an API, library, or system behaves — or anything a past session already investigated — query the topic itself; research subagents accumulate exactly these findings and recall surfaces them, often as the top hit, so check before re-investigating from scratch. Also recall before asserting the history of anything — that it was never built, was dropped, is out of scope, or was never discussed; a confident claim about a past decision is the cue you're missing context this holds. To recall from a different memory than the server's default (e.g. a shared `<org>/<repo>` dataset on the HF Hub), pass `memory` — no CLI needed."
+        description = "Recall decisions, rationale, and context from the user's past AI agent sessions. Returns ranked passages with provenance (timestamp, session, block type) plus surrounding neighbor chunks. Each hit carries a `→ get <session_id> --from <seq> --to <seq>` line — call `get` with exactly those to read the full surrounding turns. Use when the user references earlier work, or when you lack context that may exist in a prior session. Recall subject-matter, not only decisions: before re-deriving how an API, library, or system behaves — or anything a past session already investigated — query the topic itself; research subagents accumulate exactly these findings and recall surfaces them, often as the top hit, so check before re-investigating from scratch. Also recall before asserting the history of anything — that it was never built, was dropped, is out of scope, or was never discussed; a confident claim about a past decision is the cue you're missing context this holds. To recall from a different memory than the server's default (e.g. a shared `<org>/<repo>` dataset on the HF Hub), pass `memory` — no CLI needed."
     )]
     async fn recall(
         &self,
@@ -105,18 +109,19 @@ impl Funes {
     }
 
     #[tool(
-        description = "Drill down on a recall hit: fetch the named turn plus the turns within `window` of it, each reassembled into readable text. Pass the `session_id` and `turn_uuid` from a recall hit's `→ get` line — and the `memory` it names."
+        description = "Read a range of one session's turns, each reassembled into readable text. Turns are addressed by `seq`, the session's own dense counter over its turns; a recall hit's `→ get` line carries the session, the range around the hit, and the memory to pass. A session id on its own reads from the start. Every reply closes with the range it covered and the session's size."
     )]
     async fn get(
         &self,
         Parameters(GetRequest {
             session_id,
-            turn_uuid,
-            window,
+            from,
+            to,
             memory,
         }): Parameters<GetRequest>,
     ) -> String {
-        match recall::get(self.memory(memory), session_id, turn_uuid, window.unwrap_or(3)).await {
+        let range = recall::TurnRange { from, to };
+        match recall::get(self.memory(memory), session_id, range).await {
             Ok(s) if !s.is_empty() => s,
             Ok(_) => "no results".to_string(),
             Err(e) => format!("get error: {e}"),

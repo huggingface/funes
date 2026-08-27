@@ -81,11 +81,28 @@ async fn index_then_read_surface() {
     .unwrap();
     assert!(tu.contains("tool_use"), "type filter should keep tool_use rows: {tu}");
 
-    // get: reassemble the assistant turn by its uuid.
-    let got = funes::commands::recall::get(funes::memory::Memory::local(), session.clone(), "t2".into(), 3)
-        .await
-        .unwrap();
+    // get: a session id alone reads from the start, and says what range it read.
+    let got = funes::commands::recall::get(
+        funes::memory::Memory::local(),
+        session.clone(),
+        funes::commands::recall::TurnRange::default(),
+    )
+    .await
+    .unwrap();
     assert!(got.contains("typed blocks"), "get should return the turn text: {got}");
+    assert!(got.contains("turns "), "get should close with the range it read: {got}");
+
+    // An unknown session id is absent, not an empty range.
+    let missing = funes::commands::recall::get(
+        funes::memory::Memory::local(),
+        "no-such-session".into(),
+        funes::commands::recall::TurnRange::default(),
+    )
+    .await;
+    assert!(
+        missing.is_err_and(|e| e.to_string().contains("no session no-such-session")),
+        "an unknown session id should error"
+    );
 
     // Every hit names the memory it was read from — the default memory and an explicit one alike.
     let default_hint = format!("--memory {}", db_dir.path().join("memory").display());
