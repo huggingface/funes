@@ -243,6 +243,12 @@ async fn models() -> Result<&'static Mutex<Models>> {
         .await
 }
 
+/// A recall's defaults, owned here so the CLI and the MCP server search the same way.
+pub const DEFAULT_K: usize = 8;
+pub const DEFAULT_CANDIDATES: usize = 30;
+pub const DEFAULT_HALF_LIFE: f64 = 30.0;
+pub const DEFAULT_NEIGHBORS: i64 = 1;
+
 /// Run the recall pipeline over one memory and return the results rendered in the agent format.
 #[allow(clippy::too_many_arguments)]
 pub async fn recall(

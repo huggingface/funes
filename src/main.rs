@@ -34,16 +34,16 @@ enum Cmd {
         #[arg(required = true, num_args = 1..)]
         query: Vec<String>,
         /// How many results to show.
-        #[arg(short, long, default_value_t = 8)]
+        #[arg(short, long, default_value_t = recall::DEFAULT_K)]
         k: usize,
         /// How many fused candidates to rerank.
-        #[arg(long, default_value_t = 30)]
+        #[arg(long, default_value_t = recall::DEFAULT_CANDIDATES)]
         candidates: usize,
         /// Recency half-life in days (a hit this old keeps half its weight). 0 disables.
-        #[arg(long, default_value_t = 30.0)]
+        #[arg(long, default_value_t = recall::DEFAULT_HALF_LIFE)]
         half_life: f64,
         /// Adjacent chunks (within this seq window) to attach to each hit. 0 disables.
-        #[arg(long, default_value_t = 1)]
+        #[arg(long, default_value_t = recall::DEFAULT_NEIGHBORS)]
         neighbors: i64,
         /// Restrict to a block type: text | thinking | tool_use | tool_result.
         #[arg(long = "type", value_name = "BLOCK_TYPE")]

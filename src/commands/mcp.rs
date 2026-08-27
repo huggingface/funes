@@ -15,8 +15,18 @@ use rmcp::{schemars, tool, tool_handler, tool_router, ServerHandler, ServiceExt}
 pub struct RecallRequest {
     #[schemars(description = "Natural-language description of what to recall from past sessions")]
     pub query: String,
-    #[schemars(description = "Number of results to return (default 8)")]
+    #[schemars(description = "Number of results to return")]
     pub k: Option<usize>,
+    #[schemars(
+        description = "Recency half-life in days: a hit that old keeps half its score. Pass 0 to weigh every age alike, for a memory spanning months or an answer that may be old."
+    )]
+    pub half_life: Option<f64>,
+    #[schemars(description = "Adjacent chunks attached to each hit for context; 0 returns the hits alone.")]
+    pub neighbors: Option<i64>,
+    #[schemars(
+        description = "How many fused candidates to rerank. Raise it when a topic is rare and the first pass may not surface it."
+    )]
+    pub candidates: Option<usize>,
     #[schemars(description = "Restrict to a block type: text | thinking | tool_use | tool_result")]
     pub block_type: Option<String>,
     #[schemars(description = "Restrict to a harness: claude | codex | pi | hermes")]
@@ -85,6 +95,9 @@ impl Funes {
         Parameters(RecallRequest {
             query,
             k,
+            half_life,
+            neighbors,
+            candidates,
             block_type,
             harness,
             memory,
@@ -93,10 +106,10 @@ impl Funes {
         match recall::recall(
             self.memory(memory),
             query,
-            k.unwrap_or(8),
-            30,
-            30.0,
-            1,
+            k.unwrap_or(recall::DEFAULT_K),
+            candidates.unwrap_or(recall::DEFAULT_CANDIDATES),
+            half_life.unwrap_or(recall::DEFAULT_HALF_LIFE),
+            neighbors.unwrap_or(recall::DEFAULT_NEIGHBORS),
             block_type,
             harness,
         )
