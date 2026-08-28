@@ -136,8 +136,11 @@ fn one_line(s: &str, max: usize) -> String {
 /// Byte-stable.
 pub fn sessions_agent(note: &str, sessions: &[Session], total: usize, offset: usize) -> String {
     let mut out = note.to_string();
-    let mut shown = 0;
-    for s in sessions {
+    // `offset` walks back from the recent end, so a budget cut has to keep that same end of the page:
+    // take the newest rows that fit, then print them back in reading order.
+    let mut budget = SESSIONS_BUDGET.saturating_sub(out.len());
+    let mut rows = Vec::new();
+    for s in sessions.iter().rev() {
         let mut row = String::new();
         let _ = writeln!(
             row,
@@ -151,12 +154,14 @@ pub fn sessions_agent(note: &str, sessions: &[Session], total: usize, offset: us
         if !s.first_prompt.is_empty() {
             let _ = writeln!(row, "  {}", one_line(&s.first_prompt, PROMPT_CHARS));
         }
-        if shown > 0 && out.len() + row.len() > SESSIONS_BUDGET {
+        if !rows.is_empty() && row.len() > budget {
             break;
         }
-        out.push_str(&row);
-        shown += 1;
+        budget = budget.saturating_sub(row.len());
+        rows.push(row);
     }
+    let shown = rows.len();
+    out.extend(rows.into_iter().rev());
     // What is left is older than this page: `offset + shown` names the row it starts at, and the
     // ordering is total, so that offset is the same row on every call.
     let remaining = total.saturating_sub(offset + shown);
@@ -712,6 +717,45 @@ mod tests {
             "got: {}",
             &out[out.len() - 60..]
         );
+    }
+
+    fn session_at(i: usize) -> Session {
+        Session {
+            session_id: format!("session-{i:03}"),
+            ts: "2026-06-19T01:29:59.000Z".to_string(),
+            workdir: "/home/u/funes".to_string(),
+            harness: "codex".to_string(),
+            repo: format!("owner/{}", "r".repeat(100)),
+            turns: 1,
+            first_prompt: "x".repeat(PROMPT_CHARS * 2),
+        }
+    }
+
+    fn listed_session_ids(out: &str) -> Vec<usize> {
+        out.lines()
+            .filter(|line| line.starts_with('['))
+            .map(|line| line.rsplit_once("session-").unwrap().1.parse().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn sessions_agent_budget_keeps_the_recent_end_of_a_page() {
+        let sessions: Vec<Session> = (0..250).map(session_at).collect();
+        let page = |offset: usize| {
+            let end = sessions.len().saturating_sub(offset);
+            &sessions[end.saturating_sub(200)..end]
+        };
+
+        let first = listed_session_ids(&sessions_agent("", page(0), sessions.len(), 0));
+        assert!(first.len() < page(0).len(), "the fixture must cross the byte budget");
+        assert_eq!(first.last(), Some(&249), "a cut must retain the newest session");
+
+        let second = listed_session_ids(&sessions_agent("", page(first.len()), sessions.len(), first.len()));
+        assert!(
+            first.iter().all(|id| !second.contains(id)),
+            "successive pages must not overlap: {first:?} then {second:?}"
+        );
+        assert_eq!(second.last().map(|id| id + 1), first.first().copied());
     }
 
     #[test]
