@@ -81,6 +81,75 @@ async fn index_then_read_surface() {
     .unwrap();
     assert!(tu.contains("tool_use"), "type filter should keep tool_use rows: {tu}");
 
+    // scan: an exhaustive literal search of one session, and a zero that names what it cleared.
+    let scanned = funes::commands::recall::scan(
+        funes::memory::Memory::local(),
+        "typed blocks".into(),
+        session.clone(),
+        None,
+        None,
+        false,
+        40,
+    )
+    .await
+    .unwrap();
+    assert!(
+        scanned.contains(&format!("scan \"typed blocks\" in {session} — 1 hits")),
+        "scan should find the literal exactly once: {scanned}"
+    );
+    assert!(
+        scanned.contains(&format!("→ get {session} --from 0 --to 4")),
+        "a hit carries a runnable range around its turn, clamped at the start: {scanned}"
+    );
+    let zero = funes::commands::recall::scan(
+        funes::memory::Memory::local(),
+        "nothing anywhere says this".into(),
+        session.clone(),
+        None,
+        None,
+        false,
+        40,
+    )
+    .await
+    .unwrap();
+    assert!(
+        zero.contains(&format!("no matches for \"nothing anywhere says this\" in {session}")),
+        "a zero echoes the needle and the session it cleared: {zero}"
+    );
+
+    // An unknown session is an error, not a clearance: a mistyped id must never read as absence.
+    let unknown = funes::commands::recall::scan(
+        funes::memory::Memory::local(),
+        "typed blocks".into(),
+        "no-such-session".into(),
+        None,
+        None,
+        false,
+        40,
+    )
+    .await;
+    assert!(
+        unknown.is_err_and(|e| e.to_string().contains("no session no-such-session")),
+        "an unknown session must be an error"
+    );
+
+    // A window scopes what a zero clears, and the reply says which stretch it scanned.
+    let windowed = funes::commands::recall::scan(
+        funes::memory::Memory::local(),
+        "typed blocks".into(),
+        session.clone(),
+        Some(2),
+        None,
+        false,
+        40,
+    )
+    .await
+    .unwrap();
+    assert!(
+        windowed.contains("turns 2 on"),
+        "a windowed scan names the stretch it covered: {windowed}"
+    );
+
     // sessions: the memory enumerates to the one indexed session, counted in turns not rows.
     let listed = funes::commands::recall::sessions(funes::memory::Memory::local(), Default::default())
         .await

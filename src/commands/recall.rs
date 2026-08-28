@@ -59,6 +59,51 @@ pub struct Hit {
     pub neighbors: Vec<Neighbor>,
 }
 
+/// Matching blocks `scan` lists before it stops. What the cap dropped is always reported.
+const SCAN_HIT_CAP: usize = 200;
+
+/// Characters of surrounding text a `scan` hit shows on each side of its match.
+pub const DEFAULT_CONTEXT: usize = 100;
+
+/// Why a `scan` listing stopped short, and what the caller can do about it.
+pub enum ScanCut {
+    /// Hits remain from this turn onward; a continuing scan starts exactly there. The page was cut
+    /// back to a turn boundary so that resuming neither repeats a hit nor skips one.
+    Resume(i64),
+    /// This one turn holds more matches than the cap by itself, so paging cannot step over it.
+    Crowded(i64),
+}
+
+/// One block of a session carrying a `scan` needle.
+pub struct ScanHit {
+    pub turn_uuid: String,
+    pub ts: String,
+    pub block_type: String,
+    pub seq: i64,
+    /// Byte offset of the match within `text`.
+    pub at: usize,
+    /// Chars the match spans — its own length, which case folding leaves unchanged.
+    pub len: usize,
+    /// The whole reassembled block, for the caller to excerpt around `at`.
+    pub text: String,
+}
+
+/// What a `scan` needle found in one session, or in the window of it that was scanned.
+pub struct ScanResult {
+    pub needle: String,
+    pub session_id: String,
+    /// Matching blocks in reading order, capped at [`SCAN_HIT_CAP`].
+    pub hits: Vec<ScanHit>,
+    /// Matching blocks past the cap, absent from `hits`.
+    pub dropped: usize,
+    /// Why the listing stopped, when it did.
+    pub cut: Option<ScanCut>,
+    /// The seq window scanned, when one was asked for. A zero over a window clears the window, not
+    /// the session, so the window rides with the result.
+    pub from: Option<i64>,
+    pub to: Option<i64>,
+}
+
 /// One session in a memory's listing: when and where it started, how much it holds, and the prompt
 /// it opened with.
 pub struct Session {
@@ -867,6 +912,213 @@ async fn scan_sessions(ds: &Dataset) -> Result<Vec<Session>> {
         .collect();
     out.sort_by(|a, b| (&a.ts, &a.session_id).cmp(&(&b.ts, &b.session_id)));
     Ok(out)
+}
+
+/// One block of a memory, its splits stitched back together, with the facets a `scan` hit prints.
+struct Block {
+    turn_uuid: String,
+    ts: String,
+    block_type: String,
+    seq: i64,
+    block_idx: i64,
+    text: String,
+}
+
+/// Blocks under assembly, keyed by (seq, turn_uuid, block_idx): each one's facets, and the split
+/// rows still to be stitched into its `text`. The seq is part of the key because a turn uuid can
+/// recur at different positions in a session — a compacted transcript replays turns — so two blocks
+/// that merely share a uuid are two blocks, not one.
+type BlockParts = HashMap<(i64, String, i64), (Block, Vec<(i64, String)>)>;
+
+/// Find `needle` in every block of one session, rendered in the agent format. Literal, never a
+/// pattern: a regex that silently matched nothing would read as a clearance.
+///
+/// A session that isn't in the memory is an error, not an empty result.
+pub async fn scan(
+    memory: Memory,
+    needle: String,
+    session_id: String,
+    from: Option<i64>,
+    to: Option<i64>,
+    ignore_case: bool,
+    context: usize,
+) -> Result<String> {
+    let read = open_read(&memory).await?;
+    let note = read.note.clone().unwrap_or_default();
+    let label = read.memory_label.clone().unwrap_or_else(|| memory.label());
+    let blocks = reassembled_blocks(&read.ds, &session_id, from, to).await?;
+    if blocks.is_empty() {
+        // A window that holds nothing is not the same as a session that isn't there: only the
+        // unwindowed case can conclude the session is absent.
+        if from.is_some() || to.is_some() {
+            let scanned = reassembled_blocks(&read.ds, &session_id, None, None).await?;
+            if !scanned.is_empty() {
+                return Ok(format!(
+                    "{note}no turns in that range of session {session_id} (it holds {})\n",
+                    scanned.iter().map(|b| b.seq).collect::<HashSet<_>>().len()
+                ));
+            }
+        }
+        bail!("no session {session_id} in {label}");
+    }
+    let result = find_needle(&blocks, &needle, &session_id, from, to, ignore_case);
+    Ok(crate::ui::render::scan_agent(
+        &note,
+        &memory_hint(read.memory_label.as_deref()),
+        &result,
+        context,
+    ))
+}
+
+/// Every block of one session, splits de-overlapped. Matching raw chunks would miss a needle that
+/// straddles a split boundary, so the session's rows are bucketed by block before anything is
+/// matched. Ordered by position in the session. Empty when the session isn't in the memory.
+async fn reassembled_blocks(ds: &Dataset, session_id: &str, from: Option<i64>, to: Option<i64>) -> Result<Vec<Block>> {
+    let cols = ["turn_uuid", "seq", "ts", "block_type", "block_idx", "split_idx", "text"];
+    let mut filter = format!("session_id = '{}'", esc(session_id));
+    if let Some(from) = from {
+        filter.push_str(&format!(" AND seq >= {from}"));
+    }
+    if let Some(to) = to {
+        filter.push_str(&format!(" AND seq <= {to}"));
+    }
+    let batches = dataset::scan_rows(ds, &cols, Some(filter.as_str()), None).await?;
+
+    // Splits of one block can land in different batches, so every row is bucketed before any of it
+    // is stitched.
+    let mut blocks: BlockParts = HashMap::new();
+    for batch in &batches {
+        let (turn, ts, bt, text) = (
+            scol(batch, "turn_uuid"),
+            scol(batch, "ts"),
+            scol(batch, "block_type"),
+            scol(batch, "text"),
+        );
+        let (seq, bi, si) = (icol(batch, "seq"), icol(batch, "block_idx"), icol(batch, "split_idx"));
+        for i in 0..batch.num_rows() {
+            let key = (ival(seq, i), sval(turn, i), ival(bi, i));
+            let entry = blocks.entry(key).or_insert_with(|| {
+                (
+                    Block {
+                        turn_uuid: sval(turn, i),
+                        ts: sval(ts, i),
+                        block_type: sval(bt, i),
+                        seq: ival(seq, i),
+                        block_idx: ival(bi, i),
+                        text: String::new(),
+                    },
+                    Vec::new(),
+                )
+            });
+            entry.1.push((ival(si, i), sval(text, i)));
+        }
+    }
+    drop(batches);
+
+    let mut out: Vec<Block> = blocks
+        .into_values()
+        .map(|(mut block, mut splits)| {
+            splits.sort_by_key(|(si, _)| *si);
+            let mut pieces = splits.into_iter().map(|(_, t)| t);
+            block.text = pieces.next().unwrap_or_default();
+            for piece in pieces {
+                block.text = chunk::stitch(&block.text, &piece);
+            }
+            block
+        })
+        .collect();
+    out.sort_by_key(|b| (b.seq, b.block_idx));
+    Ok(out)
+}
+
+/// Every block of the scanned window carrying `needle`, in reading order, capped at
+/// [`SCAN_HIT_CAP`] — with the coordinate a continuing scan resumes from when the cap bites.
+fn find_needle(
+    blocks: &[Block],
+    needle: &str,
+    session_id: &str,
+    from: Option<i64>,
+    to: Option<i64>,
+    ignore_case: bool,
+) -> ScanResult {
+    let folded: Vec<char> = if ignore_case {
+        needle.chars().map(fold).collect()
+    } else {
+        Vec::new()
+    };
+    let mut hits: Vec<ScanHit> = Vec::new();
+    for b in blocks {
+        let at = if ignore_case {
+            find_folded(&b.text, &folded)
+        } else {
+            b.text.find(needle)
+        };
+        let Some(at) = at else { continue };
+        hits.push(ScanHit {
+            turn_uuid: b.turn_uuid.clone(),
+            ts: b.ts.clone(),
+            block_type: b.block_type.clone(),
+            seq: b.seq,
+            at,
+            len: needle.chars().count(),
+            text: b.text.clone(),
+        });
+    }
+
+    // Cut at a turn boundary. Hits are in reading order, so dropping the trailing hits that share
+    // the first dropped hit's turn leaves a page a caller can continue from exactly: everything
+    // rendered lies before that turn.
+    let found = hits.len();
+    let cut = hits.get(SCAN_HIT_CAP).map(|h| h.seq).map(|boundary| {
+        match hits[..SCAN_HIT_CAP].iter().rposition(|h| h.seq < boundary) {
+            Some(last) => {
+                hits.truncate(last + 1);
+                ScanCut::Resume(boundary)
+            }
+            // The cap falls inside a single turn's own matches: no boundary to cut at.
+            None => {
+                hits.truncate(SCAN_HIT_CAP);
+                ScanCut::Crowded(boundary)
+            }
+        }
+    });
+    ScanResult {
+        needle: needle.to_string(),
+        session_id: session_id.to_string(),
+        dropped: found - hits.len(),
+        hits,
+        cut,
+        from,
+        to,
+    }
+}
+
+/// Byte offset of the first case-folded occurrence of `needle` (already folded) in `text`. Folding
+/// is per char, so the offset stays an offset into the original.
+fn find_folded(text: &str, needle: &[char]) -> Option<usize> {
+    if needle.is_empty() {
+        return None;
+    }
+    let hay: Vec<(usize, char)> = text.char_indices().collect();
+    if hay.len() < needle.len() {
+        return None;
+    }
+    hay.windows(needle.len()).find_map(|w| {
+        w.iter()
+            .zip(needle)
+            .all(|(&(_, c), &want)| fold(c) == want)
+            .then_some(w[0].0)
+    })
+}
+
+/// Lowercase `c` when that is a single char. One whose lowercase is several (`İ`) stays as it is and
+/// simply won't fold-match.
+fn fold(c: char) -> char {
+    let mut it = c.to_lowercase();
+    match (it.next(), it.next()) {
+        (Some(one), None) => one,
+        _ => c,
+    }
 }
 
 /// Reassemble rows into turns: group by (seq, turn_uuid), order blocks by (block_idx, split_idx),

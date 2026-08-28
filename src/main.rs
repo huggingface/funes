@@ -101,6 +101,29 @@ enum Cmd {
         #[arg(long)]
         yes: bool,
     },
+    /// Find a literal string everywhere in one session — exhaustive, unranked.
+    Scan {
+        /// The literal to find. Not a regex.
+        #[arg(value_name = "NEEDLE")]
+        needle: String,
+        /// The session to scan (from a `sessions` row or a recall hit's `→ get` line).
+        #[arg(value_name = "SESSION_ID")]
+        session_id: String,
+        /// First turn to scan, as the session's own seq. Defaults to the session's start.
+        #[arg(long, value_name = "SEQ")]
+        from: Option<i64>,
+        /// Last turn to scan, as the session's own seq. Defaults to the session's end.
+        #[arg(long, value_name = "SEQ")]
+        to: Option<i64>,
+        /// Match regardless of case.
+        #[arg(short, long)]
+        ignore_case: bool,
+        /// Characters of surrounding text to show on each side of a match.
+        #[arg(long, default_value_t = recall::DEFAULT_CONTEXT)]
+        context: usize,
+        #[command(flatten)]
+        memory: MemoryOpts,
+    },
     /// List a memory's sessions, oldest first.
     Sessions {
         /// Keep only sessions whose checkout resolved to this repo (`owner/name`).
@@ -337,6 +360,21 @@ async fn main() -> Result<()> {
                     render::recall_agent(&note, &recall::memory_hint(memory_label.as_deref()), &hits)
                 );
             }
+            Ok(())
+        }
+        Cmd::Scan {
+            needle,
+            session_id,
+            from,
+            to,
+            ignore_case,
+            context,
+            memory,
+        } => {
+            print!(
+                "{}",
+                recall::scan(memory.resolve(), needle, session_id, from, to, ignore_case, context).await?
+            );
             Ok(())
         }
         Cmd::Sessions {

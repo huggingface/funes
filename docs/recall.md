@@ -49,6 +49,29 @@ from. `no results` prints when nothing matched. The exact shape is a contract �
 The MCP `recall` tool takes the same parameters and defaults, so an agent can widen a search —
 `half_life: 0` when the answer may be old.
 
+## Scanning a session
+
+```bash
+funes scan <needle> <session_id> [--from <seq>] [--to <seq>] [-i] [--context <n>] [--memory <label>]
+```
+
+`scan` finds a literal in every block of one session, in reading order, each hit carrying the `→ get`
+range that reads the turn around it. The needle is a literal, never a regex: a pattern that silently
+matched nothing would read as a clean result.
+
+| flag | default | effect |
+|---|---|---|
+| `--from` / `--to` | whole session | scan only this seq range |
+| `-i`, `--ignore-case` | off | match regardless of case |
+| `--context` | 100 | characters of surrounding text shown on each side of a match |
+| `--memory` | local | the memory to read |
+
+Splits are stitched back together before matching, so a needle that straddles a chunk boundary is
+found. A zero — `no matches for "<needle>" in <session_id>` — covers that session and that exact
+spelling, and a windowed scan says which stretch it covered. Listing stops at 200 hits, cut at a turn
+boundary, and names the `--from` that continues; if one turn holds more matches than that by itself,
+the reply names the turn to read instead.
+
 ## Listing sessions
 
 ```bash

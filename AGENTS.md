@@ -38,6 +38,27 @@ fell back to).
 | `--harness` | — | restrict to `claude \| codex \| pi \| hermes` (the saved facet `claude_code` also parses) |
 | `--memory` | local memory | the memory to read — `<org>/<repo>`, an `hf://…` URI, a local path, or `local` |
 
+### scan
+
+`funes scan <needle> <session_id> [--from <seq>] [--to <seq>] [-i] [--context <n>] [--memory <label>]`
+— every block of one session carrying a literal, in reading order. Splits are stitched back together
+before matching, so a needle straddling a chunk boundary is still found. `-i` matches regardless of
+case; `--from`/`--to` scan a stretch, and then a zero clears only that stretch.
+
+Agent format, a header then one line per carrying block:
+
+```
+scan "<needle>" in <session_id>[ turns <a>-<b>] — <n> hits
+[<ts>] <block_type> seq<N>
+  → get <session_id> --from <seq> --to <seq> --memory <label>
+  … <the match, with surrounding text on one line> …
+---
+```
+
+`no matches for "<needle>" in <session_id>` when nothing carries it — that zero is per session and
+per spelling. A capped listing is cut at a turn boundary and names the coordinate to continue from;
+when one turn holds more matches than the cap, it says so and names the turn.
+
 ### sessions
 
 `funes sessions [--repo <owner/name>] [--since <date>] [--until <date>] [--limit <n>] [--offset <n>]

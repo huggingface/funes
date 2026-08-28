@@ -5,7 +5,7 @@
 //! a terminal: tool chunks compressed to a deterministic one-liner, prose wrapped, marks
 //! highlighted.
 
-use crate::commands::recall::{Hit, Session, Turn};
+use crate::commands::recall::{Hit, ScanCut, ScanResult, Session, Turn};
 use std::fmt::Write as _;
 
 /// Turns each side of a hit that a `→ get` line reaches for.
@@ -45,6 +45,72 @@ pub fn recall_agent(note: &str, memory_arg: &str, hits: &[(Hit, f64)]) -> String
         let _ = writeln!(out, "---");
     }
     out
+}
+
+/// The agent `scan` format: a header naming the needle, the session and the window, then one line
+/// per carrying block with the `→ get` that reads it. A cap is stated with the coordinate that
+/// continues past it. Byte-stable.
+pub fn scan_agent(note: &str, memory_arg: &str, r: &ScanResult, context: usize) -> String {
+    let mut out = note.to_string();
+    let scanned = match (r.from, r.to) {
+        (None, None) => String::new(),
+        (Some(a), Some(b)) => format!(" turns {a}-{b}"),
+        (Some(a), None) => format!(" turns {a} on"),
+        (None, Some(b)) => format!(" turns up to {b}"),
+    };
+    if r.hits.is_empty() {
+        let _ = writeln!(out, "no matches for {:?} in {}{scanned}\n---", r.needle, r.session_id);
+        return out;
+    }
+    let _ = writeln!(
+        out,
+        "scan {:?} in {}{scanned} — {} hits",
+        r.needle,
+        r.session_id,
+        r.hits.len() + r.dropped
+    );
+    for h in &r.hits {
+        let _ = writeln!(out, "[{}] {} seq{}", h.ts, h.block_type, h.seq);
+        let _ = writeln!(out, "  → get {}{}{}", r.session_id, hint_range(h.seq), memory_arg);
+        let _ = writeln!(out, "  {}", excerpt(&h.text, h.at, h.len, context));
+    }
+    match &r.cut {
+        Some(ScanCut::Resume(seq)) => {
+            let _ = writeln!(out, "{} more hits not shown — continue with --from {seq}", r.dropped);
+        }
+        Some(ScanCut::Crowded(seq)) => {
+            let _ = writeln!(
+                out,
+                "{} more hits not shown, all in turn {seq} — read it with --from {seq} --to {seq}",
+                r.dropped
+            );
+        }
+        None => {}
+    }
+    let _ = writeln!(out, "---");
+    out
+}
+
+/// `context` chars of the block on each side of the match, whitespace-collapsed onto one line. A
+/// `…` marks each end the block runs past.
+fn excerpt(text: &str, at: usize, len: usize, context: usize) -> String {
+    // Stepping back `context` chars means taking the (context - 1)th char in reverse; a context of
+    // zero steps nowhere and starts at the match.
+    let start = if context == 0 {
+        at
+    } else {
+        text[..at].char_indices().rev().nth(context - 1).map_or(0, |(j, _)| j)
+    };
+    let end = text[at..]
+        .char_indices()
+        .nth(len + context)
+        .map_or(text.len(), |(j, _)| at + j);
+    format!(
+        "{}{}{}",
+        if start > 0 { "… " } else { "" },
+        text[start..end].split_whitespace().collect::<Vec<_>>().join(" "),
+        if end < text.len() { " …" } else { "" }
+    )
 }
 
 /// Characters of a session's opening prompt a listing shows.
@@ -566,6 +632,14 @@ mod tests {
         assert_eq!(word_span(text, "nope delta"), None);
         // A long mark cut mid-word at its start still anchors via the skip.
         assert_eq!(word_span(text, "pha beta gamma delta epsilon zeta eta"), Some(1..7));
+    }
+
+    #[test]
+    fn excerpt_with_no_context_shows_the_match_alone() {
+        // A context of zero asks for the match and nothing around it, not the char before it.
+        assert_eq!(excerpt("xbeta gamma", 1, 4, 0), "… beta …");
+        // One char of context reaches the start of the block, so nothing is elided on the left.
+        assert_eq!(excerpt("xbeta gamma", 1, 4, 1), "xbeta …");
     }
 
     #[test]
