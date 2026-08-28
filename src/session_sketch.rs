@@ -20,6 +20,7 @@ use std::time::Instant;
 const DEFAULT_BUDGET: usize = 8;
 const DEFAULT_CHAR_BUDGET: usize = 16_000;
 const TOOL_RESULT_PREVIEW: usize = 2_000;
+const ELISION: &str = "\n\n[… shortened by session-sketch …]\n\n";
 
 /// The fewest characters a selected passage renders, whatever the budget divided by the unit count
 /// works out to. Below this a passage is not evidence, just a fragment.
@@ -1392,13 +1393,15 @@ fn display_text(unit: &Unit, cap: usize) -> (String, bool) {
     if unit.text.chars().count() <= limit {
         return (unit.text.clone(), false);
     }
-    let head_len = limit * 7 / 10;
-    let tail_len = limit.saturating_sub(head_len);
+    // The marker is part of what the passage renders, so it comes out of the same limit.
+    let kept = limit.saturating_sub(ELISION.chars().count());
+    let head_len = kept * 7 / 10;
+    let tail_len = kept.saturating_sub(head_len);
     let head: String = unit.text.chars().take(head_len).collect();
     let mut tail: Vec<char> = unit.text.chars().rev().take(tail_len).collect();
     tail.reverse();
     let tail: String = tail.into_iter().collect();
-    (format!("{head}\n\n[… shortened by session-sketch …]\n\n{tail}"), true)
+    (format!("{head}{ELISION}{tail}"), true)
 }
 
 #[cfg(test)]
@@ -1541,8 +1544,8 @@ mod tests {
         let (text, truncated) = display_text(&u, 1_000);
         assert!(truncated);
         assert!(
-            text.chars().count() < 1_100,
-            "capped near its share, got {} chars",
+            text.chars().count() <= 1_000,
+            "the marker comes out of the share, got {} chars",
             text.chars().count()
         );
         // A short passage is untouched.
