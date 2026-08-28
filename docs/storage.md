@@ -13,11 +13,11 @@ guarantees.
 
 ## Reference memories
 
-A development memory and its curated, published project memory:
+A development memory and a published memory of a selection from it:
 
 | | Local development | Published project |
 |---|---|---|
-| role | full working history | curated project history |
+| role | full working history | published selection |
 | chunks | 117,499 | 22,597 |
 | live data | 249.9 MB | 46.3 MB |
 | data B/chunk | 2,127 | 2,047 |

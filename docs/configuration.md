@@ -22,11 +22,9 @@ benchmarks, and tests because it leaves the normal local memory untouched.
 | `state.json` | Per-source incremental indexing state. |
 | `index-coverage.json` | The last sweep's small coverage snapshot used by `funes status`. |
 | `pushed/` | Per-remote receipts used to report this host's pending push coverage. |
-| `curation/` | This host's include/exclude decisions for project memories. |
 
-The memory and indexing state are derived from the original agent transcripts and can be rebuilt.
-Push receipts can be recreated by running `funes push <memory>`, but curation decisions are human
-input: preserve `curation/` when moving or backing up a curated setup.
+The memory and indexing state are derived from the original agent transcripts and can be rebuilt,
+and push receipts can be recreated by running `funes push <memory>`.
 
 `FUNES_HOME` does **not** relocate agent configuration, installed integrations, or model caches.
 Those paths must remain stable after an agent records them.
@@ -56,7 +54,7 @@ token in this order:
 3. `HUGGINGFACE_TOKEN`
 4. `~/.cache/huggingface/token`, written by `hf auth login`
 
-A token used only for recall needs read access; `push`, project-memory setup, and curation need write
+A token used only for recall needs read access; `push` needs write
 access to the target dataset repository. Public-memory recall needs no token.
 
 ## Model and remote caches
@@ -78,7 +76,6 @@ file-grained cache design and cold-versus-warm behavior.
 | `FUNES_BIN` | Binary path recorded in supported MCP registrations and used by the pi bridge. Hook workers instead find `funes` on `PATH` or in common install directories. |
 | `FUNES_MEMORY` | Per-run memory override understood by the pi extension; otherwise its binding from `funes add pi [memory]` is used. |
 | `FUNES_TRUFFLEHOG` | Explicit TruffleHog binary for secret scanning. Index-time redaction is best-effort; push and scrub scanning fail closed. |
-| `FUNES_NO_TUI` | Use the plain-text `curate` listing even when stdin and stdout are terminals. |
 | `HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN`, `HUGGINGFACE_TOKEN` | Hugging Face authentication, in the precedence shown above. |
 | `HF_HOME` | Hugging Face home, including the default backend's model cache. |
 | `HF_HUB_CACHE` | Hugging Face Hub file-cache location, including cached remote-memory files. |

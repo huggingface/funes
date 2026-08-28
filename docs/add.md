@@ -18,7 +18,7 @@ funes remove claude                       # or codex, pi, hermes
 
 It unregisters funes's tools, removes its automation hooks and owned integration files, and
 preserves unrelated agent hooks and configuration. It does **not** delete your local memory,
-original session transcripts, curation decisions, model/Hub caches, or any published memory. The
+original session transcripts, model/Hub caches, or any published memory. The
 command is idempotent, so an already-absent integration is a successful no-op.
 
 ## The agents
