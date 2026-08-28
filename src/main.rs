@@ -5,7 +5,7 @@
 //! `$FUNES_HOME` or `~/.funes`.
 
 use funes::agents::{claude, codex, hermes, pi};
-use funes::commands::{ask, index, mcp, push, recall, scrub, update};
+use funes::commands::{ask, index, mcp, push, recall, scrub, sketch, update};
 use funes::hub;
 use funes::memory;
 use funes::scan;
@@ -140,6 +140,25 @@ enum Cmd {
         /// Skip this many of the most recent matches before taking --limit, to walk back in time.
         #[arg(long, value_name = "N", default_value_t = 0)]
         offset: usize,
+        #[command(flatten)]
+        memory: MemoryOpts,
+    },
+    /// Digest one session: the passages most distinctive within it, chosen without a query.
+    Sketch {
+        /// Session to digest (from a `sessions` row or a hit's `→ get` line).
+        session_id: String,
+        /// How many distinct places to show. Clamped to 40, and to what --max-chars can render.
+        #[arg(long, value_name = "N")]
+        units: Option<usize>,
+        /// Total characters to render. Clamped to 40000.
+        #[arg(long, value_name = "N")]
+        max_chars: Option<usize>,
+        /// First turn to digest, as the session's own seq. Defaults to the session's start.
+        #[arg(long, value_name = "SEQ")]
+        from: Option<i64>,
+        /// Last turn to digest, as the session's own seq. Defaults to the session's end.
+        #[arg(long, value_name = "SEQ")]
+        to: Option<i64>,
         #[command(flatten)]
         memory: MemoryOpts,
     },
@@ -369,6 +388,20 @@ async fn main() -> Result<()> {
                 offset,
             };
             print!("{}", recall::sessions(memory.resolve(), filter).await?);
+            Ok(())
+        }
+        Cmd::Sketch {
+            session_id,
+            units,
+            max_chars,
+            from,
+            to,
+            memory,
+        } => {
+            print!(
+                "{}",
+                sketch::run(memory.resolve(), session_id, from, to, units, max_chars).await?
+            );
             Ok(())
         }
         Cmd::Get {

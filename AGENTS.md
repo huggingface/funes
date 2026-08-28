@@ -113,6 +113,40 @@ A turn renders whole or not at all, so a single turn larger than that is the one
 exceed it. `no turns in that range of session <id> (it holds <n>)` when the coordinates land outside
 the session, `no session <id> in <label>` when the id is unknown.
 
+### sketch
+
+`funes sketch <session_id> [--units <n>] [--max-chars <n>] [--from <seq>] [--to <seq>] [--memory
+<label>]` — what one session contains, asked without a query: the passages most distinctive within
+it, chosen from the stored vectors. This is the read for an open-ended judgement about a session — is
+it worth publishing, does it reveal anything internal, what was accomplished here — where what
+answers the question is usually what does not belong in the session, and is what a summary drops.
+
+Agent format, a header then each selected place with the `get` that reads around it:
+
+```
+sketch <session_id> — <n> of <units> places · <chars> of <max-chars> chars · <k> eligible units
+  (units clamped to <n>)
+[<ts>] <role> <block_type> seq<N> · shortened
+  → get <session_id> --from <seq> --to <seq> --memory <label>
+<the passage>
+---
+a sketch samples: it shows what it selected, not that anything is absent — scan a literal for that
+```
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--units` | 8 | places to show; clamped to 40, and to what `--max-chars` fits at 240 chars each |
+| `--max-chars` | 8,000 | characters rendered in total; clamped to 40,000 |
+| `--from` / `--to` | whole session | digest one stretch — a fixed number of places is thinner the longer the session |
+| `--memory` | local memory | the memory holding the session |
+
+No passage may take more than its share of the budget, so one turn carrying a file cannot become the
+whole digest; a shortened passage says so. Every clamp is reported rather than applied quietly. A
+sketch **samples**: it can never establish absence.
+
+`no session <id> in <label>` when the id is unknown, `no turns in that range of session <id> (it
+holds <n>)` when a window lands outside the session.
+
 ### ask
 
 `funes ask claude|codex "<question>" [--memory <label>]` — one grounded answer from a coding
@@ -148,8 +182,9 @@ claude/codex/hermes also installs the automation hooks — see [docs/automation.
 positional `memory` binds the server to a memory; `funes add <agent> <memory>` bakes it into the
 registration. `funes remove <agent>` reverses that agent integration without deleting memories or
 transcripts. Tools: `recall` (query, k, half_life, neighbors, candidates, block_type/harness
-filters, memory), `get` (session_id, from, to, memory), `status` (memory) — each returns the
-corresponding agent-format string verbatim. A tool call's `memory` overrides the server's; with
+filters, memory), `get` (session_id, from, to, memory), `sketch` (session_id, units, max_chars,
+from, to, memory), `status` (memory) — each returns the corresponding agent-format string verbatim.
+A tool call's `memory` overrides the server's; with
 neither, it reads the local memory.
 
 ## Working on the repo

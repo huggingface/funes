@@ -200,6 +200,62 @@ async fn index_then_read_surface() {
     assert!(got.contains("typed blocks"), "get should return the turn text: {got}");
     assert!(got.contains("turns "), "get should close with the range it read: {got}");
 
+    // sketch: what the session contains, asked without a query — bounded, addressable, and
+    // explicit about what it left out.
+    let sketched = funes::commands::sketch::run(
+        funes::memory::Memory::local(),
+        session.clone(),
+        None,
+        None,
+        Some(3),
+        Some(2_000),
+    )
+    .await
+    .unwrap();
+    assert!(
+        sketched.starts_with(&format!("sketch {session} — ")),
+        "a sketch names the session it digested: {sketched}"
+    );
+    assert!(
+        sketched.contains(&format!("→ get {session} --from 0 --to 3")),
+        "every place must be addressable, in the same coordinate as get: {sketched}"
+    );
+    assert!(
+        sketched.trim_end().ends_with("scan a literal for that"),
+        "a sketch must not read as a clearance: {sketched}"
+    );
+
+    // A clamped request is reported: a silent clamp reads as the whole digest.
+    let clamped = funes::commands::sketch::run(
+        funes::memory::Memory::local(),
+        session.clone(),
+        None,
+        None,
+        Some(40),
+        Some(1_000),
+    )
+    .await
+    .unwrap();
+    assert!(
+        clamped.contains("(units clamped to 4)"),
+        "a clamp must be stated, not applied quietly: {clamped}"
+    );
+
+    // An unknown session is an error, not an empty digest.
+    let missing = funes::commands::sketch::run(
+        funes::memory::Memory::local(),
+        "no-such-session".into(),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert!(
+        missing.is_err_and(|e| e.to_string().contains("no session no-such-session")),
+        "a mistyped session must not read as an empty session"
+    );
+
     // An unknown session id is absent, not an empty range.
     let missing = funes::commands::recall::get(
         funes::memory::Memory::local(),
