@@ -56,6 +56,28 @@ pub struct GetRequest {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SessionsRequest {
+    #[schemars(description = "Keep only sessions whose checkout resolved to this repo, as `owner/name`")]
+    pub repo: Option<String>,
+    #[schemars(description = "Keep only sessions that started on or after this date, `YYYY-MM-DD`")]
+    pub since: Option<String>,
+    #[schemars(description = "Keep only sessions that started on or before this date, `YYYY-MM-DD`")]
+    pub until: Option<String>,
+    #[schemars(
+        description = "Rows to list, keeping the most recent. More than the maximum cannot fit in one reply — walk with `offset` instead. Zero is an error, not every match."
+    )]
+    pub limit: Option<usize>,
+    #[schemars(
+        description = "Skip this many of the most recent matches before taking `limit`, to walk a listing back through time. The closing line names the offset that continues, and a given offset always names the same session."
+    )]
+    pub offset: Option<usize>,
+    #[schemars(
+        description = "Memory to list — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Defaults to the server's memory."
+    )]
+    pub memory: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct StatusRequest {
     #[schemars(
         description = "Memory to inspect — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Defaults to the server's memory."
@@ -138,6 +160,34 @@ impl Funes {
             Ok(s) if !s.is_empty() => s,
             Ok(_) => "no results".to_string(),
             Err(e) => format!("get error: {e}"),
+        }
+    }
+
+    #[tool(
+        description = "List a memory's sessions, oldest first: date, harness, source repo (or workdir when the checkout did not resolve), turn count, full session id, and the prompt each session opened with. That prompt says what a session was for without reading any of it. Use it to size a memory, to pick the sessions a criterion is about, or to check whether a session you heard about by id is there at all. Narrow with `repo`, `since` and `until` rather than listing everything; the closing line states the full match count, so an elided row is never silently dropped."
+    )]
+    async fn sessions(
+        &self,
+        Parameters(SessionsRequest {
+            repo,
+            since,
+            until,
+            limit,
+            offset,
+            memory,
+        }): Parameters<SessionsRequest>,
+    ) -> String {
+        let filter = recall::SessionFilter {
+            repo,
+            since,
+            until,
+            limit,
+            offset: offset.unwrap_or(0),
+        };
+        match recall::sessions(self.memory(memory), filter).await {
+            Ok(s) if !s.is_empty() => s,
+            Ok(_) => "no results".to_string(),
+            Err(e) => format!("sessions error: {e}"),
         }
     }
 

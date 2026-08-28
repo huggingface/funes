@@ -38,6 +38,26 @@ fell back to).
 | `--harness` | — | restrict to `claude \| codex \| pi \| hermes` (the saved facet `claude_code` also parses) |
 | `--memory` | local memory | the memory to read — `<org>/<repo>`, an `hf://…` URI, a local path, or `local` |
 
+### sessions
+
+`funes sessions [--repo <owner/name>] [--since <date>] [--until <date>] [--limit <n>] [--offset <n>]
+[--memory <label>]` — every session a memory holds, oldest first, with the prompt each opened with.
+`--limit` keeps the most recent rows; `--offset` walks the listing back through time.
+
+Agent format, a row per session plus its opening prompt, closed by the total:
+
+```
+[<date>] <harness> <repo|workdir> <n> turns <session_id>
+  <the prompt it opened with, one line>
+---
+<shown> of <total> sessions — <n> older: continue with --offset <n>, or narrow with --repo/--since/--until
+```
+
+The session id is printed whole — it is what `get` takes. Turn counts are (seq, turn_uuid) pairs,
+the unit `get` renders, so the two agree on a session's size. A complete listing closes with
+`<total> sessions`; `no sessions in <label>` when the memory is empty, `no session in <label>
+matches` when a filter keeps nothing.
+
 ### get
 
 `funes get <session_id> [--from <seq>] [--to <seq>] [--memory <label>]` — a range of one session's

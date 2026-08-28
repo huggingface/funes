@@ -49,6 +49,26 @@ from. `no results` prints when nothing matched. The exact shape is a contract �
 The MCP `recall` tool takes the same parameters and defaults, so an agent can widen a search —
 `half_life: 0` when the answer may be old.
 
+## Listing sessions
+
+```bash
+funes sessions [--repo <owner/name>] [--since <date>] [--until <date>] [--limit <n>] [--offset <n>] [--memory <label>]
+```
+
+`sessions` lists what a memory holds, oldest first: date, harness, source repo (or the working
+directory when the checkout didn't resolve), turn count, session id, and the prompt the session
+opened with.
+
+| flag | default | effect |
+|---|---|---|
+| `--repo` | — | keep sessions whose checkout resolved to this `owner/name` |
+| `--since` / `--until` | — | keep sessions that started on or after / on or before a `YYYY-MM-DD` |
+| `--limit` | 50 | rows to list, keeping the most recent; capped at 200 |
+| `--offset` | 0 | skip this many of the most recent matches, to walk back in time |
+
+The trailer states the full match count and, when rows are elided, the offset that continues, so a
+listing never drops a session silently. A limit of 0 is an error rather than an empty reply.
+
 ## Reading turns with `get`
 
 ```bash

@@ -81,6 +81,45 @@ async fn index_then_read_surface() {
     .unwrap();
     assert!(tu.contains("tool_use"), "type filter should keep tool_use rows: {tu}");
 
+    // sessions: the memory enumerates to the one indexed session, counted in turns not rows.
+    let listed = funes::commands::recall::sessions(funes::memory::Memory::local(), Default::default())
+        .await
+        .unwrap();
+    assert!(
+        listed.contains(&session) && listed.contains(" turns "),
+        "sessions should list the session with its turn count: {listed}"
+    );
+    assert!(
+        listed.trim_end().ends_with("1 sessions"),
+        "a complete listing closes with the total: {listed}"
+    );
+
+    // A limit of zero would render nothing, so it is an error that names the bounds.
+    let zero = funes::commands::recall::sessions(
+        funes::memory::Memory::local(),
+        funes::commands::recall::SessionFilter {
+            limit: Some(0),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(
+        zero.is_err_and(|e| e.to_string().contains("would list nothing")),
+        "a limit of 0 should error"
+    );
+
+    // A date filter narrows the population; one that excludes everything says so.
+    let none = funes::commands::recall::sessions(
+        funes::memory::Memory::local(),
+        funes::commands::recall::SessionFilter {
+            since: Some("2099-01-01".to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(none.contains("matches"), "an empty filter result says so: {none}");
+
     // get: a session id alone reads from the start, and says what range it read.
     let got = funes::commands::recall::get(
         funes::memory::Memory::local(),

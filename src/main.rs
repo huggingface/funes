@@ -101,6 +101,25 @@ enum Cmd {
         #[arg(long)]
         yes: bool,
     },
+    /// List a memory's sessions, oldest first.
+    Sessions {
+        /// Keep only sessions whose checkout resolved to this repo (`owner/name`).
+        #[arg(long, value_name = "OWNER/NAME")]
+        repo: Option<String>,
+        /// Keep only sessions that started on or after this date (`YYYY-MM-DD`).
+        #[arg(long, value_name = "DATE")]
+        since: Option<String>,
+        /// Keep only sessions that started on or before this date (`YYYY-MM-DD`).
+        #[arg(long, value_name = "DATE")]
+        until: Option<String>,
+        #[arg(long, value_name = "N", help = format!("Rows to list, keeping the most recent. Defaults to {}, capped at {} — walk with --offset for more. Zero is an error.", recall::SESSIONS_LIMIT, recall::SESSIONS_LIMIT_MAX))]
+        limit: Option<usize>,
+        /// Skip this many of the most recent matches before taking --limit, to walk back in time.
+        #[arg(long, value_name = "N", default_value_t = 0)]
+        offset: usize,
+        #[command(flatten)]
+        memory: MemoryOpts,
+    },
     /// Show index statistics.
     Status {
         /// Memory to inspect — an `<org>/<repo>` shorthand, an `hf://…` URI, a local path, or
@@ -318,6 +337,24 @@ async fn main() -> Result<()> {
                     render::recall_agent(&note, &recall::memory_hint(memory_label.as_deref()), &hits)
                 );
             }
+            Ok(())
+        }
+        Cmd::Sessions {
+            repo,
+            since,
+            until,
+            limit,
+            offset,
+            memory,
+        } => {
+            let filter = recall::SessionFilter {
+                repo,
+                since,
+                until,
+                limit,
+                offset,
+            };
+            print!("{}", recall::sessions(memory.resolve(), filter).await?);
             Ok(())
         }
         Cmd::Get {

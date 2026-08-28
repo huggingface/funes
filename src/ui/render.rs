@@ -5,7 +5,7 @@
 //! a terminal: tool chunks compressed to a deterministic one-liner, prose wrapped, marks
 //! highlighted.
 
-use crate::commands::recall::{Hit, Turn};
+use crate::commands::recall::{Hit, Session, Turn};
 use std::fmt::Write as _;
 
 /// Turns each side of a hit that a `→ get` line reaches for.
@@ -43,6 +43,67 @@ pub fn recall_agent(note: &str, memory_arg: &str, hits: &[(Hit, f64)]) -> String
             let _ = writeln!(out, "  ~ [{} {} seq{}] {}", n.role, n.block_type, n.seq, np);
         }
         let _ = writeln!(out, "---");
+    }
+    out
+}
+
+/// Characters of a session's opening prompt a listing shows.
+const PROMPT_CHARS: usize = 120;
+
+/// Characters a `sessions` listing renders. A row renders whole, so a listing bounded by `limit`
+/// can still stop short of it.
+const SESSIONS_BUDGET: usize = 40_000;
+
+/// `s` collapsed onto one line and cut to `max` chars, `…` marking the cut.
+fn one_line(s: &str, max: usize) -> String {
+    let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    match flat.char_indices().nth(max) {
+        Some((i, _)) => format!("{}…", &flat[..i]),
+        None => flat,
+    }
+}
+
+/// The agent `sessions` format: a row per session, oldest first, each carrying the prompt it opened
+/// with on an indented second line, closed by the total. The session id is printed whole — it is the
+/// payload here, not a pointer into a hint line. `total` is every session the filter matched and
+/// `offset` where this page started, so the trailer can name the offset that continues.
+/// Byte-stable.
+pub fn sessions_agent(note: &str, sessions: &[Session], total: usize, offset: usize) -> String {
+    let mut out = note.to_string();
+    let mut shown = 0;
+    for s in sessions {
+        let mut row = String::new();
+        let _ = writeln!(
+            row,
+            "[{}] {} {} {} turns {}",
+            s.date(),
+            s.harness,
+            s.origin(),
+            s.turns,
+            s.session_id
+        );
+        if !s.first_prompt.is_empty() {
+            let _ = writeln!(row, "  {}", one_line(&s.first_prompt, PROMPT_CHARS));
+        }
+        if shown > 0 && out.len() + row.len() > SESSIONS_BUDGET {
+            break;
+        }
+        out.push_str(&row);
+        shown += 1;
+    }
+    // What is left is older than this page: `offset + shown` names the row it starts at, and the
+    // ordering is total, so that offset is the same row on every call.
+    let remaining = total.saturating_sub(offset + shown);
+    if remaining == 0 && offset == 0 {
+        let _ = writeln!(out, "---\n{total} sessions");
+    } else if remaining == 0 {
+        let _ = writeln!(out, "---\n{shown} of {total} sessions — the oldest match reached");
+    } else {
+        let _ = writeln!(
+            out,
+            "---\n{shown} of {total} sessions — {remaining} older: continue with --offset {}, or narrow with --repo/--since/--until",
+            offset + shown
+        );
     }
     out
 }
