@@ -37,5 +37,6 @@ pub mod hub;
 pub mod inference;
 pub mod memory;
 pub mod scan;
+pub mod session_sketch;
 pub mod traces;
 pub mod ui;

@@ -102,6 +102,30 @@ pub struct ScanRequest {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SketchRequest {
+    #[schemars(description = "Session to digest — the id from a `sessions` row or a hit's `→ get` line")]
+    pub session_id: String,
+    #[schemars(
+        description = "How many distinct places to show — breadth (default 8, maximum 40). Also held to what `max_chars` can render at 240 characters apiece, and any narrowing is reported in the reply."
+    )]
+    pub units: Option<usize>,
+    #[schemars(
+        description = "Total characters to render — cost (default 8000, maximum 40000). More than that is a reply no caller receives."
+    )]
+    pub max_chars: Option<usize>,
+    #[schemars(
+        description = "First turn to digest, as the session's own seq. Digest a long session in windows to get coverage proportional to its length rather than a fixed sample of it."
+    )]
+    pub from: Option<i64>,
+    #[schemars(description = "Last turn to digest, as the session's own seq.")]
+    pub to: Option<i64>,
+    #[schemars(
+        description = "Memory to read for this call — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Defaults to the server's memory."
+    )]
+    pub memory: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct StatusRequest {
     #[schemars(
         description = "Memory to inspect — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Defaults to the server's memory."
@@ -244,6 +268,27 @@ impl Funes {
             Ok(s) if !s.is_empty() => s,
             Ok(_) => "no results".to_string(),
             Err(e) => format!("scan error: {e}"),
+        }
+    }
+
+    #[tool(
+        description = "A query-independent digest of one session: the passages most distinctive *within* it, chosen from the stored embeddings with no query at all. This is what tells you what a session contains when you do not already know what to look for — use it to judge a session against open-ended criteria: is this worth publishing, does it reveal anything internal, what was actually accomplished here. What answers such a question is usually the material that does not belong in the session, which a distinctiveness selector surfaces and a summary drops. DO NOT READ THE WHOLE SESSION INSTEAD: sessions run to thousands of turns, and every place a sketch shows carries a `→ get` line for the surrounding turns verbatim. `units` sets how many places, `max_chars` the reply budget, `from`/`to` digest one stretch of a long session; every clamp and elision is stated. A sketch samples: it shows what it selected, so it can never show that something is absent."
+    )]
+    async fn sketch(
+        &self,
+        Parameters(SketchRequest {
+            session_id,
+            units,
+            max_chars,
+            from,
+            to,
+            memory,
+        }): Parameters<SketchRequest>,
+    ) -> String {
+        match super::sketch::run(self.memory(memory), session_id, from, to, units, max_chars).await {
+            Ok(s) if !s.is_empty() => s,
+            Ok(_) => "no results".to_string(),
+            Err(e) => format!("sketch error: {e}"),
         }
     }
 

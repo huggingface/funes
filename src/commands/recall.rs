@@ -822,7 +822,7 @@ pub async fn sessions(memory: Memory, filter: SessionFilter) -> Result<String> {
 /// compacted session replays its machine-written recap as a user turn opening `This session is being
 /// continued…`. All are recognizable from the block's start (a mid-block split can begin anywhere, so
 /// test split 0).
-fn is_scaffolding(block_start: &str) -> bool {
+pub(crate) fn is_scaffolding(block_start: &str) -> bool {
     let t = block_start.trim_start();
     t.starts_with('<')
         || t.starts_with('#')
