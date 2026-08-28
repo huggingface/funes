@@ -195,7 +195,7 @@ async fn held_among(local: &Dataset, pending: &HashSet<String>) -> Option<Skippe
     if pending.is_empty() {
         return None;
     }
-    let rows = rows_to_push(local, pending, false).await.ok()?;
+    let rows = rows_with_ids(local, pending).await.ok()?;
     let (_, skipped) = drop_secret_rows(rows).ok()?;
     (skipped.rows > 0).then_some(skipped)
 }
@@ -215,18 +215,21 @@ fn ids_in_batches(batches: &[RecordBatch]) -> HashSet<String> {
     ids
 }
 
-/// The to-push rows (all columns) from the local memory. An append reads just the missing ids via an
-/// `id IN (…)` predicate (already scoped, since `to_push` is). A first publish reads everything.
-async fn rows_to_push(local: &Dataset, to_push: &HashSet<String>, first_publish: bool) -> Result<Vec<RecordBatch>> {
-    let filter = (!first_publish).then(|| {
-        let list = to_push
-            .iter()
-            .map(|id| format!("'{id}'"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!("id IN ({list})")
-    });
-    dataset::scan_rows(local, &[], filter.as_deref(), None).await
+/// Whole rows of the local memory — every column, since a publish ships the row as it stands.
+async fn read_rows(local: &Dataset, filter: Option<&str>) -> Result<Vec<RecordBatch>> {
+    dataset::scan_rows(local, &[], filter, None).await
+}
+
+/// Every row. Naming a whole memory's ids instead would mean a 150k-term `id IN (…)` predicate,
+/// which costs far more than the scan it filters.
+async fn all_rows(local: &Dataset) -> Result<Vec<RecordBatch>> {
+    read_rows(local, None).await
+}
+
+/// The rows whose id is in `ids`.
+async fn rows_with_ids(local: &Dataset, ids: &HashSet<String>) -> Result<Vec<RecordBatch>> {
+    let list = ids.iter().map(|id| format!("'{id}'")).collect::<Vec<_>>().join(", ");
+    read_rows(local, Some(&format!("id IN ({list})"))).await
 }
 
 /// The outcome of a [`run_push`]: the report to print, and `blocked` — true when the secret gate
@@ -417,8 +420,14 @@ pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm, ses
     // dataset's schema so its metadata (the embedding-model id) rides along — scan-result batches
     // drop it, and on first publish that schema is what the new dataset persists.
     let schema: arrow_schema::SchemaRef = Arc::new(arrow_schema::Schema::from(local.schema()));
-    let batches: Vec<RecordBatch> = rows_to_push(&local, &to_push, first_publish)
-        .await?
+    // Only a first publish with nothing named ships the whole memory; anything else, `to_push`
+    // is the answer — including a first publish of a selection.
+    let rows = if first_publish && sessions.is_empty() {
+        all_rows(&local).await?
+    } else {
+        rows_with_ids(&local, &to_push).await?
+    };
+    let batches: Vec<RecordBatch> = rows
         .into_iter()
         .map(|b| RecordBatch::try_new(schema.clone(), b.columns().to_vec()))
         .collect::<std::result::Result<_, _>>()?;
@@ -1008,7 +1017,7 @@ mod tests {
         let ds = two_session_ds(dir.path()).await;
         let reviewed = ids_by_session(&ds).await.unwrap()["reviewed"].clone();
         let to_push: HashSet<String> = reviewed.iter().cloned().collect();
-        let rows = rows_to_push(&ds, &to_push, false).await.unwrap();
+        let rows = rows_with_ids(&ds, &to_push).await.unwrap();
         let pushed: usize = rows.iter().map(|b| b.num_rows()).sum();
         assert_eq!(pushed, reviewed.len(), "only that session's rows are read");
     }
