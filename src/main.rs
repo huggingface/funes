@@ -13,14 +13,11 @@ use funes::traces::harness::Harness;
 use funes::ui::render;
 
 use anyhow::{anyhow, Context, Result};
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand};
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-
-/// Turns around a `get` target when no window is given.
-const DEFAULT_WINDOW: i64 = 3;
 
 #[derive(Parser)]
 #[command(name = "funes", version, about = "Recall over your past AI agent sessions.")]
@@ -37,16 +34,16 @@ enum Cmd {
         #[arg(required = true, num_args = 1..)]
         query: Vec<String>,
         /// How many results to show.
-        #[arg(short, long, default_value_t = 8)]
+        #[arg(short, long, default_value_t = recall::DEFAULT_K)]
         k: usize,
         /// How many fused candidates to rerank.
-        #[arg(long, default_value_t = 30)]
+        #[arg(long, default_value_t = recall::DEFAULT_CANDIDATES)]
         candidates: usize,
         /// Recency half-life in days (a hit this old keeps half its weight). 0 disables.
-        #[arg(long, default_value_t = 30.0)]
+        #[arg(long, default_value_t = recall::DEFAULT_HALF_LIFE)]
         half_life: f64,
         /// Adjacent chunks (within this seq window) to attach to each hit. 0 disables.
-        #[arg(long, default_value_t = 1)]
+        #[arg(long, default_value_t = recall::DEFAULT_NEIGHBORS)]
         neighbors: i64,
         /// Restrict to a block type: text | thinking | tool_use | tool_result.
         #[arg(long = "type", value_name = "BLOCK_TYPE")]
@@ -57,21 +54,15 @@ enum Cmd {
         #[command(flatten)]
         memory: MemoryOpts,
     },
-    /// Drill down on a recall hit: a turn plus the turns around it, reassembled.
+    /// Read a range of a session's turns, addressed by the session's own seq.
     Get {
         /// Session id (from a recall hit's `→ get` line).
         session_id: String,
-        /// Turn uuid (from a recall hit's `→ get` line).
-        turn_uuid: String,
-        /// Turns within this seq window of the target are included.
-        #[arg(long, default_value_t = DEFAULT_WINDOW)]
-        window: i64,
-        /// Output format. Default: human in a terminal, agent when piped.
-        #[arg(long, value_enum)]
-        format: Option<OutputFormat>,
-        /// Highlight this text in the human rendering (matched whitespace-insensitively).
-        #[arg(long)]
-        highlight: Option<String>,
+        /// First turn to read, as the session's own seq. Defaults to the session's start.
+        #[arg(long, value_name = "SEQ")]
+        from: Option<i64>,
+        #[arg(long, value_name = "SEQ", help = format!("Last turn to read, as the session's own seq. Defaults to {} turns from --from.", recall::DEFAULT_SPAN))]
+        to: Option<i64>,
         #[command(flatten)]
         memory: MemoryOpts,
     },
@@ -109,6 +100,48 @@ enum Cmd {
         /// an explicit path skips the first-index size confirmation.
         #[arg(long)]
         yes: bool,
+    },
+    /// Find a literal string everywhere in one session — exhaustive, unranked.
+    Scan {
+        /// The literal to find. Not a regex.
+        #[arg(value_name = "NEEDLE")]
+        needle: String,
+        /// The session to scan (from a `sessions` row or a recall hit's `→ get` line).
+        #[arg(value_name = "SESSION_ID")]
+        session_id: String,
+        /// First turn to scan, as the session's own seq. Defaults to the session's start.
+        #[arg(long, value_name = "SEQ")]
+        from: Option<i64>,
+        /// Last turn to scan, as the session's own seq. Defaults to the session's end.
+        #[arg(long, value_name = "SEQ")]
+        to: Option<i64>,
+        /// Match regardless of case.
+        #[arg(short, long)]
+        ignore_case: bool,
+        /// Characters of surrounding text to show on each side of a match.
+        #[arg(long, default_value_t = recall::DEFAULT_CONTEXT)]
+        context: usize,
+        #[command(flatten)]
+        memory: MemoryOpts,
+    },
+    /// List a memory's sessions, oldest first.
+    Sessions {
+        /// Keep only sessions whose checkout resolved to this repo (`owner/name`).
+        #[arg(long, value_name = "OWNER/NAME")]
+        repo: Option<String>,
+        /// Keep only sessions that started on or after this date (`YYYY-MM-DD`).
+        #[arg(long, value_name = "DATE")]
+        since: Option<String>,
+        /// Keep only sessions that started on or before this date (`YYYY-MM-DD`).
+        #[arg(long, value_name = "DATE")]
+        until: Option<String>,
+        #[arg(long, value_name = "N", help = format!("Rows to list, keeping the most recent. Defaults to {}, capped at {} — walk with --offset for more. Zero is an error.", recall::SESSIONS_LIMIT, recall::SESSIONS_LIMIT_MAX))]
+        limit: Option<usize>,
+        /// Skip this many of the most recent matches before taking --limit, to walk back in time.
+        #[arg(long, value_name = "N", default_value_t = 0)]
+        offset: usize,
+        #[command(flatten)]
+        memory: MemoryOpts,
     },
     /// Show index statistics.
     Status {
@@ -281,29 +314,6 @@ impl MemoryOpts {
     }
 }
 
-/// The two output layouts for `get`.
-#[derive(Clone, Copy, ValueEnum)]
-enum OutputFormat {
-    /// A numbered list with a hit selector.
-    Human,
-    /// The stable agent layout: multi-line hits with provenance, previews, and neighbors.
-    Agent,
-}
-
-impl OutputFormat {
-    /// Resolve the effective format: an explicit flag wins; otherwise human when both stdin and
-    /// stdout are terminals (the hit selector needs both), agent when piped or scripted.
-    fn resolve(flag: Option<OutputFormat>) -> OutputFormat {
-        flag.unwrap_or_else(|| {
-            if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-                OutputFormat::Human
-            } else {
-                OutputFormat::Agent
-            }
-        })
-    }
-}
-
 /// Color and width for the human renderings: color needs a terminal and no `NO_COLOR`; width
 /// follows `$COLUMNS` when exported, else 100.
 fn human_io() -> (bool, usize) {
@@ -352,29 +362,47 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Get {
+        Cmd::Scan {
+            needle,
             session_id,
-            turn_uuid,
-            window,
-            format,
-            highlight,
+            from,
+            to,
+            ignore_case,
+            context,
             memory,
         } => {
-            let format = OutputFormat::resolve(format);
-            let (note, turns) =
-                recall::get_turns(memory.resolve(), session_id.clone(), turn_uuid.clone(), window).await?;
-            if turns.is_empty() {
-                print!("{note}");
-                println!("turn {turn_uuid} not found in session {session_id}");
-            } else if matches!(format, OutputFormat::Human) {
-                let (color, width) = human_io();
-                print!(
-                    "{}",
-                    render::get_human(&note, &turns, color, width, highlight.as_deref())
-                );
-            } else {
-                print!("{}", render::get_agent(&note, &turns));
-            }
+            print!(
+                "{}",
+                recall::scan(memory.resolve(), needle, session_id, from, to, ignore_case, context).await?
+            );
+            Ok(())
+        }
+        Cmd::Sessions {
+            repo,
+            since,
+            until,
+            limit,
+            offset,
+            memory,
+        } => {
+            let filter = recall::SessionFilter {
+                repo,
+                since,
+                until,
+                limit,
+                offset,
+            };
+            print!("{}", recall::sessions(memory.resolve(), filter).await?);
+            Ok(())
+        }
+        Cmd::Get {
+            session_id,
+            from,
+            to,
+            memory,
+        } => {
+            let range = recall::TurnRange { from, to };
+            print!("{}", recall::get(memory.resolve(), session_id, range).await?);
             Ok(())
         }
         Cmd::Ask { agent } => match agent {

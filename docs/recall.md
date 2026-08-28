@@ -24,7 +24,7 @@ Each hit carries its provenance and a ready-to-run drill-down line:
 
 ```
 [<ts>] <harness> <workdir>/<session8> <block_type>  score=<s.sss>
-  → get <session_id> <turn_uuid> --memory <label>
+  → get <session_id> --from <seq> --to <seq> --memory <label>
 <the full chunk text>
   ~ [<role> <block_type> seq<N>] <neighbor chunk, first 160 chars>
 ---
@@ -46,18 +46,86 @@ from. `no results` prints when nothing matched. The exact shape is a contract �
 | `--harness` | — | restrict to `claude \| codex \| pi \| hermes` |
 | `--memory` | local | the memory to read (see below) |
 
-## Drilling in with `get`
+The MCP `recall` tool takes the same parameters and defaults, so an agent can widen a search —
+`half_life: 0` when the answer may be old.
+
+## Scanning a session
 
 ```bash
-funes get <session_id> <turn_uuid> [--window 3] [--memory <label>] [--highlight <text>] [--format human|agent]
+funes scan <needle> <session_id> [--from <seq>] [--to <seq>] [-i] [--context <n>] [--memory <label>]
 ```
 
-`get` returns the named turn plus the turns within the seq window, with splits reassembled into whole
-blocks. Pass the same `--memory` the recall hint named, so the drill-down reads the memory the hit came
-from. Unlike `recall`, `get` has a **human** rendering in addition to the agent format — chosen when
-both stdin and stdout are terminals, overridable with `--format`. `--highlight` marks text in that
-human rendering (whitespace-insensitive; no effect on the agent format). It prints `turn <uuid> not
-found in session <id>` when the turn is absent.
+`scan` finds a literal in every block of one session, in reading order, each hit carrying the `→ get`
+range that reads the turn around it. The needle is a literal, never a regex: a pattern that silently
+matched nothing would read as a clean result.
+
+| flag | default | effect |
+|---|---|---|
+| `--from` / `--to` | whole session | scan only this seq range |
+| `-i`, `--ignore-case` | off | match regardless of case |
+| `--context` | 100 | characters of surrounding text shown on each side of a match |
+| `--memory` | local | the memory to read |
+
+Splits are stitched back together before matching, so a needle that straddles a chunk boundary is
+found. A zero — `no matches for "<needle>" in <session_id>` — covers that session and that exact
+spelling, and a windowed scan says which stretch it covered. Listing stops at 200 hits, cut at a turn
+boundary, and names the `--from` that continues; if one turn holds more matches than that by itself,
+the reply names the turn to read instead.
+
+## Listing sessions
+
+```bash
+funes sessions [--repo <owner/name>] [--since <date>] [--until <date>] [--limit <n>] [--offset <n>] [--memory <label>]
+```
+
+`sessions` lists what a memory holds, oldest first: date, harness, source repo (or the working
+directory when the checkout didn't resolve), turn count, session id, and the prompt the session
+opened with.
+
+| flag | default | effect |
+|---|---|---|
+| `--repo` | — | keep sessions whose checkout resolved to this `owner/name` |
+| `--since` / `--until` | — | keep sessions that started on or after / on or before a `YYYY-MM-DD` |
+| `--limit` | 50 | rows to list, keeping the most recent; capped at 200 |
+| `--offset` | 0 | skip this many of the most recent matches, to walk back in time |
+
+The trailer states the full match count and, when rows are elided, the offset that continues, so a
+listing never drops a session silently. A limit of 0 is an error rather than an empty reply.
+
+## Reading turns with `get`
+
+```bash
+funes get <session_id> [--from <seq>] [--to <seq>] [--memory <label>]
+```
+
+`get` returns a range of a session's turns, with their splits reassembled into whole blocks. Pass the
+same `--memory` the recall hint named, so the drill-down reads the memory the hit came from. The
+output is the agent format, the same in a terminal as when piped.
+
+Turns are addressed by `seq`, the session's own dense counter over its turns, so `--from 40 --to 60`
+is turns 40 through 60. A hit's `→ get` line hands you a ready-to-run range:
+
+```bash
+funes get 987a1e04-… --from 37 --to 43   # as printed by the hit
+funes get 987a1e04-… --from 40 --to 60   # move or widen
+funes get 987a1e04-…                     # from the start; --from alone reads 20 turns on
+```
+
+The turn uuid is provenance, not an address: it identifies a turn across re-indexing, and is printed
+with every turn, but nothing takes it as input.
+
+Every read closes with the range it covered and the session's size:
+
+```
+---
+turns 0-19 of 786
+```
+
+A read renders 40,000 characters at most, naming the coordinate to resume from — `9 more turn(s) in
+range not shown — read them with --from 12`. A turn renders whole or not at all, so a single turn
+larger than that is the one thing that can exceed it. It prints `no turns in that range of session
+<id>` when the coordinates land outside the session, and errors with `no session <id> in <label>`
+when the id is unknown.
 
 ## Reading a different memory
 

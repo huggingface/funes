@@ -10,7 +10,7 @@ use crate::inference::{self, Embedder, Reranker};
 use crate::memory::dataset;
 use crate::memory::{Memory, MemoryState};
 use crate::traces::harness::Harness;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use arrow_array::{Float32Array, Int64Array, RecordBatch, StringArray, UInt64Array};
 use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
@@ -58,6 +58,88 @@ pub struct Hit {
     pub harness: String,
     pub neighbors: Vec<Neighbor>,
 }
+
+/// Matching blocks `scan` lists before it stops. What the cap dropped is always reported.
+const SCAN_HIT_CAP: usize = 200;
+
+/// Characters of surrounding text a `scan` hit shows on each side of its match.
+pub const DEFAULT_CONTEXT: usize = 100;
+
+/// Why a `scan` listing stopped short, and what the caller can do about it.
+pub enum ScanCut {
+    /// Hits remain from this turn onward; a continuing scan starts exactly there. The page was cut
+    /// back to a turn boundary so that resuming neither repeats a hit nor skips one.
+    Resume(i64),
+    /// This one turn holds more matches than the cap by itself, so paging cannot step over it.
+    Crowded(i64),
+}
+
+/// One block of a session carrying a `scan` needle.
+pub struct ScanHit {
+    pub turn_uuid: String,
+    pub ts: String,
+    pub block_type: String,
+    pub seq: i64,
+    /// Byte offset of the match within `text`.
+    pub at: usize,
+    /// Chars the match spans — its own length, which case folding leaves unchanged.
+    pub len: usize,
+    /// The whole reassembled block, for the caller to excerpt around `at`.
+    pub text: String,
+}
+
+/// What a `scan` needle found in one session, or in the window of it that was scanned.
+pub struct ScanResult {
+    pub needle: String,
+    pub session_id: String,
+    /// Matching blocks in reading order, capped at [`SCAN_HIT_CAP`].
+    pub hits: Vec<ScanHit>,
+    /// Matching blocks past the cap, absent from `hits`.
+    pub dropped: usize,
+    /// Why the listing stopped, when it did.
+    pub cut: Option<ScanCut>,
+    /// The seq window scanned, when one was asked for. A zero over a window clears the window, not
+    /// the session, so the window rides with the result.
+    pub from: Option<i64>,
+    pub to: Option<i64>,
+}
+
+/// One session in a memory's listing: when and where it started, how much it holds, and the prompt
+/// it opened with.
+pub struct Session {
+    pub session_id: String,
+    /// First timestamp in the session.
+    pub ts: String,
+    pub workdir: String,
+    pub harness: String,
+    /// The session's source repo(s) as `owner/name`, space-joined; empty when unresolvable.
+    pub repo: String,
+    /// Distinct turns, not rows: chunking is an indexing artifact, and a turn is what `get` reads,
+    /// so this counts (seq, turn_uuid) pairs. A uuid alone would undercount — a compacted
+    /// transcript replays turns under a uuid it has already used.
+    pub turns: usize,
+    /// The opening real prompt, scaffolding skipped — what the session was for, in one line.
+    pub first_prompt: String,
+}
+
+impl Session {
+    /// The `YYYY-MM-DD` the session started.
+    pub fn date(&self) -> &str {
+        self.ts.get(..10).unwrap_or(&self.ts)
+    }
+
+    /// Best available provenance: the repo when the checkout resolved, else the working directory.
+    pub fn origin(&self) -> &str {
+        self.repo.split_whitespace().next().unwrap_or(&self.workdir)
+    }
+}
+
+/// Sessions a listing renders when no limit is given.
+pub const SESSIONS_LIMIT: usize = 50;
+
+/// The most rows one listing will render, whatever `limit` asks for. Past this the reply is larger
+/// than a tool result can carry; `offset` walks the rest.
+pub const SESSIONS_LIMIT_MAX: usize = 200;
 
 /// One reassembled turn from `get`: its blocks in order, splits stitched back together.
 pub struct Turn {
@@ -243,6 +325,12 @@ async fn models() -> Result<&'static Mutex<Models>> {
         .await
 }
 
+/// A recall's defaults, owned here so the CLI and the MCP server search the same way.
+pub const DEFAULT_K: usize = 8;
+pub const DEFAULT_CANDIDATES: usize = 30;
+pub const DEFAULT_HALF_LIFE: f64 = 30.0;
+pub const DEFAULT_NEIGHBORS: i64 = 1;
+
 /// Run the recall pipeline over one memory and return the results rendered in the agent format.
 #[allow(clippy::too_many_arguments)]
 pub async fn recall(
@@ -413,12 +501,15 @@ async fn fts_candidates(ds: &Dataset, query: &str, limit: usize, filter: Option<
     collect_hits(scan).await
 }
 
-/// Whether the memory carries the `harness` column — false for one built before the facet existed
-/// (an un-migrated memory).
+/// Whether the dataset carries `name`. Projecting a column a memory predates errors, so every
+/// migrated column is asked for before it is read.
+fn has_col(ds: &Dataset, name: &str) -> bool {
+    arrow_schema::Schema::from(ds.schema()).column_with_name(name).is_some()
+}
+
+/// Whether the memory carries the `harness` column — false for one built before the facet existed.
 fn has_harness_col(ds: &Dataset) -> bool {
-    arrow_schema::Schema::from(ds.schema())
-        .column_with_name("harness")
-        .is_some()
+    has_col(ds, "harness")
 }
 
 /// `HIT_COLS`, minus `harness` on an un-migrated memory: projecting a column the dataset lacks errors,
@@ -567,25 +658,39 @@ async fn attach_neighbors(ds: &Dataset, hits: &mut [&mut Hit], window: i64) -> R
     Ok(())
 }
 
-/// Drill down on a recall hit: the named turn plus the turns within `window` of it, rendered in
-/// the agent format.
-pub async fn get(memory: Memory, session_id: String, turn_uuid: String, window: i64) -> Result<String> {
-    let (note, turns) = get_turns(memory, session_id.clone(), turn_uuid.clone(), window).await?;
-    if turns.is_empty() {
-        return Ok(format!("{note}turn {turn_uuid} not found in session {session_id}\n"));
-    }
-    Ok(crate::ui::render::get_agent(&note, &turns))
+/// Which turns of a session to read, as a `seq` range: `seq` is the session's own dense counter over
+/// its turns, so a range is turns n through m.
+#[derive(Default)]
+pub struct TurnRange {
+    /// First seq to read. Defaults to the session's start.
+    pub from: Option<i64>,
+    /// Last seq to read. Defaults to [`DEFAULT_SPAN`] turns from `from`.
+    pub to: Option<i64>,
 }
 
-/// The turns behind `get`: the named one plus those within `window` of it, each reassembled
-/// (blocks in order, splits de-overlapped). Returns the degradation note and the turns — empty
-/// when the turn isn't in the session; rendering is the caller's choice.
-pub async fn get_turns(
-    memory: Memory,
-    session_id: String,
-    turn_uuid: String,
-    window: i64,
-) -> Result<(String, Vec<Turn>)> {
+/// Turns a read covers when only a start is given. The CLI and the MCP server defer to it rather
+/// than carrying a default of their own.
+pub const DEFAULT_SPAN: i64 = 20;
+
+/// Read a range of a session's turns, rendered in the agent format.
+pub async fn get(memory: Memory, session_id: String, range: TurnRange) -> Result<String> {
+    let label = memory.label();
+    let (note, turns, total) = get_turns(memory, session_id.clone(), range).await?;
+    // A session with no rows is absent, not empty: only a range can come back empty.
+    if total == 0 {
+        bail!("no session {session_id} in {label}");
+    }
+    if turns.is_empty() {
+        return Ok(format!(
+            "{note}no turns in that range of session {session_id} (it holds {total})\n"
+        ));
+    }
+    Ok(crate::ui::render::get_agent(&note, &turns, total))
+}
+
+/// The turns behind `get`, each reassembled (blocks in order, splits de-overlapped). Returns the
+/// degradation note, the turns — empty when the range holds none — and the session's turn count.
+pub async fn get_turns(memory: Memory, session_id: String, range: TurnRange) -> Result<(String, Vec<Turn>, usize)> {
     let read = open_read(&memory).await?;
     let note = read.note.clone().unwrap_or_default();
     let ds = &read.ds;
@@ -621,14 +726,399 @@ pub async fn get_turns(
         }
     }
 
-    let center = match rows.iter().find(|r| r.1 == turn_uuid) {
-        Some(r) => r.0,
-        None => return Ok((note, Vec::new())),
-    };
-    Ok((
-        note,
-        turns_from_rows(rows.iter().filter(|r| (r.0 - center).abs() <= window)),
+    let total = rows.iter().map(|r| (r.0, &r.1)).collect::<HashSet<_>>().len();
+    let from = range
+        .from
+        .unwrap_or_else(|| rows.iter().map(|r| r.0).min().unwrap_or(0));
+    let to = range.to.unwrap_or(from + DEFAULT_SPAN - 1);
+    let kept = rows.iter().filter(|r| r.0 >= from && r.0 <= to);
+    Ok((note, turns_from_rows(kept), total))
+}
+
+/// What narrows a listing.
+#[derive(Default)]
+pub struct SessionFilter {
+    /// Keep sessions whose stored repo names this `owner/name`.
+    pub repo: Option<String>,
+    /// Keep sessions that started on or after this `YYYY-MM-DD`.
+    pub since: Option<String>,
+    /// Keep sessions that started on or before this `YYYY-MM-DD`.
+    pub until: Option<String>,
+    /// Rows to render; `None` takes [`SESSIONS_LIMIT`], and anything above [`SESSIONS_LIMIT_MAX`] is
+    /// clamped to it.
+    pub limit: Option<usize>,
+    /// Skip this many of the most recent matches before taking `limit`. Rows are ordered on
+    /// (timestamp, session id), so a given offset always names the same row.
+    pub offset: usize,
+}
+
+impl SessionFilter {
+    /// Whether `s` survives every filter that was given.
+    fn keeps(&self, s: &Session) -> bool {
+        // A session's repo field can name several checkouts; any of them counts. Empty means the
+        // checkout didn't resolve at index time, which no `--repo` can claim.
+        if let Some(repo) = &self.repo {
+            if !s.repo.split_whitespace().any(|i| i == repo) {
+                return false;
+            }
+        }
+        if let Some(since) = &self.since {
+            if s.date() < since.as_str() {
+                return false;
+            }
+        }
+        if let Some(until) = &self.until {
+            if s.date() > until.as_str() {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// The sessions of a memory that `filter` keeps, oldest first, rendered in the agent format. The
+/// prompts are read after the filter and the bound, so their cost follows the rows rendered rather
+/// than the size of the memory.
+pub async fn sessions(memory: Memory, filter: SessionFilter) -> Result<String> {
+    // Zero would render nothing, which is never what a caller wants.
+    if filter.limit == Some(0) {
+        bail!("a limit of 0 would list nothing — omit it for {SESSIONS_LIMIT} rows, raise it to at most {SESSIONS_LIMIT_MAX}, and walk the rest with --offset");
+    }
+    let read = open_read(&memory).await?;
+    let note = read.note.clone().unwrap_or_default();
+    let label = read.memory_label.clone().unwrap_or_else(|| memory.label());
+    let all = scan_sessions(&read.ds).await?;
+    if all.is_empty() {
+        return Ok(format!("{note}no sessions in {label}\n"));
+    }
+    let matched: Vec<Session> = all.into_iter().filter(|s| filter.keeps(s)).collect();
+    if matched.is_empty() {
+        return Ok(format!("{note}no session in {label} matches\n"));
+    }
+
+    // Oldest first is the reading order, but a page is taken from the recent end and `offset` walks
+    // back from there.
+    let total = matched.len();
+    let limit = filter.limit.unwrap_or(SESSIONS_LIMIT).min(SESSIONS_LIMIT_MAX);
+    let end = total.saturating_sub(filter.offset);
+    let mut shown: Vec<Session> = matched.into_iter().take(end).skip(end.saturating_sub(limit)).collect();
+    if shown.is_empty() {
+        return Ok(format!(
+            "{note}offset {} is past the {total} session(s) in {label}\n",
+            filter.offset
+        ));
+    }
+    let ids: Vec<String> = shown.iter().map(|s| s.session_id.clone()).collect();
+    let mut prompts = first_prompts(&read.ds, &ids).await?;
+    for s in shown.iter_mut() {
+        s.first_prompt = prompts.remove(&s.session_id).unwrap_or_default();
+    }
+    Ok(crate::ui::render::sessions_agent(&note, &shown, total, filter.offset))
+}
+
+/// The opening real prompt of each session in `ids` — its earliest user text block that isn't
+/// injected scaffolding, collapsed to one line. A session whose user turns are all scaffolding is
+/// absent from the map.
+async fn first_prompts(ds: &Dataset, ids: &[String]) -> Result<HashMap<String, String>> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let list: Vec<String> = ids.iter().map(|id| format!("'{}'", esc(id))).collect();
+    // Split 0 only: `is_scaffolding` reads a block's start, and a later split begins mid-text.
+    let filter = format!(
+        "session_id IN ({}) AND role = 'user' AND block_type = 'text' AND split_idx = 0",
+        list.join(", ")
+    );
+    let cols = ["session_id", "seq", "block_idx", "text"];
+    let batches = dataset::scan_rows(ds, &cols, Some(&filter), None).await?;
+    let mut best: HashMap<String, ((i64, i64), String)> = HashMap::new();
+    for batch in &batches {
+        let (sid, text) = (scol(batch, "session_id"), scol(batch, "text"));
+        let (seq, bi) = (icol(batch, "seq"), icol(batch, "block_idx"));
+        for i in 0..batch.num_rows() {
+            let body = sval(text, i);
+            if crate::commands::curate::is_scaffolding(&body) {
+                continue;
+            }
+            let key = (ival(seq, i), ival(bi, i));
+            match best.entry(sval(sid, i)) {
+                std::collections::hash_map::Entry::Occupied(mut e) if key < e.get().0 => {
+                    e.insert((key, body));
+                }
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert((key, body));
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(best.into_iter().map(|(id, (_, text))| (id, text)).collect())
+}
+
+/// Fold every row into its session: earliest timestamp, provenance, and distinct turn count. Reads
+/// metadata only — the opening prompts cost a `text` read, so they are fetched separately.
+async fn scan_sessions(ds: &Dataset) -> Result<Vec<Session>> {
+    let mut cols = vec!["session_id", "ts", "workdir", "turn_uuid", "seq"];
+    if has_harness_col(ds) {
+        cols.push("harness");
+    }
+    if has_col(ds, "repo") {
+        cols.push("repo");
+    }
+    let batches = dataset::scan_rows(ds, &cols, None, None).await?;
+
+    let mut by_id: HashMap<String, (Session, HashSet<(i64, String)>)> = HashMap::new();
+    for batch in &batches {
+        let (sid, ts, wd, turn, harness, repo) = (
+            scol(batch, "session_id"),
+            scol(batch, "ts"),
+            scol(batch, "workdir"),
+            scol(batch, "turn_uuid"),
+            scol(batch, "harness"),
+            scol(batch, "repo"),
+        );
+        let seq = icol(batch, "seq");
+        for i in 0..batch.num_rows() {
+            let id = sval(sid, i);
+            let (session, turns) = by_id.entry(id.clone()).or_insert_with(|| {
+                (
+                    Session {
+                        session_id: id,
+                        ts: sval(ts, i),
+                        workdir: sval(wd, i),
+                        harness: sval(harness, i),
+                        repo: sval(repo, i),
+                        turns: 0,
+                        first_prompt: String::new(),
+                    },
+                    HashSet::new(),
+                )
+            });
+            // Rows arrive in scan order, not time order, so the first one seen isn't the earliest.
+            let row_ts = sval(ts, i);
+            if row_ts < session.ts {
+                session.ts = row_ts;
+            }
+            turns.insert((ival(seq, i), sval(turn, i)));
+        }
+    }
+
+    let mut out: Vec<Session> = by_id
+        .into_values()
+        .map(|(session, turns)| Session {
+            turns: turns.len(),
+            ..session
+        })
+        .collect();
+    out.sort_by(|a, b| (&a.ts, &a.session_id).cmp(&(&b.ts, &b.session_id)));
+    Ok(out)
+}
+
+/// One block of a memory, its splits stitched back together, with the facets a `scan` hit prints.
+struct Block {
+    turn_uuid: String,
+    ts: String,
+    block_type: String,
+    seq: i64,
+    block_idx: i64,
+    text: String,
+}
+
+/// Blocks under assembly, keyed by (seq, turn_uuid, block_idx): each one's facets, and the split
+/// rows still to be stitched into its `text`. The seq is part of the key because a turn uuid can
+/// recur at different positions in a session — a compacted transcript replays turns — so two blocks
+/// that merely share a uuid are two blocks, not one.
+type BlockParts = HashMap<(i64, String, i64), (Block, Vec<(i64, String)>)>;
+
+/// Find `needle` in every block of one session, rendered in the agent format. Literal, never a
+/// pattern: a regex that silently matched nothing would read as a clearance.
+///
+/// A session that isn't in the memory is an error, not an empty result.
+pub async fn scan(
+    memory: Memory,
+    needle: String,
+    session_id: String,
+    from: Option<i64>,
+    to: Option<i64>,
+    ignore_case: bool,
+    context: usize,
+) -> Result<String> {
+    let read = open_read(&memory).await?;
+    let note = read.note.clone().unwrap_or_default();
+    let label = read.memory_label.clone().unwrap_or_else(|| memory.label());
+    let blocks = reassembled_blocks(&read.ds, &session_id, from, to).await?;
+    if blocks.is_empty() {
+        // A window that holds nothing is not the same as a session that isn't there: only the
+        // unwindowed case can conclude the session is absent.
+        if from.is_some() || to.is_some() {
+            let scanned = reassembled_blocks(&read.ds, &session_id, None, None).await?;
+            if !scanned.is_empty() {
+                return Ok(format!(
+                    "{note}no turns in that range of session {session_id} (it holds {})\n",
+                    scanned.iter().map(|b| b.seq).collect::<HashSet<_>>().len()
+                ));
+            }
+        }
+        bail!("no session {session_id} in {label}");
+    }
+    let result = find_needle(&blocks, &needle, &session_id, from, to, ignore_case);
+    Ok(crate::ui::render::scan_agent(
+        &note,
+        &memory_hint(read.memory_label.as_deref()),
+        &result,
+        context,
     ))
+}
+
+/// Every block of one session, splits de-overlapped. Matching raw chunks would miss a needle that
+/// straddles a split boundary, so the session's rows are bucketed by block before anything is
+/// matched. Ordered by position in the session. Empty when the session isn't in the memory.
+async fn reassembled_blocks(ds: &Dataset, session_id: &str, from: Option<i64>, to: Option<i64>) -> Result<Vec<Block>> {
+    let cols = ["turn_uuid", "seq", "ts", "block_type", "block_idx", "split_idx", "text"];
+    let mut filter = format!("session_id = '{}'", esc(session_id));
+    if let Some(from) = from {
+        filter.push_str(&format!(" AND seq >= {from}"));
+    }
+    if let Some(to) = to {
+        filter.push_str(&format!(" AND seq <= {to}"));
+    }
+    let batches = dataset::scan_rows(ds, &cols, Some(filter.as_str()), None).await?;
+
+    // Splits of one block can land in different batches, so every row is bucketed before any of it
+    // is stitched.
+    let mut blocks: BlockParts = HashMap::new();
+    for batch in &batches {
+        let (turn, ts, bt, text) = (
+            scol(batch, "turn_uuid"),
+            scol(batch, "ts"),
+            scol(batch, "block_type"),
+            scol(batch, "text"),
+        );
+        let (seq, bi, si) = (icol(batch, "seq"), icol(batch, "block_idx"), icol(batch, "split_idx"));
+        for i in 0..batch.num_rows() {
+            let key = (ival(seq, i), sval(turn, i), ival(bi, i));
+            let entry = blocks.entry(key).or_insert_with(|| {
+                (
+                    Block {
+                        turn_uuid: sval(turn, i),
+                        ts: sval(ts, i),
+                        block_type: sval(bt, i),
+                        seq: ival(seq, i),
+                        block_idx: ival(bi, i),
+                        text: String::new(),
+                    },
+                    Vec::new(),
+                )
+            });
+            entry.1.push((ival(si, i), sval(text, i)));
+        }
+    }
+    drop(batches);
+
+    let mut out: Vec<Block> = blocks
+        .into_values()
+        .map(|(mut block, mut splits)| {
+            splits.sort_by_key(|(si, _)| *si);
+            let mut pieces = splits.into_iter().map(|(_, t)| t);
+            block.text = pieces.next().unwrap_or_default();
+            for piece in pieces {
+                block.text = chunk::stitch(&block.text, &piece);
+            }
+            block
+        })
+        .collect();
+    out.sort_by_key(|b| (b.seq, b.block_idx));
+    Ok(out)
+}
+
+/// Every block of the scanned window carrying `needle`, in reading order, capped at
+/// [`SCAN_HIT_CAP`] — with the coordinate a continuing scan resumes from when the cap bites.
+fn find_needle(
+    blocks: &[Block],
+    needle: &str,
+    session_id: &str,
+    from: Option<i64>,
+    to: Option<i64>,
+    ignore_case: bool,
+) -> ScanResult {
+    let folded: Vec<char> = if ignore_case {
+        needle.chars().map(fold).collect()
+    } else {
+        Vec::new()
+    };
+    let mut hits: Vec<ScanHit> = Vec::new();
+    for b in blocks {
+        let at = if ignore_case {
+            find_folded(&b.text, &folded)
+        } else {
+            b.text.find(needle)
+        };
+        let Some(at) = at else { continue };
+        hits.push(ScanHit {
+            turn_uuid: b.turn_uuid.clone(),
+            ts: b.ts.clone(),
+            block_type: b.block_type.clone(),
+            seq: b.seq,
+            at,
+            len: needle.chars().count(),
+            text: b.text.clone(),
+        });
+    }
+
+    // Cut at a turn boundary. Hits are in reading order, so dropping the trailing hits that share
+    // the first dropped hit's turn leaves a page a caller can continue from exactly: everything
+    // rendered lies before that turn.
+    let found = hits.len();
+    let cut = hits.get(SCAN_HIT_CAP).map(|h| h.seq).map(|boundary| {
+        match hits[..SCAN_HIT_CAP].iter().rposition(|h| h.seq < boundary) {
+            Some(last) => {
+                hits.truncate(last + 1);
+                ScanCut::Resume(boundary)
+            }
+            // The cap falls inside a single turn's own matches: no boundary to cut at.
+            None => {
+                hits.truncate(SCAN_HIT_CAP);
+                ScanCut::Crowded(boundary)
+            }
+        }
+    });
+    ScanResult {
+        needle: needle.to_string(),
+        session_id: session_id.to_string(),
+        dropped: found - hits.len(),
+        hits,
+        cut,
+        from,
+        to,
+    }
+}
+
+/// Byte offset of the first case-folded occurrence of `needle` (already folded) in `text`. Folding
+/// is per char, so the offset stays an offset into the original.
+fn find_folded(text: &str, needle: &[char]) -> Option<usize> {
+    if needle.is_empty() {
+        return None;
+    }
+    let hay: Vec<(usize, char)> = text.char_indices().collect();
+    if hay.len() < needle.len() {
+        return None;
+    }
+    hay.windows(needle.len()).find_map(|w| {
+        w.iter()
+            .zip(needle)
+            .all(|(&(_, c), &want)| fold(c) == want)
+            .then_some(w[0].0)
+    })
+}
+
+/// Lowercase `c` when that is a single char. One whose lowercase is several (`İ`) stays as it is and
+/// simply won't fold-match.
+fn fold(c: char) -> char {
+    let mut it = c.to_lowercase();
+    match (it.next(), it.next()) {
+        (Some(one), None) => one,
+        _ => c,
+    }
 }
 
 /// Reassemble rows into turns: group by (seq, turn_uuid), order blocks by (block_idx, split_idx),
