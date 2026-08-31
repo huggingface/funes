@@ -192,7 +192,7 @@ impl Funes {
     }
 
     #[tool(
-        description = "Read a range of one session's turns, each reassembled into readable text. Turns are addressed by `seq`, the session's own dense counter over its turns; a recall hit's `→ get` line carries the session, the range around the hit, and the memory to pass. A session id on its own reads from the start. Every reply closes with the range it covered and the session's size."
+        description = "Read one session's turns as they were written — whole blocks, splits reassembled, nothing ranked or summarized. Typically the follow-up to a search verb: expand a result into the turns around it. Sessions run to thousands of turns: read the stretch you need, not the session."
     )]
     async fn get(
         &self,
