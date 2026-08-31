@@ -3,8 +3,9 @@
 //! pi has no MCP client, so funes ships a small pi extension (a bridge that
 //! spawns `funes mcp` over stdio — see `integrations/pi/`). The extension is
 //! embedded in the binary here, so once `funes` is on PATH a single
-//! `funes add pi` drops it where pi loads it — no separate package to fetch,
-//! and it always matches this binary's MCP surface. The install is always
+//! `funes add pi` drops it where pi loads it — no separate package to fetch.
+//! Which tools that gives pi is decided at runtime: the extension reads them
+//! from `funes mcp`. The install is always
 //! user-wide at a fixed `~/.funes/integrations/pi` — independent of the cwd and
 //! of `FUNES_HOME`, because pi records the install path permanently — and is
 //! registered with `pi install`. pi >= 0.80 no longer auto-loads
@@ -19,10 +20,10 @@ use std::process::Command;
 const INDEX_TS: &str = include_str!("../../integrations/pi/index.ts");
 const PACKAGE_JSON: &str = include_str!("../../integrations/pi/package.json");
 
-/// The pi version funes' extension API (`pi.extensions` manifest, `registerTool`, the
-/// provided `typebox`) was validated against — the `@earendil-works/pi-coding-agent` line
-/// (the older `@mariozechner` scope is deprecated). Older pi may not load the extension.
-const MIN_PI: (u32, u32, u32) = (0, 74, 2);
+/// The oldest pi [`install`] accepts, on the `@earendil-works/pi-coding-agent` line (the older
+/// `@mariozechner` scope is deprecated). The tools carry their MCP schemas, whose optional
+/// arguments are nullable unions — pi validates those correctly only from 0.84.0 on.
+const MIN_PI: (u32, u32, u32) = (0, 84, 0);
 
 /// Install the embedded pi extension at `~/.funes/integrations/pi` and register it with pi.
 /// That path is fixed — independent of the cwd and of `FUNES_HOME` — because pi records the
@@ -39,8 +40,8 @@ pub fn install(memory: Option<String>, force: bool) -> Result<()> {
     let dir = dir.to_string_lossy().into_owned();
     let install_command = shell_command("pi", &["install", &dir]);
 
-    // Probe pi: this confirms it's on PATH (else extract-and-instruct) and lets us flag a
-    // version older than the one the extension API was validated against.
+    // Probe pi: this confirms it's on PATH (else extract-and-instruct) and gates the install on a
+    // version the extension actually works on.
     let version = match Command::new("pi").arg("--version").output() {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
         Ok(_) => String::new(), // pi present but odd --version; proceed without a version
@@ -51,10 +52,15 @@ pub fn install(memory: Option<String>, force: bool) -> Result<()> {
         }
         Err(e) => return Err(anyhow::Error::new(e).context("running `pi --version`")),
     };
+    // Refused rather than warned: on an older pi the tools would register and then reject every
+    // call that omits an optional argument — a broken integration that looks installed.
     if matches!(parse_semver(&version), Some(v) if v < MIN_PI) {
-        eprintln!(
-            "warning: pi {version} is older than the tested {}.{}.{} — if `recall` doesn't appear in pi, run `pi update`.",
-            MIN_PI.0, MIN_PI.1, MIN_PI.2
+        anyhow::bail!(
+            "pi {version} is too old for funes — the tools need pi {}.{}.{} or newer to accept their arguments. \
+             Run `pi update`, then re-run this command. The extension is extracted at {dir} either way.",
+            MIN_PI.0,
+            MIN_PI.1,
+            MIN_PI.2
         );
     }
 
@@ -66,7 +72,7 @@ pub fn install(memory: Option<String>, force: bool) -> Result<()> {
                 format!(" {version}")
             };
             println!(
-                "installed funes recall into pi{v} — `recall`/`get` are now available (restart pi if it's running)."
+                "installed funes into pi{v} — the funes tools are now available (restart pi if it's running)."
             );
             Ok(())
         }
@@ -109,9 +115,9 @@ fn file_matches(path: &Path, want: &str) -> bool {
 }
 
 /// Write the embedded extension (index.ts + package.json) into `dir`, plus the `memory` file that
-/// binds this install's recall (the extension reads it at startup; `None` = local, so the file is
-/// absent). A copy that drifts from what this install would write — a newer embedded version, or a
-/// different bound memory — is refreshed; `force` rewrites even when it matches.
+/// binds this install's recall (`None` = local, so the file is absent). A copy that drifts from
+/// what this install would write — a newer embedded version, or a different bound memory — is refreshed; `force`
+/// rewrites even when it matches.
 fn extract(dir: &Path, memory: Option<&str>, force: bool) -> Result<()> {
     // Tidy up a pre-rename install: the extension now reads only the `memory` file, so a leftover
     // `store` binding is already inert — remove it anyway so nothing stale lingers on disk.
@@ -170,8 +176,8 @@ mod tests {
         assert_eq!(parse_semver(""), None);
 
         // the floor comparison the install warning hinges on
-        assert!(parse_semver("0.74.1").unwrap() < MIN_PI);
-        assert!(parse_semver("0.74.2").unwrap() >= MIN_PI);
+        assert!(parse_semver("0.83.9").unwrap() < MIN_PI);
+        assert!(parse_semver("0.84.0").unwrap() >= MIN_PI);
         assert!(parse_semver("1.0.0").unwrap() >= MIN_PI);
     }
 

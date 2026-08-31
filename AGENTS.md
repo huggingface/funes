@@ -23,6 +23,8 @@ that will drift.
 - **One agent format, everywhere.** The read commands print the same layout to a terminal and to a
   pipe, and the MCP tools return those strings verbatim. There is no human rendering and no
   `--format` switch to add one back.
+- **An integration never restates the tool surface.** The pi extension registers what `tools/list`
+  returns, so `src/commands/mcp.rs` stays the one place a verb is described to an agent.
 - **`--memory` precedence.** A tool call's own `memory` beats the server's (`funes mcp <memory>`),
   which beats the local memory. Same order for the CLI flag.
 - **The stored harness facet for Claude is `claude_code`.** `--harness` takes the CLI spellings
