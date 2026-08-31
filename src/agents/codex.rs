@@ -7,7 +7,7 @@
 //! overwrites it (idempotent).
 //!
 //! Codex lists a skill's name and description before any MCP tool is loaded, so funes installs one
-//! at `~/.agents/skills/funes/` to be recognizable as memory while its tools are still deferred.
+//! at `~/.codex/skills/funes/` to be recognizable as memory while its tools are still deferred.
 //!
 //! Automation lives in Codex's dedicated `~/.codex/hooks.json`: a `Stop` hook indexes each
 //! completed turn and, with a bound memory, `SessionEnd` publishes it — with `SessionStart`
@@ -120,13 +120,31 @@ pub fn uninstall() -> Result<()> {
     Ok(())
 }
 
-/// The funes-owned skill directory, fixed under `$HOME`: Codex reads user skills from there.
+/// The funes-owned skill directory, fixed under `$HOME`. Codex reads user skills from both
+/// `~/.codex/skills` and `~/.agents/skills`; the funes skill goes in the Codex-private one, because
+/// every harness implementing the skills standard reads the shared tree — a skill funes installs for
+/// one agent and removes with it has no business being another agent's too.
 fn skill_dir() -> Result<PathBuf> {
     let home = PathBuf::from(std::env::var_os("HOME").context("resolving $HOME for the skills dir")?);
-    Ok(home.join(".agents/skills/funes"))
+    Ok(home.join(".codex/skills/funes"))
+}
+
+/// The shared-tree copy an earlier install left behind, cleared on both install and uninstall so it
+/// stops reaching the agents that read that tree. Best-effort: it is gone on every host but the ones
+/// that ran that install.
+fn remove_shared_skill() -> Result<()> {
+    let home = PathBuf::from(std::env::var_os("HOME").context("resolving $HOME for the skills dir")?);
+    let dir = home.join(".agents/skills/funes");
+    remove_file(&dir.join("SKILL.md"))?;
+    remove_empty_dir(&dir)?;
+    for parent in dir.ancestors().skip(1).take(2) {
+        remove_empty_dir(parent)?;
+    }
+    Ok(())
 }
 
 fn install_skill() -> Result<()> {
+    remove_shared_skill()?;
     let dir = skill_dir()?;
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let path = dir.join("SKILL.md");
@@ -136,13 +154,11 @@ fn install_skill() -> Result<()> {
 }
 
 fn uninstall_skill() -> Result<()> {
+    remove_shared_skill()?;
     let dir = skill_dir()?;
     remove_file(&dir.join("SKILL.md"))?;
-    // The install creates the whole path, so prune back up while each level is left empty.
+    // Only `funes/` is funes's: `~/.codex/skills` is Codex's own root, and `~/.codex` its home.
     remove_empty_dir(&dir)?;
-    for parent in dir.ancestors().skip(1).take(2) {
-        remove_empty_dir(parent)?;
-    }
     Ok(())
 }
 

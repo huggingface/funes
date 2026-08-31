@@ -57,7 +57,8 @@ when they're indexed, and `funes index` re-embeds nothing already written. Keepi
 - **Codex** has no plugin system, so funes writes its hooks into `~/.codex/hooks.json` — a file
   dedicated to hooks, not your `config.toml`. The merge is append-or-replace keyed by funes's own
   scripts, so any hooks you added yourself are left untouched. It also installs a small skill at
-  `~/.agents/skills/funes/`, so Codex recognizes funes as memory before it loads any of its tools.
+  `~/.codex/skills/funes/` — Codex's own skills root, rather than the `~/.agents/skills` tree other
+  harnesses read — so Codex recognizes funes as memory before it loads any of its tools.
   **Codex runs a hook only once you have trusted it**, so after installing — and again after any
   change to a funes hook — run `/hooks` in Codex and review them; until then it skips them and
   nothing is indexed or published
