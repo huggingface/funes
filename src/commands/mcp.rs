@@ -212,7 +212,7 @@ impl Funes {
     }
 
     #[tool(
-        description = "List a memory's sessions, oldest first: date, harness, source repo (or workdir when the checkout did not resolve), turn count, full session id, and the prompt each session opened with. That prompt says what a session was for without reading any of it. Use it to size a memory, to pick the sessions a criterion is about, or to check whether a session you heard about by id is there at all. Narrow with `repo`, `since` and `until` rather than listing everything; the closing line states the full match count, so an elided row is never silently dropped."
+        description = "Enumerate a memory's sessions, oldest first. Metadata only — date, harness, repo, turn count, id, and the prompt each opened with, which is the ask a session started from, not what it became. Filter by repo or date to get the session ids the other verbs take; a whole memory can run to thousands of rows."
     )]
     async fn sessions(
         &self,
