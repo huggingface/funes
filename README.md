@@ -120,11 +120,11 @@ workflow-oriented [documentation index](docs/README.md) for the complete guides.
 | `funes add <agent> [memory]` / `funes remove <agent>` / `funes mcp [memory]` | [docs/add.md](docs/add.md) — supported agents, integration lifecycle, generic MCP clients, hooks, and memory binding |
 | `funes index [path]` | [docs/index.md](docs/index.md) — build/update the memory; sources, incremental, flags |
 | `funes recall "…"` / `funes get …` | [docs/recall.md](docs/recall.md) — recall passages and drill into them |
+| `funes sessions` / `funes sketch …` / `funes scan …` | [docs/sessions.md](docs/sessions.md) — list sessions, digest one, find a literal in one |
 | `funes ask <agent> "…"` | [docs/ask.md](docs/ask.md) — borrow an agent for a grounded answer |
 | `funes push <memory>` (+ `scrub`, `status`) | [docs/push.md](docs/push.md) — publish and share a memory |
 | `funes update` | [installation and updating](#get-funes) — replace the installed binary with a verified release |
 
-The stable agent-facing output contract for the read commands is specified in [AGENTS.md](AGENTS.md).
 The per-turn indexing and session-boundary publishing the hooks run are detailed in
 [docs/automation.md](docs/automation.md).
 
@@ -144,6 +144,7 @@ any cited turn in full.
 
 - [docs/index.md](docs/index.md) — the indexing pipeline, tiers, and incremental behavior.
 - [docs/recall.md](docs/recall.md) — retrieval, drill-down with `get`, and reading a shared memory.
+- [docs/sessions.md](docs/sessions.md) — browsing a memory by session: `sessions`, `sketch`, `scan`.
 - [docs/ask.md](docs/ask.md) — borrow an agent for a grounded answer, nothing installed.
 - [docs/automation.md](docs/automation.md) — the per-turn hooks that keep it all fresh.
 

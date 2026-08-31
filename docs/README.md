@@ -10,6 +10,8 @@ This directory contains the user guides and design notes for
 - [Building the memory](index.md) — index session transcripts and understand the indexing
   pipeline.
 - [Recalling](recall.md) — retrieve passages and drill into their surrounding turns.
+- [Browsing sessions](sessions.md) — list what a memory holds, digest a session, scan one for a
+  literal.
 - [Asking](ask.md) — borrow a coding agent for one answer grounded in a memory.
 
 ## Sharing and automation
@@ -28,5 +30,5 @@ This directory contains the user guides and design notes for
 - [Storage growth](storage.md) — measured storage costs and growth estimates.
 - [Memory-tool landscape](landscape.md) — a comparison with other agent-memory tools.
 
-The stable agent-facing contract for `recall`, `get`, `ask`, `status`, and the MCP tools is defined
-in [`AGENTS.md`](../AGENTS.md).
+The read commands print one stable layout everywhere, and the MCP tools return those same strings
+verbatim. [`AGENTS.md`](../AGENTS.md) holds the conventions for working on the repo itself.

@@ -1,10 +1,7 @@
-//! `funes sketch`: what a session contains, without being told what to look for.
+//! `funes sketch`: what a session contains.
 //!
-//! Selects the passages most distinctive within one session, from the vectors already stored. That
-//! is the read for judging a session against criteria that cannot be turned into a query, because
-//! what answers them is usually the material that does not belong in the session.
-//!
-//! It samples, so it never establishes absence.
+//! Selects the passages most distinctive within one session, from the vectors already stored,
+//! always keeping the opening ask and the last word of the range digested.
 
 use crate::memory::Memory;
 use crate::session_sketch::{self, SketchOptions};

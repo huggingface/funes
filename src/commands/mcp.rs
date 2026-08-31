@@ -158,7 +158,7 @@ impl Funes {
     }
 
     #[tool(
-        description = "Recall decisions, rationale, and context from the user's past AI agent sessions. Returns ranked passages with provenance (timestamp, session, block type) plus surrounding neighbor chunks. Each hit carries a `→ get <session_id> --from <seq> --to <seq>` line — call `get` with exactly those to read the full surrounding turns. Use when the user references earlier work, or when you lack context that may exist in a prior session. Recall subject-matter, not only decisions: before re-deriving how an API, library, or system behaves — or anything a past session already investigated — query the topic itself; research subagents accumulate exactly these findings and recall surfaces them, often as the top hit, so check before re-investigating from scratch. Also recall before asserting the history of anything — that it was never built, was dropped, is out of scope, or was never discussed; a confident claim about a past decision is the cue you're missing context this holds. To recall from a different memory than the server's default (e.g. a shared `<org>/<repo>` dataset on the HF Hub), pass `memory` — no CLI needed."
+        description = "Semantic search over the user's past AI agent sessions: describe what you are after, get back the verbatim passages — what was decided, tried, measured or investigated. Call it when they refer to earlier work, or when you are about to re-derive something a session may already have settled. Call it too before claiming that something was never built, was dropped, or was never discussed: the code cannot show that, only the sessions can. Ranked top-k, so it gives you a foothold on a topic, not every session touching it."
     )]
     async fn recall(
         &self,
@@ -192,7 +192,7 @@ impl Funes {
     }
 
     #[tool(
-        description = "Read a range of one session's turns, each reassembled into readable text. Turns are addressed by `seq`, the session's own dense counter over its turns; a recall hit's `→ get` line carries the session, the range around the hit, and the memory to pass. A session id on its own reads from the start. Every reply closes with the range it covered and the session's size."
+        description = "Read one session's turns as they were written — whole blocks, splits reassembled, nothing ranked or summarized. Typically the follow-up to a search verb: expand a result into the turns around it. Sessions run to thousands of turns: read the stretch you need, not the session."
     )]
     async fn get(
         &self,
@@ -212,7 +212,7 @@ impl Funes {
     }
 
     #[tool(
-        description = "List a memory's sessions, oldest first: date, harness, source repo (or workdir when the checkout did not resolve), turn count, full session id, and the prompt each session opened with. That prompt says what a session was for without reading any of it. Use it to size a memory, to pick the sessions a criterion is about, or to check whether a session you heard about by id is there at all. Narrow with `repo`, `since` and `until` rather than listing everything; the closing line states the full match count, so an elided row is never silently dropped."
+        description = "Enumerate a memory's sessions, oldest first. Metadata only — date, harness, repo, turn count, id, and the prompt each opened with, which is the ask a session started from, not what it became. Filter by repo or date to get the session ids the other verbs take; a whole memory can run to thousands of rows."
     )]
     async fn sessions(
         &self,
@@ -240,7 +240,7 @@ impl Funes {
     }
 
     #[tool(
-        description = "Find a literal string in every block of one session — exhaustive and unranked. Use it to screen a session against a criterion, or to locate where a term you already expect actually occurs. Splits are stitched back together first, so a needle straddling a chunk boundary is still found, and each hit carries a `→ get` line to read the turn around it. Scanning is per session: name the session with `session_id`. A needle that returns nothing is absent from that session and says nothing about any other; absence clears only the exact spelling passed, so use `ignore_case` for case variation. Listing stops at a cap and names the `from` to continue at; `from`/`to` also scan just a stretch of a session, and then a zero clears only that stretch."
+        description = "Find every occurrence of a literal string in one session — exhaustive, unranked, in reading order. For when you already know the wording and want where it occurs, rather than what a topic is about. Scope is one session and one spelling: a zero result clears only that."
     )]
     async fn scan(
         &self,
@@ -272,7 +272,7 @@ impl Funes {
     }
 
     #[tool(
-        description = "A query-independent digest of one session: the passages most distinctive *within* it, chosen from the stored embeddings with no query at all. This is what tells you what a session contains when you do not already know what to look for — use it to judge a session against open-ended criteria: is this worth publishing, does it reveal anything internal, what was actually accomplished here. What answers such a question is usually the material that does not belong in the session, which a distinctiveness selector surfaces and a summary drops. DO NOT READ THE WHOLE SESSION INSTEAD: sessions run to thousands of turns, and every place a sketch shows carries a `→ get` line for the surrounding turns verbatim. `units` sets how many places, `max_chars` the reply budget, `from`/`to` digest one stretch of a long session; every clamp and elision is stated. A sketch samples: it shows what it selected, so it can never show that something is absent."
+        description = "What one session was about, worked on, and ended up at: the passages most distinctive within it, verbatim, always including its opening ask and its last word. Takes a session id; there is no query. Enough to tell the user what a session was, in one call; not a way to find a particular thing in it."
     )]
     async fn sketch(
         &self,
@@ -293,7 +293,7 @@ impl Funes {
     }
 
     #[tool(
-        description = "Show funes memory status: chunk and session counts, pending local indexing, and — for a remote memory — last push plus this host's pending push coverage."
+        description = "Health and size of a memory: how much is indexed, what is still pending, and for a remote what this host has yet to push. Call it when a read comes back empty or thinner than expected — it says whether the memory is the problem rather than the call."
     )]
     async fn status(&self, Parameters(StatusRequest { memory }): Parameters<StatusRequest>) -> String {
         // No update check here: it needs the network, and the "update available" notice belongs
@@ -313,18 +313,6 @@ impl ServerHandler for Funes {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(server_info)
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
-            .with_instructions(
-                "Recall over the user's past AI agent sessions (hybrid search + cross-encoder \
-                 rerank + recency). Call `recall` with a natural-language query when you need prior \
-                 decisions, rationale, or context — and before asserting the history of anything \
-                 (that it was never built, was dropped, or is out of scope): a confident claim \
-                 about a past decision is the cue to recall first. Recall subject-matter too, not \
-                 only decisions: before re-deriving how an API, library, or system behaves — or \
-                 anything a prior session (often a research subagent) investigated — query the \
-                 topic itself; recall surfaces those findings. Drill into a hit with `get`. Both \
-                 take an optional `memory` to read a different memory for one call."
-                    .to_string(),
-            )
     }
 }
 

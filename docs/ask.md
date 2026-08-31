@@ -55,4 +55,3 @@ child's exit code reported.
 
 - [recall.md](recall.md) — the ranked passages behind an answer, and `get` to read a cited turn.
 - [add.md](add.md) — wire an agent permanently instead of borrowing it per question.
-- [AGENTS.md](../AGENTS.md) — the exact `ask` contract.

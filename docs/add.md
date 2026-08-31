@@ -68,7 +68,7 @@ server exposes:
 | `get` | Reassemble a hit and its surrounding turns. | `session_id`, `turn_uuid`, optional `window`, `memory` |
 | `status` | Inspect memory and synchronization state. | optional `memory` |
 
-Every tool returns the stable agent-format strings defined in [`AGENTS.md`](../AGENTS.md). A
+Every tool returns the same stable strings the CLI prints. A
 tool-call `memory` overrides the memory bound when the server started; with neither, the server reads
 the local memory. `mcp` is read-only: indexing and publishing remain separate commands or automation
 installed by `funes add`.
