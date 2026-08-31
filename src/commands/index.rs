@@ -154,43 +154,56 @@ fn unit_current(entry: Option<&UnitState>, sig: &str, target: Tier) -> bool {
     entry.is_some_and(|e| e.sig == sig && e.level >= target)
 }
 
-/// Lightweight coverage snapshot written by indexing runs for `status` to read without walking
-/// the transcript trees again.
+/// Lightweight coverage snapshot written by indexing runs for `status` to read without walking the
+/// transcript trees again. Pending unit keys are bucketed by source: a run sweeps only the sources
+/// it was pointed at, so buckets it didn't touch carry over untouched while the ones it swept are
+/// rebuilt from that sweep.
 #[derive(Serialize, Deserialize, Default)]
 struct IndexCoverageSnapshot {
-    pending: HashSet<String>,
+    pending: HashMap<String, HashSet<String>>,
 }
 
 pub(crate) struct IndexCoverage {
     pub pending: usize,
 }
 
+/// Fold this run's units — each tagged with its source's index into `buckets` — into `snapshot`.
+///
+/// An exhaustive sweep of a source is the whole truth for its bucket, so the bucket is rebuilt from
+/// it. That is what retires a unit which has since disappeared: a deleted worktree's transcripts, a
+/// hermes session dropped from `state.db`. Nothing else ever would — a vanished unit is simply
+/// never enumerated again, so a carried-over key would sit pending forever.
 fn update_index_coverage<'a>(
     mut snapshot: IndexCoverageSnapshot,
-    units: impl IntoIterator<Item = &'a source::Unit>,
+    buckets: &[Option<source::CoverageBucket>],
+    units: impl IntoIterator<Item = (usize, &'a source::Unit)>,
     state: &HashMap<String, UnitState>,
 ) -> IndexCoverageSnapshot {
     let target = *Tier::ALL.iter().max().expect("Tier::ALL is non-empty");
-    for unit in units {
-        // Native sessions have incremental signatures. Bulk parquet and remote imports do not
-        // belong in the local-session status snapshot (and unsigned units never become current).
-        let Some(sig) = &unit.signature else {
+    for bucket in buckets.iter().flatten().filter(|b| b.exhaustive) {
+        snapshot.pending.remove(&bucket.id);
+    }
+    for (src, unit) in units {
+        // Skipped: a source that stays out of the snapshot (a bulk or remote import), and a unit
+        // whose stamp couldn't be read — unsigned units are never recorded, so they never clear.
+        let (Some(bucket), Some(sig)) = (&buckets[src], &unit.signature) else {
             continue;
         };
-        if unit.key.starts_with("hf://") {
-            continue;
-        }
+        let pending = snapshot.pending.entry(bucket.id.clone()).or_default();
         if unit_current(state.get(&unit.key), sig, target) {
-            snapshot.pending.remove(&unit.key);
+            pending.remove(&unit.key);
         } else {
-            snapshot.pending.insert(unit.key.clone());
+            pending.insert(unit.key.clone());
         }
     }
+    // Don't keep an emptied bucket: a fully indexed root, or one no longer indexed at all.
+    snapshot.pending.retain(|_, keys| !keys.is_empty());
     snapshot
 }
 
 fn write_index_coverage(
     path: &Path,
+    buckets: &[Option<source::CoverageBucket>],
     units: &[(usize, source::Unit)],
     state: &HashMap<String, UnitState>,
 ) -> Result<()> {
@@ -198,10 +211,7 @@ fn write_index_coverage(
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default();
-    let mut snapshot = update_index_coverage(snapshot, units.iter().map(|(_, unit)| unit), state);
-    // A carried-over key whose transcript is gone — a deleted worktree's project dir — is never
-    // enumerated again, so nothing else would ever clear it.
-    snapshot.pending.retain(|key| Path::new(key).exists());
+    let snapshot = update_index_coverage(snapshot, buckets, units.iter().map(|(i, unit)| (*i, unit)), state);
     std::fs::write(path, serde_json::to_string(&snapshot)?)
         .with_context(|| format!("writing index coverage at {}", path.display()))
 }
@@ -214,7 +224,9 @@ pub(crate) fn local_index_coverage() -> Option<IndexCoverage> {
         .ok()
         .and_then(|text| serde_json::from_str::<IndexCoverageSnapshot>(&text).ok())
         .map(|snapshot| IndexCoverage {
-            pending: snapshot.pending.len(),
+            // Union, not a sum of bucket sizes: nested roots swept separately list shared
+            // transcripts in both their buckets.
+            pending: snapshot.pending.values().flatten().collect::<HashSet<_>>().len(),
         })
 }
 
@@ -235,6 +247,8 @@ struct Indexer {
     state: HashMap<String, UnitState>,
     state_path: PathBuf,
     coverage_path: PathBuf,
+    /// Each source's coverage bucket, indexed like `sources`.
+    coverage_buckets: Vec<Option<source::CoverageBucket>>,
     /// The memory didn't exist when this run opened it — the first index.
     first_index: bool,
     /// A human is watching (stdin is a terminal) — probed once here, so every prompt-or-proceed
@@ -346,7 +360,8 @@ impl Indexer {
         };
 
         let units = collect_units(&sources)?;
-        write_index_coverage(&coverage_path, &units, &state)?;
+        let coverage_buckets: Vec<_> = sources.iter().map(|src| src.coverage()).collect();
+        write_index_coverage(&coverage_path, &coverage_buckets, &units, &state)?;
 
         Ok(Indexer {
             uri,
@@ -359,6 +374,7 @@ impl Indexer {
             state,
             state_path,
             coverage_path,
+            coverage_buckets,
             first_index,
             interactive,
             work_remaining: false,
@@ -474,7 +490,7 @@ impl Indexer {
                 },
             );
             std::fs::write(&self.state_path, serde_json::to_string_pretty(&self.state)?)?;
-            write_index_coverage(&self.coverage_path, &self.units, &self.state)?;
+            write_index_coverage(&self.coverage_path, &self.coverage_buckets, &self.units, &self.state)?;
         }
         // Count a unit's sessions once per run — later tier passes over it only add chunks.
         if self.counted.insert(i) {
@@ -957,20 +973,36 @@ mod tests {
         assert!(!unit_current(None, "10:20", Tier::Text));
     }
 
-    #[test]
-    fn index_coverage_merges_native_pending_units_across_sweeps() {
-        let unit = |key: &str, sig: Option<&str>| source::Unit {
+    fn unit(key: &str, sig: Option<&str>) -> source::Unit {
+        source::Unit {
             key: key.to_string(),
             signature: sig.map(str::to_string),
             is_subagent: false,
-        };
-        let first = vec![
-            unit("current", Some("1")),
-            unit("partial", Some("2")),
-            unit("stale", Some("new")),
-            unit("new", Some("4")),
-            unit("unsigned", None),
-            unit("hf://datasets/acme/traces/shard.parquet", Some("oid")),
+        }
+    }
+
+    fn bucket(id: &str, exhaustive: bool) -> Option<source::CoverageBucket> {
+        Some(source::CoverageBucket {
+            id: id.to_string(),
+            exhaustive,
+        })
+    }
+
+    fn keys(keys: &[&str]) -> HashSet<String> {
+        keys.iter().copied().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn index_coverage_merges_native_pending_units_across_sweeps() {
+        // Source 0 is a transcript tree; source 1 is a Hub import, which stays out of the snapshot.
+        let buckets = [bucket("/claude/projects", true), None];
+        let first = [
+            (0, unit("current", Some("1"))),
+            (0, unit("partial", Some("2"))),
+            (0, unit("stale", Some("new"))),
+            (0, unit("new", Some("4"))),
+            (0, unit("unsigned", None)),
+            (1, unit("hf://datasets/acme/traces/shard.parquet", Some("oid"))),
         ];
         let state = HashMap::from([
             (
@@ -995,37 +1027,58 @@ mod tests {
                 },
             ),
         ]);
-        let snapshot = update_index_coverage(IndexCoverageSnapshot::default(), &first, &state);
+        let snapshot = update_index_coverage(
+            IndexCoverageSnapshot::default(),
+            &buckets,
+            first.iter().map(|(i, u)| (*i, u)),
+            &state,
+        );
         assert_eq!(
             snapshot.pending,
-            ["partial", "stale", "new"].into_iter().map(str::to_string).collect()
+            HashMap::from([("/claude/projects".to_string(), keys(&["partial", "stale", "new"]))])
         );
 
-        let second = [unit("other-harness", Some("5"))];
-        let snapshot = update_index_coverage(snapshot, &second, &state);
-        assert!(snapshot.pending.contains("partial"));
-        assert!(snapshot.pending.contains("other-harness"));
+        // A sweep of another harness leaves the tree's bucket alone — nothing about it was observed.
+        let hermes = [bucket("/hermes/state.db", true)];
+        let second = [(0, unit("20260507_180845_20f0ac", Some("5")))];
+        let snapshot = update_index_coverage(snapshot, &hermes, second.iter().map(|(i, u)| (*i, u)), &state);
+        assert!(snapshot.pending["/claude/projects"].contains("partial"));
+        assert!(snapshot.pending["/hermes/state.db"].contains("20260507_180845_20f0ac"));
     }
 
     #[test]
-    fn index_coverage_drops_pending_units_whose_source_is_gone() {
+    fn index_coverage_drops_pending_units_an_exhaustive_sweep_no_longer_lists() {
         let dir = tempfile::tempdir().unwrap();
-        let live = dir.path().join("live.jsonl");
-        std::fs::write(&live, "{}").unwrap();
-        let gone = dir.path().join("gone.jsonl");
-        let key = |p: &Path| p.to_str().unwrap().to_string();
-
         let coverage = dir.path().join("index-coverage.json");
+        // hermes keys units by session id, so no filesystem probe could tell that one is gone.
         let carried = IndexCoverageSnapshot {
-            pending: [key(&live), key(&gone)].into_iter().collect(),
+            pending: HashMap::from([(
+                "/hermes/state.db".to_string(),
+                keys(&["20260507_180845_20f0ac", "20260507_182214_06fc70"]),
+            )]),
         };
         std::fs::write(&coverage, serde_json::to_string(&carried).unwrap()).unwrap();
 
-        write_index_coverage(&coverage, &[], &HashMap::new()).unwrap();
+        // An exhaustive sweep lists only the second session: the first has left the DB.
+        let buckets = [bucket("/hermes/state.db", true)];
+        let units = [(0, unit("20260507_182214_06fc70", Some("5")))];
+        write_index_coverage(&coverage, &buckets, &units, &HashMap::new()).unwrap();
 
         let snapshot: IndexCoverageSnapshot =
             serde_json::from_str(&std::fs::read_to_string(&coverage).unwrap()).unwrap();
-        assert_eq!(snapshot.pending, [key(&live)].into_iter().collect());
+        assert_eq!(snapshot.pending["/hermes/state.db"], keys(&["20260507_182214_06fc70"]));
+    }
+
+    #[test]
+    fn index_coverage_keeps_pending_units_a_limited_sweep_never_listed() {
+        let carried = IndexCoverageSnapshot {
+            pending: HashMap::from([("/claude/projects".to_string(), keys(&["recent", "older"]))]),
+        };
+        // `--limit` truncates enumeration, so "older" is unlisted but not gone.
+        let buckets = [bucket("/claude/projects", false)];
+        let units = [(0, unit("recent", Some("1")))];
+        let snapshot = update_index_coverage(carried, &buckets, units.iter().map(|(i, u)| (*i, u)), &HashMap::new());
+        assert_eq!(snapshot.pending["/claude/projects"], keys(&["recent", "older"]));
     }
 
     #[test]

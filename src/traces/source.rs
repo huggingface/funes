@@ -22,14 +22,26 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-/// One artifact a source indexes as a unit. `key` is its `state.json` identity (the path). A
-/// `Some` `signature` is a cheap change-stamp: the unit is skipped when it still matches what was
-/// recorded, and recorded after a successful index. `None` means "always read, never recorded" —
-/// for a bulk source whose idempotency comes from chunk-id dedup, not file stats.
+/// One artifact a source indexes as a unit. `key` is its `state.json` identity, unique across
+/// sources but *not* a uniform namespace: a transcript path for the file-per-session sources, a
+/// bare `messages.session_id` for hermes, an `hf://` uri for a Hub shard. A `Some` `signature` is a
+/// cheap change-stamp: the unit is skipped when it still matches what was recorded, and recorded
+/// after a successful index. `None` means "always read, never recorded" — for a bulk source whose
+/// idempotency comes from chunk-id dedup, not file stats.
 pub struct Unit {
     pub key: String,
     pub signature: Option<String>,
     pub is_subagent: bool,
+}
+
+/// A source's slot in the coverage snapshot that `status` reads: which bucket its pending units
+/// belong to, and whether this enumeration listed every unit the source holds.
+pub struct CoverageBucket {
+    /// Stable id — the source root — so the same tree or DB keeps its bucket across runs.
+    pub id: String,
+    /// `units()` listed everything the source holds, so the sweep is the whole truth for this
+    /// bucket and may rebuild it. A `--limit`ed sweep saw only a subset, and merges instead.
+    pub exhaustive: bool,
 }
 
 /// A source of agent-session transcripts. `units()` is cheap (enumerate + stat, no parsing);
@@ -49,6 +61,14 @@ pub trait TraceSource {
     /// dataset) returns `true`, so a corrupt file is a hard failure rather than a silent skip.
     fn fatal_on_read_error(&self) -> bool {
         false
+    }
+
+    /// This source's bucket in the local-session coverage snapshot, or `None` to stay out of it — a
+    /// bulk parquet or Hub import is not local session backlog for `status` to report. Bucketing by
+    /// source is what lets a sweep tell "this unit is gone" from "this unit belongs to a source
+    /// this run didn't touch"; the keys can't say, since they aren't all paths to probe for.
+    fn coverage(&self) -> Option<CoverageBucket> {
+        None
     }
 }
 
@@ -166,6 +186,13 @@ impl TraceSource for JsonlTree {
         Ok(units)
     }
 
+    fn coverage(&self) -> Option<CoverageBucket> {
+        Some(CoverageBucket {
+            id: self.root.to_string_lossy().into_owned(),
+            exhaustive: self.limit.is_none(),
+        })
+    }
+
     fn read(&self, unit: &Unit) -> Result<Vec<Turn>> {
         let p = Path::new(&unit.key);
         // Each parser derives the workdir facet from the session's recorded cwd; the path-derived
@@ -211,6 +238,13 @@ impl TraceSource for HermesDb {
                 is_subagent: false,
             })
             .collect())
+    }
+
+    fn coverage(&self) -> Option<CoverageBucket> {
+        Some(CoverageBucket {
+            id: self.path.to_string_lossy().into_owned(),
+            exhaustive: self.limit.is_none(),
+        })
     }
 
     fn read(&self, unit: &Unit) -> Result<Vec<Turn>> {
