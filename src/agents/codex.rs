@@ -7,11 +7,13 @@
 //! overwrites it (idempotent).
 //!
 //! Automation lives in Codex's dedicated `~/.codex/hooks.json`: a `Stop` hook indexes each
-//! completed turn and, with a bound memory, `SessionStart` publishes it. funes merges only its own
-//! hook groups and installs the scripts under `~/.codex/hooks/`.
+//! completed turn and, with a bound memory, `SessionEnd` publishes it — with `SessionStart`
+//! catching up whatever a missed end left behind. funes merges only its own hook groups and
+//! installs the scripts under `~/.codex/hooks/`.
 
 use super::hooks;
 use super::{remove_empty_dir, remove_file, run_remove, shell_command, RemoveCommand};
+use crate::commands::update::parse_semver;
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -19,6 +21,10 @@ use std::process::Command;
 
 const INDEX_STATUS: &str = "Indexing turn into funes memory";
 const PUSH_STATUS: &str = "Publishing funes memory";
+
+/// The gate for publishing: without a `SessionEnd` event the hook never fires. Codex grew that
+/// event in 0.145.0; this is the release the integration was verified against.
+const MIN_CODEX: (u32, u32, u32) = (0, 151, 0);
 
 /// The `codex mcp add` argument vector registering `funes mcp [memory]`. A non-local `memory` is
 /// appended as `funes mcp <memory>`, pinning this agent's recall to it.
@@ -34,6 +40,18 @@ fn mcp_add_args(funes: &str, memory: Option<&str>) -> Vec<String> {
 }
 
 pub fn install(memory: Option<String>) -> Result<()> {
+    // Only publishing needs `SessionEnd`, and the check precedes every write.
+    if memory.is_some() {
+        if let Some((version, parsed)) = codex_version()? {
+            if parsed < MIN_CODEX {
+                let (major, minor, patch) = MIN_CODEX;
+                bail!(
+                    "codex {version} has no SessionEnd hook, so a bound memory would never publish — upgrade to {major}.{minor}.{patch} or later, or run `funes add codex` with no memory to index locally."
+                );
+            }
+        }
+    }
+
     // Hooks are files + a hooks.json edit, so they land even when the MCP registration below can't
     // reach the Codex CLI.
     install_hooks(memory.as_deref())?;
@@ -91,6 +109,24 @@ pub fn uninstall() -> Result<()> {
     Ok(())
 }
 
+/// The installed Codex's `--version`, printed and parsed. `None` when Codex is absent or the line
+/// is unparseable, which leaves the install to proceed as the registration does.
+fn codex_version() -> Result<Option<(String, (u32, u32, u32))>> {
+    let out = match Command::new("codex").arg("--version").output() {
+        Ok(o) if o.status.success() => o,
+        Ok(_) => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(anyhow::Error::new(e).context("running `codex --version`")),
+    };
+    let printed = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    Ok(parse_version_line(&printed).map(|parsed| (printed, parsed)))
+}
+
+/// Codex prints `codex-cli 0.151.0`, so the version is a later token, not the first.
+fn parse_version_line(printed: &str) -> Option<(u32, u32, u32)> {
+    printed.split_whitespace().find_map(parse_semver)
+}
+
 fn desired_hooks(hooks_dir: &Path, memory: Option<&str>) -> Vec<hooks::Hook> {
     let mut hooks = vec![hooks::Hook {
         event: "Stop",
@@ -98,9 +134,15 @@ fn desired_hooks(hooks_dir: &Path, memory: Option<&str>) -> Vec<hooks::Hook> {
         status: INDEX_STATUS,
     }];
     if let Some(memory) = memory {
+        let command = hooks::command(&hooks_dir.join("funes-push.sh").display().to_string(), memory);
+        hooks.push(hooks::Hook {
+            event: "SessionEnd",
+            command: command.clone(),
+            status: PUSH_STATUS,
+        });
         hooks.push(hooks::Hook {
             event: "SessionStart",
-            command: hooks::command(&hooks_dir.join("funes-push.sh").display().to_string(), memory),
+            command,
             status: PUSH_STATUS,
         });
     }
@@ -195,7 +237,7 @@ fn uninstall_hooks() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{desired_hooks, mcp_add_args};
+    use super::{desired_hooks, mcp_add_args, parse_version_line, MIN_CODEX};
     use std::path::Path;
 
     #[test]
@@ -211,6 +253,13 @@ mod tests {
     }
 
     #[test]
+    fn reads_the_version_out_of_codexs_own_line() {
+        assert_eq!(parse_version_line("codex-cli 0.151.0"), Some((0, 151, 0)));
+        assert!(parse_version_line("codex-cli 0.150.9").unwrap() < MIN_CODEX);
+        assert_eq!(parse_version_line("codex-cli"), None);
+    }
+
+    #[test]
     fn hooks_use_codex_paths_and_available_events() {
         let local = desired_hooks(Path::new("/h/hooks"), None);
         assert_eq!(local.len(), 1);
@@ -218,9 +267,12 @@ mod tests {
         assert!(local[0].command.contains("/h/hooks/funes-index.sh"));
 
         let remote = desired_hooks(Path::new("/h/hooks"), Some("acme/kb"));
-        assert_eq!(remote.len(), 2);
+        assert_eq!(remote.len(), 3);
+        assert!(remote.iter().any(|hook| hook.event == "SessionEnd"));
         assert!(remote.iter().any(|hook| hook.event == "SessionStart"));
-        assert!(!remote.iter().any(|hook| hook.event == "SessionEnd"));
-        assert!(remote[1].command.contains("acme/kb"));
+        assert!(remote
+            .iter()
+            .filter(|hook| hook.event != "Stop")
+            .all(|hook| hook.command.contains("acme/kb")));
     }
 }
