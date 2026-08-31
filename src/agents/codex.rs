@@ -6,6 +6,9 @@
 //! user config (`~/.codex/config.toml`); it has no project scope, and re-adding an existing server
 //! overwrites it (idempotent).
 //!
+//! Codex lists a skill's name and description before any MCP tool is loaded, so funes installs one
+//! at `~/.agents/skills/funes/` to be recognizable as memory while its tools are still deferred.
+//!
 //! Automation lives in Codex's dedicated `~/.codex/hooks.json`: a `Stop` hook indexes each
 //! completed turn and, with a bound memory, `SessionEnd` publishes it — with `SessionStart`
 //! catching up whatever a missed end left behind. funes merges only its own hook groups and
@@ -18,6 +21,8 @@ use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+const SKILL_MD: &str = include_str!("../../integrations/codex/SKILL.md");
 
 const INDEX_STATUS: &str = "Indexing turn into funes memory";
 const PUSH_STATUS: &str = "Publishing funes memory";
@@ -42,8 +47,8 @@ fn mcp_add_args(funes: &str, memory: Option<&str>) -> Vec<String> {
 pub fn install(memory: Option<String>) -> Result<()> {
     // Only publishing needs `SessionEnd`, and the check precedes every write.
     if memory.is_some() {
-        if let Some((version, parsed)) = codex_version()? {
-            if parsed < MIN_CODEX {
+        if let Some(version) = codex_version()? {
+            if matches!(parse_version_line(&version), Some(v) if v < MIN_CODEX) {
                 let (major, minor, patch) = MIN_CODEX;
                 bail!(
                     "codex {version} has no SessionEnd hook, so a bound memory would never publish — upgrade to {major}.{minor}.{patch} or later, or run `funes add codex` with no memory to index locally."
@@ -52,8 +57,9 @@ pub fn install(memory: Option<String>) -> Result<()> {
         }
     }
 
-    // Hooks are files + a hooks.json edit, so they land even when the MCP registration below can't
-    // reach the Codex CLI.
+    // The skill and the hooks are plain files, so they land even when the MCP registration below
+    // can't reach the Codex CLI.
+    install_skill()?;
     install_hooks(memory.as_deref())?;
 
     let funes = std::env::var("FUNES_BIN").unwrap_or_else(|_| "funes".to_string());
@@ -89,11 +95,11 @@ pub fn uninstall() -> Result<()> {
         &["mcp", "remove", "funes"],
         &["No MCP server named 'funes' found"],
     );
-    let hooks = uninstall_hooks();
+    let hooks = uninstall_hooks().and_then(|()| uninstall_skill());
     let outcome = match (registration, hooks) {
         (Ok(outcome), Ok(())) => outcome,
         (Err(registration), Ok(())) => {
-            return Err(registration.context("local Codex hooks were removed"));
+            return Err(registration.context("the local Codex skill and hooks were removed"));
         }
         (Ok(_), Err(hooks)) => return Err(hooks),
         (Err(registration), Err(hooks)) => {
@@ -102,24 +108,49 @@ pub fn uninstall() -> Result<()> {
     };
 
     if outcome == RemoveCommand::MissingCli {
-        println!("`codex` isn't on PATH — hooks were removed; once it is, run:  codex mcp remove funes");
+        println!("`codex` isn't on PATH — the skill and hooks were removed; once it is, run:  codex mcp remove funes");
     } else {
-        println!("removed funes from Codex — recall registration, hook entries, and hook scripts.");
+        println!("removed funes from Codex — recall registration, skill, hook entries, and hook scripts.");
     }
     Ok(())
 }
 
-/// The installed Codex's `--version`, printed and parsed. `None` when Codex is absent or the line
-/// is unparseable, which leaves the install to proceed as the registration does.
-fn codex_version() -> Result<Option<(String, (u32, u32, u32))>> {
+/// The funes-owned skill directory, fixed under `$HOME`: Codex reads user skills from there.
+fn skill_dir() -> Result<PathBuf> {
+    let home = PathBuf::from(std::env::var_os("HOME").context("resolving $HOME for the skills dir")?);
+    Ok(home.join(".agents/skills/funes"))
+}
+
+fn install_skill() -> Result<()> {
+    let dir = skill_dir()?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let path = dir.join("SKILL.md");
+    std::fs::write(&path, SKILL_MD).with_context(|| format!("writing {}", path.display()))?;
+    println!("installed the funes skill into {}.", path.display());
+    Ok(())
+}
+
+fn uninstall_skill() -> Result<()> {
+    let dir = skill_dir()?;
+    remove_file(&dir.join("SKILL.md"))?;
+    // The install creates the whole path, so prune back up while each level is left empty.
+    remove_empty_dir(&dir)?;
+    for parent in dir.ancestors().skip(1).take(2) {
+        remove_empty_dir(parent)?;
+    }
+    Ok(())
+}
+
+/// What Codex prints for `--version`. `None` when Codex is absent, which leaves the install to
+/// proceed as the registration does.
+fn codex_version() -> Result<Option<String>> {
     let out = match Command::new("codex").arg("--version").output() {
         Ok(o) if o.status.success() => o,
         Ok(_) => return Ok(None),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(anyhow::Error::new(e).context("running `codex --version`")),
     };
-    let printed = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    Ok(parse_version_line(&printed).map(|parsed| (printed, parsed)))
+    Ok(Some(String::from_utf8_lossy(&out.stdout).trim().to_string()))
 }
 
 /// Codex prints `codex-cli 0.151.0`, so the version is a later token, not the first.
@@ -237,7 +268,7 @@ fn uninstall_hooks() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{desired_hooks, mcp_add_args, parse_version_line, MIN_CODEX};
+    use super::{desired_hooks, mcp_add_args, parse_version_line, MIN_CODEX, SKILL_MD};
     use std::path::Path;
 
     #[test]
@@ -250,6 +281,13 @@ mod tests {
             mcp_add_args("funes", Some("acme/kb")),
             ["mcp", "add", "funes", "--", "funes", "mcp", "acme/kb"]
         );
+    }
+
+    #[test]
+    fn the_embedded_skill_declares_itself_to_codex() {
+        let front = SKILL_MD.split("---").nth(1).expect("frontmatter");
+        assert!(front.contains("name: funes"), "{front}");
+        assert!(front.contains("description:"), "{front}");
     }
 
     #[test]

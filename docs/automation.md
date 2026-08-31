@@ -52,8 +52,8 @@ when they're indexed, and `funes index` re-embeds nothing already written. Keepi
   the extracted source, and the separate MCP registration.
 - **Codex** has no plugin system, so funes writes its hooks into `~/.codex/hooks.json` — a file
   dedicated to hooks, not your `config.toml`. The merge is append-or-replace keyed by funes's own
-  scripts, so any hooks you added yourself are left untouched. Codex has no session-end event, so it
-  publishes on `SessionStart` only.
+  scripts, so any hooks you added yourself are left untouched. It also installs a small skill at
+  `~/.agents/skills/funes/`, so Codex recognizes funes as memory before it loads any of its tools.
 - **Hermes** (indexing is **beta**) declares shell hooks in `~/.hermes/config.yaml`. funes merges a `post_llm_call` index
   hook (fired once per completed turn) and, with a memory, `on_session_finalize` + `on_session_start`
   publish hooks into that file — remove-then-add keyed by funes's own scripts, so your other hooks
@@ -81,8 +81,9 @@ timeout.
 - **Published at the boundaries you have.** Claude publishes on `SessionEnd` and again on
   `SessionStart` (catching up anything a missed `SessionEnd` left behind — a disconnect, a closed
   window). Hermes publishes on `on_session_finalize` (its true session end) and again on
-  `on_session_start` (the same catch-up). Codex has no session-end event, so it publishes at
-  `SessionStart` only; its last turns publish no sooner than the next Codex session's start.
+  `on_session_start` (the same catch-up). Codex publishes on the same pair, `SessionEnd` and
+  `SessionStart`. Binding a memory needs Codex 0.151.0, the release this is verified against, and an
+  older one is refused rather than left silently unpublished.
 - **Serialized in the binary.** funes holds an advisory lock while it mutates the local memory, so
   only one writer touches it at a time, whatever launched it (a hook, a manual `funes index`, `funes
   scrub`). A run that hits the lock fails loudly and re-sweeps next turn (indexing is idempotent).

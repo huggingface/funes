@@ -36,7 +36,7 @@ fn add_codex_installs_hooks_and_preserves_existing() {
     }
 
     let cfg: Value = serde_json::from_str(&fs::read_to_string(&config).unwrap()).unwrap();
-    // funes's hooks: Stop (index codex) + SessionStart (push acme/kb); Codex has no SessionEnd.
+    // funes's hooks: Stop (index codex) + SessionEnd/SessionStart (push acme/kb).
     let stop = cfg["hooks"]["Stop"][0]["hooks"][0]["command"].as_str().unwrap();
     assert!(
         stop.contains("funes-index.sh") && stop.contains("codex"),
@@ -47,10 +47,13 @@ fn add_codex_installs_hooks_and_preserves_existing() {
         start.contains("funes-push.sh") && start.contains("acme/kb"),
         "start: {start}"
     );
-    assert!(
-        cfg["hooks"].get("SessionEnd").is_none(),
-        "codex has no SessionEnd publish"
-    );
+    let end = cfg["hooks"]["SessionEnd"][0]["hooks"][0]["command"].as_str().unwrap();
+    assert!(end.contains("funes-push.sh") && end.contains("acme/kb"), "end: {end}");
+    // The skill Codex lists before loading any tool.
+    let skill = home.path().join(".agents/skills/funes/SKILL.md");
+    assert!(skill.exists(), "skill written");
+    assert!(fs::read_to_string(&skill).unwrap().contains("name: funes"));
+
     // The user's own hook is untouched.
     assert_eq!(cfg["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "guard.sh");
 
@@ -58,8 +61,8 @@ fn add_codex_installs_hooks_and_preserves_existing() {
     codex::install(None).unwrap();
     let cfg2: Value = serde_json::from_str(&fs::read_to_string(&config).unwrap()).unwrap();
     assert!(
-        cfg2["hooks"].get("SessionStart").is_none(),
-        "local re-run drops the push hook"
+        cfg2["hooks"].get("SessionStart").is_none() && cfg2["hooks"].get("SessionEnd").is_none(),
+        "local re-run drops the push hooks"
     );
     assert_eq!(
         cfg2["hooks"]["Stop"].as_array().unwrap().len(),
