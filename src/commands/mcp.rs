@@ -272,7 +272,7 @@ impl Funes {
     }
 
     #[tool(
-        description = "A query-independent digest of one session: the passages most distinctive *within* it, chosen from the stored embeddings with no query at all. This is what tells you what a session contains when you do not already know what to look for — use it to judge a session against open-ended criteria: is this worth publishing, does it reveal anything internal, what was actually accomplished here. What answers such a question is usually the material that does not belong in the session, which a distinctiveness selector surfaces and a summary drops. DO NOT READ THE WHOLE SESSION INSTEAD: sessions run to thousands of turns, and every place a sketch shows carries a `→ get` line for the surrounding turns verbatim. `units` sets how many places, `max_chars` the reply budget, `from`/`to` digest one stretch of a long session; every clamp and elision is stated. A sketch samples: it shows what it selected, so it can never show that something is absent."
+        description = "What one session was about, worked on, and ended up at: the passages most distinctive within it, verbatim, always including its opening ask and its last word. Takes a session id; there is no query. Enough to tell the user what a session was, in one call; not a way to find a particular thing in it."
     )]
     async fn sketch(
         &self,
