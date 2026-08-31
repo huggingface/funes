@@ -1,9 +1,9 @@
 # Adding and removing funes
 
 `funes add <agent> [memory]` wires funes into a coding agent in one command. Every agent gets the
-`recall` and `get` tools plus instructions on when to use them; for **Claude, Codex, and Hermes** it
-also wires the memory itself — building your first index, installing the hooks that keep it current,
-and (with a memory bound) doing the first publish. Nothing is left to run by hand.
+funes read tools plus instructions on when to use them, and the memory itself — building your first
+index, installing the automation that keeps it current, and (with a memory bound) doing the first
+publish. Nothing is left to run by hand.
 
 ```bash
 funes add claude                           # local
@@ -23,16 +23,15 @@ command is idempotent, so an already-absent integration is a successful no-op.
 
 ## The agents
 
-| Agent | `recall`/`get` | Per-turn indexing | Session-boundary publish |
+| Agent | Read tools | Per-turn indexing | Session-boundary publish |
 | --- | --- | --- | --- |
 | `claude` | ✅ | ✅ (plugin hooks) | ✅ (with a memory bound) |
 | `codex` | ✅ | ✅ (hooks, after a `/hooks` review) | ✅ (with a memory bound — needs Codex 0.151.0) |
 | `hermes` | ✅ | ✅ **beta** (shell hooks) | ✅ (with a memory bound) |
-| `pi` | ✅ | — (no hook system) | — |
+| `pi` | ✅ | ✅ (extension events) | ✅ (with a memory bound) |
 
-**pi** is trace-only and has no hooks, so `funes add pi` registers the read-side tools only; keep its
-recall fresh by re-running `funes index` (it sweeps `~/.pi/agent/sessions`). What exactly gets
-installed for each agent — and how the hooks behave — is in [automation.md](automation.md).
+What exactly gets installed for each agent — and how the automation behaves — is in
+[automation.md](automation.md).
 
 ## Other MCP clients
 

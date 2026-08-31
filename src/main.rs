@@ -206,9 +206,8 @@ enum Cmd {
     },
     /// Add funes to a coding agent.
     ///
-    /// Installs the `recall`/`get` tools for any agent — and, for claude, codex, and hermes,
-    /// automatic per-turn indexing. Name a memory the agent recalls from — and, for claude, codex,
-    /// and hermes, publishes to — an `<org>/<repo>` shorthand or an `hf://…` URI; omit it to stay
+    /// Installs funes's read tools and automatic per-turn indexing. Name a memory the agent recalls
+    /// from — and publishes to — an `<org>/<repo>` shorthand or an `hf://…` URI; omit it to stay
     /// local (the default).
     #[command(
         subcommand_value_name = "AGENT",
@@ -221,8 +220,8 @@ enum Cmd {
     },
     /// Remove funes from a coding agent.
     ///
-    /// Unregisters the `recall`/`get` tools and removes funes's automation hooks and integration
-    /// files. Your local memory, source transcripts, and remote memories are left untouched.
+    /// Unregisters funes's read tools and removes its automation and integration files. Your local
+    /// memory, source transcripts, and remote memories are left untouched.
     #[command(
         subcommand_value_name = "AGENT",
         subcommand_help_heading = "Agents",
@@ -519,9 +518,8 @@ async fn main() -> Result<()> {
         Cmd::Update { force } => update::run(force).await,
         Cmd::Mcp { memory } => mcp::run(memory).await,
         Cmd::Add { agent } => match agent {
-            // Claude, Codex, and Hermes have the full local pipeline (index + hooks + push), so `add`
-            // bootstraps it: build the first index and do the first push — the two one-time steps
-            // the hooks can't do unattended — so nothing is left to run by hand.
+            // `add` bootstraps the local pipeline: build the first index and do the first push — the
+            // two one-time steps the automation can't do unattended — so nothing is left to run by hand.
             AddAgent::Claude { memory } => {
                 let resolved = resolve_add_memory(memory).await?;
                 if let Some(remote) = resolved.as_ref().filter(|r| r.is_remote()) {
@@ -543,9 +541,13 @@ async fn main() -> Result<()> {
                 }
                 bootstrap_add(Harness::Hermes, resolved, hermes::install).await
             }
-            // The rest register a read-side integration only (no local pipeline to bootstrap), so
-            // they just take the resolved memory — the `created` flag only matters to the first push.
-            AddAgent::Pi { memory, force } => pi::install(resolve_add_memory(memory).await?.map(|r| r.memory), force),
+            AddAgent::Pi { memory, force } => {
+                let resolved = resolve_add_memory(memory).await?;
+                if let Some(remote) = resolved.as_ref().filter(|r| r.is_remote()) {
+                    require_scanner(&remote.memory, Harness::Pi)?;
+                }
+                bootstrap_add(Harness::Pi, resolved, |memory| pi::install(memory, force)).await
+            }
         },
         Cmd::Remove { agent } => match agent {
             RemoveAgent::Claude => claude::uninstall(),

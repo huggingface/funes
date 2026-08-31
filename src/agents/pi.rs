@@ -1,4 +1,4 @@
-//! `funes add pi` / `funes remove pi`: manage funes recall as a first-class pi tool.
+//! `funes add pi` / `funes remove pi`: manage recall and automation in pi.
 //!
 //! pi has no MCP client, so funes ships a small pi extension (a bridge that
 //! spawns `funes mcp` over stdio — see `integrations/pi/`). The extension is
@@ -10,7 +10,11 @@
 //! of `FUNES_HOME`, because pi records the install path permanently — and is
 //! registered with `pi install`. pi >= 0.80 no longer auto-loads
 //! `.pi/extensions`, so the explicit register is required.
+//!
+//! pi exposes its lifecycle to extensions rather than to shell hooks, so the automation rides in
+//! that same extension, driving the shared scripts extracted into `scripts/` beside it.
 
+use super::hooks;
 use super::{remove_empty_dir, remove_tree, run_remove, shell_command, RemoveCommand};
 use crate::commands::update::parse_semver;
 use anyhow::{Context, Result};
@@ -72,7 +76,7 @@ pub fn install(memory: Option<String>, force: bool) -> Result<()> {
                 format!(" {version}")
             };
             println!(
-                "installed funes into pi{v} — the funes tools are now available (restart pi if it's running)."
+                "installed funes into pi{v} — recall and per-turn indexing are now active (restart pi if it's running)."
             );
             Ok(())
         }
@@ -97,7 +101,7 @@ pub fn uninstall() -> Result<()> {
             remove_empty_dir(parent)?;
         }
         println!(
-            "`pi` isn't on PATH — extracted integration files were removed. Once it is, remove the registration manually:  {remove_command}"
+            "`pi` isn't on PATH — the extension and its automation were removed. Once it is, remove the registration manually:  {remove_command}"
         );
         return Ok(());
     }
@@ -105,7 +109,7 @@ pub fn uninstall() -> Result<()> {
     if let Some(parent) = dir.parent() {
         remove_empty_dir(parent)?;
     }
-    println!("removed funes from pi — extension registration and extracted integration files.");
+    println!("removed funes from pi — extension registration, its automation, and the extracted files.");
     Ok(())
 }
 
@@ -114,16 +118,19 @@ fn file_matches(path: &Path, want: &str) -> bool {
     std::fs::read_to_string(path).map(|got| got == want).unwrap_or(false)
 }
 
-/// Write the embedded extension (index.ts + package.json) into `dir`, plus the `memory` file that
-/// binds this install's recall (`None` = local, so the file is absent). A copy that drifts from
-/// what this install would write — a newer embedded version, or a different bound memory — is refreshed; `force`
+/// Write the embedded extension (index.ts + package.json) into `dir`, the automation scripts it
+/// drives into `dir/scripts`, plus the `memory` file that binds this install's recall and its
+/// publishing (`None` = local, so the file is absent). A copy that drifts from what this install
+/// would write — a newer embedded version, or a different bound memory — is refreshed; `force`
 /// rewrites even when it matches.
 fn extract(dir: &Path, memory: Option<&str>, force: bool) -> Result<()> {
     // Tidy up a pre-rename install: the extension now reads only the `memory` file, so a leftover
     // `store` binding is already inert — remove it anyway so nothing stale lingers on disk.
     // Best-effort, before the `current` check so it runs even when nothing else needs rewriting.
     let _ = std::fs::remove_file(dir.join("store"));
+    let scripts_changed = hooks::write_scripts(&dir.join("scripts"))?;
     let current = !force
+        && !scripts_changed
         && file_matches(&dir.join("index.ts"), INDEX_TS)
         && file_matches(&dir.join("package.json"), PACKAGE_JSON)
         && memory_matches(&dir.join("memory"), memory);
@@ -209,6 +216,14 @@ mod tests {
     fn embedded_extension_reads_the_memory_file() {
         assert!(super::INDEX_TS.contains(r#""memory""#));
         assert!(super::INDEX_TS.contains("FUNES_MEMORY"));
+    }
+
+    /// The extension looks for the scripts where [`extract`] writes them. A disagreement fails
+    /// silently — no script found, no indexing — so it is asserted here.
+    #[test]
+    fn embedded_extension_runs_the_extracted_scripts() {
+        assert!(super::INDEX_TS.contains(r#"join(HERE, "scripts", "funes-index.sh")"#));
+        assert!(super::INDEX_TS.contains(r#"join(HERE, "scripts", "funes-push.sh")"#));
     }
 
     #[test]

@@ -1,5 +1,5 @@
 // funes-owned pi extension: expose recall over past AI-assistant sessions as
-// first-class pi tools.
+// first-class pi tools, and index each turn into the local memory.
 //
 // pi has no MCP client, so this extension *is* the client: it spawns `funes mcp`
 // once over stdio, keeps it warm for the session, and forwards each call as an
@@ -21,14 +21,14 @@
 // and points FUNES_MEMORY at a live hf:// memory. This extension knows nothing of
 // it — only of the vars.)
 //
-// The memory this extension recalls from is resolved once, in order:
+// The memory this extension recalls from — and publishes to — is resolved once, in order:
 //   1. FUNES_MEMORY in the environment (a per-run override, set by whatever host)
 //   2. the memory bound at install by `funes add pi <memory>`, saved in a `memory`
 //      file next to this extension (absent = the local memory)
 // The result is forwarded as the `funes mcp <memory>` positional; empty forwards a
 // bare `funes mcp` (the local memory).
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -187,6 +187,22 @@ class FunesMcp {
 
 const funes = new FunesMcp();
 
+// The automation scripts `funes add pi` installs beside this extension. A checkout has none, hence
+// the guard in runScript: a missing script means no automation, not an error.
+const INDEX_SH = join(HERE, "scripts", "funes-index.sh");
+const PUSH_SH = join(HERE, "scripts", "funes-push.sh");
+
+// Run one automation script and forget it: each hands off to a detached worker, and no failure of
+// theirs is worth disturbing the session with.
+function runScript(script: string, arg: string) {
+  if (!existsSync(script)) return;
+  try {
+    const child = spawn("bash", [script, arg], { detached: true, stdio: "ignore" });
+    child.on("error", () => {});
+    child.unref();
+  } catch {}
+}
+
 export default async function (pi: any) {
   let tools: McpTool[] = [];
   let failure = "";
@@ -212,8 +228,18 @@ export default async function (pi: any) {
     });
   }
 
-  // Reported at session start: at load it would land inside pi's own startup.
-  pi.on("session_start", async (_event: any, ctx: any) => {
-    if (failure) ctx?.ui?.notify(failure, "warning");
+  pi.on("session_start", async (event: any, ctx: any) => {
+    if (failure) ctx?.ui?.notify(failure, "warning"); // at load it would land inside pi's own startup
+    // A fresh process is the one start with no shutdown behind it, so it catches up whatever a
+    // process that never shut down cleanly left unpublished.
+    if (memory && event?.reason === "startup") runScript(PUSH_SH, memory);
+  });
+
+  // Per turn, so a session killed mid-flight is indexed up to its last completed turn.
+  pi.on("turn_end", async () => runScript(INDEX_SH, "pi"));
+
+  // A reload replaces the extension instance without ending the session: nothing to publish.
+  pi.on("session_shutdown", async (event: any) => {
+    if (memory && event?.reason !== "reload") runScript(PUSH_SH, memory);
   });
 }

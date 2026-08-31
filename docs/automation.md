@@ -13,8 +13,8 @@ it behaves; you rarely need to touch any of it by hand.
 
 ## What `funes add` sets up
 
-`funes add claude`, `funes add codex`, and `funes add hermes` install, beyond the `recall`/`get`
-tools:
+`funes add claude`, `funes add codex`, `funes add pi`, and `funes add hermes` install, beyond the
+read tools:
 
 - **Per-turn indexing.** A per-turn hook runs `funes index` after every completed turn, so your
   local memory tracks the session as it grows — a session killed mid-flight is already indexed up to
@@ -50,6 +50,10 @@ when they're indexed, and `funes index` re-embeds nothing already written. Keepi
   `claude plugin install`. Claude's loader activates the plugin's hooks — **funes never edits your
   `settings.json`**. `funes remove claude` removes the plugin, its local marketplace registration,
   the extracted source, and the separate MCP registration.
+- **pi** has no hook system: it exposes its lifecycle to extensions instead, so the automation rides
+  in the extension that already gives pi the read tools — the same scripts, run from `turn_end` and
+  the session-boundary events. Nothing outside `~/.funes/integrations/pi` is configured, so
+  `funes remove pi` takes the whole install with it.
 - **Codex** has no plugin system, so funes writes its hooks into `~/.codex/hooks.json` — a file
   dedicated to hooks, not your `config.toml`. The merge is append-or-replace keyed by funes's own
   scripts, so any hooks you added yourself are left untouched. It also installs a small skill at
@@ -71,7 +75,7 @@ invoke funes's scripts, then remove the scripts and their `funes-sync.log`; othe
 and config keys remain. Removing an integration never deletes the indexed memory or source
 transcripts.
 
-All three agents drive the same two scripts, installed alongside: `funes-index.sh` (the per-turn
+Every agent drives the same two scripts, installed alongside: `funes-index.sh` (the per-turn
 local index) and `funes-push.sh` (the network publish). Each drains the hook payload and re-execs a
 detached worker, so the hook returns in well under a second and never blocks the turn or trips a
 timeout.
@@ -80,7 +84,7 @@ timeout.
 
 - **Local-first, always safe.** The index hook only ever writes your local memory; only the push hook
   touches the network — and with no memory bound, there's no push hook at all.
-- **Fresh every turn.** `Stop` re-indexes after each turn; because indexing is incremental, the
+- **Fresh every turn.** Each completed turn re-indexes; because indexing is incremental, the
   re-sweep is cheap.
 - **The boundary publish indexes first.** The per-turn index detaches, so a session's last turn may
   still be landing when the boundary fires; the publish hook sweeps the harness itself (retrying
@@ -89,9 +93,11 @@ timeout.
 - **Published at the boundaries you have.** Claude publishes on `SessionEnd` and again on
   `SessionStart` (catching up anything a missed `SessionEnd` left behind — a disconnect, a closed
   window). Hermes publishes on `on_session_finalize` (its true session end) and again on
-  `on_session_start` (the same catch-up). Codex publishes on the same pair, `SessionEnd` and
-  `SessionStart`. Binding a memory needs Codex 0.151.0, the release this is verified against, and an
-  older one is refused rather than left silently unpublished.
+  `on_session_start` (the same catch-up). pi publishes on `session_shutdown`, and on `session_start`
+  only when the process is fresh — its other starts follow a shutdown that just published. Codex
+  publishes on the same pair, `SessionEnd` and `SessionStart`. Binding a memory needs Codex 0.151.0,
+  the release this is verified against, and an older one is refused rather than left silently
+  unpublished.
 - **Serialized in the binary.** funes holds an advisory lock while it mutates the local memory, so
   only one writer touches it at a time, whatever launched it (a hook, a manual `funes index`, `funes
   scrub`). A run that hits the lock fails loudly and re-sweeps next turn (indexing is idempotent).
@@ -110,9 +116,3 @@ timeout.
 - **The remaining gap.** A session's last turns publish no later than the next session's start; a
   machine retired without starting another session keeps its last unpushed turns local. Run `funes
   push <org>/<repo>` by hand before stepping away if that matters.
-
-## pi
-
-**pi** is trace-only: funes ingests pi sessions by parsing their exported traces, and pi has no hook
-system — so there's no per-turn automation for it. `funes index` sweeps `~/.pi/agent/sessions`
-(re-run it to keep recall fresh), or index a trace directly with `funes index <path-or-repo>`.
