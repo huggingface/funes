@@ -313,6 +313,12 @@ impl ServerHandler for Funes {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(server_info)
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
+            .with_instructions(
+                "Persistent memory over the user's past AI coding sessions: their transcripts, \
+                 indexed automatically as they work and read-only here — nothing has to be saved. \
+                 When earlier work matters, this is the memory to consult."
+                    .to_string(),
+            )
     }
 }
 
