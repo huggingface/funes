@@ -72,9 +72,9 @@ pub fn uninstall() -> Result<()> {
 /// command drives a detached script and is the exact string the allowlist must match.
 fn desired(hooks_dir: &Path, memory: Option<&str>) -> Vec<(&'static str, String)> {
     let index_script = hooks_dir.join("funes-index.sh").display().to_string();
-    let mut out = vec![("post_llm_call", hooks::command(&index_script, "hermes"))];
+    let mut out = vec![("post_llm_call", hooks::command(&index_script, &["hermes"]))];
     if let Some(s) = memory {
-        let push = hooks::command(&hooks_dir.join("funes-push.sh").display().to_string(), s);
+        let push = hooks::command(&hooks_dir.join("funes-push.sh").display().to_string(), &[s, "hermes"]);
         out.push(("on_session_start", push.clone()));
         out.push(("on_session_finalize", push));
     }
@@ -420,7 +420,7 @@ mod tests {
         );
         assert_eq!(
             funes_cmd(&out, "on_session_finalize").as_deref(),
-            Some("bash \"/h/hooks/funes-push.sh\" \"acme/kb\"")
+            Some("bash \"/h/hooks/funes-push.sh\" \"acme/kb\" \"hermes\"")
         );
         assert!(funes_cmd(&out, "on_session_start").is_some());
     }

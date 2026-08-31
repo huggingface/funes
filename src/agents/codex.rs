@@ -6,19 +6,30 @@
 //! user config (`~/.codex/config.toml`); it has no project scope, and re-adding an existing server
 //! overwrites it (idempotent).
 //!
+//! Codex lists a skill's name and description before any MCP tool is loaded, so funes installs one
+//! at `~/.agents/skills/funes/` to be recognizable as memory while its tools are still deferred.
+//!
 //! Automation lives in Codex's dedicated `~/.codex/hooks.json`: a `Stop` hook indexes each
-//! completed turn and, with a bound memory, `SessionStart` publishes it. funes merges only its own
-//! hook groups and installs the scripts under `~/.codex/hooks/`.
+//! completed turn and, with a bound memory, `SessionEnd` publishes it — with `SessionStart`
+//! catching up whatever a missed end left behind. funes merges only its own hook groups and
+//! installs the scripts under `~/.codex/hooks/`.
 
 use super::hooks;
 use super::{remove_empty_dir, remove_file, run_remove, shell_command, RemoveCommand};
+use crate::commands::update::parse_semver;
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+const SKILL_MD: &str = include_str!("../../integrations/codex/SKILL.md");
+
 const INDEX_STATUS: &str = "Indexing turn into funes memory";
 const PUSH_STATUS: &str = "Publishing funes memory";
+
+/// The gate for publishing: below this the install is refused. `SessionEnd` exists from 0.145.0,
+/// but this is the release the hook was verified to fire on, so it is the one enforced.
+const MIN_CODEX: (u32, u32, u32) = (0, 151, 0);
 
 /// The `codex mcp add` argument vector registering `funes mcp [memory]`. A non-local `memory` is
 /// appended as `funes mcp <memory>`, pinning this agent's recall to it.
@@ -34,8 +45,21 @@ fn mcp_add_args(funes: &str, memory: Option<&str>) -> Vec<String> {
 }
 
 pub fn install(memory: Option<String>) -> Result<()> {
-    // Hooks are files + a hooks.json edit, so they land even when the MCP registration below can't
-    // reach the Codex CLI.
+    // Only publishing needs `SessionEnd`, and the check precedes every write.
+    if memory.is_some() {
+        if let Some(version) = codex_version()? {
+            if matches!(parse_version_line(&version), Some(v) if v < MIN_CODEX) {
+                let (major, minor, patch) = MIN_CODEX;
+                bail!(
+                    "codex {version} has no SessionEnd hook, so a bound memory would never publish — upgrade to {major}.{minor}.{patch} or later, or run `funes add codex` with no memory to index locally."
+                );
+            }
+        }
+    }
+
+    // The skill and the hooks are plain files, so they land even when the MCP registration below
+    // can't reach the Codex CLI.
+    install_skill()?;
     install_hooks(memory.as_deref())?;
 
     let funes = std::env::var("FUNES_BIN").unwrap_or_else(|_| "funes".to_string());
@@ -71,36 +95,93 @@ pub fn uninstall() -> Result<()> {
         &["mcp", "remove", "funes"],
         &["No MCP server named 'funes' found"],
     );
-    let hooks = uninstall_hooks();
-    let outcome = match (registration, hooks) {
+    // Independent cleanups: a malformed hooks file must not strand the skill.
+    let files = match (uninstall_hooks(), uninstall_skill()) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(e), Ok(())) | (Ok(()), Err(e)) => Err(e),
+        (Err(hooks), Err(skill)) => Err(hooks.context(format!("skill cleanup also failed: {skill:#}"))),
+    };
+    let outcome = match (registration, files) {
         (Ok(outcome), Ok(())) => outcome,
         (Err(registration), Ok(())) => {
-            return Err(registration.context("local Codex hooks were removed"));
+            return Err(registration.context("the local Codex skill and hooks were removed"));
         }
-        (Ok(_), Err(hooks)) => return Err(hooks),
-        (Err(registration), Err(hooks)) => {
-            return Err(registration.context(format!("Codex hook cleanup also failed: {hooks:#}")));
+        (Ok(_), Err(files)) => return Err(files),
+        (Err(registration), Err(files)) => {
+            return Err(registration.context(format!("Codex file cleanup also failed: {files:#}")));
         }
     };
 
     if outcome == RemoveCommand::MissingCli {
-        println!("`codex` isn't on PATH — hooks were removed; once it is, run:  codex mcp remove funes");
+        println!("`codex` isn't on PATH — the skill and hooks were removed; once it is, run:  codex mcp remove funes");
     } else {
-        println!("removed funes from Codex — recall registration, hook entries, and hook scripts.");
+        println!("removed funes from Codex — recall registration, skill, hook entries, and hook scripts.");
     }
     Ok(())
+}
+
+/// The funes-owned skill directory, fixed under `$HOME`: Codex reads user skills from there.
+fn skill_dir() -> Result<PathBuf> {
+    let home = PathBuf::from(std::env::var_os("HOME").context("resolving $HOME for the skills dir")?);
+    Ok(home.join(".agents/skills/funes"))
+}
+
+fn install_skill() -> Result<()> {
+    let dir = skill_dir()?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let path = dir.join("SKILL.md");
+    std::fs::write(&path, SKILL_MD).with_context(|| format!("writing {}", path.display()))?;
+    println!("installed the funes skill into {}.", path.display());
+    Ok(())
+}
+
+fn uninstall_skill() -> Result<()> {
+    let dir = skill_dir()?;
+    remove_file(&dir.join("SKILL.md"))?;
+    // The install creates the whole path, so prune back up while each level is left empty.
+    remove_empty_dir(&dir)?;
+    for parent in dir.ancestors().skip(1).take(2) {
+        remove_empty_dir(parent)?;
+    }
+    Ok(())
+}
+
+/// What Codex prints for `--version`. `None` when Codex is absent, which leaves the install to
+/// proceed as the registration does.
+fn codex_version() -> Result<Option<String>> {
+    let out = match Command::new("codex").arg("--version").output() {
+        Ok(o) if o.status.success() => o,
+        Ok(_) => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(anyhow::Error::new(e).context("running `codex --version`")),
+    };
+    Ok(Some(String::from_utf8_lossy(&out.stdout).trim().to_string()))
+}
+
+/// Codex prints `codex-cli 0.151.0`, so the version is a later token, not the first.
+fn parse_version_line(printed: &str) -> Option<(u32, u32, u32)> {
+    printed.split_whitespace().find_map(parse_semver)
 }
 
 fn desired_hooks(hooks_dir: &Path, memory: Option<&str>) -> Vec<hooks::Hook> {
     let mut hooks = vec![hooks::Hook {
         event: "Stop",
-        command: hooks::command(&hooks_dir.join("funes-index.sh").display().to_string(), "codex"),
+        command: hooks::command(&hooks_dir.join("funes-index.sh").display().to_string(), &["codex"]),
         status: INDEX_STATUS,
     }];
     if let Some(memory) = memory {
+        let command = hooks::command(
+            &hooks_dir.join("funes-push.sh").display().to_string(),
+            &[memory, "codex"],
+        );
+        hooks.push(hooks::Hook {
+            event: "SessionEnd",
+            command: command.clone(),
+            status: PUSH_STATUS,
+        });
         hooks.push(hooks::Hook {
             event: "SessionStart",
-            command: hooks::command(&hooks_dir.join("funes-push.sh").display().to_string(), memory),
+            command,
             status: PUSH_STATUS,
         });
     }
@@ -142,6 +223,9 @@ fn install_hooks(memory: Option<&str>) -> Result<()> {
         config.display(),
         events.join(", ")
     );
+    // Codex skips a hook until its exact command is trusted, so an install that says nothing here
+    // reads as automation that silently never runs.
+    println!("run `/hooks` in Codex to review and trust them — until then Codex skips them.");
     Ok(())
 }
 
@@ -195,7 +279,7 @@ fn uninstall_hooks() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{desired_hooks, mcp_add_args};
+    use super::{desired_hooks, mcp_add_args, parse_version_line, MIN_CODEX, SKILL_MD};
     use std::path::Path;
 
     #[test]
@@ -211,6 +295,20 @@ mod tests {
     }
 
     #[test]
+    fn the_embedded_skill_declares_itself_to_codex() {
+        let front = SKILL_MD.split("---").nth(1).expect("frontmatter");
+        assert!(front.contains("name: funes"), "{front}");
+        assert!(front.contains("description:"), "{front}");
+    }
+
+    #[test]
+    fn reads_the_version_out_of_codexs_own_line() {
+        assert_eq!(parse_version_line("codex-cli 0.151.0"), Some((0, 151, 0)));
+        assert!(parse_version_line("codex-cli 0.150.9").unwrap() < MIN_CODEX);
+        assert_eq!(parse_version_line("codex-cli"), None);
+    }
+
+    #[test]
     fn hooks_use_codex_paths_and_available_events() {
         let local = desired_hooks(Path::new("/h/hooks"), None);
         assert_eq!(local.len(), 1);
@@ -218,9 +316,12 @@ mod tests {
         assert!(local[0].command.contains("/h/hooks/funes-index.sh"));
 
         let remote = desired_hooks(Path::new("/h/hooks"), Some("acme/kb"));
-        assert_eq!(remote.len(), 2);
+        assert_eq!(remote.len(), 3);
+        assert!(remote.iter().any(|hook| hook.event == "SessionEnd"));
         assert!(remote.iter().any(|hook| hook.event == "SessionStart"));
-        assert!(!remote.iter().any(|hook| hook.event == "SessionEnd"));
-        assert!(remote[1].command.contains("acme/kb"));
+        assert!(remote
+            .iter()
+            .filter(|hook| hook.event != "Stop")
+            .all(|hook| hook.command.contains("acme/kb")));
     }
 }

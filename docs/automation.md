@@ -52,8 +52,12 @@ when they're indexed, and `funes index` re-embeds nothing already written. Keepi
   the extracted source, and the separate MCP registration.
 - **Codex** has no plugin system, so funes writes its hooks into `~/.codex/hooks.json` — a file
   dedicated to hooks, not your `config.toml`. The merge is append-or-replace keyed by funes's own
-  scripts, so any hooks you added yourself are left untouched. Codex has no session-end event, so it
-  publishes on `SessionStart` only.
+  scripts, so any hooks you added yourself are left untouched. It also installs a small skill at
+  `~/.agents/skills/funes/`, so Codex recognizes funes as memory before it loads any of its tools.
+  **Codex runs a hook only once you have trusted it**, so after installing — and again after any
+  change to a funes hook — run `/hooks` in Codex and review them; until then it skips them and
+  nothing is indexed or published
+  ([Codex docs](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks)).
 - **Hermes** (indexing is **beta**) declares shell hooks in `~/.hermes/config.yaml`. funes merges a `post_llm_call` index
   hook (fired once per completed turn) and, with a memory, `on_session_finalize` + `on_session_start`
   publish hooks into that file — remove-then-add keyed by funes's own scripts, so your other hooks
@@ -78,11 +82,16 @@ timeout.
   touches the network — and with no memory bound, there's no push hook at all.
 - **Fresh every turn.** `Stop` re-indexes after each turn; because indexing is incremental, the
   re-sweep is cheap.
+- **The boundary publish indexes first.** The per-turn index detaches, so a session's last turn may
+  still be landing when the boundary fires; the publish hook sweeps the harness itself (retrying
+  while the per-turn writer holds the memory lock) and then pushes, rather than leaving that turn to
+  the next session's catch-up.
 - **Published at the boundaries you have.** Claude publishes on `SessionEnd` and again on
   `SessionStart` (catching up anything a missed `SessionEnd` left behind — a disconnect, a closed
   window). Hermes publishes on `on_session_finalize` (its true session end) and again on
-  `on_session_start` (the same catch-up). Codex has no session-end event, so it publishes at
-  `SessionStart` only; its last turns publish no sooner than the next Codex session's start.
+  `on_session_start` (the same catch-up). Codex publishes on the same pair, `SessionEnd` and
+  `SessionStart`. Binding a memory needs Codex 0.151.0, the release this is verified against, and an
+  older one is refused rather than left silently unpublished.
 - **Serialized in the binary.** funes holds an advisory lock while it mutates the local memory, so
   only one writer touches it at a time, whatever launched it (a hook, a manual `funes index`, `funes
   scrub`). A run that hits the lock fails loudly and re-sweeps next turn (indexing is idempotent).

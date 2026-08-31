@@ -24,11 +24,15 @@ pub(crate) struct Hook {
     pub(crate) status: &'static str,
 }
 
-/// `bash "<script>" "<arg>"` — the hook command line. `script` may be a path or an environment
-/// expression expanded by the hook runner; double-quoted so spaces survive. `"`/`\` in either field
+/// `bash "<script>" "<arg>"…` — the hook command line. `script` may be a path or an environment
+/// expression expanded by the hook runner; double-quoted so spaces survive. `"`/`\` in every field
 /// are escaped so a value with a quote can't break out (`$` remains available to the runner).
-pub fn command(script: &str, arg: &str) -> String {
-    format!("bash \"{}\" \"{}\"", dquote_escape(script), dquote_escape(arg))
+pub fn command(script: &str, args: &[&str]) -> String {
+    let mut out = format!("bash \"{}\"", dquote_escape(script));
+    for arg in args {
+        out.push_str(&format!(" \"{}\"", dquote_escape(arg)));
+    }
+    out
 }
 
 /// Escape a value for embedding inside a double-quoted shell string: backslash then double-quote.
@@ -126,20 +130,24 @@ mod tests {
     fn idx(arg: &str) -> Hook {
         Hook {
             event: "TurnComplete",
-            command: command("/h/funes-index.sh", arg),
+            command: command("/h/funes-index.sh", &[arg]),
             status: "idx",
         }
     }
 
     #[test]
     fn command_escapes_quotes_but_keeps_dollar() {
-        // Ordinary paths/args are untouched.
-        assert_eq!(command("/h/x.sh", "agent"), "bash \"/h/x.sh\" \"agent\"");
+        // Ordinary paths/args are untouched, and every argument is carried.
+        assert_eq!(command("/h/x.sh", &["agent"]), "bash \"/h/x.sh\" \"agent\"");
+        assert_eq!(
+            command("/h/x.sh", &["acme/kb", "codex"]),
+            "bash \"/h/x.sh\" \"acme/kb\" \"codex\""
+        );
         // A quote in a value is escaped, so it can't break out of the double-quotes.
-        assert_eq!(command("/h/a\"b.sh", "s"), "bash \"/h/a\\\"b.sh\" \"s\"");
+        assert_eq!(command("/h/a\"b.sh", &["s"]), "bash \"/h/a\\\"b.sh\" \"s\"");
         // `$` is left intact so the hook runner can expand an environment-provided root.
         assert_eq!(
-            command("${HOOK_ROOT}/x.sh", "agent"),
+            command("${HOOK_ROOT}/x.sh", &["agent"]),
             "bash \"${HOOK_ROOT}/x.sh\" \"agent\""
         );
     }
@@ -147,7 +155,7 @@ mod tests {
     fn push(event: &'static str, memory: &str) -> Hook {
         Hook {
             event,
-            command: command("/h/funes-push.sh", memory),
+            command: command("/h/funes-push.sh", &[memory]),
             status: "push",
         }
     }
