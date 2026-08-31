@@ -240,7 +240,7 @@ impl Funes {
     }
 
     #[tool(
-        description = "Find a literal string in every block of one session — exhaustive and unranked. Use it to screen a session against a criterion, or to locate where a term you already expect actually occurs. Splits are stitched back together first, so a needle straddling a chunk boundary is still found, and each hit carries a `→ get` line to read the turn around it. Scanning is per session: name the session with `session_id`. A needle that returns nothing is absent from that session and says nothing about any other; absence clears only the exact spelling passed, so use `ignore_case` for case variation. Listing stops at a cap and names the `from` to continue at; `from`/`to` also scan just a stretch of a session, and then a zero clears only that stretch."
+        description = "Find every occurrence of a literal string in one session — exhaustive, unranked, in reading order. For when you already know the wording and want where it occurs, rather than what a topic is about. Scope is one session and one spelling: a zero result clears only that."
     )]
     async fn scan(
         &self,
