@@ -145,11 +145,11 @@ fn uninstall_hooks() -> Result<()> {
 fn desired_hooks(memory: Option<&str>) -> Vec<hooks::Hook> {
     let mut hooks = vec![hooks::Hook {
         event: "Stop",
-        command: hooks::command("${CLAUDE_PLUGIN_ROOT}/scripts/funes-index.sh", "claude"),
+        command: hooks::command("${CLAUDE_PLUGIN_ROOT}/scripts/funes-index.sh", &["claude"]),
         status: INDEX_STATUS,
     }];
     if let Some(memory) = memory {
-        let command = hooks::command("${CLAUDE_PLUGIN_ROOT}/scripts/funes-push.sh", memory);
+        let command = hooks::command("${CLAUDE_PLUGIN_ROOT}/scripts/funes-push.sh", &[memory, "claude"]);
         hooks.push(hooks::Hook {
             event: "SessionStart",
             command: command.clone(),

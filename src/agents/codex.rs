@@ -27,8 +27,8 @@ const SKILL_MD: &str = include_str!("../../integrations/codex/SKILL.md");
 const INDEX_STATUS: &str = "Indexing turn into funes memory";
 const PUSH_STATUS: &str = "Publishing funes memory";
 
-/// The gate for publishing: without a `SessionEnd` event the hook never fires. Codex grew that
-/// event in 0.145.0; this is the release the integration was verified against.
+/// The gate for publishing: below this the install is refused. `SessionEnd` exists from 0.145.0,
+/// but this is the release the hook was verified to fire on, so it is the one enforced.
 const MIN_CODEX: (u32, u32, u32) = (0, 151, 0);
 
 /// The `codex mcp add` argument vector registering `funes mcp [memory]`. A non-local `memory` is
@@ -95,15 +95,20 @@ pub fn uninstall() -> Result<()> {
         &["mcp", "remove", "funes"],
         &["No MCP server named 'funes' found"],
     );
-    let hooks = uninstall_hooks().and_then(|()| uninstall_skill());
-    let outcome = match (registration, hooks) {
+    // Independent cleanups: a malformed hooks file must not strand the skill.
+    let files = match (uninstall_hooks(), uninstall_skill()) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(e), Ok(())) | (Ok(()), Err(e)) => Err(e),
+        (Err(hooks), Err(skill)) => Err(hooks.context(format!("skill cleanup also failed: {skill:#}"))),
+    };
+    let outcome = match (registration, files) {
         (Ok(outcome), Ok(())) => outcome,
         (Err(registration), Ok(())) => {
             return Err(registration.context("the local Codex skill and hooks were removed"));
         }
-        (Ok(_), Err(hooks)) => return Err(hooks),
-        (Err(registration), Err(hooks)) => {
-            return Err(registration.context(format!("Codex hook cleanup also failed: {hooks:#}")));
+        (Ok(_), Err(files)) => return Err(files),
+        (Err(registration), Err(files)) => {
+            return Err(registration.context(format!("Codex file cleanup also failed: {files:#}")));
         }
     };
 
@@ -161,11 +166,14 @@ fn parse_version_line(printed: &str) -> Option<(u32, u32, u32)> {
 fn desired_hooks(hooks_dir: &Path, memory: Option<&str>) -> Vec<hooks::Hook> {
     let mut hooks = vec![hooks::Hook {
         event: "Stop",
-        command: hooks::command(&hooks_dir.join("funes-index.sh").display().to_string(), "codex"),
+        command: hooks::command(&hooks_dir.join("funes-index.sh").display().to_string(), &["codex"]),
         status: INDEX_STATUS,
     }];
     if let Some(memory) = memory {
-        let command = hooks::command(&hooks_dir.join("funes-push.sh").display().to_string(), memory);
+        let command = hooks::command(
+            &hooks_dir.join("funes-push.sh").display().to_string(),
+            &[memory, "codex"],
+        );
         hooks.push(hooks::Hook {
             event: "SessionEnd",
             command: command.clone(),
@@ -215,6 +223,9 @@ fn install_hooks(memory: Option<&str>) -> Result<()> {
         config.display(),
         events.join(", ")
     );
+    // Codex skips a hook until its exact command is trusted, so an install that says nothing here
+    // reads as automation that silently never runs.
+    println!("run `/hooks` in Codex to review and trust them — until then Codex skips them.");
     Ok(())
 }
 
