@@ -102,5 +102,4 @@ the reply names the turn to read instead.
 ## See also
 
 - [recall.md](recall.md) — searching by description, and reading turns with `get`.
-- [AGENTS.md](../AGENTS.md) — the exact agent-format contract for these commands and their MCP tools.
 - [push.md](push.md) — publishing a memory, and inspecting one with `status`.

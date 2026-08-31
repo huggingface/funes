@@ -33,8 +33,8 @@ Each hit carries its provenance and a ready-to-run drill-down line:
 ```
 
 The `→ get` line carries exactly the arguments `get` wants, including the memory the hits were read
-from. `no results` prints when nothing matched. The exact shape is a contract — see
-[AGENTS.md](../AGENTS.md); don't parse it loosely.
+from. `no results` prints when nothing matched. The exact shape is stable — a contract, not a
+presentation; don't parse it loosely.
 
 ## `recall` flags
 
@@ -103,6 +103,5 @@ Recall over a remote caches whole files to local disk, so warm calls run at loca
 
 - [sessions.md](sessions.md) — list a memory's sessions, digest one with `sketch`, scan one for a literal.
 - [ask.md](ask.md) — get a grounded answer instead of ranked passages.
-- [AGENTS.md](../AGENTS.md) — the exact agent-format contract for `recall`/`get`.
 - [push.md](push.md) — publishing a memory, and inspecting one with `status`.
 - [hub-caching.md](hub-caching.md) — how recall over a remote caches to local disk.

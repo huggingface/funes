@@ -125,7 +125,6 @@ workflow-oriented [documentation index](docs/README.md) for the complete guides.
 | `funes push <memory>` (+ `scrub`, `status`) | [docs/push.md](docs/push.md) — publish and share a memory |
 | `funes update` | [installation and updating](#get-funes) — replace the installed binary with a verified release |
 
-The stable agent-facing output contract for the read commands is specified in [AGENTS.md](AGENTS.md).
 The per-turn indexing and session-boundary publishing the hooks run are detailed in
 [docs/automation.md](docs/automation.md).
 
