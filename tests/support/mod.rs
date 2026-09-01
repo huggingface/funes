@@ -19,6 +19,9 @@ pub fn run_remove(home: &Path, bin: &Path, log: &Path, agent: &str) -> Output {
         .args(["remove", agent])
         .env("HOME", home)
         .env("PATH", bin)
+        // A developer running the suite with a real `CODEX_HOME` set would otherwise have their own
+        // Codex integration removed: funes asks Codex where its home is, and that variable answers.
+        .env_remove("CODEX_HOME")
         .env("FUNES_TEST_CLI_LOG", log)
         .output()
         .unwrap()
