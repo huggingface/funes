@@ -191,13 +191,16 @@ const funes = new FunesMcp();
 // the guard in runScript: a missing script means no automation, not an error.
 const INDEX_SH = join(HERE, "scripts", "funes-index.sh");
 const PUSH_SH = join(HERE, "scripts", "funes-push.sh");
+// Both scripts take the harness to index: the push runs that index itself, so a boundary publishes
+// the turns a detached per-turn worker may not have stored yet.
+const HARNESS = "pi";
 
 // Run one automation script and forget it: each hands off to a detached worker, and no failure of
 // theirs is worth disturbing the session with.
-function runScript(script: string, arg: string) {
+function runScript(script: string, ...args: string[]) {
   if (!existsSync(script)) return;
   try {
-    const child = spawn("bash", [script, arg], { detached: true, stdio: "ignore" });
+    const child = spawn("bash", [script, ...args], { detached: true, stdio: "ignore" });
     child.on("error", () => {});
     child.unref();
   } catch {}
@@ -232,14 +235,14 @@ export default async function (pi: any) {
     if (failure) ctx?.ui?.notify(failure, "warning"); // at load it would land inside pi's own startup
     // A fresh process is the one start with no shutdown behind it, so it catches up whatever a
     // process that never shut down cleanly left unpublished.
-    if (memory && event?.reason === "startup") runScript(PUSH_SH, memory);
+    if (memory && event?.reason === "startup") runScript(PUSH_SH, memory, HARNESS);
   });
 
   // Per turn, so a session killed mid-flight is indexed up to its last completed turn.
-  pi.on("turn_end", async () => runScript(INDEX_SH, "pi"));
+  pi.on("turn_end", async () => runScript(INDEX_SH, HARNESS));
 
   // A reload replaces the extension instance without ending the session: nothing to publish.
   pi.on("session_shutdown", async (event: any) => {
-    if (memory && event?.reason !== "reload") runScript(PUSH_SH, memory);
+    if (memory && event?.reason !== "reload") runScript(PUSH_SH, memory, HARNESS);
   });
 }
