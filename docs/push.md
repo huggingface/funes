@@ -28,7 +28,7 @@ you wrote yourself is never touched.
 **The wrong-memory guard.** A first push to a memory your local memory shares no chunks with — a first
 push, a new host, or genuinely the wrong memory — asks before uploading. Off a terminal it refuses
 rather than guess; `--yes` overrides. ([`funes add`](add.md) clears this for you by doing the first
-push interactively.)
+push interactively — once that machine has an index of its own to push.)
 
 If your token can't write the target, push says so — recall can still read a memory you can't publish
 to.

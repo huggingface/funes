@@ -113,7 +113,7 @@ timeout.
 - **The wrong-memory guard.** A first push to a memory your local memory shares no chunks with (a first
   push, a new host, or the wrong memory) is refused off a terminal. `funes add` clears it by doing
   that first push interactively — so on a new host, re-run `funes add <agent> <org>/<repo>` there
-  once.
+  once, as soon as that host has an index of its own to push.
 - **The remaining gap.** A session's last turns publish no later than the next session's start; a
   machine retired without starting another session keeps its last unpushed turns local. Run `funes
   push <org>/<repo>` by hand before stepping away if that matters.
