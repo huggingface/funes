@@ -25,6 +25,11 @@ fn add_codex_installs_hooks_and_preserves_existing() {
     )
     .unwrap();
 
+    // What an install before the move left in the shared tree, for this one to clear.
+    let old_skill = home.path().join(".agents/skills/funes/SKILL.md");
+    fs::create_dir_all(old_skill.parent().unwrap()).unwrap();
+    fs::write(&old_skill, "stale").unwrap();
+
     codex::install(Some("acme/kb".to_string())).unwrap();
 
     // Scripts written and executable.
@@ -56,8 +61,8 @@ fn add_codex_installs_hooks_and_preserves_existing() {
     let skill = home.path().join(".codex/skills/funes/SKILL.md");
     assert!(skill.exists(), "skill written");
     assert!(fs::read_to_string(&skill).unwrap().contains("name: funes"));
-    let old_skill = home.path().join(".agents/skills/funes/SKILL.md");
     assert!(!old_skill.exists(), "old shared skill removed");
+    assert!(!home.path().join(".agents").exists(), "and its tree pruned");
 
     // The user's own hook is untouched.
     assert_eq!(cfg["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "guard.sh");
