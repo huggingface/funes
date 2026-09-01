@@ -5,7 +5,7 @@
 //! `$FUNES_HOME` or `~/.funes`.
 
 use funes::agents::{claude, codex, hermes, pi};
-use funes::commands::{ask, index, mcp, push, recall, scrub, sketch, update};
+use funes::commands::{ask, doctor, index, mcp, push, recall, scrub, sketch, update};
 use funes::hub;
 use funes::memory;
 use funes::scan;
@@ -185,6 +185,20 @@ enum Cmd {
         /// hold.
         #[arg(long, value_name = "SESSION")]
         sessions: Vec<String>,
+    },
+    /// Check a memory for the faults funes knows how to repair, and fix the ones you confirm.
+    ///
+    /// Reports duplicate rows and a stale index in the memory itself, plus — for your local memory
+    /// — index bookkeeping whose transcripts are gone, leftover lock files, and disk no live
+    /// version needs. Nothing is repaired without a yes.
+    Doctor {
+        /// Memory to check — an `<org>/<repo>` shorthand, an `hf://…` URI, a local path, or
+        /// `local`. Defaults to your local memory.
+        #[arg(value_name = "MEMORY")]
+        memory: Option<String>,
+        /// Apply every repair without asking.
+        #[arg(short, long)]
+        yes: bool,
     },
     /// Redact secrets from your local memory in place — for rows indexed before redaction existed (or
     /// flagged by an updated ruleset); needs no source transcript. Cleans the local memory only: it
@@ -519,6 +533,7 @@ async fn main() -> Result<()> {
                 Err(e) => Err(e),
             }
         }
+        Cmd::Doctor { memory, yes } => doctor::run(memory::Memory::resolve(memory), yes).await,
         Cmd::Scrub => scrub::run().await,
         Cmd::Update { force } => update::run(force).await,
         Cmd::Mcp { memory } => mcp::run(memory).await,

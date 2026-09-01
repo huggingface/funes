@@ -123,6 +123,7 @@ workflow-oriented [documentation index](docs/README.md) for the complete guides.
 | `funes sessions` / `funes sketch …` / `funes scan …` | [docs/sessions.md](docs/sessions.md) — list sessions, digest one, find a literal in one |
 | `funes ask <agent> "…"` | [docs/ask.md](docs/ask.md) — borrow an agent for a grounded answer |
 | `funes push <memory>` (+ `scrub`, `status`) | [docs/push.md](docs/push.md) — publish and share a memory |
+| `funes doctor [memory]` | [docs/configuration.md](docs/configuration.md#repairing-a-memory-funes-doctor) — report a memory's faults and repair the ones you confirm |
 | `funes update` | [installation and updating](#get-funes) — replace the installed binary with a verified release |
 
 The per-turn indexing and session-boundary publishing the hooks run are detailed in

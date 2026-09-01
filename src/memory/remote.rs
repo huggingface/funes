@@ -440,7 +440,7 @@ pub(crate) fn upload_progress() -> Progress {
 }
 
 /// Human-readable byte count (binary units), for the upload bar.
-fn human_bytes(n: u64) -> String {
+pub(crate) fn human_bytes(n: u64) -> String {
     const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
     let mut v = n as f64;
     let mut i = 0;
@@ -575,6 +575,39 @@ mod tests {
         assert!(
             after.iter().any(|i| i.uuid == base_uuid),
             "the base index must survive untouched"
+        );
+    }
+
+    /// Why a memory's duplicate rows are dropped on the local memory and never on a remote: a
+    /// delete's deletion file does not go through the capture seam. Only the manifest is captured,
+    /// so a guarded commit built from a delete would reference a file that was never uploaded, and
+    /// the published dataset would stop opening. Should a Lance release route the write through the
+    /// dataset's object store, this fails and the repair becomes possible remotely.
+    #[tokio::test]
+    async fn a_delete_writes_past_the_capture_seam() {
+        let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
+        let rows = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(StringArray::from(vec!["alpha", "bravo", "charlie"]))],
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let uri = dir.path().join("t.lance");
+        let uri = uri.to_str().unwrap();
+        Dataset::write(RecordBatchIterator::new([rows], schema), uri, None)
+            .await
+            .unwrap();
+
+        let (mut ds, wrapper) = open_capturing(uri, HashMap::new()).await.unwrap();
+        assert_eq!(dataset::delete_rowids(&mut ds, &[1]).await.unwrap(), 1);
+
+        let captured: Vec<String> = captured_files(&wrapper).into_keys().collect();
+        assert!(
+            captured.iter().all(|f| !f.contains("_deletions/")),
+            "a captured deletion file would make a remote repair committable: {captured:?}"
+        );
+        assert!(
+            std::fs::read_dir(dir.path().join("t.lance/_deletions")).is_ok_and(|mut d| d.next().is_some()),
+            "the deletion file must have gone to the store itself"
         );
     }
 

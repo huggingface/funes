@@ -4,6 +4,7 @@
 //! decisions live. Every state they act on is one the layers below report; nothing here infers it.
 
 pub mod ask;
+pub mod doctor;
 pub mod index;
 pub mod mcp;
 pub mod push;

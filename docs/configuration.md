@@ -29,6 +29,43 @@ and push receipts can be recreated by running `funes push <memory>`.
 `FUNES_HOME` does **not** relocate agent configuration, installed integrations, or model caches.
 Those paths must remain stable after an agent records them.
 
+## Repairing a memory: `funes doctor`
+
+`funes doctor [memory]` reports the faults funes knows how to repair and fixes the ones you confirm.
+Each finding is printed before it is offered; `--yes` takes every offer, and a run with no terminal
+reports and changes nothing.
+
+```
+$ funes doctor
+memory: /home/u/.funes/memory
+chunks: 99687
+  duplicate rows: none
+  indexes: current
+funes home: /home/u/.funes
+  state.json: 10 of 187 entries name a transcript that is gone — they only take up room, since a transcript that comes back is read again anyway
+  drop them? [y/N]
+```
+
+What it checks in the memory itself, local or remote (a remote is reported, never rewritten):
+
+| Finding | Repair |
+| --- | --- |
+| Rows sharing a chunk id — the same passage ranks and renders more than once | Drops every copy but the most recently written, in the local memory. A published row is only removable by republishing the memory: a delete writes its deletion file past the seam funes builds a guarded Hub commit from, so committing one would publish a dataset that no longer opens. Doctor counts a remote's duplicates and stops there. |
+| Rows not folded into the FTS/IVF indexes | Rebuilds the local indexes. A remote's index is refreshed by `funes push <memory> --force-reindex`. |
+
+And in the funes home, for your local memory only:
+
+| Finding | Repair |
+| --- | --- |
+| `state.json` / `index-coverage.json` entries naming a transcript that is gone | Drops those entries. Only a run that enumerates a unit again clears its entry, so a deleted transcript leaves one behind — a pending entry keeps `funes status` reporting indexing owed. Keys that are not absolute paths belong to a harness that addresses units its own way and are never touched. |
+| Push-receipt lock files whose receipt is gone | Removes them, after taking each lock to confirm nothing holds it. The memory lock's own file stays: it is what writers contend on, and the kernel releases an `flock` when its process exits, so an unheld one is the resting state. |
+| `<home>/store` holding a table nothing reads | Deletes it. funes renames that pre-rename location into place only when there is no `memory/` yet, so a home that had both keeps a second copy. |
+| Dataset versions a repair left behind | Compacts the table and drops all but the two most recent versions. Compaction is what turns a deleted row back into free space; the cleanup spares any file young enough to belong to a write still in flight. |
+
+Repairs to the local memory and its bookkeeping hold the writer lock, so an indexing run in progress
+leaves them for the next `funes doctor` rather than losing its own update. Redacting secrets is a
+separate verb — see [`funes scrub`](push.md#what-funes-scrub-changes).
+
 ## Agent integration files
 
 `funes add` writes or registers these user-wide files; `funes remove <agent>` removes the matching

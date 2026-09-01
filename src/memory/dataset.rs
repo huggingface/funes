@@ -13,7 +13,7 @@ use arrow_array::{FixedSizeListArray, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use futures::TryStreamExt;
 use lance::dataset::builder::DatasetBuilder;
-use lance::dataset::Dataset;
+use lance::dataset::{Dataset, ROW_ID};
 use lance::index::vector::VectorIndexParams;
 use lance::index::DatasetIndexExt;
 use lance_index::scalar::InvertedIndexParams;
@@ -114,6 +114,27 @@ pub async fn scan_rows(
         batches.push(batch);
     }
     Ok(batches)
+}
+
+/// Delete the rows at `rowids` (Lance row addresses), and report how many rows went. The ids are
+/// spent in batches: a predicate is planned as one expression, so a whole backlog in a single
+/// `IN (…)` list would be a pathologically large plan, while a batch of thousands keeps every
+/// statement small. Deleting a row does not move any other, so the ids stay valid across the
+/// batches. The caller holds the writer lock.
+pub(crate) async fn delete_rowids(ds: &mut Dataset, rowids: &[u64]) -> Result<u64> {
+    /// Row ids per `delete` predicate.
+    const BATCH: usize = 2000;
+
+    let mut deleted = 0;
+    for batch in rowids.chunks(BATCH) {
+        let list = batch.iter().map(u64::to_string).collect::<Vec<_>>().join(", ");
+        deleted += ds
+            .delete(&format!("{ROW_ID} IN ({list})"))
+            .await
+            .context("deleting rows")?
+            .num_deleted_rows;
+    }
+    Ok(deleted)
 }
 
 /// Best-effort: build the FTS index on `text` and the IVF_PQ index on `vector`. A small corpus
