@@ -13,8 +13,10 @@ fn add_codex_installs_hooks_and_preserves_existing() {
     std::env::set_var("HOME", home.path());
     std::env::set_var("PATH", "");
     // Codex's home is asked of Codex, and `CODEX_HOME` answers when it can't be run — so a
-    // developer's own variable would send this install into their real Codex home.
+    // developer's own variable would send this install into their real Codex home. `FUNES_HOME`
+    // names the memory this install would seed.
     std::env::remove_var("CODEX_HOME");
+    std::env::remove_var("FUNES_HOME");
     let config = home.path().join(".codex/hooks.json");
 
     // A hook the user already had must survive funes's merge.

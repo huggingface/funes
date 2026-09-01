@@ -15,6 +15,10 @@ fn add_claude_generates_the_plugin_tree() {
     std::env::set_var("HOME", home.path());
     // No `claude` on PATH → funes extracts the plugin and returns Ok without registering it.
     std::env::set_var("PATH", "");
+    // The variables that name real state elsewhere: the memory this install would seed, and the
+    // Codex home a sibling test's agent would be asked for.
+    std::env::remove_var("FUNES_HOME");
+    std::env::remove_var("CODEX_HOME");
 
     claude::install(Some("acme/kb".to_string())).unwrap();
 
