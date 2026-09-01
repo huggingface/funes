@@ -449,7 +449,7 @@ async fn main() -> Result<()> {
                         .into_iter()
                         .find(|(_, kh)| *kh == h)
                         .map(|(dir, _)| vec![(dir, Some(h))])
-                        .ok_or_else(|| anyhow!("no {} session dir found on this machine", h.cli_name()))?
+                        .unwrap_or_default()
                 }
                 // No target at all: index every known harness root — but only in a terminal. An
                 // automated run (no TTY) must name a target, so a session-end hook indexes just its
@@ -468,9 +468,14 @@ async fn main() -> Result<()> {
                 }
             };
             if roots.is_empty() {
-                return Err(anyhow!(
-                    "no local sessions found — looked in ~/.claude/projects, ~/.codex/sessions, ~/.pi/agent/sessions, ~/.hermes/state.db"
-                ));
+                match harness {
+                    Some(h) => println!("no {} sessions on this machine yet — nothing to index.", h.cli_name()),
+                    None => println!(
+                        "no sessions on this machine yet — nothing to index (looked in ~/.claude/projects, \
+                         ~/.codex/sessions, ~/.pi/agent/sessions, ~/.hermes/state.db)."
+                    ),
+                }
+                return Ok(());
             }
             if budgeted {
                 index::run_index_budgeted(&roots, no_thinking, limit, yes).await

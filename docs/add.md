@@ -111,7 +111,8 @@ For Claude, Codex, and Hermes, `funes add` runs the one-time bootstrap the hooks
    terminal (the wrong-memory guard; see [automation.md](automation.md)).
 
 Re-run `funes add <agent> <memory>` any time to change the memory or refresh the setup — it's
-idempotent. On a new host, re-running it once clears the wrong-memory guard for that machine.
+idempotent. On a new host, re-running it once clears the wrong-memory guard for that machine, as
+soon as that host has an index of its own to push.
 Run `funes remove <agent>` to reverse the agent wiring without deleting the memory it used.
 
 From here you just work: when something touches a past decision, its rationale, or an earlier
