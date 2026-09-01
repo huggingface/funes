@@ -12,6 +12,11 @@ fn add_codex_installs_hooks_and_preserves_existing() {
     let home = tempfile::tempdir().unwrap();
     std::env::set_var("HOME", home.path());
     std::env::set_var("PATH", "");
+    // Codex's home is asked of Codex, and `CODEX_HOME` answers when it can't be run — so a
+    // developer's own variable would send this install into their real Codex home. `FUNES_HOME`
+    // names the memory this install would seed.
+    std::env::remove_var("CODEX_HOME");
+    std::env::remove_var("FUNES_HOME");
     let config = home.path().join(".codex/hooks.json");
 
     // A hook the user already had must survive funes's merge.
@@ -21,6 +26,11 @@ fn add_codex_installs_hooks_and_preserves_existing() {
         r#"{ "hooks": { "PreToolUse": [ { "hooks": [ { "type": "command", "command": "guard.sh" } ] } ] } }"#,
     )
     .unwrap();
+
+    // What an install before the move left in the shared tree, for this one to clear.
+    let old_skill = home.path().join(".agents/skills/funes/SKILL.md");
+    fs::create_dir_all(old_skill.parent().unwrap()).unwrap();
+    fs::write(&old_skill, "stale").unwrap();
 
     codex::install(Some("acme/kb".to_string())).unwrap();
 
@@ -49,10 +59,12 @@ fn add_codex_installs_hooks_and_preserves_existing() {
     );
     let end = cfg["hooks"]["SessionEnd"][0]["hooks"][0]["command"].as_str().unwrap();
     assert!(end.contains("funes-push.sh") && end.contains("acme/kb"), "end: {end}");
-    // The skill Codex lists before loading any tool.
-    let skill = home.path().join(".agents/skills/funes/SKILL.md");
+    // The skill Codex lists before loading any tool (now in Codex's own tree, not shared).
+    let skill = home.path().join(".codex/skills/funes/SKILL.md");
     assert!(skill.exists(), "skill written");
     assert!(fs::read_to_string(&skill).unwrap().contains("name: funes"));
+    assert!(!old_skill.exists(), "old shared skill removed");
+    assert!(!home.path().join(".agents").exists(), "and its tree pruned");
 
     // The user's own hook is untouched.
     assert_eq!(cfg["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "guard.sh");

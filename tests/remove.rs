@@ -76,7 +76,7 @@ fn remove_codex_preserves_user_hooks_and_files() {
     for owned in ["funes-index.sh", "funes-push.sh", "funes-sync.log"] {
         assert!(!hooks.join(owned).exists(), "{owned} removed");
     }
-    assert_eq!(fs::read_to_string(&log).unwrap(), "mcp remove funes\n");
+    assert_eq!(fs::read_to_string(&log).unwrap(), "mcp remove funes\ndoctor --json\n");
 
     let second = support::run_remove(&home, &bin, &log, "codex");
     support::assert_success(&second);
@@ -205,7 +205,10 @@ fn malformed_hook_configs_do_not_block_mcp_unregistration() {
     let codex_bin = support::fake_cli(&tmp.path().join("codex-fake"), "codex");
     let codex = support::run_remove(&codex_home, &codex_bin, &codex_log, "codex");
     assert!(!codex.status.success(), "malformed hooks.json remains an error");
-    assert_eq!(fs::read_to_string(codex_log).unwrap(), "mcp remove funes\n");
+    assert_eq!(
+        fs::read_to_string(codex_log).unwrap(),
+        "mcp remove funes\ndoctor --json\n"
+    );
 
     let hermes_home = tmp.path().join("hermes-home");
     fs::create_dir_all(hermes_home.join(".hermes")).unwrap();

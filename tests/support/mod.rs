@@ -19,6 +19,11 @@ pub fn run_remove(home: &Path, bin: &Path, log: &Path, agent: &str) -> Output {
         .args(["remove", agent])
         .env("HOME", home)
         .env("PATH", bin)
+        // Every variable that would point funes at something real: `CODEX_HOME` answers when funes
+        // asks Codex where its home is, and `FUNES_HOME` names the memory. A developer running the
+        // suite with either set would otherwise have their own integration removed.
+        .env_remove("CODEX_HOME")
+        .env_remove("FUNES_HOME")
         .env("FUNES_TEST_CLI_LOG", log)
         .output()
         .unwrap()

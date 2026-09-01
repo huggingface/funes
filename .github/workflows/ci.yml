@@ -117,25 +117,14 @@ jobs:
             ~/.cache/huggingface/hub/models--BAAI--bge-reranker-base
           key: hf-models-blas-v1
 
-      - name: Integration test
-        run: cargo test --profile ci --test index_recall -- --nocapture
-
-      # `cargo test --test <name>` runs only the named target.
-      - name: Secret redaction tests
-        run: cargo test --profile ci --test redact_on_index --test scrub --test scrub_drops_escaped_key --test scrub_drops_all -- --nocapture
-
-      # Gated: runs only when the secret is present (skips on forks / missing secret).
-      - name: Remote recall test
+      # The whole suite, named by nothing: this job has the model cache and the Hub secret, which
+      # is everything any test needs, so a test added later is covered without touching this file.
+      # The Hub ones skip themselves when the secret is absent (on a fork) and clean up the
+      # scratch paths they create.
+      - name: Integration tests
         env:
           HF_FUNES_TEST_TOKEN: ${{ secrets.HF_FUNES_TEST_TOKEN }}
-        run: cargo test --profile ci --test remote_recall -- --nocapture
-
-      # Gated: create→append→recall→clear against a unique scratch path. Skips without the
-      # secret; cleans up the scratch path itself.
-      - name: Push round-trip test
-        env:
-          HF_FUNES_TEST_TOKEN: ${{ secrets.HF_FUNES_TEST_TOKEN }}
-        run: cargo test --profile ci --test push_round_trip -- --nocapture
+        run: cargo test --profile ci -- --nocapture
 
       - name: Save model weights
         if: ${{ !cancelled() && github.ref == 'refs/heads/main' && steps.models.outputs.cache-hit != 'true' }}
