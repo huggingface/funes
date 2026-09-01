@@ -49,10 +49,12 @@ fn add_codex_installs_hooks_and_preserves_existing() {
     );
     let end = cfg["hooks"]["SessionEnd"][0]["hooks"][0]["command"].as_str().unwrap();
     assert!(end.contains("funes-push.sh") && end.contains("acme/kb"), "end: {end}");
-    // The skill Codex lists before loading any tool.
-    let skill = home.path().join(".agents/skills/funes/SKILL.md");
+    // The skill Codex lists before loading any tool (now in Codex's own tree, not shared).
+    let skill = home.path().join(".codex/skills/funes/SKILL.md");
     assert!(skill.exists(), "skill written");
     assert!(fs::read_to_string(&skill).unwrap().contains("name: funes"));
+    let old_skill = home.path().join(".agents/skills/funes/SKILL.md");
+    assert!(!old_skill.exists(), "old shared skill removed");
 
     // The user's own hook is untouched.
     assert_eq!(cfg["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "guard.sh");
