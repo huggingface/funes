@@ -361,8 +361,17 @@ pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm, ses
         MemoryState::Ready(ds) => Some(ds),
     };
 
+    // Only `Empty` can land here: a local path has no Hub states, and an unreadable memory is an
+    // `Err`. A host whose first index isn't built yet has nothing to publish — that is not a failure.
+    let MemoryState::Ready(local) = Memory::local().state().await? else {
+        return Ok(format!(
+            "{}: nothing indexed on this machine yet — nothing to publish\n",
+            target.label()
+        )
+        .into());
+    };
+
     eprintln!("comparing local and remote indexes…");
-    let local = Memory::local().open().await?;
     let remote_ids = match &remote {
         Some(ds) => all_ids(ds).await?,
         None => HashSet::new(),
