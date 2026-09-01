@@ -1,8 +1,8 @@
 # Building the memory
 
 `funes index` builds or updates your local memory from session transcripts. [`funes add`](add.md)
-runs it for you on every turn; run it by hand to seed a memory, to fold in a new source, or to keep
-recall fresh for an agent with no hooks (pi).
+runs it for you on every turn; run it by hand to seed a memory, to fold in a new source, or to index
+sessions from a machine or agent that never ran the automation.
 
 ```bash
 funes index      # a fast, text-first pass over every known harness dir, into one local memory

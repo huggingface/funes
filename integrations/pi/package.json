@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "pi extension: recall over past AI-assistant sessions, bridged to `funes mcp`.",
+  "description": "pi extension: recall over past AI-assistant sessions bridged to `funes mcp`, and per-turn indexing of the session into that memory.",
   "scripts": {
     "clean": "echo 'nothing to clean'",
     "build": "echo 'nothing to build'",

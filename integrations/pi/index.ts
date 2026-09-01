@@ -1,11 +1,15 @@
 // funes-owned pi extension: expose recall over past AI-assistant sessions as
-// first-class pi tools (`recall`, `get`).
+// first-class pi tools, and index each turn into the local memory.
 //
 // pi has no MCP client, so this extension *is* the client: it spawns `funes mcp`
 // once over stdio, keeps it warm for the session, and forwards each call as an
 // MCP `tools/call`. That keeps the embedder + reranker loaded across calls
 // (unlike shelling out to `funes recall`, which reloads both every time), and
 // it consumes the same `funes mcp` surface every other agent integration uses.
+//
+// The tools aren't written out here: the extension registers whatever
+// `tools/list` returns, passing each MCP schema through as pi's `parameters` —
+// so there is no second copy of the surface to keep in step.
 //
 // Install:  funes add pi   — or, from a funes checkout, `pi install
 // ./integrations/pi`, or `pi -e ./integrations/pi` for a single run.
@@ -17,24 +21,24 @@
 // and points FUNES_MEMORY at a live hf:// memory. This extension knows nothing of
 // it — only of the vars.)
 //
-// The memory this extension recalls from is resolved once, in order:
+// The memory this extension recalls from — and publishes to — is resolved once, in order:
 //   1. FUNES_MEMORY in the environment (a per-run override, set by whatever host)
 //   2. the memory bound at install by `funes add pi <memory>`, saved in a `memory`
 //      file next to this extension (absent = the local memory)
 // The result is forwarded as the `funes mcp <memory>` positional; empty forwards a
 // bare `funes mcp` (the local memory).
-import { Type } from "typebox";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
+const HERE = dirname(fileURLToPath(import.meta.url));
 const FUNES_BIN = process.env.FUNES_BIN || "funes";
 
 // The memory `funes add pi <memory>` wrote beside this extension, or "" if none (local).
 function boundMemory(): string {
   try {
-    return readFileSync(join(dirname(fileURLToPath(import.meta.url)), "memory"), "utf8").trim();
+    return readFileSync(join(HERE, "memory"), "utf8").trim();
   } catch {
     return "";
   }
@@ -44,8 +48,10 @@ const memory = (process.env.FUNES_MEMORY || boundMemory()).trim();
 const FUNES_ARGS = memory ? ["mcp", memory] : ["mcp"];
 const PROTOCOL_VERSION = "2024-11-05"; // matches funes' rmcp server
 const CALL_TIMEOUT_MS = 120_000;
+const HANDSHAKE_TIMEOUT_MS = 10_000; // pi's startup waits on these, so they don't get a recall's bound
 
 type Pending = { resolve: (v: any) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> };
+type McpTool = { name: string; description?: string; inputSchema: Record<string, unknown> };
 
 // A minimal MCP stdio client for a single `funes mcp` child. stdout is the
 // JSON-RPC channel (newline-delimited messages); stderr is logs.
@@ -85,11 +91,16 @@ class FunesMcp {
 
     const start = (async () => {
       try {
-        await this.request("initialize", {
-          protocolVersion: PROTOCOL_VERSION,
-          capabilities: {},
-          clientInfo: { name: "pi-funes-bridge", version: "0.1.0" },
-        });
+        await this.request(
+          "initialize",
+          {
+            protocolVersion: PROTOCOL_VERSION,
+            capabilities: {},
+            clientInfo: { name: "pi-funes-bridge", version: "0.1.0" },
+          },
+          undefined,
+          HANDSHAKE_TIMEOUT_MS,
+        );
         this.send({ jsonrpc: "2.0", method: "notifications/initialized", params: {} });
       } catch (err: any) {
         // Initialize failed while the child may still be alive (e.g. it timed out): tear it
@@ -133,28 +144,39 @@ class FunesMcp {
     this.child.stdin.write(JSON.stringify(obj) + "\n");
   }
 
-  private request(method: string, params: any): Promise<any> {
+  private request(method: string, params: any, signal?: AbortSignal, timeoutMs = CALL_TIMEOUT_MS): Promise<any> {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const settle = (err: Error) => {
+        const p = this.pending.get(id);
+        if (!p) return;
         this.pending.delete(id);
-        reject(new Error(`funes ${method} timed out`));
-      }, CALL_TIMEOUT_MS);
+        clearTimeout(p.timer);
+        reject(err);
+      };
+      const timer = setTimeout(() => settle(new Error(`funes ${method} timed out`)), timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
+      // A cancelled turn releases its call here instead of holding the event loop until the timeout.
+      signal?.addEventListener("abort", () => settle(new Error(`funes ${method} cancelled`)), { once: true });
       try {
         this.send({ jsonrpc: "2.0", id, method, params });
       } catch (err: any) {
-        clearTimeout(timer);
-        this.pending.delete(id);
-        reject(err);
+        settle(err);
       }
     });
   }
 
-  // Call an MCP tool and flatten its text content to a string.
-  async callTool(name: string, args: Record<string, unknown>): Promise<string> {
+  // The tools this funes binary exposes, as MCP declares them.
+  async listTools(): Promise<McpTool[]> {
     await this.ensureStarted();
-    const result = await this.request("tools/call", { name, arguments: args });
+    const result = await this.request("tools/list", {}, undefined, HANDSHAKE_TIMEOUT_MS);
+    return (result?.tools ?? []) as McpTool[];
+  }
+
+  // Call an MCP tool and flatten its text content to a string.
+  async callTool(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<string> {
+    await this.ensureStarted();
+    const result = await this.request("tools/call", { name, arguments: args }, signal);
     const content: any[] = result?.content ?? [];
     return content
       .filter((c) => c?.type === "text")
@@ -165,63 +187,62 @@ class FunesMcp {
 
 const funes = new FunesMcp();
 
-async function call(name: string, args: Record<string, unknown>) {
+// The automation scripts `funes add pi` installs beside this extension. A checkout has none, hence
+// the guard in runScript: a missing script means no automation, not an error.
+const INDEX_SH = join(HERE, "scripts", "funes-index.sh");
+const PUSH_SH = join(HERE, "scripts", "funes-push.sh");
+// Both scripts take the harness to index: the push runs that index itself, so a boundary publishes
+// the turns a detached per-turn worker may not have stored yet.
+const HARNESS = "pi";
+
+// Run one automation script and forget it: each hands off to a detached worker, and no failure of
+// theirs is worth disturbing the session with.
+function runScript(script: string, ...args: string[]) {
+  if (!existsSync(script)) return;
   try {
-    return { content: [{ type: "text", text: await funes.callTool(name, args) }] };
-  } catch (e: any) {
-    return { content: [{ type: "text", text: `${name} error: ${e?.message || String(e)}` }] };
-  }
+    const child = spawn("bash", [script, ...args], { detached: true, stdio: "ignore" });
+    child.on("error", () => {});
+    child.unref();
+  } catch {}
 }
 
-export default function (pi: any) {
-  pi.registerTool({
-    name: "recall",
-    label: "Recall",
-    description:
-      "Recall decisions, rationale, context, and subject-matter findings from the user's past " +
-      "AI-assistant sessions. Returns ranked passages with provenance (timestamp, session, block " +
-      "type); each hit carries a `→ get <session_id> <turn_uuid>` line you can pass to `get` to " +
-      "read the full surrounding turns. Use it when a question concerns something decided or " +
-      "discussed in an earlier session rather than the current files, or before asserting the " +
-      "history of anything. Recall subject-matter too, not only decisions: before re-deriving how " +
-      "an API or system behaves — or anything a past session (often a research subagent) " +
-      "investigated — query the topic itself; recall surfaces those findings. To recall from a " +
-      "different memory than the server's default, pass `memory`.",
-    parameters: Type.Object({
-      query: Type.String({ description: "Natural-language search query" }),
-      k: Type.Optional(Type.Number({ description: "Number of results (default 8)" })),
-      memory: Type.Optional(
-        Type.String({
-          description:
-            "Memory to read for this call — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Defaults to the server's memory.",
-        }),
-      ),
-    }),
-    execute: (_id: string, params: { query: string; k?: number; memory?: string }) =>
-      call("recall", { query: params.query, k: params.k, memory: params.memory }),
+export default async function (pi: any) {
+  let tools: McpTool[] = [];
+  let failure = "";
+  try {
+    tools = await funes.listTools();
+  } catch (e: any) {
+    failure = `funes recall is unavailable: ${e?.message || String(e)}`;
+  }
+
+  for (const tool of tools) {
+    pi.registerTool({
+      name: tool.name,
+      label: `funes ${tool.name}`,
+      description: tool.description ?? "",
+      parameters: tool.inputSchema,
+      execute: async (_id: string, params: Record<string, unknown>, signal?: AbortSignal) => {
+        try {
+          return { content: [{ type: "text", text: await funes.callTool(tool.name, params, signal) }], details: {} };
+        } catch (e: any) {
+          return { content: [{ type: "text", text: `${tool.name} error: ${e?.message || String(e)}` }], details: {} };
+        }
+      },
+    });
+  }
+
+  pi.on("session_start", async (event: any, ctx: any) => {
+    if (failure) ctx?.ui?.notify(failure, "warning"); // at load it would land inside pi's own startup
+    // A fresh process is the one start with no shutdown behind it, so it catches up whatever a
+    // process that never shut down cleanly left unpublished.
+    if (memory && event?.reason === "startup") runScript(PUSH_SH, memory, HARNESS);
   });
 
-  pi.registerTool({
-    name: "get",
-    label: "Recall: get",
-    description:
-      "Drill down on a recall hit: fetch the named turn plus the turns around it, reassembled " +
-      "into readable text. Pass the `session_id` and `turn_uuid` from a recall hit's `→ get` line — " +
-      "and the `memory` it names.",
-    parameters: Type.Object({
-      session_id: Type.String({ description: "Session id from a recall hit's `→ get` line" }),
-      turn_uuid: Type.String({ description: "Turn uuid from a recall hit's `→ get` line" }),
-      window: Type.Optional(Type.Number({ description: "Turns within this window are included (default 3)" })),
-      memory: Type.Optional(
-        Type.String({ description: "Memory to read for this call — the one the recall hit came from" }),
-      ),
-    }),
-    execute: (_id: string, params: { session_id: string; turn_uuid: string; window?: number; memory?: string }) =>
-      call("get", {
-        session_id: params.session_id,
-        turn_uuid: params.turn_uuid,
-        window: params.window,
-        memory: params.memory,
-      }),
+  // Per turn, so a session killed mid-flight is indexed up to its last completed turn.
+  pi.on("turn_end", async () => runScript(INDEX_SH, HARNESS));
+
+  // A reload replaces the extension instance without ending the session: nothing to publish.
+  pi.on("session_shutdown", async (event: any) => {
+    if (memory && event?.reason !== "reload") runScript(PUSH_SH, memory, HARNESS);
   });
 }

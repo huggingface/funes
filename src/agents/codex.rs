@@ -7,12 +7,13 @@
 //! overwrites it (idempotent).
 //!
 //! Codex lists a skill's name and description before any MCP tool is loaded, so funes installs one
-//! at `~/.agents/skills/funes/` to be recognizable as memory while its tools are still deferred.
+//! under Codex's own `skills/` to be recognizable as memory while its tools are still deferred.
 //!
-//! Automation lives in Codex's dedicated `~/.codex/hooks.json`: a `Stop` hook indexes each
+//! Automation lives in Codex's dedicated `hooks.json`: a `Stop` hook indexes each
 //! completed turn and, with a bound memory, `SessionEnd` publishes it — with `SessionStart`
 //! catching up whatever a missed end left behind. funes merges only its own hook groups and
-//! installs the scripts under `~/.codex/hooks/`.
+//! installs the scripts under Codex's `hooks/`. Every one of those paths hangs off the home
+//! `codex doctor` reports, so a relocated `CODEX_HOME` is written to and read from alike.
 
 use super::hooks;
 use super::{remove_empty_dir, remove_file, run_remove, shell_command, RemoveCommand};
@@ -59,8 +60,9 @@ pub fn install(memory: Option<String>) -> Result<()> {
 
     // The skill and the hooks are plain files, so they land even when the MCP registration below
     // can't reach the Codex CLI.
-    install_skill()?;
-    install_hooks(memory.as_deref())?;
+    let codex_home = codex_home()?;
+    install_skill(&codex_home)?;
+    install_hooks(&codex_home, memory.as_deref())?;
 
     let funes = std::env::var("FUNES_BIN").unwrap_or_else(|_| "funes".to_string());
     let args = mcp_add_args(&funes, memory.as_deref());
@@ -96,7 +98,8 @@ pub fn uninstall() -> Result<()> {
         &["No MCP server named 'funes' found"],
     );
     // Independent cleanups: a malformed hooks file must not strand the skill.
-    let files = match (uninstall_hooks(), uninstall_skill()) {
+    let codex_home = codex_home()?;
+    let files = match (uninstall_hooks(&codex_home), uninstall_skill(&codex_home)) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(e), Ok(())) | (Ok(()), Err(e)) => Err(e),
         (Err(hooks), Err(skill)) => Err(hooks.context(format!("skill cleanup also failed: {skill:#}"))),
@@ -120,14 +123,65 @@ pub fn uninstall() -> Result<()> {
     Ok(())
 }
 
-/// The funes-owned skill directory, fixed under `$HOME`: Codex reads user skills from there.
-fn skill_dir() -> Result<PathBuf> {
-    let home = PathBuf::from(std::env::var_os("HOME").context("resolving $HOME for the skills dir")?);
-    Ok(home.join(".agents/skills/funes"))
+/// Codex's own home — where its config, hooks, and skills live. Asked of Codex rather than assumed,
+/// because Codex honors `CODEX_HOME` and resolves the user's home itself; `$HOME/.codex` is only
+/// where a default install happens to land, and is the fallback when Codex can't be asked.
+fn codex_home() -> Result<PathBuf> {
+    if let Some(path) = doctor_codex_home() {
+        return Ok(path);
+    }
+    if let Some(dir) = std::env::var_os("CODEX_HOME").filter(|d| !d.is_empty()) {
+        return Ok(PathBuf::from(dir));
+    }
+    let home = std::env::var_os("HOME").context("resolving $HOME for the Codex home")?;
+    Ok(PathBuf::from(home).join(".codex"))
 }
 
-fn install_skill() -> Result<()> {
-    let dir = skill_dir()?;
+/// The home `codex doctor --json` reports. Its exit status is the health verdict, not whether it
+/// answered, so the report is read whatever it says; anything unreadable yields `None` and leaves
+/// the caller its fallback.
+fn doctor_codex_home() -> Option<PathBuf> {
+    let report = Command::new("codex").args(["doctor", "--json"]).output().ok()?;
+    codex_home_from_report(&report.stdout)
+}
+
+/// The `CODEX_HOME` a doctor report carries, from the check that states it as a plain absolute path.
+fn codex_home_from_report(report: &[u8]) -> Option<PathBuf> {
+    let report: Value = serde_json::from_slice(report).ok()?;
+    let home = report
+        .get("checks")?
+        .get("config.load")?
+        .get("details")?
+        .get("CODEX_HOME")?
+        .as_str()?;
+    (!home.is_empty()).then(|| PathBuf::from(home))
+}
+
+/// The funes-owned skill directory under Codex's home. Codex reads user skills from both
+/// `<codex home>/skills` and `~/.agents/skills`; the funes skill goes in the Codex-private one,
+/// because every harness implementing the skills standard reads the shared tree — a skill funes
+/// installs for one agent and removes with it has no business being another agent's too.
+fn skill_dir(codex_home: &Path) -> PathBuf {
+    codex_home.join("skills/funes")
+}
+
+/// The shared-tree copy an earlier install left behind, cleared on both install and uninstall so it
+/// stops reaching the agents that read that tree. Best-effort: it is gone on every host but the ones
+/// that ran that install.
+fn remove_shared_skill() -> Result<()> {
+    let home = PathBuf::from(std::env::var_os("HOME").context("resolving $HOME for the skills dir")?);
+    let dir = home.join(".agents/skills/funes");
+    remove_file(&dir.join("SKILL.md"))?;
+    remove_empty_dir(&dir)?;
+    for parent in dir.ancestors().skip(1).take(2) {
+        remove_empty_dir(parent)?;
+    }
+    Ok(())
+}
+
+fn install_skill(codex_home: &Path) -> Result<()> {
+    remove_shared_skill()?;
+    let dir = skill_dir(codex_home);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let path = dir.join("SKILL.md");
     std::fs::write(&path, SKILL_MD).with_context(|| format!("writing {}", path.display()))?;
@@ -135,14 +189,12 @@ fn install_skill() -> Result<()> {
     Ok(())
 }
 
-fn uninstall_skill() -> Result<()> {
-    let dir = skill_dir()?;
+fn uninstall_skill(codex_home: &Path) -> Result<()> {
+    remove_shared_skill()?;
+    let dir = skill_dir(codex_home);
     remove_file(&dir.join("SKILL.md"))?;
-    // The install creates the whole path, so prune back up while each level is left empty.
+    // Only `funes/` is funes's: `skills` is Codex's own root, and its parent Codex's home.
     remove_empty_dir(&dir)?;
-    for parent in dir.ancestors().skip(1).take(2) {
-        remove_empty_dir(parent)?;
-    }
     Ok(())
 }
 
@@ -190,9 +242,8 @@ fn desired_hooks(hooks_dir: &Path, memory: Option<&str>) -> Vec<hooks::Hook> {
 
 /// Write the scripts and merge funes's groups into Codex's dedicated hooks file, preserving every
 /// hand-authored group.
-fn install_hooks(memory: Option<&str>) -> Result<()> {
-    let home = PathBuf::from(std::env::var_os("HOME").context("resolving $HOME for the hooks dir")?);
-    let base = home.join(".codex");
+fn install_hooks(codex_home: &Path, memory: Option<&str>) -> Result<()> {
+    let base = codex_home.to_path_buf();
     let hooks_dir = base.join("hooks");
     hooks::write_scripts(&hooks_dir)?;
     let desired = desired_hooks(&hooks_dir, memory);
@@ -240,9 +291,8 @@ fn manual_hook_instructions(path: &Path, desired: &[hooks::Hook]) -> Result<()> 
 
 /// Remove only funes's groups from Codex's shared hooks file, then delete its scripts and log. An
 /// absent setup is already removed; a malformed hooks file is left wholly untouched.
-fn uninstall_hooks() -> Result<()> {
-    let home = PathBuf::from(std::env::var_os("HOME").context("resolving $HOME for the hooks dir")?);
-    let base = home.join(".codex");
+fn uninstall_hooks(codex_home: &Path) -> Result<()> {
+    let base = codex_home.to_path_buf();
     let config = base.join("hooks.json");
 
     let current = match std::fs::read_to_string(&config) {
@@ -279,8 +329,9 @@ fn uninstall_hooks() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{desired_hooks, mcp_add_args, parse_version_line, MIN_CODEX, SKILL_MD};
+    use super::{codex_home_from_report, desired_hooks, mcp_add_args, parse_version_line, MIN_CODEX, SKILL_MD};
     use std::path::Path;
+    use std::path::PathBuf;
 
     #[test]
     fn bakes_the_memory_only_when_present() {
@@ -292,6 +343,24 @@ mod tests {
             mcp_add_args("funes", Some("acme/kb")),
             ["mcp", "add", "funes", "--", "funes", "mcp", "acme/kb"]
         );
+    }
+
+    #[test]
+    fn codex_home_comes_from_the_doctor_report() {
+        let report = br#"{"schemaVersion":1,"overallStatus":"ok","checks":{
+            "config.load":{"details":{"CODEX_HOME":"/elsewhere/codex","config.toml":"x"}},
+            "state.paths":{"details":{"CODEX_HOME":"~/.codex (dir)"}}}}"#;
+        assert_eq!(codex_home_from_report(report), Some(PathBuf::from("/elsewhere/codex")));
+
+        // A report that carries no home — a failed run, an older schema — leaves the caller its
+        // fallback rather than a guess.
+        assert_eq!(
+            codex_home_from_report(br#"{"checks":{"config.load":{"details":{}}}}"#),
+            None
+        );
+        assert_eq!(codex_home_from_report(br#"{"checks":{}}"#), None);
+        assert_eq!(codex_home_from_report(b"not json"), None);
+        assert_eq!(codex_home_from_report(b""), None);
     }
 
     #[test]
