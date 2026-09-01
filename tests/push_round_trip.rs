@@ -263,18 +263,17 @@ async fn push_round_trip_create_append_recall() {
         recall_reindexed.contains("SYNCSMOKE2"),
         "remote recall should still surface the turn after reindex: {recall_reindexed}"
     );
+    let mut published = 0;
     for (who, r) in [("a", race_a), ("b", race_b)] {
-        // Any of these outcomes is fine; an error or a second copy is not.
         let report = r.unwrap_or_else(|e| panic!("racing push {who} failed: {e}")).report;
         eprintln!("racing push {who}: {}", report.trim_end());
+        published += usize::from(report.contains("pushed"));
         assert!(
-            report.contains("pushed")
-                || report.contains("skipped")
-                || report.contains("already published")
-                || report.contains("up to date"),
+            report.contains("pushed") || report.contains("skipped") || report.contains("up to date"),
             "racing push {who} reported: {report}"
         );
     }
+    assert_eq!(published, 1, "one racer publishes the new chunk, the other stands down");
     assert_eq!(
         remote_rows, remote_ids,
         "two pushes racing must not leave duplicate rows on the remote"

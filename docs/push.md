@@ -33,8 +33,9 @@ push interactively — once that machine has an index of its own to push.)
 If your token can't write the target, push says so — recall can still read a memory you can't publish
 to.
 
-The hooks [`funes add`](add.md) installs run this at session boundaries automatically; see
-[automation.md](automation.md).
+One publish per memory at a time on a machine: a push that starts while another is still running
+says so and stops, and the next one picks up what it left. The hooks [`funes add`](add.md) installs
+run this at session boundaries automatically; see [automation.md](automation.md).
 
 ## Keeping secrets out: the gate and `funes scrub`
 
