@@ -205,14 +205,29 @@ fn write_index_coverage(
 
 /// Native sessions that the most recent indexing sweep found short of a complete index. `None`
 /// means no sweep has written a readable snapshot yet; status omits the line rather than doing an
-/// unbounded recursive transcript scan.
+/// unbounded recursive transcript scan. An absolute-path key whose transcript no longer exists
+/// on disk is not counted — a deleted file is never enumerated again, so its key would otherwise
+/// stay pending forever while `index`, which walks the live tree, correctly reports nothing owed.
 pub(crate) fn local_index_coverage() -> Option<IndexCoverage> {
     std::fs::read_to_string(dataset::funes_dir().join("index-coverage.json"))
         .ok()
         .and_then(|text| serde_json::from_str::<IndexCoverageSnapshot>(&text).ok())
         .map(|snapshot| IndexCoverage {
-            pending: snapshot.pending.len(),
+            pending: pending_on_disk(&snapshot.pending),
         })
+}
+
+/// Count the pending keys that still owe work: an absolute-path key counts only while its
+/// transcript exists on disk, and any other key — a hermes unit is keyed by session id, which
+/// cannot be stat'ed — stays counted. Relative keys are never stat'ed against the cwd.
+fn pending_on_disk(pending: &HashSet<String>) -> usize {
+    pending
+        .iter()
+        .filter(|key| {
+            let path = Path::new(key.as_str());
+            !path.is_absolute() || path.exists()
+        })
+        .count()
 }
 
 /// A set-up indexer: it holds the memory lock, embedder, dataset, redaction scanner, and incremental
@@ -1002,6 +1017,27 @@ mod tests {
         let snapshot = update_index_coverage(snapshot, &second, &state);
         assert!(snapshot.pending.contains("partial"));
         assert!(snapshot.pending.contains("other-harness"));
+    }
+
+    #[test]
+    fn pending_count_skips_keys_whose_transcript_is_gone() {
+        let temp = tempfile::tempdir().unwrap();
+        let live = temp.path().join("live.jsonl");
+        std::fs::write(&live, "{}").unwrap();
+        let snapshot = IndexCoverageSnapshot {
+            pending: [
+                live.to_str().unwrap().to_string(),
+                temp.path().join("deleted.jsonl").to_str().unwrap().to_string(),
+                // A hermes unit is keyed by session id, not a path — it cannot be stat'ed and must
+                // stay counted, or an owed hermes session would vanish from status.
+                "01a05d63-1777-7871-864b-0297f282040a".to_string(),
+                "relative/live.jsonl".to_string(),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        // Only the deleted absolute path drops out.
+        assert_eq!(pending_on_disk(&snapshot.pending), 3);
     }
 
     #[test]
