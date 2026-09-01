@@ -16,9 +16,10 @@
 # next session's catch-up, which is the gap the boundary hook exists to close. Indexing here also
 # covers a per-turn run that never happened. It is the same incremental, local, idempotent sweep.
 #
-# `funes push` is incremental and commit-guarded (it retries against a moved remote
-# head), so overlapping publishes — and a publish that overlaps an index — are safe;
-# no lock is needed. It has a fail-closed secret gate: a chunk holding a credential is
+# `funes push` is incremental and takes a per-remote lock, so a publish that starts while
+# another is still running steps aside and the next session start sweeps it. A publish that
+# overlaps an index is safe — push only reads the local memory. It has a fail-closed secret
+# gate: a chunk holding a credential is
 # withheld (exit 2) rather than published. A first push to a memory your local memory
 # shares no chunks with is refused off a terminal — clear it once by hand (see setup).
 #

@@ -102,8 +102,10 @@ timeout.
 - **Serialized in the binary.** funes holds an advisory lock while it mutates the local memory, so
   only one writer touches it at a time, whatever launched it (a hook, a manual `funes index`, `funes
   scrub`). A run that hits the lock fails loudly and re-sweeps next turn (indexing is idempotent).
-  Reads take no lock. `funes push` is commit-guarded on the remote, so overlapping publishes — and a
-  publish overlapping an index — are safe.
+  Reads take no lock. `funes push` takes one of its own, per remote memory — it only reads the local
+  memory, so it never blocks an index — and a publish that finds another in flight steps aside; the
+  next session start sweeps it. Nothing is serialized across machines: two hosts publishing to one
+  memory still race on the Hub.
 - **Secrets held back.** funes redacts credentials at index time; on push, a separate always-on gate
   withholds any chunk that still contains one — the clean rows publish, and the push exits non-zero
   (code `2`) only if that leaves nothing to publish. Run `funes scrub`, then the next push includes it.

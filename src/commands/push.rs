@@ -22,6 +22,7 @@
 use crate::hub;
 use crate::memory::card::{self, CardAction, CardCtx};
 use crate::memory::dataset;
+use crate::memory::lock;
 use crate::memory::remote::{self, Appended, Reindexed};
 use crate::memory::{Memory, MemoryState};
 use crate::{chunk, scan};
@@ -88,6 +89,15 @@ async fn all_ids(ds: &Dataset) -> Result<HashSet<String>> {
 /// local: a shared remote's sessions from other hosts say nothing about this host's push backlog.
 fn pushed_path(memory_uri: &str) -> PathBuf {
     dataset::funes_dir().join("pushed").join(sanitize(memory_uri))
+}
+
+/// The file a publish to `memory_uri` locks for its whole run — not the receipt's lock, which
+/// [`record_pushed`] takes per write.
+fn push_lock_path(memory_uri: &str) -> PathBuf {
+    dataset::funes_dir()
+        .join("pushed")
+        .join(".locks")
+        .join(format!("{}.push", sanitize(memory_uri)))
 }
 
 fn load_pushed_from(path: &Path) -> Option<HashSet<String>> {
@@ -339,6 +349,15 @@ pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm, ses
         Memory::Local { .. } => {
             bail!("push target must be a remote `hf://` memory — it publishes your local index up to the Hub")
         }
+    };
+
+    // A push's delta is only valid against the head it read, so a concurrent one republishes those rows.
+    let Some(_push_lock) = lock::try_lock_file(&push_lock_path(&uri))? else {
+        return Ok(format!(
+            "{}: another push to this memory is in flight — skipped\n",
+            target.label()
+        )
+        .into());
     };
 
     // 1. What the remote *is*, and what's on it — asked before any local build or scan, so an
@@ -1029,6 +1048,16 @@ mod tests {
         let rows = rows_with_ids(&ds, &to_push).await.unwrap();
         let pushed: usize = rows.iter().map(|b| b.num_rows()).sum();
         assert_eq!(pushed, reviewed.len(), "only that session's rows are read");
+    }
+
+    #[test]
+    fn a_push_locks_its_own_file_per_remote() {
+        let uri = "hf://datasets/acme/kb";
+        let receipt = pushed_path(uri);
+        let receipt_lock = receipt.parent().unwrap().join(".locks").join(sanitize(uri));
+        assert_ne!(push_lock_path(uri), receipt);
+        assert_ne!(push_lock_path(uri), receipt_lock);
+        assert_ne!(push_lock_path(uri), push_lock_path("hf://datasets/acme/other"));
     }
 
     #[tokio::test]

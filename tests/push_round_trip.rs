@@ -27,6 +27,27 @@ use hf_hub::{HFClient, HFError, HFRepository, RepoTypeDataset};
 const OWNER: &str = "optimum-internal-testing";
 const NAME: &str = "funes-test";
 
+/// The remote's row count and its distinct chunk-id count.
+async fn remote_rows_and_ids(uri: &str) -> (usize, usize) {
+    let ds = Memory::parse(uri).open().await.expect("opening the remote");
+    let batches = funes::memory::dataset::scan_rows(&ds, &["id"], None, None)
+        .await
+        .expect("scanning the remote ids");
+    let mut rows = 0usize;
+    let mut ids = std::collections::HashSet::new();
+    for b in &batches {
+        rows += b.num_rows();
+        let col = b
+            .column_by_name("id")
+            .and_then(|c| c.as_any().downcast_ref::<arrow_array::StringArray>())
+            .expect("an id column");
+        for i in 0..b.num_rows() {
+            ids.insert(col.value(i).to_string());
+        }
+    }
+    (rows, ids.len())
+}
+
 /// Write `projects/<proj>/sess.jsonl` with the given (uuid, text) user turns.
 fn write_session(source: &std::path::Path, turns: &[(&str, &str)]) {
     let dir = source.join("projects").join("-synctest-proj");
@@ -158,6 +179,24 @@ async fn push_round_trip_create_append_recall() {
     // the index as its own commit (capture_reindex + a separate commit), then recall it again.
     let reindex = funes::commands::push::run_push(Memory::parse(&uri), true, Confirm::Yes, &[]).await;
     let recall_reindexed = recall_remote(&uri, "SYNCSMOKE2 continuation").await;
+    // Two pushes at once — what N subagents ending together do.
+    write_session(
+        src.path(),
+        &[
+            ("s1", "SYNCSMOKE parsing transcripts into turns"),
+            ("s2", "SYNCSMOKE2 the continuation adds only this new turn"),
+            ("s3", "SYNCSMOKE3 the turn two pushes race to publish"),
+        ],
+    );
+    funes::commands::index::run_index(src.path(), false, None)
+        .await
+        .unwrap();
+    let (race_a, race_b) = tokio::join!(
+        funes::commands::push::run_push(Memory::parse(&uri), false, Confirm::Yes, &[]),
+        funes::commands::push::run_push(Memory::parse(&uri), false, Confirm::Yes, &[]),
+    );
+    let (remote_rows, remote_ids) = remote_rows_and_ids(&uri).await;
+
     let readme_after = root_readme(&repo).await;
     // The model id must travel with the memory (stamped in the schema metadata, uploaded by push).
     let remote_model = match Memory::parse(&uri).open().await {
@@ -223,6 +262,21 @@ async fn push_round_trip_create_append_recall() {
     assert!(
         recall_reindexed.contains("SYNCSMOKE2"),
         "remote recall should still surface the turn after reindex: {recall_reindexed}"
+    );
+    let mut published = 0;
+    for (who, r) in [("a", race_a), ("b", race_b)] {
+        let report = r.unwrap_or_else(|e| panic!("racing push {who} failed: {e}")).report;
+        eprintln!("racing push {who}: {}", report.trim_end());
+        published += usize::from(report.contains("pushed"));
+        assert!(
+            report.contains("pushed") || report.contains("skipped") || report.contains("up to date"),
+            "racing push {who} reported: {report}"
+        );
+    }
+    assert_eq!(published, 1, "one racer publishes the new chunk, the other stands down");
+    assert_eq!(
+        remote_rows, remote_ids,
+        "two pushes racing must not leave duplicate rows on the remote"
     );
     assert_eq!(
         remote_model.as_deref(),
