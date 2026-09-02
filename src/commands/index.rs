@@ -855,6 +855,9 @@ mod tests {
                 })
                 .collect())
         }
+        fn unit_keys(&self) -> Result<Vec<String>> {
+            Ok(self.keys.iter().map(|k| k.to_string()).collect())
+        }
         fn read(&self, _: &source::Unit) -> Result<Vec<traces::Turn>> {
             Ok(vec![])
         }

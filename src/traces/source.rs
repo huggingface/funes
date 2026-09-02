@@ -20,6 +20,7 @@ use crate::hub;
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::UNIX_EPOCH;
 
 /// One artifact a source indexes as a unit. `key` identifies and locates it: a transcript path, an
@@ -56,6 +57,9 @@ pub trait TraceSource {
     fn owns(&self, _key: &str) -> bool {
         false
     }
+
+    /// Keys of every unit this store holds, uncapped by the `limit` that trims `units`.
+    fn unit_keys(&self) -> Result<Vec<String>>;
 }
 
 /// Pick the source for `path`: a `*.parquet` file is a parquet trace dataset, a hermes `state.db`
@@ -89,6 +93,7 @@ pub fn open_with_harness(path: &Path, limit: Option<usize>, harness: Option<Harn
             root: path.to_path_buf(),
             limit,
             harness,
+            listing: OnceLock::new(),
         })
     }
 }
@@ -138,6 +143,14 @@ struct JsonlTree {
     root: PathBuf,
     limit: Option<usize>,
     harness: Harness,
+    listing: OnceLock<Vec<PathBuf>>,
+}
+
+impl JsonlTree {
+    /// Walked once: a readdir per project dir is the whole cost of it on a network mount.
+    fn listing(&self) -> &[PathBuf] {
+        self.listing.get_or_init(|| jsonl::iter_jsonl_files(&self.root))
+    }
 }
 
 impl TraceSource for JsonlTree {
@@ -150,7 +163,7 @@ impl TraceSource for JsonlTree {
     }
 
     fn units(&self) -> Result<Vec<Unit>> {
-        let mut files = jsonl::iter_jsonl_files(&self.root);
+        let mut files = self.listing().to_vec();
         // Newest-first by mtime; `--limit` then keeps the recent N. (Default filename order is
         // ≈ random for UUID-named sessions.)
         files.sort_by_cached_key(|p| {
@@ -174,6 +187,14 @@ impl TraceSource for JsonlTree {
 
     fn owns(&self, key: &str) -> bool {
         Path::new(key).starts_with(&self.root)
+    }
+
+    fn unit_keys(&self) -> Result<Vec<String>> {
+        Ok(self
+            .listing()
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect())
     }
 
     fn read(&self, unit: &Unit) -> Result<Vec<Turn>> {
@@ -239,6 +260,13 @@ impl TraceSource for HermesDb {
         key.rsplit_once('#').is_some_and(|(db, _)| Path::new(db) == self.path)
     }
 
+    fn unit_keys(&self) -> Result<Vec<String>> {
+        Ok(hermes::sessions_with_watermark(&self.path)?
+            .into_iter()
+            .map(|s| self.unit_key(&s.session_id))
+            .collect())
+    }
+
     fn read(&self, unit: &Unit) -> Result<Vec<Turn>> {
         // The workdir is derived from the session's recorded cwd inside the parser; "hermes" is only
         // the fallback for a session that never recorded one.
@@ -266,6 +294,10 @@ impl TraceSource for ParquetDataset {
             signature: None,
             is_subagent: false,
         }])
+    }
+
+    fn unit_keys(&self) -> Result<Vec<String>> {
+        Ok(vec![self.path.to_string_lossy().into_owned()])
     }
 
     fn read(&self, unit: &Unit) -> Result<Vec<Turn>> {
@@ -355,6 +387,10 @@ impl TraceSource for RemoteParquetDataset {
                 is_subagent: false,
             })
             .collect())
+    }
+
+    fn unit_keys(&self) -> Result<Vec<String>> {
+        Ok(self.shards.iter().map(|s| s.key.clone()).collect())
     }
 
     fn read(&self, unit: &Unit) -> Result<Vec<Turn>> {
@@ -465,6 +501,8 @@ mod tests {
         }
         assert_eq!(open(dir.path(), Some(2)).units().unwrap().len(), 2);
         assert_eq!(open(dir.path(), None).units().unwrap().len(), 5);
+        // The listing stays whole under a limit.
+        assert_eq!(open(dir.path(), Some(2)).unit_keys().unwrap().len(), 5);
     }
 
     #[test]
@@ -532,7 +570,8 @@ mod tests {
         let turns = src.read(&units[0]).unwrap();
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0].harness, "hermes");
-        // --limit keeps the recent N sessions.
+        // --limit keeps the recent N sessions, and leaves the listing whole.
         assert_eq!(open(&db, Some(1)).units().unwrap().len(), 1);
+        assert_eq!(open(&db, Some(1)).unit_keys().unwrap(), vec![key("s1"), key("s2")]);
     }
 }
