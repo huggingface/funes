@@ -22,7 +22,8 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-/// One artifact a source indexes as a unit. `key` is its `state.json` identity (the path). A
+/// One artifact a source indexes as a unit. `key` identifies and locates it: a transcript path, an
+/// `hf://` shard uri, a `state.db` and the session inside it. A
 /// `Some` `signature` is a cheap change-stamp: the unit is skipped when it still matches what was
 /// recorded, and recorded after a successful index. `None` means "always read, never recorded" —
 /// for a bulk source whose idempotency comes from chunk-id dedup, not file stats.
@@ -191,6 +192,18 @@ struct HermesDb {
     limit: Option<usize>,
 }
 
+impl HermesDb {
+    /// A session id alone doesn't say which db to open.
+    fn unit_key(&self, session_id: &str) -> String {
+        format!("{}#{session_id}", self.path.display())
+    }
+
+    /// A path may contain `#`, a session id may not.
+    fn session_id(key: &str) -> &str {
+        key.rsplit_once('#').map_or(key, |(_, sid)| sid)
+    }
+}
+
 impl TraceSource for HermesDb {
     fn describe(&self) -> String {
         format!("scanning hermes sessions in {}", self.path.display())
@@ -206,7 +219,7 @@ impl TraceSource for HermesDb {
         Ok(sessions
             .into_iter()
             .map(|s| Unit {
-                key: s.session_id,
+                key: self.unit_key(&s.session_id),
                 signature: Some(s.watermark.to_string()),
                 is_subagent: false,
             })
@@ -216,7 +229,7 @@ impl TraceSource for HermesDb {
     fn read(&self, unit: &Unit) -> Result<Vec<Turn>> {
         // The workdir is derived from the session's recorded cwd inside the parser; "hermes" is only
         // the fallback for a session that never recorded one.
-        hermes::turns_from_state_db(&self.path, &unit.key, "hermes")
+        hermes::turns_from_state_db(&self.path, Self::session_id(&unit.key), "hermes")
     }
 }
 
@@ -473,10 +486,11 @@ mod tests {
         let src = open(&db, None);
         let units = src.units().unwrap();
         assert_eq!(units.len(), 2);
-        // Most-recent-activity first: s1's high-water id is 3 (ids 1,3) > s2's 2.
-        assert_eq!(units[0].key, "s1");
+        // Keyed by location, most-recent-activity first: s1's high-water id is 3 (ids 1,3) > s2's 2.
+        let key = |sid: &str| format!("{}#{sid}", db.display());
+        assert_eq!(units[0].key, key("s1"));
         assert_eq!(units[0].signature.as_deref(), Some("3"));
-        assert_eq!(units[1].key, "s2");
+        assert_eq!(units[1].key, key("s2"));
         assert_eq!(units[1].signature.as_deref(), Some("2"));
         // read wires through to the parser (s1 has two turns).
         let turns = src.read(&units[0]).unwrap();
