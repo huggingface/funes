@@ -51,6 +51,11 @@ pub trait TraceSource {
     fn fatal_on_read_error(&self) -> bool {
         false
     }
+
+    /// Whether `key` names one of this store's units.
+    fn owns(&self, _key: &str) -> bool {
+        false
+    }
 }
 
 /// Pick the source for `path`: a `*.parquet` file is a parquet trace dataset, a hermes `state.db`
@@ -167,6 +172,10 @@ impl TraceSource for JsonlTree {
         Ok(units)
     }
 
+    fn owns(&self, key: &str) -> bool {
+        Path::new(key).starts_with(&self.root)
+    }
+
     fn read(&self, unit: &Unit) -> Result<Vec<Turn>> {
         let p = Path::new(&unit.key);
         // Each parser derives the workdir facet from the session's recorded cwd; the path-derived
@@ -224,6 +233,10 @@ impl TraceSource for HermesDb {
                 is_subagent: false,
             })
             .collect())
+    }
+
+    fn owns(&self, key: &str) -> bool {
+        key.rsplit_once('#').is_some_and(|(db, _)| Path::new(db) == self.path)
     }
 
     fn read(&self, unit: &Unit) -> Result<Vec<Turn>> {
@@ -452,6 +465,29 @@ mod tests {
         }
         assert_eq!(open(dir.path(), Some(2)).units().unwrap().len(), 2);
         assert_eq!(open(dir.path(), None).units().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn a_store_owns_the_keys_it_can_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("projects");
+        let nested = root.join("-a-project");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let wide = open_with_harness(&root, None, Some(Harness::Claude));
+        let narrow = open_with_harness(&nested, None, Some(Harness::Claude));
+        let inside = nested.join("s.jsonl").to_string_lossy().into_owned();
+        let elsewhere = root.join("-b-project/s.jsonl").to_string_lossy().into_owned();
+        assert!(wide.owns(&inside) && wide.owns(&elsewhere));
+        // A narrower root doesn't speak for the rest of the tree.
+        assert!(narrow.owns(&inside) && !narrow.owns(&elsewhere));
+
+        let db = dir.path().join("state.db");
+        let hermes = open_with_harness(&db, None, Some(Harness::Hermes));
+        assert!(hermes.owns(&format!("{}#s1", db.display())));
+        assert!(!hermes.owns(&format!("{}#s1", dir.path().join("other.db").display())));
+        assert!(!hermes.owns("s1"));
+        assert!(!open(&dir.path().join("d.parquet"), None).owns(&inside));
     }
 
     #[test]
