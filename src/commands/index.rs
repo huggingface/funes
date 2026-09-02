@@ -172,14 +172,10 @@ fn update_index_coverage<'a>(
 ) -> IndexCoverageSnapshot {
     let target = *Tier::ALL.iter().max().expect("Tier::ALL is non-empty");
     for unit in units {
-        // Native sessions have incremental signatures. Bulk parquet and remote imports do not
-        // belong in the local-session status snapshot (and unsigned units never become current).
+        // A unit with no signature can never be known up to date.
         let Some(sig) = &unit.signature else {
             continue;
         };
-        if unit.key.starts_with("hf://") {
-            continue;
-        }
         if unit_current(state.get(&unit.key), sig, target) {
             snapshot.pending.remove(&unit.key);
         } else {
@@ -191,6 +187,7 @@ fn update_index_coverage<'a>(
 
 fn write_index_coverage(
     path: &Path,
+    sources: &[Box<dyn source::TraceSource>],
     units: &[(usize, source::Unit)],
     state: &HashMap<String, UnitState>,
 ) -> Result<()> {
@@ -198,7 +195,11 @@ fn write_index_coverage(
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default();
-    let snapshot = update_index_coverage(snapshot, units.iter().map(|(_, unit)| unit), state);
+    let owned = units
+        .iter()
+        .filter(|(si, unit)| sources[*si].owns(&unit.key))
+        .map(|(_, unit)| unit);
+    let snapshot = update_index_coverage(snapshot, owned, state);
     std::fs::write(path, serde_json::to_string(&snapshot)?)
         .with_context(|| format!("writing index coverage at {}", path.display()))
 }
@@ -343,7 +344,7 @@ impl Indexer {
         };
 
         let units = collect_units(&sources)?;
-        write_index_coverage(&coverage_path, &units, &state)?;
+        write_index_coverage(&coverage_path, &sources, &units, &state)?;
 
         Ok(Indexer {
             uri,
@@ -471,7 +472,7 @@ impl Indexer {
                 },
             );
             std::fs::write(&self.state_path, serde_json::to_string_pretty(&self.state)?)?;
-            write_index_coverage(&self.coverage_path, &self.units, &self.state)?;
+            write_index_coverage(&self.coverage_path, &self.sources, &self.units, &self.state)?;
         }
         // Count a unit's sessions once per run — later tier passes over it only add chunks.
         if self.counted.insert(i) {
@@ -849,7 +850,7 @@ mod tests {
                 .iter()
                 .map(|k| source::Unit {
                     key: k.to_string(),
-                    signature: None,
+                    signature: Some("sig".to_string()),
                     is_subagent: false,
                 })
                 .collect())
@@ -967,7 +968,6 @@ mod tests {
             unit("stale", Some("new")),
             unit("new", Some("4")),
             unit("unsigned", None),
-            unit("hf://datasets/acme/traces/shard.parquet", Some("oid")),
         ];
         let state = HashMap::from([
             (
@@ -1002,6 +1002,35 @@ mod tests {
         let snapshot = update_index_coverage(snapshot, &second, &state);
         assert!(snapshot.pending.contains("partial"));
         assert!(snapshot.pending.contains("other-harness"));
+    }
+
+    fn pending_after_a_sweep(coverage: &Path, sources: &[Box<dyn source::TraceSource>]) -> HashSet<String> {
+        let units = collect_units(sources).unwrap();
+        write_index_coverage(coverage, sources, &units, &HashMap::new()).unwrap();
+        let snapshot: IndexCoverageSnapshot =
+            serde_json::from_str(&std::fs::read_to_string(coverage).unwrap()).unwrap();
+        snapshot.pending
+    }
+
+    #[test]
+    fn index_coverage_holds_only_the_keys_a_store_claims() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("projects");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.jsonl"), b"{}\n").unwrap();
+        let sources: Vec<Box<dyn source::TraceSource>> = vec![
+            source::open_with_harness(&root, None, Some(Harness::Claude)),
+            // Signed units, and a store that claims none of them.
+            Box::new(MockSource {
+                name: "remote",
+                keys: vec!["hf://datasets/acme/traces/shard.parquet"],
+                fail: false,
+            }),
+        ];
+        assert_eq!(
+            pending_after_a_sweep(&dir.path().join("index-coverage.json"), &sources),
+            HashSet::from([root.join("a.jsonl").to_string_lossy().into_owned()])
+        );
     }
 
     #[test]
