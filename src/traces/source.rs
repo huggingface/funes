@@ -20,9 +20,11 @@ use crate::hub;
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::UNIX_EPOCH;
 
-/// One artifact a source indexes as a unit. `key` is its `state.json` identity (the path). A
+/// One artifact a source indexes as a unit. `key` identifies and locates it: a transcript path, an
+/// `hf://` shard uri, a `state.db` and the session inside it. A
 /// `Some` `signature` is a cheap change-stamp: the unit is skipped when it still matches what was
 /// recorded, and recorded after a successful index. `None` means "always read, never recorded" —
 /// for a bulk source whose idempotency comes from chunk-id dedup, not file stats.
@@ -50,6 +52,14 @@ pub trait TraceSource {
     fn fatal_on_read_error(&self) -> bool {
         false
     }
+
+    /// Whether `key` names one of this store's units.
+    fn owns(&self, _key: &str) -> bool {
+        false
+    }
+
+    /// Keys of every unit this store holds, uncapped by the `limit` that trims `units`.
+    fn unit_keys(&self) -> Result<Vec<String>>;
 }
 
 /// Pick the source for `path`: a `*.parquet` file is a parquet trace dataset, a hermes `state.db`
@@ -83,6 +93,7 @@ pub fn open_with_harness(path: &Path, limit: Option<usize>, harness: Option<Harn
             root: path.to_path_buf(),
             limit,
             harness,
+            listing: OnceLock::new(),
         })
     }
 }
@@ -132,6 +143,14 @@ struct JsonlTree {
     root: PathBuf,
     limit: Option<usize>,
     harness: Harness,
+    listing: OnceLock<Vec<PathBuf>>,
+}
+
+impl JsonlTree {
+    /// Walked once: a readdir per project dir is the whole cost of it on a network mount.
+    fn listing(&self) -> &[PathBuf] {
+        self.listing.get_or_init(|| jsonl::iter_jsonl_files(&self.root))
+    }
 }
 
 impl TraceSource for JsonlTree {
@@ -144,7 +163,7 @@ impl TraceSource for JsonlTree {
     }
 
     fn units(&self) -> Result<Vec<Unit>> {
-        let mut files = jsonl::iter_jsonl_files(&self.root);
+        let mut files = self.listing().to_vec();
         // Newest-first by mtime; `--limit` then keeps the recent N. (Default filename order is
         // ≈ random for UUID-named sessions.)
         files.sort_by_cached_key(|p| {
@@ -164,6 +183,18 @@ impl TraceSource for JsonlTree {
         // Subagents last (stable sort preserves recency within each group).
         units.sort_by_key(|u| u.is_subagent);
         Ok(units)
+    }
+
+    fn owns(&self, key: &str) -> bool {
+        Path::new(key).starts_with(&self.root)
+    }
+
+    fn unit_keys(&self) -> Result<Vec<String>> {
+        Ok(self
+            .listing()
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect())
     }
 
     fn read(&self, unit: &Unit) -> Result<Vec<Turn>> {
@@ -191,6 +222,18 @@ struct HermesDb {
     limit: Option<usize>,
 }
 
+impl HermesDb {
+    /// A session id alone doesn't say which db to open.
+    fn unit_key(&self, session_id: &str) -> String {
+        format!("{}#{session_id}", self.path.display())
+    }
+
+    /// A path may contain `#`, a session id may not.
+    fn session_id(key: &str) -> &str {
+        key.rsplit_once('#').map_or(key, |(_, sid)| sid)
+    }
+}
+
 impl TraceSource for HermesDb {
     fn describe(&self) -> String {
         format!("scanning hermes sessions in {}", self.path.display())
@@ -206,17 +249,28 @@ impl TraceSource for HermesDb {
         Ok(sessions
             .into_iter()
             .map(|s| Unit {
-                key: s.session_id,
+                key: self.unit_key(&s.session_id),
                 signature: Some(s.watermark.to_string()),
                 is_subagent: false,
             })
             .collect())
     }
 
+    fn owns(&self, key: &str) -> bool {
+        key.rsplit_once('#').is_some_and(|(db, _)| Path::new(db) == self.path)
+    }
+
+    fn unit_keys(&self) -> Result<Vec<String>> {
+        Ok(hermes::sessions_with_watermark(&self.path)?
+            .into_iter()
+            .map(|s| self.unit_key(&s.session_id))
+            .collect())
+    }
+
     fn read(&self, unit: &Unit) -> Result<Vec<Turn>> {
         // The workdir is derived from the session's recorded cwd inside the parser; "hermes" is only
         // the fallback for a session that never recorded one.
-        hermes::turns_from_state_db(&self.path, &unit.key, "hermes")
+        hermes::turns_from_state_db(&self.path, Self::session_id(&unit.key), "hermes")
     }
 }
 
@@ -240,6 +294,10 @@ impl TraceSource for ParquetDataset {
             signature: None,
             is_subagent: false,
         }])
+    }
+
+    fn unit_keys(&self) -> Result<Vec<String>> {
+        Ok(vec![self.path.to_string_lossy().into_owned()])
     }
 
     fn read(&self, unit: &Unit) -> Result<Vec<Turn>> {
@@ -329,6 +387,10 @@ impl TraceSource for RemoteParquetDataset {
                 is_subagent: false,
             })
             .collect())
+    }
+
+    fn unit_keys(&self) -> Result<Vec<String>> {
+        Ok(self.shards.iter().map(|s| s.key.clone()).collect())
     }
 
     fn read(&self, unit: &Unit) -> Result<Vec<Turn>> {
@@ -439,6 +501,31 @@ mod tests {
         }
         assert_eq!(open(dir.path(), Some(2)).units().unwrap().len(), 2);
         assert_eq!(open(dir.path(), None).units().unwrap().len(), 5);
+        // The listing stays whole under a limit.
+        assert_eq!(open(dir.path(), Some(2)).unit_keys().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn a_store_owns_the_keys_it_can_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("projects");
+        let nested = root.join("-a-project");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let wide = open_with_harness(&root, None, Some(Harness::Claude));
+        let narrow = open_with_harness(&nested, None, Some(Harness::Claude));
+        let inside = nested.join("s.jsonl").to_string_lossy().into_owned();
+        let elsewhere = root.join("-b-project/s.jsonl").to_string_lossy().into_owned();
+        assert!(wide.owns(&inside) && wide.owns(&elsewhere));
+        // A narrower root doesn't speak for the rest of the tree.
+        assert!(narrow.owns(&inside) && !narrow.owns(&elsewhere));
+
+        let db = dir.path().join("state.db");
+        let hermes = open_with_harness(&db, None, Some(Harness::Hermes));
+        assert!(hermes.owns(&format!("{}#s1", db.display())));
+        assert!(!hermes.owns(&format!("{}#s1", dir.path().join("other.db").display())));
+        assert!(!hermes.owns("s1"));
+        assert!(!open(&dir.path().join("d.parquet"), None).owns(&inside));
     }
 
     #[test]
@@ -473,16 +560,18 @@ mod tests {
         let src = open(&db, None);
         let units = src.units().unwrap();
         assert_eq!(units.len(), 2);
-        // Most-recent-activity first: s1's high-water id is 3 (ids 1,3) > s2's 2.
-        assert_eq!(units[0].key, "s1");
+        // Keyed by location, most-recent-activity first: s1's high-water id is 3 (ids 1,3) > s2's 2.
+        let key = |sid: &str| format!("{}#{sid}", db.display());
+        assert_eq!(units[0].key, key("s1"));
         assert_eq!(units[0].signature.as_deref(), Some("3"));
-        assert_eq!(units[1].key, "s2");
+        assert_eq!(units[1].key, key("s2"));
         assert_eq!(units[1].signature.as_deref(), Some("2"));
         // read wires through to the parser (s1 has two turns).
         let turns = src.read(&units[0]).unwrap();
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0].harness, "hermes");
-        // --limit keeps the recent N sessions.
+        // --limit keeps the recent N sessions, and leaves the listing whole.
         assert_eq!(open(&db, Some(1)).units().unwrap().len(), 1);
+        assert_eq!(open(&db, Some(1)).unit_keys().unwrap(), vec![key("s1"), key("s2")]);
     }
 }

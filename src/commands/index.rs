@@ -165,6 +165,20 @@ pub(crate) struct IndexCoverage {
     pub pending: usize,
 }
 
+/// Drop the pending keys a store claims and no longer holds. A store that can't list its units
+/// says nothing about any of them.
+fn retire_vanished_units(path: &Path, sources: &[Box<dyn source::TraceSource>]) -> Result<()> {
+    let mut snapshot = read_index_coverage(path);
+    for src in sources {
+        let Ok(keys) = src.unit_keys() else {
+            continue;
+        };
+        let held: HashSet<String> = keys.into_iter().collect();
+        snapshot.pending.retain(|key| !src.owns(key) || held.contains(key));
+    }
+    write_snapshot(path, &snapshot)
+}
+
 fn update_index_coverage<'a>(
     mut snapshot: IndexCoverageSnapshot,
     units: impl IntoIterator<Item = &'a source::Unit>,
@@ -172,14 +186,10 @@ fn update_index_coverage<'a>(
 ) -> IndexCoverageSnapshot {
     let target = *Tier::ALL.iter().max().expect("Tier::ALL is non-empty");
     for unit in units {
-        // Native sessions have incremental signatures. Bulk parquet and remote imports do not
-        // belong in the local-session status snapshot (and unsigned units never become current).
+        // A unit with no signature can never be known up to date.
         let Some(sig) = &unit.signature else {
             continue;
         };
-        if unit.key.starts_with("hf://") {
-            continue;
-        }
         if unit_current(state.get(&unit.key), sig, target) {
             snapshot.pending.remove(&unit.key);
         } else {
@@ -189,18 +199,30 @@ fn update_index_coverage<'a>(
     snapshot
 }
 
+fn read_index_coverage(path: &Path) -> IndexCoverageSnapshot {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+fn write_snapshot(path: &Path, snapshot: &IndexCoverageSnapshot) -> Result<()> {
+    std::fs::write(path, serde_json::to_string(snapshot)?)
+        .with_context(|| format!("writing index coverage at {}", path.display()))
+}
+
 fn write_index_coverage(
     path: &Path,
+    sources: &[Box<dyn source::TraceSource>],
     units: &[(usize, source::Unit)],
     state: &HashMap<String, UnitState>,
 ) -> Result<()> {
-    let snapshot = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default();
-    let snapshot = update_index_coverage(snapshot, units.iter().map(|(_, unit)| unit), state);
-    std::fs::write(path, serde_json::to_string(&snapshot)?)
-        .with_context(|| format!("writing index coverage at {}", path.display()))
+    let owned = units
+        .iter()
+        .filter(|(si, unit)| sources[*si].owns(&unit.key))
+        .map(|(_, unit)| unit);
+    let snapshot = update_index_coverage(read_index_coverage(path), owned, state);
+    write_snapshot(path, &snapshot)
 }
 
 /// Native sessions that the most recent indexing sweep found short of a complete index. `None`
@@ -343,7 +365,9 @@ impl Indexer {
         };
 
         let units = collect_units(&sources)?;
-        write_index_coverage(&coverage_path, &units, &state)?;
+        // A unit can be deleted between sweeps.
+        retire_vanished_units(&coverage_path, &sources)?;
+        write_index_coverage(&coverage_path, &sources, &units, &state)?;
 
         Ok(Indexer {
             uri,
@@ -471,7 +495,7 @@ impl Indexer {
                 },
             );
             std::fs::write(&self.state_path, serde_json::to_string_pretty(&self.state)?)?;
-            write_index_coverage(&self.coverage_path, &self.units, &self.state)?;
+            write_index_coverage(&self.coverage_path, &self.sources, &self.units, &self.state)?;
         }
         // Count a unit's sessions once per run — later tier passes over it only add chunks.
         if self.counted.insert(i) {
@@ -849,10 +873,13 @@ mod tests {
                 .iter()
                 .map(|k| source::Unit {
                     key: k.to_string(),
-                    signature: None,
+                    signature: Some("sig".to_string()),
                     is_subagent: false,
                 })
                 .collect())
+        }
+        fn unit_keys(&self) -> Result<Vec<String>> {
+            Ok(self.keys.iter().map(|k| k.to_string()).collect())
         }
         fn read(&self, _: &source::Unit) -> Result<Vec<traces::Turn>> {
             Ok(vec![])
@@ -967,7 +994,6 @@ mod tests {
             unit("stale", Some("new")),
             unit("new", Some("4")),
             unit("unsigned", None),
-            unit("hf://datasets/acme/traces/shard.parquet", Some("oid")),
         ];
         let state = HashMap::from([
             (
@@ -1002,6 +1028,79 @@ mod tests {
         let snapshot = update_index_coverage(snapshot, &second, &state);
         assert!(snapshot.pending.contains("partial"));
         assert!(snapshot.pending.contains("other-harness"));
+    }
+
+    fn pending_after_a_sweep(coverage: &Path, sources: &[Box<dyn source::TraceSource>]) -> HashSet<String> {
+        let units = collect_units(sources).unwrap();
+        retire_vanished_units(coverage, sources).unwrap();
+        write_index_coverage(coverage, sources, &units, &HashMap::new()).unwrap();
+        let snapshot: IndexCoverageSnapshot =
+            serde_json::from_str(&std::fs::read_to_string(coverage).unwrap()).unwrap();
+        snapshot.pending
+    }
+
+    #[test]
+    fn index_coverage_retires_a_transcript_the_tree_no_longer_lists() {
+        let dir = tempfile::tempdir().unwrap();
+        let coverage = dir.path().join("index-coverage.json");
+        let root = dir.path().join("projects");
+        std::fs::create_dir_all(&root).unwrap();
+        for f in ["a.jsonl", "b.jsonl"] {
+            std::fs::write(root.join(f), b"{}\n").unwrap();
+        }
+        let key = |f: &str| root.join(f).to_string_lossy().into_owned();
+        let sweep = || -> Vec<Box<dyn source::TraceSource>> {
+            vec![
+                source::open_with_harness(&root, None, Some(Harness::Claude)),
+                // A store that claims no key contributes none, however its units are signed.
+                Box::new(MockSource {
+                    name: "remote",
+                    keys: vec!["hf://datasets/acme/traces/shard.parquet"],
+                    fail: false,
+                }),
+            ]
+        };
+        assert_eq!(
+            pending_after_a_sweep(&coverage, &sweep()),
+            HashSet::from([key("a.jsonl"), key("b.jsonl")])
+        );
+
+        std::fs::remove_file(root.join("b.jsonl")).unwrap();
+        assert_eq!(
+            pending_after_a_sweep(&coverage, &sweep()),
+            HashSet::from([key("a.jsonl")])
+        );
+    }
+
+    #[test]
+    fn index_coverage_retires_a_session_the_hermes_db_no_longer_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let coverage = dir.path().join("index-coverage.json");
+        let db = dir.path().join("state.db");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, cwd TEXT);
+             CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, \
+                content TEXT, tool_call_id TEXT, tool_calls TEXT, tool_name TEXT, timestamp REAL NOT NULL, \
+                reasoning TEXT, reasoning_content TEXT);
+             INSERT INTO sessions (id, cwd) VALUES ('s1','/w'),('s2','/w');
+             INSERT INTO messages (session_id, role, content, timestamp) VALUES
+                ('s1','user','a',1.0),('s2','user','b',2.0);",
+        )
+        .unwrap();
+        let key = |sid: &str| format!("{}#{sid}", db.display());
+        let sweep = || -> Vec<Box<dyn source::TraceSource>> {
+            vec![source::open_with_harness(&db, None, Some(Harness::Hermes))]
+        };
+        assert_eq!(
+            pending_after_a_sweep(&coverage, &sweep()),
+            HashSet::from([key("s1"), key("s2")])
+        );
+
+        // The db outlives the session it dropped, and the key is no path to probe for.
+        conn.execute_batch("DELETE FROM messages WHERE session_id = 's2'")
+            .unwrap();
+        assert_eq!(pending_after_a_sweep(&coverage, &sweep()), HashSet::from([key("s1")]));
     }
 
     #[test]
