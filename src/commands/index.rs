@@ -85,14 +85,17 @@ fn elide_turns(turns: &mut [traces::Turn]) {
 /// deferred tiers aren't scanned now and a tier-major backfill doesn't re-scan each session per
 /// tier. Best-effort: removes a secret whose value byte-matches the stored text (the common case,
 /// real newlines); anything that resists is caught downstream by the fail-closed push gate.
-/// Reports to stderr what it removed.
+/// Reports to stderr what it removed, and what it could not place: a finding the scanner reports
+/// on a line past the end of the blob (a decoder such as HTML or BASE64 numbers lines in the
+/// decoded stream) and whose value no block contains is left as-is rather than failing the whole
+/// unit — the push gate scans strictly and holds such a block back.
 fn redact_turns(
     turns: &mut [traces::Turn],
     scanner: &dyn scan::SecretScanner,
     tiers: &[Tier],
     include_thinking: bool,
 ) -> Result<()> {
-    let removed: Vec<String> = {
+    let (removed, unplaced): (Vec<String>, Vec<String>) = {
         let mut blocks: Vec<&mut traces::Block> = turns
             .iter_mut()
             .flat_map(|t| t.blocks.iter_mut())
@@ -101,27 +104,37 @@ fn redact_turns(
         if blocks.is_empty() {
             return Ok(());
         }
-        let per_block = {
+        let scanned = {
             let texts: Vec<&str> = blocks.iter().map(|b| b.text.as_str()).collect();
-            scan::scan_blocks(&texts, scanner)?
+            scan::scan_blocks_best_effort(&texts, scanner)?
         };
         let mut removed = Vec::new();
-        for (b, findings) in blocks.iter_mut().zip(&per_block) {
+        for (b, findings) in blocks.iter_mut().zip(&scanned.per_block) {
             let r = scan::excise(&b.text, findings);
             removed.extend(r.removed_detectors);
             b.text = r.text;
         }
-        removed
+        (removed, scan::detectors(&scanned.unattributed))
     };
-    if removed.is_empty() {
+    if removed.is_empty() && unplaced.is_empty() {
         return Ok(());
     }
     let sid = turns.first().map(|t| t.session_id.as_str()).unwrap_or("?");
-    eprintln!(
-        "    redacted {} secret(s) in {sid}: {}",
-        removed.len(),
-        scan::summary(removed.iter().map(String::as_str))
-    );
+    if !removed.is_empty() {
+        eprintln!(
+            "    redacted {} secret(s) in {sid}: {}",
+            removed.len(),
+            scan::summary(removed.iter().map(String::as_str))
+        );
+    }
+    if !unplaced.is_empty() {
+        eprintln!(
+            "    could not place {} finding(s) in {sid} (scanner line outside the text, value not \
+             found) — left for the push gate: {}",
+            unplaced.len(),
+            scan::summary(unplaced.iter().map(String::as_str))
+        );
+    }
     Ok(())
 }
 
