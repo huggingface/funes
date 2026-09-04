@@ -189,22 +189,43 @@ fn find_in(env: impl Fn(&str) -> Option<OsString>, exists: impl Fn(&Path) -> boo
     })
 }
 
+/// Per-block secret findings from one scan, plus the ones no block could be charged with.
+/// `per_block[i]` holds the findings located in `texts[i]`.
+pub struct Attribution {
+    pub per_block: Vec<Vec<Finding>>,
+    /// Findings that resisted attribution: the scanner reported them on a line outside the
+    /// scanned blob (a non-PLAIN decoder such as HTML or BASE64 numbers lines in the *decoded*
+    /// stream, which can be longer than the text it came from) and no block contains their value
+    /// in any byte form [`excise`] would match. Nothing can be redacted for them; a strict caller
+    /// must refuse to continue, a best-effort one may carry on and leave them to the push gate.
+    pub unattributed: Vec<Finding>,
+}
+
 /// The one place a scanner is invoked for *block-level* detection. Scans `texts` together in a
 /// single pass and attributes each finding to the text it falls in — by **line number**, not by
 /// matching `raw`. The line number is robust where `raw`-substring matching is not: an escaped or
 /// quoted key still maps to the right text, because the line doesn't depend on the stored bytes
 /// matching trufflehog's canonical form. `texts` must each be a contiguous unit (a reconstructed
-/// block), so a secret never straddles two. `out[i]` holds the findings located in `texts[i]`.
-/// Redaction ([`excise`]) and the drop/hold-back decisions are derived from this result without
-/// re-scanning. Fail-closed on the scanner.
-pub fn scan_blocks(texts: &[&str], scanner: &dyn SecretScanner) -> Result<Vec<Vec<Finding>>> {
-    let mut out: Vec<Vec<Finding>> = (0..texts.len()).map(|_| Vec::new()).collect();
+/// block), so a secret never straddles two. A finding whose line falls outside every text — or that
+/// carries no line — is located by its value instead, in the byte forms [`excise`] matches; one
+/// that resists both lands in [`Attribution::unattributed`]. Redaction ([`excise`]) and the
+/// drop/hold-back decisions are derived from this result without re-scanning. Fail-closed on the
+/// scanner.
+pub fn scan_blocks_best_effort(texts: &[&str], scanner: &dyn SecretScanner) -> Result<Attribution> {
+    let mut per_block: Vec<Vec<Finding>> = (0..texts.len()).map(|_| Vec::new()).collect();
+    let mut unattributed = Vec::new();
     if texts.is_empty() {
-        return Ok(out);
+        return Ok(Attribution {
+            per_block,
+            unattributed,
+        });
     }
     let findings = scanner.scan(&texts.join("\n"))?;
     if findings.is_empty() {
-        return Ok(out);
+        return Ok(Attribution {
+            per_block,
+            unattributed,
+        });
     }
 
     // Line span [start, end) of each text in the joined blob (1-based). `join("\n")` puts one
@@ -217,44 +238,53 @@ pub fn scan_blocks(texts: &[&str], scanner: &dyn SecretScanner) -> Result<Vec<Ve
         cursor += lines;
     }
 
-    for (finding, f) in findings.into_iter().enumerate() {
-        match f.line {
-            // Primary: map the reported line to the text whose span contains it.
-            Some(line) => {
-                let i = spans.iter().position(|&(s, e)| line >= s && line < e).ok_or_else(|| {
-                    anyhow!(
-                        "secret-scanner finding {} reports line {line} outside the scanned text; refusing to continue",
-                        finding + 1
-                    )
-                })?;
-                out[i].push(f);
-            }
-            // Fall back to raw containment when the scanner has no line information.
-            None => {
-                let needle = f.raw.trim().to_string();
-                if needle.is_empty() {
-                    bail!(
-                        "secret-scanner finding {} has neither a line nor a usable match; refusing to continue",
-                        finding + 1
-                    );
-                }
-                let mut mapped = false;
-                for (i, t) in texts.iter().enumerate() {
-                    if t.contains(&needle) {
-                        out[i].push(f.clone());
-                        mapped = true;
-                    }
-                }
-                if !mapped {
-                    bail!(
-                        "secret-scanner finding {} could not be attributed to scanned text; refusing to continue",
-                        finding + 1
-                    );
-                }
+    for f in findings {
+        // Primary: map the reported line to the text whose span contains it.
+        if let Some(i) = f
+            .line
+            .and_then(|line| spans.iter().position(|&(s, e)| line >= s && line < e))
+        {
+            per_block[i].push(f);
+            continue;
+        }
+        // Fall back to value containment when the scanner gave no line, or one outside the blob.
+        let needle = f.raw.trim();
+        let forms = if needle.is_empty() {
+            Vec::new()
+        } else {
+            candidate_forms(needle)
+        };
+        let mut mapped = false;
+        for (i, t) in texts.iter().enumerate() {
+            if forms.iter().any(|c| t.contains(c.as_str())) {
+                per_block[i].push(f.clone());
+                mapped = true;
             }
         }
+        if !mapped {
+            unattributed.push(f);
+        }
     }
-    Ok(out)
+    Ok(Attribution {
+        per_block,
+        unattributed,
+    })
+}
+
+/// [`scan_blocks_best_effort`], fail-closed: a finding that can't be attributed to any text is an
+/// error, because nothing downstream could redact or hold it back. This is the gate `push` and
+/// `scrub` scan behind; `index` redacts best-effort and takes the lenient form.
+pub fn scan_blocks(texts: &[&str], scanner: &dyn SecretScanner) -> Result<Vec<Vec<Finding>>> {
+    let scanned = scan_blocks_best_effort(texts, scanner)?;
+    if let Some(f) = scanned.unattributed.first() {
+        bail!(
+            "secret-scanner finding ({}) could not be attributed to scanned text: reported line {} \
+             is outside the scanned text and its value matches no block; refusing to continue",
+            f.detector,
+            f.line.map_or_else(|| "unknown".to_string(), |l| l.to_string())
+        );
+    }
+    Ok(scanned.per_block)
 }
 
 /// The outcome of excising one block's secrets; see [`excise`].
@@ -570,6 +600,47 @@ mod tests {
         let scanner = FakeScanner(vec![finding_at("PrivateKey", 99)]);
         let err = scan_blocks(&["only one line"], &scanner).unwrap_err().to_string();
         assert!(err.contains("outside the scanned text"), "{err}");
+    }
+
+    #[test]
+    fn scan_blocks_locates_an_out_of_range_line_by_value() {
+        // A non-PLAIN decoder numbers lines in the decoded stream, which can run past the blob's
+        // end. The value still says which block it came from.
+        let scanner = FakeScanner(vec![Finding {
+            detector: "AWS".to_string(),
+            raw: "SEKRET".to_string(),
+            line: Some(99),
+            decoder: "HTML".to_string(),
+        }]);
+        let hits = detectors(&["clean", "contains SEKRET", "also clean"], &scanner);
+        assert!(hits[0].is_empty() && hits[2].is_empty());
+        assert_eq!(hits[1], vec!["AWS".to_string()]);
+    }
+
+    #[test]
+    fn scan_blocks_locates_an_escaped_value_when_the_line_is_unusable() {
+        // A compact-JSON tool_use block stores the key with escaped newlines; the canonical value
+        // is not a substring, its JSON-escaped form is.
+        let scanner = FakeScanner(vec![Finding {
+            detector: "PrivateKey".to_string(),
+            raw: "-----BEGIN-----\nABC\n-----END-----".to_string(),
+            line: None,
+            decoder: "PLAIN".to_string(),
+        }]);
+        let escaped = "{\"key\":\"-----BEGIN-----\\nABC\\n-----END-----\"}";
+        let hits = detectors(&["clean", escaped], &scanner);
+        assert!(hits[0].is_empty());
+        assert_eq!(hits[1], vec!["PrivateKey".to_string()]);
+    }
+
+    #[test]
+    fn best_effort_reports_what_it_cannot_attribute_instead_of_failing() {
+        let scanner = FakeScanner(vec![finding_at("PrivateKey", 99), finding("AWS", "SEKRET")]);
+        let scanned = scan_blocks_best_effort(&["only one line", "has SEKRET"], &scanner).unwrap();
+        assert!(scanned.per_block[0].is_empty());
+        assert_eq!(scanned.per_block[1].len(), 1);
+        assert_eq!(scanned.unattributed.len(), 1);
+        assert_eq!(scanned.unattributed[0].detector, "PrivateKey");
     }
 
     #[test]
