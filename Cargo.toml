@@ -13,10 +13,9 @@ fastembed = { version = "5", optional = true }
 arrow-array = "58"               # RecordBatch types (must match lance's arrow version)
 arrow-schema = "58"              # Schema/Field/DataType for building batches
 arrow-select = "58"              # filter_record_batch: drop secret-bearing rows before a push
-# huggingface = hf:// reads/writes (Xet-cached). gcp is a workaround: lance-io 7.0's `huggingface`
-# feature alone fails to compile (it uses DEFAULT_CLOUD_BLOCK_SIZE, gated behind a cloud feature).
+# huggingface = hf:// reads/writes (Xet-cached).
 lance = "=11.0.0"                # Dataset open/scan/append + create_index, local and over hf://
-lance-io = { version = "=11.0.0", features = ["huggingface", "gcp"] }  # hf:// object store + WrappingObjectStore
+lance-io = { version = "=11.0.0", features = ["huggingface"] }  # hf:// object store + WrappingObjectStore
 lance-index = "=11.0.0"          # FTS/IVF index params + FullTextSearchQuery
 lance-linalg = "=11.0.0"         # MetricType for the IVF_PQ index
 parquet = "58"                   # read agent-trace datasets stored as parquet (arrow-rs, matches arrow-* = "58")
