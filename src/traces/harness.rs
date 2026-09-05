@@ -87,6 +87,29 @@ impl Harness {
 /// hermes' session store — a single SQLite file under `$HOME`, not a session dir like the others.
 pub const HERMES_DB: &str = ".hermes/state.db";
 
+fn known_harness_roots_from(home: &Path, pi_agent_dir: Option<&Path>) -> Vec<(PathBuf, Harness)> {
+    let mut roots: Vec<(PathBuf, Harness)> = KNOWN_DIRS
+        .iter()
+        .filter(|(_, h)| *h != Harness::Pi)
+        .map(|(tail, h)| (home.join(tail), *h))
+        .filter(|(dir, _)| dir.is_dir())
+        .collect();
+
+    let pi_sessions = pi_agent_dir
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| home.join(".pi/agent"))
+        .join("sessions");
+    if pi_sessions.is_dir() {
+        roots.push((pi_sessions, Harness::Pi));
+    }
+
+    let hermes_db = home.join(HERMES_DB);
+    if hermes_db.is_file() {
+        roots.push((hermes_db, Harness::Hermes));
+    }
+    roots
+}
+
 /// The `(root, harness)` pairs present under `$HOME` — drives a no-arg `funes index`. The JSONL
 /// agents contribute a session dir each; hermes contributes its `state.db` file.
 pub fn known_harness_roots() -> Vec<(PathBuf, Harness)> {
@@ -94,16 +117,8 @@ pub fn known_harness_roots() -> Vec<(PathBuf, Harness)> {
         Some(h) => PathBuf::from(h),
         None => return Vec::new(),
     };
-    let mut roots: Vec<(PathBuf, Harness)> = KNOWN_DIRS
-        .iter()
-        .map(|(tail, h)| (home.join(tail), *h))
-        .filter(|(dir, _)| dir.is_dir())
-        .collect();
-    let hermes_db = home.join(HERMES_DB);
-    if hermes_db.is_file() {
-        roots.push((hermes_db, Harness::Hermes));
-    }
-    roots
+    let pi_agent_dir = std::env::var_os("PI_CODING_AGENT_DIR").map(PathBuf::from);
+    known_harness_roots_from(&home, pi_agent_dir.as_deref())
 }
 
 #[cfg(test)]
@@ -143,5 +158,32 @@ mod tests {
         assert_eq!(Harness::parse("pi").unwrap(), Harness::Pi);
         assert_eq!(Harness::parse("hermes").unwrap(), Harness::Hermes);
         assert!(Harness::parse("gpt").is_err());
+    }
+
+    #[test]
+    fn known_roots_honor_pi_coding_agent_dir() {
+        let home = tempfile::tempdir().unwrap();
+        let default_pi = home.path().join(".pi/agent/sessions");
+        std::fs::create_dir_all(&default_pi).unwrap();
+
+        let custom = tempfile::tempdir().unwrap();
+        let custom_sessions = custom.path().join("sessions");
+        std::fs::create_dir_all(&custom_sessions).unwrap();
+
+        let roots = known_harness_roots_from(home.path(), Some(custom.path()));
+
+        assert!(roots.contains(&(custom_sessions, Harness::Pi)));
+        assert!(!roots.contains(&(default_pi, Harness::Pi)));
+    }
+
+    #[test]
+    fn known_roots_fall_back_to_default_pi_dir() {
+        let home = tempfile::tempdir().unwrap();
+        let default_pi = home.path().join(".pi/agent/sessions");
+        std::fs::create_dir_all(&default_pi).unwrap();
+
+        let roots = known_harness_roots_from(home.path(), None);
+
+        assert!(roots.contains(&(default_pi, Harness::Pi)));
     }
 }
