@@ -27,11 +27,13 @@ use crate::memory::remote::{self, Appended, Reindexed};
 use crate::memory::{Memory, MemoryState};
 use crate::{chunk, scan};
 use anyhow::{bail, Context, Result};
-use arrow_array::{BooleanArray, RecordBatch, StringArray};
+use arrow_array::{BooleanArray, RecordBatch, StringArray, UInt64Array};
 use arrow_select::filter::filter_record_batch;
 use bytes::Bytes;
 use chrono::Utc;
+use futures::TryStreamExt;
 use hf_hub::{HFError, HFRepository, RepoTypeDataset};
+use lance::dataset::ROW_ID;
 use lance::Dataset;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
@@ -225,21 +227,43 @@ fn ids_in_batches(batches: &[RecordBatch]) -> HashSet<String> {
     ids
 }
 
-/// Whole rows of the local memory — every column, since a publish ships the row as it stands.
-async fn read_rows(local: &Dataset, filter: Option<&str>) -> Result<Vec<RecordBatch>> {
-    dataset::scan_rows(local, &[], filter, None).await
-}
-
-/// Every row. Naming a whole memory's ids instead would mean a 150k-term `id IN (…)` predicate,
-/// which costs far more than the scan it filters.
+/// Every row of the local memory, whole — a publish ships each row as it stands.
 async fn all_rows(local: &Dataset) -> Result<Vec<RecordBatch>> {
-    read_rows(local, None).await
+    dataset::scan_rows(local, &[], None, None).await
 }
 
-/// The rows whose id is in `ids`.
+/// Don't make this a scan filter. On a memory that hasn't been pushed in a while, that filter lists
+/// every pending id. Lance copies the whole filter into every fragment before it reads a row. RAM
+/// use climbs with both the size of the backlog and the number of fragments.
 async fn rows_with_ids(local: &Dataset, ids: &HashSet<String>) -> Result<Vec<RecordBatch>> {
-    let list = ids.iter().map(|id| format!("'{id}'")).collect::<Vec<_>>().join(", ");
-    read_rows(local, Some(&format!("id IN ({list})"))).await
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut scan = local.scan();
+    scan.project(&["id"])?;
+    scan.with_row_id();
+    let mut stream = scan.try_into_stream().await?;
+    let mut selected = Vec::new();
+    while let Some(batch) = stream.try_next().await? {
+        let chunk_ids = batch
+            .column_by_name("id")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .context("selecting push rows: missing or non-string id column")?;
+        let row_ids = batch
+            .column_by_name(ROW_ID)
+            .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
+            .context("selecting push rows: missing or non-u64 row ids")?;
+        let matching: Vec<u64> = chunk_ids
+            .iter()
+            .zip(row_ids.values())
+            .filter(|(id, _)| id.is_some_and(|id| ids.contains(id)))
+            .map(|(_, &row_id)| row_id)
+            .collect();
+        if !matching.is_empty() {
+            selected.push(local.take_rows(&matching, local.schema().clone()).await?);
+        }
+    }
+    Ok(selected)
 }
 
 /// The outcome of a [`run_push`]: the report to print, and `blocked` — true when the secret gate
@@ -996,6 +1020,46 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn selected_rows_still_pass_through_the_secret_gate() {
+        if scan::Trufflehog::find().is_err() {
+            eprintln!("skip: trufflehog not found");
+            return;
+        }
+        let Some(key) = keygen(&["-t", "rsa", "-b", "4096"]) else {
+            eprintln!("skip: ssh-keygen unavailable");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (b, _) = batch(&[turn_sess("clean", 0, "notes on parsers"), turn_sess("dirty", 1, &key)]);
+        assert!(b.num_rows() > 2, "the secret must span multiple chunks");
+        let uri = dataset::table_uri(&dir.path().to_string_lossy());
+        let schema = b.schema();
+        let reader = RecordBatchIterator::new(vec![Ok(b.slice(0, 1))], schema.clone());
+        let mut ds = Dataset::write(reader, &uri, Some(WriteParams::default()))
+            .await
+            .unwrap();
+        // One row per fragment, so the key's chunks come back from different take calls and the
+        // gate must still see the whole key.
+        for i in 1..b.num_rows() {
+            ds.append(RecordBatchIterator::new(vec![Ok(b.slice(i, 1))], schema.clone()), None)
+                .await
+                .unwrap();
+        }
+        let by_session = ids_by_session(&ds).await.unwrap();
+
+        let all: HashSet<String> = by_session.values().flatten().cloned().collect();
+        let rows = rows_with_ids(&ds, &all).await.unwrap();
+        let (clean, held) = drop_secret_rows(rows).unwrap();
+        assert_eq!(held.rows, by_session["dirty"].len(), "every secret split is held");
+        assert!(held.summary.contains("PrivateKey"), "summary: {}", held.summary);
+
+        let clean_only: HashSet<String> = by_session["clean"].iter().cloned().collect();
+        assert_eq!(ids_in_batches(&clean), clean_only, "unrelated clean rows survive");
+        let rows = rows_with_ids(&ds, &clean_only).await.unwrap();
+        assert_eq!(drop_secret_rows(rows).unwrap().1.rows, 0, "clean rows are not held");
+    }
+
     #[test]
     fn push_receipt_is_an_atomic_growing_set() {
         let dir = tempfile::tempdir().unwrap();
@@ -1039,15 +1103,72 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_append_reads_only_the_included_delta() {
-        // The append path reads exactly the ids in `to_push` — never the sibling session's rows.
+    async fn an_append_returns_only_the_included_delta() {
         let dir = tempfile::tempdir().unwrap();
         let ds = two_session_ds(dir.path()).await;
         let reviewed = ids_by_session(&ds).await.unwrap()["reviewed"].clone();
         let to_push: HashSet<String> = reviewed.iter().cloned().collect();
         let rows = rows_with_ids(&ds, &to_push).await.unwrap();
         let pushed: usize = rows.iter().map(|b| b.num_rows()).sum();
-        assert_eq!(pushed, reviewed.len(), "only that session's rows are read");
+        assert_eq!(pushed, reviewed.len(), "only that session's rows are returned");
+    }
+
+    #[tokio::test]
+    async fn large_selection_across_many_fragments_preserves_rows() {
+        use arrow_schema::{DataType, Field, Schema};
+
+        // Many fragments and many ids: the shape whose `id IN (…)` filter blew up, so the selection
+        // must stay correct where it matters most.
+        let dir = tempfile::tempdir().unwrap();
+        let uri = dataset::table_uri(&dir.path().to_string_lossy());
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("payload", DataType::UInt64, false),
+        ]));
+        let fragments = 256;
+        let per_fragment = 512;
+        let reader = |range: std::ops::Range<u64>| {
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(StringArray::from_iter_values(
+                        range.clone().map(|n| format!("{n:016x}")),
+                    )),
+                    Arc::new(UInt64Array::from_iter_values(range)),
+                ],
+            )
+            .unwrap();
+            RecordBatchIterator::new(vec![Ok(batch)], schema.clone())
+        };
+        let mut ds = Dataset::write(reader(0..per_fragment), &uri, Some(WriteParams::default()))
+            .await
+            .unwrap();
+        for fragment in 1..fragments {
+            let start = fragment * per_fragment;
+            ds.append(reader(start..start + per_fragment), None).await.unwrap();
+        }
+        assert_eq!(ds.get_fragments().len(), fragments as usize);
+        // Repeated IDs are valid input. Selection must preserve each stored occurrence.
+        ds.append(reader(1..2), None).await.unwrap();
+        let wanted: HashSet<_> = (0..fragments * per_fragment)
+            .filter(|n| n % 3 != 0)
+            .map(|n| format!("{n:016x}"))
+            .collect();
+        let rows = rows_with_ids(&ds, &wanted).await.unwrap();
+        assert_eq!(rows.iter().map(|b| b.num_rows()).sum::<usize>(), wanted.len() + 1);
+        assert_eq!(ids_in_batches(&rows), wanted);
+        for batch in rows {
+            assert_eq!(batch.schema().fields(), schema.fields());
+            let ids = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+            let values = batch.column(1).as_any().downcast_ref::<UInt64Array>().unwrap();
+            for i in 0..batch.num_rows() {
+                assert_eq!(ids.value(i), format!("{:016x}", values.value(i)));
+                assert_ne!(values.value(i) % 3, 0);
+            }
+        }
+        assert!(rows_with_ids(&ds, &HashSet::new()).await.unwrap().is_empty());
+        let absent = HashSet::from(["not-present".to_string()]);
+        assert!(rows_with_ids(&ds, &absent).await.unwrap().is_empty());
     }
 
     #[test]
