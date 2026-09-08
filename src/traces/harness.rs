@@ -79,19 +79,34 @@ impl Harness {
     /// identifies the harness.
     pub fn from_known_dir(root: &Path) -> Option<Harness> {
         let canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-        let s = canon.to_string_lossy();
-        KNOWN_DIRS.iter().find(|(tail, _)| s.ends_with(tail)).map(|(_, h)| *h)
+        KNOWN_DIRS
+            .iter()
+            .find(|(tail, _)| canon.ends_with(tail))
+            .map(|(_, h)| *h)
     }
 }
 
 /// hermes' session store — a single SQLite file under `$HOME`, not a session dir like the others.
 pub const HERMES_DB: &str = ".hermes/state.db";
 
-fn known_harness_roots_from(home: &Path, pi_agent_dir: Option<&Path>) -> Vec<(PathBuf, Harness)> {
+fn known_harness_roots_from(
+    home: &Path,
+    pi_agent_dir: Option<&Path>,
+    codex_home: Option<&Path>,
+) -> Vec<(PathBuf, Harness)> {
     let mut roots: Vec<(PathBuf, Harness)> = KNOWN_DIRS
         .iter()
         .filter(|(_, h)| *h != Harness::Pi)
-        .map(|(tail, h)| (home.join(tail), *h))
+        .map(|(tail, h)| {
+            let root = if *h == Harness::Codex {
+                codex_home
+                    .map(|path| path.join("sessions"))
+                    .unwrap_or_else(|| home.join(tail))
+            } else {
+                home.join(tail)
+            };
+            (root, *h)
+        })
         .filter(|(dir, _)| dir.is_dir())
         .collect();
 
@@ -113,12 +128,15 @@ fn known_harness_roots_from(home: &Path, pi_agent_dir: Option<&Path>) -> Vec<(Pa
 /// The `(root, harness)` pairs present under `$HOME` — drives a no-arg `funes index`. The JSONL
 /// agents contribute a session dir each; hermes contributes its `state.db` file.
 pub fn known_harness_roots() -> Vec<(PathBuf, Harness)> {
-    let home = match std::env::var_os("HOME") {
-        Some(h) => PathBuf::from(h),
+    let home = match crate::platform::user_home() {
+        Some(h) => h,
         None => return Vec::new(),
     };
     let pi_agent_dir = std::env::var_os("PI_CODING_AGENT_DIR").map(PathBuf::from);
-    known_harness_roots_from(&home, pi_agent_dir.as_deref())
+    let codex_home = std::env::var_os("CODEX_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    known_harness_roots_from(&home, pi_agent_dir.as_deref(), codex_home.as_deref())
 }
 
 #[cfg(test)]
@@ -170,7 +188,7 @@ mod tests {
         let custom_sessions = custom.path().join("sessions");
         std::fs::create_dir_all(&custom_sessions).unwrap();
 
-        let roots = known_harness_roots_from(home.path(), Some(custom.path()));
+        let roots = known_harness_roots_from(home.path(), Some(custom.path()), None);
 
         assert!(roots.contains(&(custom_sessions, Harness::Pi)));
         assert!(!roots.contains(&(default_pi, Harness::Pi)));
@@ -182,8 +200,30 @@ mod tests {
         let default_pi = home.path().join(".pi/agent/sessions");
         std::fs::create_dir_all(&default_pi).unwrap();
 
-        let roots = known_harness_roots_from(home.path(), None);
+        let roots = known_harness_roots_from(home.path(), None, None);
 
         assert!(roots.contains(&(default_pi, Harness::Pi)));
+    }
+
+    #[test]
+    fn relocated_codex_home_replaces_default_root() {
+        let home = tempfile::tempdir().unwrap();
+        let custom = home.path().join("Codex 测试");
+        let default_sessions = home.path().join(".codex/sessions");
+        let custom_sessions = custom.join("sessions");
+        std::fs::create_dir_all(&default_sessions).unwrap();
+        std::fs::create_dir_all(&custom_sessions).unwrap();
+        let roots = known_harness_roots_from(home.path(), None, Some(&custom));
+        assert!(roots.contains(&(custom_sessions, Harness::Codex)));
+        assert!(!roots.contains(&(default_sessions, Harness::Codex)));
+    }
+
+    #[test]
+    fn directory_matching_requires_whole_components() {
+        assert_eq!(Harness::from_known_dir(Path::new("/x/not.codex/sessions")), None);
+        #[cfg(windows)]
+        for path in [r"C:\用户 数据\.codex\sessions", r"\\server\share\.codex\sessions"] {
+            assert_eq!(Harness::from_known_dir(Path::new(path)), Some(Harness::Codex));
+        }
     }
 }

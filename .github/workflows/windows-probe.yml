@@ -1,11 +1,13 @@
-name: Windows dependency probe
+name: Windows native
 
 on:
   push:
-    branches: [feature/windows-minimum-support]
+    branches: [main, feature/windows-minimum-support]
   pull_request:
     paths:
       - 'src/**'
+      - 'tests/**'
+      - 'scripts/**'
       - 'Cargo.*'
       - 'build.rs'
       - '.github/workflows/windows-probe.yml'
@@ -26,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        backend: [blas, onnx]
+        backend: [blas]
     env:
       RUST_BACKTRACE: '1'
       RUST_MIN_STACK: '16777216'
@@ -35,11 +37,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582
         with:
+          toolchain: 1.95.0
           targets: x86_64-pc-windows-msvc
           components: clippy
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16
         with:
           key: windows-probe-${{ matrix.backend }}
+          cache-directories: ~/.cache/huggingface
+      - name: PowerShell installer and automation tests
+        shell: powershell
+        run: ./scripts/test-windows.ps1
       - name: Install pinned protoc
         shell: pwsh
         run: |
@@ -57,4 +64,14 @@ jobs:
         shell: pwsh
         run: |
           cargo test --locked --profile ci --test index_recall --target x86_64-pc-windows-msvc --no-default-features --features '${{ matrix.backend }}' -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Clippy
+        shell: pwsh
+        run: |
+          cargo clippy --locked --all-targets --profile ci --target x86_64-pc-windows-msvc -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Unit and native Codex tests
+        shell: pwsh
+        run: |
+          cargo test --locked --profile ci --lib --test add_codex_hooks --test windows_codex --target x86_64-pc-windows-msvc
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

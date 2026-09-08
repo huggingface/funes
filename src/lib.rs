@@ -19,6 +19,7 @@
 //! - [`commands`] — what funes does when you run it: orchestration and decisions.
 //! - [`ui`] — how a result reaches the terminal.
 //! - [`agents`] — registering funes with a coding agent (MCP + automation hooks).
+//! - [`platform`] — shared host filesystem conventions, profile discovery, and path classification.
 //!
 //! Where a new function goes: names an HF concept → transport; names Lance → mechanics; answers
 //! *what is this memory, what state is it in* → domain; decides *what to do about it* → command.
@@ -34,6 +35,7 @@ pub mod commands;
 pub mod hub;
 pub mod inference;
 pub mod memory;
+pub mod platform;
 pub mod scan;
 pub mod session_sketch;
 pub mod traces;

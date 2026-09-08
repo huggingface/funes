@@ -6,6 +6,7 @@
 //! shell command construction, and JSON hook-group merge used by compatible agents.
 
 use anyhow::{Context, Result};
+use base64::Engine;
 use serde_json::{json, Value};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -13,6 +14,21 @@ use std::path::Path;
 
 const INDEX_SH: &str = include_str!("../../scripts/automation/funes-index.sh");
 const PUSH_SH: &str = include_str!("../../scripts/automation/funes-push.sh");
+const INDEX_PS: &str = include_str!("../../scripts/automation/funes-index.ps1");
+const PUSH_PS: &str = include_str!("../../scripts/automation/funes-push.ps1");
+
+/// The installed index script for this host.
+pub const INDEX_NAME: &str = if cfg!(windows) {
+    "funes-index.ps1"
+} else {
+    "funes-index.sh"
+};
+/// The installed publish script for this host.
+pub const PUSH_NAME: &str = if cfg!(windows) {
+    "funes-push.ps1"
+} else {
+    "funes-push.sh"
+};
 
 /// The hook's per-run timeout (seconds). Short because both scripts hand off to a detached worker
 /// and return in well under a second — the index/push happen off the hook's critical path.
@@ -29,11 +45,41 @@ pub(crate) struct Hook {
 /// expression expanded by the hook runner; double-quoted so spaces survive. `"`/`\` in every field
 /// are escaped so a value with a quote can't break out (`$` remains available to the runner).
 pub fn command(script: &str, args: &[&str]) -> String {
+    if cfg!(windows) {
+        return powershell_command(script, args);
+    }
     let mut out = format!("bash \"{}\"", dquote_escape(script));
     for arg in args {
         out.push_str(&format!(" \"{}\"", dquote_escape(arg)));
     }
     out
+}
+
+// Encoding the whole invocation keeps CMD's %, &, parentheses and quoting rules out of paths
+// and memory arguments. PowerShell single-quoted literals only escape an apostrophe by doubling it.
+fn powershell_command(script: &str, args: &[&str]) -> String {
+    let literal = |value: &str| format!("'{}'", value.replace('\'', "''"));
+    let mut invocation = format!("& {}", literal(script));
+    for arg in args {
+        invocation.push(' ');
+        invocation.push_str(&literal(arg));
+    }
+    let bytes: Vec<u8> = invocation.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    format!("powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {encoded}")
+}
+
+fn decoded_command(command: &str) -> Option<String> {
+    let (_, encoded) = command.split_once(" -EncodedCommand ")?;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(encoded.trim()).ok()?;
+    if bytes.len() % 2 != 0 {
+        return None;
+    }
+    let words: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|b| u16::from_le_bytes([b[0], b[1]]))
+        .collect();
+    String::from_utf16(&words).ok()
 }
 
 /// Escape a value for embedding inside a double-quoted shell string: backslash then double-quote.
@@ -87,20 +133,27 @@ fn is_funes_group(group: &Value) -> bool {
 fn is_funes_hook(hook: &Value) -> bool {
     hook.get("command")
         .and_then(Value::as_str)
-        .map(|c| c.contains("funes-index.sh") || c.contains("funes-push.sh"))
+        .map(|c| {
+            let decoded = decoded_command(c);
+            let c = decoded.as_deref().unwrap_or(c);
+            ["funes-index.sh", "funes-push.sh", "funes-index.ps1", "funes-push.ps1"]
+                .iter()
+                .any(|name| c.contains(name))
+        })
         .unwrap_or(false)
 }
 
 /// Write the embedded scripts into an agent-chosen `dir`, executable. Returns whether anything
 /// changed (a drifted or absent copy is rewritten); the executable bit is (re)set every time.
 pub fn write_scripts(dir: &Path) -> Result<bool> {
-    // This build probe must never install Bash automation on native Windows.
-    if cfg!(windows) {
-        anyhow::bail!("Windows automation is not implemented yet; use explicit-path index and MCP manually");
-    }
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let mut changed = false;
-    for (name, content) in [("funes-index.sh", INDEX_SH), ("funes-push.sh", PUSH_SH)] {
+    let scripts = if cfg!(windows) {
+        [(INDEX_NAME, INDEX_PS), (PUSH_NAME, PUSH_PS)]
+    } else {
+        [(INDEX_NAME, INDEX_SH), (PUSH_NAME, PUSH_SH)]
+    };
+    for (name, content) in scripts {
         let path = dir.join(name);
         changed |= write_if_changed(&path, content)?;
         #[cfg(unix)]
@@ -135,6 +188,24 @@ fn file_matches(path: &Path, want: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn powershell_preserves_literals_and_owned_hook_cleanup() {
+        let script = r"C:\用户 & (data)\100%\it's\funes-index.ps1";
+        let cmd = powershell_command(script, &["acme/a'b", "codex"]);
+        assert_eq!(
+            decoded_command(&cmd).unwrap(),
+            "& 'C:\\用户 & (data)\\100%\\it''s\\funes-index.ps1' 'acme/a''b' 'codex'"
+        );
+        assert!(cmd
+            .split(" -EncodedCommand ")
+            .nth(1)
+            .unwrap()
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(&b)));
+        let config = json!({"hooks":{"Stop":[{"hooks":[{"command":cmd}]}]}});
+        assert_eq!(apply_funes_hooks(config, &[]), json!({"hooks":{}}));
+    }
+
     fn idx(arg: &str) -> Hook {
         Hook {
             event: "TurnComplete",
@@ -144,6 +215,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn command_escapes_quotes_but_keeps_dollar() {
         // Ordinary paths/args are untouched, and every argument is carried.
         assert_eq!(command("/h/x.sh", &["agent"]), "bash \"/h/x.sh\" \"agent\"");
@@ -186,7 +258,7 @@ mod tests {
         let out = apply_funes_hooks(json!({}), &[idx("agent")]);
         assert_eq!(
             funes_command(&out, "TurnComplete"),
-            Some("bash \"/h/funes-index.sh\" \"agent\"")
+            Some(command("/h/funes-index.sh", &["agent"]).as_str())
         );
     }
 
@@ -209,7 +281,7 @@ mod tests {
         assert!(completed.iter().any(|g| g["hooks"][0]["command"] == "make lint"));
         assert_eq!(
             funes_command(&out, "TurnComplete"),
-            Some("bash \"/h/funes-index.sh\" \"agent\"")
+            Some(command("/h/funes-index.sh", &["agent"]).as_str())
         );
         assert_eq!(
             completed.iter().filter(|g| is_funes_group(g)).count(),
@@ -230,11 +302,11 @@ mod tests {
         );
         assert_eq!(
             funes_command(&remote, "Start"),
-            Some("bash \"/h/funes-push.sh\" \"acme/kb\"")
+            Some(command("/h/funes-push.sh", &["acme/kb"]).as_str())
         );
         assert_eq!(
             funes_command(&remote, "End"),
-            Some("bash \"/h/funes-push.sh\" \"acme/kb\"")
+            Some(command("/h/funes-push.sh", &["acme/kb"]).as_str())
         );
     }
 
@@ -249,7 +321,7 @@ mod tests {
         assert!(local["hooks"].get("End").is_none(), "stale push event pruned");
         assert_eq!(
             funes_command(&local, "TurnComplete"),
-            Some("bash \"/h/funes-index.sh\" \"agent\"")
+            Some(command("/h/funes-index.sh", &["agent"]).as_str())
         );
     }
 

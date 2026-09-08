@@ -612,9 +612,7 @@ fn hf_snapshot(repo: &str) -> Result<PathBuf> {
 /// snapshots cached the pick is arbitrary — fine here: any complete copy of these frozen model
 /// repos is interchangeable.
 fn local_snapshot(repo: &str) -> Option<PathBuf> {
-    let base = std::env::var("HF_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache/huggingface"));
+    let base = crate::hub::cache_home()?;
     let snaps = base
         .join("hub")
         .join(format!("models--{}", repo.replace('/', "--")))

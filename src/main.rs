@@ -323,9 +323,27 @@ impl MemoryOpts {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cmd = Cli::parse().cmd;
-    if cfg!(windows) && matches!(&cmd, Cmd::Add { .. } | Cmd::Remove { .. }) {
+    if std::env::var_os("FUNES_HOME")
+        .filter(|value| !value.is_empty())
+        .is_none()
+        && funes::platform::user_home().is_none()
+    {
         return Err(anyhow!(
-            "Windows integration is still under development; use explicit-path index and manual MCP configuration"
+            "cannot resolve the user profile; set FUNES_HOME to an explicit state directory"
+        ));
+    }
+    if cfg!(windows)
+        && matches!(
+            &cmd,
+            Cmd::Add {
+                agent: AddAgent::Claude { .. } | AddAgent::Pi { .. } | AddAgent::Hermes { .. }
+            } | Cmd::Remove {
+                agent: RemoveAgent::Claude | RemoveAgent::Pi | RemoveAgent::Hermes
+            }
+        )
+    {
+        return Err(anyhow!(
+            "Windows automation currently supports Codex only; use explicit-path index and manual MCP configuration for other agents"
         ));
     }
     match cmd {
