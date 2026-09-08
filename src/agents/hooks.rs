@@ -48,6 +48,11 @@ pub fn command(script: &str, args: &[&str]) -> String {
     if cfg!(windows) {
         return powershell_command(script, args);
     }
+    posix_command(script, args)
+}
+
+/// Unix-only agent integrations retain their existing Bash templates on every build host.
+pub(crate) fn posix_command(script: &str, args: &[&str]) -> String {
     let mut out = format!("bash \"{}\"", dquote_escape(script));
     for arg in args {
         out.push_str(&format!(" \"{}\"", dquote_escape(arg)));
