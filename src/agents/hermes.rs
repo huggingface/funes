@@ -414,10 +414,7 @@ mod tests {
     fn adds_hooks_to_a_fresh_config() {
         let entries = desired(Path::new("/h/hooks"), Some("acme/kb"));
         let out = apply_config_hooks(serde_yaml::Value::Mapping(Default::default()), &entries);
-        assert_eq!(
-            funes_cmd(&out, "post_llm_call").as_deref(),
-            Some(entries[0].1.as_str())
-        );
+        assert_eq!(funes_cmd(&out, "post_llm_call").as_deref(), Some(entries[0].1.as_str()));
         assert_eq!(
             funes_cmd(&out, "on_session_finalize").as_deref(),
             Some(entries[2].1.as_str())
@@ -460,10 +457,7 @@ mod tests {
             .iter()
             .any(|e| e.get("command").unwrap().as_str() == Some("make lint")));
         assert_eq!(list.iter().filter(|e| is_funes_entry(e)).count(), 1);
-        assert_eq!(
-            funes_cmd(&out, "post_llm_call").as_deref(),
-            Some(entries[0].1.as_str())
-        );
+        assert_eq!(funes_cmd(&out, "post_llm_call").as_deref(), Some(entries[0].1.as_str()));
     }
 
     #[test]
