@@ -28,7 +28,7 @@ use chrono::Utc;
 use futures::stream::{self, BoxStream, StreamExt};
 use object_store::path::Path as OPath;
 use object_store::{
-    Attributes, CopyOptions, GetOptions, GetRange, GetResult, GetResultPayload, ListResult, MultipartUpload,
+    Attributes, CopyOptions, Error as OSError, GetOptions, GetResult, GetResultPayload, ListResult, MultipartUpload,
     ObjectMeta, ObjectStore as OSObjectStore, PutMultipartOptions, PutOptions, PutPayload, PutResult,
     Result as OSResult, UploadPart,
 };
@@ -91,9 +91,10 @@ impl OSObjectStore for CaptureStore {
                 let total = full.len() as u64;
                 let range = match &options.range {
                     None => 0..total,
-                    Some(GetRange::Bounded(r)) => r.start..r.end.min(total),
-                    Some(GetRange::Offset(o)) => (*o).min(total)..total,
-                    Some(GetRange::Suffix(n)) => total.saturating_sub(*n)..total,
+                    Some(requested) => requested.as_range(total).map_err(|e| OSError::Generic {
+                        store: "CaptureStore",
+                        source: Box::new(e),
+                    })?,
                 };
                 let body = full.slice(range.start as usize..range.end as usize);
                 Ok(GetResult {
