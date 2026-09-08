@@ -18,7 +18,6 @@
 //! **A decorator, because Rust has no inheritance** — the inner store is held and every method
 //! forwarded by hand, intercepting only the reads.
 
-use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -27,9 +26,8 @@ use chrono::Utc;
 use futures::stream::{self, BoxStream, StreamExt};
 use object_store::path::Path as OPath;
 use object_store::{
-    Attributes, CopyOptions, GetOptions, GetRange, GetResult, GetResultPayload, ListResult, MultipartUpload,
-    ObjectMeta, ObjectStore as OSObjectStore, PutMultipartOptions, PutOptions, PutPayload, PutResult,
-    Result as OSResult,
+    Attributes, CopyOptions, GetOptions, GetResult, GetResultPayload, ListResult, MultipartUpload, ObjectMeta,
+    ObjectStore as OSObjectStore, PutMultipartOptions, PutOptions, PutPayload, PutResult, Result as OSResult,
 };
 
 /// Supplies a whole local file for an object key: given the object path, return a local filesystem
@@ -121,7 +119,13 @@ fn serve_from_file(path: &Path, location: &OPath, options: &GetOptions) -> std::
             attributes: Attributes::default(),
         });
     }
-    let range = resolve_range(&options.range, total);
+    let range = match &options.range {
+        None => 0..total,
+        // Not clamped: an out-of-file range underflows where its length is computed.
+        Some(requested) => requested
+            .as_range(total)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?,
+    };
     let file = std::fs::File::open(path)?;
     Ok(GetResult {
         payload: GetResultPayload::File(file, path.to_path_buf()),
@@ -129,16 +133,6 @@ fn serve_from_file(path: &Path, location: &OPath, options: &GetOptions) -> std::
         range,
         attributes: Attributes::default(),
     })
-}
-
-/// The concrete byte range a [`GetOptions`] selects within a `total`-byte file (clamped to the file).
-fn resolve_range(range: &Option<GetRange>, total: u64) -> Range<u64> {
-    match range {
-        None => 0..total,
-        Some(GetRange::Bounded(r)) => r.start..r.end.min(total),
-        Some(GetRange::Offset(o)) => (*o).min(total)..total,
-        Some(GetRange::Suffix(n)) => total.saturating_sub(*n)..total,
-    }
 }
 
 fn meta(location: OPath, size: u64) -> ObjectMeta {
@@ -158,6 +152,7 @@ mod tests {
 
     use bytes::Bytes;
     use object_store::memory::InMemory;
+    use object_store::GetRange;
     use tempfile::TempDir;
 
     /// A fake fetcher: writes each requested file to a temp dir from a fixed body and returns its
@@ -270,6 +265,25 @@ mod tests {
             1,
             "fetch was attempted before falling back"
         );
+    }
+
+    /// A copy that cannot span the request is not served: the inner store answers instead.
+    #[tokio::test]
+    async fn copy_too_short_for_the_range_falls_back_to_inner() {
+        let (store, _f, inner) = store_with(&[("f", b"<Error/>")]);
+        let loc = OPath::from("f");
+        inner
+            .put_opts(&loc, PutPayload::from("0123456789abcdefghij"), PutOptions::default())
+            .await
+            .unwrap();
+        let opts = GetOptions {
+            range: Some(GetRange::Bounded(12..16)),
+            ..Default::default()
+        };
+
+        let got = store.get_opts(&loc, opts).await.unwrap();
+
+        assert_eq!(got.bytes().await.unwrap(), Bytes::from_static(b"cdef"));
     }
 
     /// `list` is delegated to the inner store (version resolution must stay live) — the fetcher is
