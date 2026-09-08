@@ -37,6 +37,9 @@ use object_store::{
 pub(crate) trait FileFetcher: std::fmt::Debug + Send + Sync {
     /// Resolve `filename` (the object's path) to a local path holding its bytes.
     async fn fetch(&self, filename: &str) -> anyhow::Result<PathBuf>;
+
+    /// Drop the local copy at `path`; a later [`fetch`](Self::fetch) of that key must not yield it.
+    async fn discard(&self, path: &Path) -> anyhow::Result<()>;
 }
 
 /// Reads are served from the whole file `fetcher` supplies for the key; every other method delegates
@@ -52,6 +55,18 @@ impl FetchStore {
     pub(crate) fn new(inner: Arc<dyn OSObjectStore>, fetcher: Arc<dyn FileFetcher>) -> Self {
         Self { inner, fetcher }
     }
+
+    /// Serve `location` from a copy obtained after discarding `corrupt`, at most one discard per read.
+    async fn repair(&self, corrupt: &Path, location: &OPath, options: GetOptions) -> OSResult<GetResult> {
+        if self.fetcher.discard(corrupt).await.is_ok() {
+            if let Ok(fresh) = self.fetcher.fetch(location.as_ref()).await {
+                if let Ok(result) = serve_from_file(&fresh, location, &options) {
+                    return Ok(result);
+                }
+            }
+        }
+        self.inner.get_opts(location, options).await
+    }
 }
 
 impl std::fmt::Display for FetchStore {
@@ -63,15 +78,14 @@ impl std::fmt::Display for FetchStore {
 #[async_trait]
 impl OSObjectStore for FetchStore {
     async fn get_opts(&self, location: &OPath, options: GetOptions) -> OSResult<GetResult> {
-        // Serve the read from the whole file the fetcher supplies for this key, sliced to the request.
-        // Any failure (fetch, or reading the file back) falls back to the inner store, so a transient
-        // miss never breaks a read.
-        match self.fetcher.fetch(location.as_ref()).await {
-            Ok(path) => match serve_from_file(&path, location, &options) {
-                Ok(result) => Ok(result),
-                Err(_) => self.inner.get_opts(location, options).await,
-            },
-            Err(_) => self.inner.get_opts(location, options).await,
+        // A transient fetch or read failure falls back to the inner store, so it never breaks a read.
+        let Ok(path) = self.fetcher.fetch(location.as_ref()).await else {
+            return self.inner.get_opts(location, options).await;
+        };
+        match serve_from_file(&path, location, &options) {
+            Ok(result) => Ok(result),
+            Err(Unservable::Corrupt) => self.repair(&path, location, options).await,
+            Err(Unservable::Unreadable) => self.inner.get_opts(location, options).await,
         }
     }
 
@@ -104,12 +118,19 @@ impl OSObjectStore for FetchStore {
     }
 }
 
+/// Why a fetched file cannot answer a read.
+enum Unservable {
+    /// It does not span the requested range, so its bytes are not the object's.
+    Corrupt,
+    Unreadable,
+}
+
 /// Build a [`GetResult`] over the fetched file at `path` for the request `options`, reporting the
 /// object's `location` and whole-file size. A `head` returns metadata only; a body request hands the
 /// open file to `object_store`, which reads the resolved range off the executor (so a large file is
 /// never buffered here).
-fn serve_from_file(path: &Path, location: &OPath, options: &GetOptions) -> std::io::Result<GetResult> {
-    let total = std::fs::metadata(path)?.len();
+fn serve_from_file(path: &Path, location: &OPath, options: &GetOptions) -> Result<GetResult, Unservable> {
+    let total = std::fs::metadata(path).map_err(|_| Unservable::Unreadable)?.len();
     let meta = meta(location.clone(), total);
     if options.head {
         return Ok(GetResult {
@@ -122,11 +143,9 @@ fn serve_from_file(path: &Path, location: &OPath, options: &GetOptions) -> std::
     let range = match &options.range {
         None => 0..total,
         // Not clamped: an out-of-file range underflows where its length is computed.
-        Some(requested) => requested
-            .as_range(total)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?,
+        Some(requested) => requested.as_range(total).map_err(|_| Unservable::Corrupt)?,
     };
-    let file = std::fs::File::open(path)?;
+    let file = std::fs::File::open(path).map_err(|_| Unservable::Unreadable)?;
     Ok(GetResult {
         payload: GetResultPayload::File(file, path.to_path_buf()),
         meta,
@@ -157,24 +176,32 @@ mod tests {
 
     /// A fake fetcher: writes each requested file to a temp dir from a fixed body and returns its
     /// path, counting fetches so a test can assert how often the fetch path was taken. A filename not
-    /// in `bodies` yields an error, exercising the live-fallback path.
+    /// in `bodies` yields an error, exercising the live-fallback path. After a discard, `repaired`
+    /// supplies the body for a key it holds.
     #[derive(Debug)]
     struct FakeFetcher {
         dir: TempDir,
         bodies: std::collections::HashMap<String, Bytes>,
+        repaired: std::collections::HashMap<String, Bytes>,
         calls: AtomicUsize,
+        discards: AtomicUsize,
+    }
+
+    fn bodies_of(files: &[(&str, &[u8])]) -> std::collections::HashMap<String, Bytes> {
+        files
+            .iter()
+            .map(|(name, body)| (name.to_string(), Bytes::copy_from_slice(body)))
+            .collect()
     }
 
     impl FakeFetcher {
-        fn new(files: &[(&str, &[u8])]) -> Self {
-            let bodies = files
-                .iter()
-                .map(|(name, body)| (name.to_string(), Bytes::copy_from_slice(body)))
-                .collect();
+        fn new(files: &[(&str, &[u8])], repaired: &[(&str, &[u8])]) -> Self {
             Self {
                 dir: tempfile::tempdir().unwrap(),
-                bodies,
+                bodies: bodies_of(files),
+                repaired: bodies_of(repaired),
                 calls: AtomicUsize::new(0),
+                discards: AtomicUsize::new(0),
             }
         }
     }
@@ -183,18 +210,33 @@ mod tests {
     impl FileFetcher for FakeFetcher {
         async fn fetch(&self, filename: &str) -> anyhow::Result<PathBuf> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            let body = self
-                .bodies
-                .get(filename)
+            let repaired = self.discards.load(Ordering::SeqCst) > 0;
+            let body = repaired
+                .then(|| self.repaired.get(filename))
+                .flatten()
+                .or_else(|| self.bodies.get(filename))
                 .ok_or_else(|| anyhow::anyhow!("no such file: {filename}"))?;
             let path = self.dir.path().join(filename.replace('/', "_"));
             std::fs::write(&path, body)?;
             Ok(path)
         }
+
+        async fn discard(&self, path: &Path) -> anyhow::Result<()> {
+            self.discards.fetch_add(1, Ordering::SeqCst);
+            std::fs::remove_file(path)?;
+            Ok(())
+        }
     }
 
     fn store_with(files: &[(&str, &[u8])]) -> (FetchStore, Arc<FakeFetcher>, Arc<InMemory>) {
-        let fetcher = Arc::new(FakeFetcher::new(files));
+        store_repairing(files, &[])
+    }
+
+    fn store_repairing(
+        files: &[(&str, &[u8])],
+        repaired: &[(&str, &[u8])],
+    ) -> (FetchStore, Arc<FakeFetcher>, Arc<InMemory>) {
+        let fetcher = Arc::new(FakeFetcher::new(files, repaired));
         let inner = Arc::new(InMemory::new());
         let store = FetchStore::new(inner.clone(), fetcher.clone());
         (store, fetcher, inner)
@@ -267,10 +309,35 @@ mod tests {
         );
     }
 
-    /// A copy that cannot span the request is not served: the inner store answers instead.
+    /// A copy that cannot span the request is discarded, and the read reflects the object's bytes.
     #[tokio::test]
-    async fn copy_too_short_for_the_range_falls_back_to_inner() {
-        let (store, _f, inner) = store_with(&[("f", b"<Error/>")]);
+    async fn short_local_copy_is_repaired_and_served() {
+        let (store, fetcher, _inner) = store_repairing(&[("f", b"<Error/>")], &[("f", b"0123456789abcdefghij")]);
+        let opts = GetOptions {
+            range: Some(GetRange::Bounded(12..16)),
+            ..Default::default()
+        };
+
+        let got = store.get_opts(&OPath::from("f"), opts).await.unwrap();
+
+        assert_eq!(got.meta.size, 20, "size is the repaired copy's");
+        assert_eq!(got.bytes().await.unwrap(), Bytes::from_static(b"cdef"));
+        assert_eq!(
+            fetcher.discards.load(Ordering::SeqCst),
+            1,
+            "the short copy was discarded"
+        );
+        assert_eq!(
+            fetcher.calls.load(Ordering::SeqCst),
+            2,
+            "fetched again after the discard"
+        );
+    }
+
+    /// A corrupt copy no refetch repairs leaves the inner store to answer, after one discard.
+    #[tokio::test]
+    async fn unrepairable_copy_falls_back_to_inner() {
+        let (store, fetcher, inner) = store_with(&[("f", b"<Error/>")]);
         let loc = OPath::from("f");
         inner
             .put_opts(&loc, PutPayload::from("0123456789abcdefghij"), PutOptions::default())
@@ -284,6 +351,8 @@ mod tests {
         let got = store.get_opts(&loc, opts).await.unwrap();
 
         assert_eq!(got.bytes().await.unwrap(), Bytes::from_static(b"cdef"));
+        assert_eq!(fetcher.discards.load(Ordering::SeqCst), 1, "one repair attempt only");
+        assert_eq!(fetcher.calls.load(Ordering::SeqCst), 2);
     }
 
     /// `list` is delegated to the inner store (version resolution must stay live) — the fetcher is
