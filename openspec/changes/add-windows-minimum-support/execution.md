@@ -32,3 +32,27 @@ PowerShell commands use UTF-16LE EncodedCommand instead of interpolating paths t
 - No Windows 10/11 desktop VM or authenticated HF test token was available in this workspace.
   Manual desktop installation, authenticated Hub round trips, and cross-OS memory transfer must be
   checked before release. No tag, binary release, or upstream PR is published by this work.
+
+## Code review follow-up
+
+- Fixed a configuration preservation bug: a group containing both Funes and user hooks lost
+  all its commands during replacement/removal. Merging now removes individual owned hooks and
+  preserves unrelated commands and group metadata. Regression coverage exercises plain and
+  encoded PowerShell commands, removal, replacement, and repeated installation.
+- Fixed malformed JSON container handling: valid JSON with a non-object `hooks` or non-array
+  event could reach unchecked merging. Installation now preserves unsupported configurations
+  with manual guidance; removal returns an error and retains referenced scripts. Tests cover
+  invalid container shapes and byte-for-byte preservation on disk.
+- Fixed install reads that treated every I/O error as a missing configuration. Only NotFound
+  initializes a new configuration; other read errors propagate before script installation.
+  A directory at hooks.json exercises this portably without relying on permission settings.
+- Corrected the Windows integration test's mixed-separator expected path: construct each path
+  component with `join` before comparing encoded commands.
+- Local review validation: all-target default-backend Clippy, formatting, and diff checks pass.
+  All nine tests in the actual shared hooks module pass via a small isolated harness, avoiding
+  the local Arrow/DataFusion archive issue noted above. This is not a full-crate test result.
+- Pre-review commit `45647bf`: Linux lint/unit and real-embedder integration jobs passed.
+  Windows run https://github.com/wellorbetter/funes/actions/runs/34236706924 passed installer/
+  automation tests, native compilation, real index/recall, Clippy, and 251 unit tests; it then
+  failed at the mixed-separator assertion corrected above, before running windows_codex.
+  The review changes require fresh Linux and Windows CI; desktop release checks remain open.

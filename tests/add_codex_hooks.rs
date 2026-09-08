@@ -38,7 +38,7 @@ fn add_codex_installs_hooks_and_preserves_existing() {
     codex::install(Some("acme/kb".to_string())).unwrap();
 
     // Scripts written and executable.
-    let hooks_dir = home.path().join(".codex/hooks");
+    let hooks_dir = home.path().join(".codex").join("hooks");
     for name in [funes::agents::hooks::INDEX_NAME, funes::agents::hooks::PUSH_NAME] {
         let p = hooks_dir.join(name);
         assert!(p.exists(), "{name} written");

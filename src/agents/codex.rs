@@ -247,13 +247,18 @@ fn desired_hooks(hooks_dir: &Path, memory: Option<&str>) -> Vec<hooks::Hook> {
 fn install_hooks(codex_home: &Path, memory: Option<&str>) -> Result<()> {
     let base = codex_home.to_path_buf();
     let hooks_dir = base.join("hooks");
-    hooks::write_scripts(&hooks_dir)?;
     let desired = desired_hooks(&hooks_dir, memory);
 
     let config = base.join("hooks.json");
-    let cfg = match std::fs::read_to_string(&config).ok().as_deref().map(str::trim) {
+    let contents = match std::fs::read_to_string(&config) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).with_context(|| format!("reading {}", config.display())),
+    };
+    hooks::write_scripts(&hooks_dir)?;
+    let cfg = match contents.as_deref().map(str::trim) {
         Some(s) if !s.is_empty() => match serde_json::from_str::<Value>(s) {
-            Ok(v) if v.is_object() => v,
+            Ok(v) if hooks::config_is_mergeable(&v) => v,
             _ => return manual_hook_instructions(&config, &desired),
         },
         _ => json!({}),
@@ -285,7 +290,7 @@ fn install_hooks(codex_home: &Path, memory: Option<&str>) -> Result<()> {
 fn manual_hook_instructions(path: &Path, desired: &[hooks::Hook]) -> Result<()> {
     let block = serde_json::to_string_pretty(&hooks::apply_funes_hooks(json!({}), desired))?;
     println!(
-        "{} isn't plain JSON — leaving it untouched. Merge this in to enable funes hooks:\n{block}",
+        "{} isn't a supported hooks JSON object — leaving it untouched. Merge this in to enable funes hooks:\n{block}",
         path.display()
     );
     Ok(())
@@ -301,9 +306,9 @@ fn uninstall_hooks(codex_home: &Path) -> Result<()> {
         Ok(s) if !s.trim().is_empty() => {
             let value = serde_json::from_str::<Value>(&s)
                 .with_context(|| format!("parsing {} to remove funes hooks", config.display()))?;
-            if !value.is_object() {
+            if !hooks::config_is_mergeable(&value) {
                 bail!(
-                    "{} isn't a JSON object — leaving it and the hook scripts untouched; remove hook groups whose command contains `funes-index.sh` or `funes-push.sh`, then re-run `funes remove codex`",
+                    "{} isn't a supported hooks JSON object — leaving it and the hook scripts untouched; repair its hooks/event structure, then re-run `funes remove codex`",
                     config.display()
                 );
             }
@@ -340,6 +345,29 @@ mod tests {
     use super::{codex_home_from_report, desired_hooks, mcp_add_args, parse_version_line, MIN_CODEX, SKILL_MD};
     use std::path::Path;
     use std::path::PathBuf;
+
+    #[test]
+    fn malformed_hook_structure_is_preserved_on_install_and_remove() {
+        for text in [r#"{"hooks":{"Stop":{}}}"#, r#"{"hooks":null}"#, r#"{"hooks":[]}"#] {
+            let home = tempfile::tempdir().unwrap();
+            let config = home.path().join("hooks.json");
+            std::fs::write(&config, text).unwrap();
+            super::install_hooks(home.path(), None).unwrap();
+            assert_eq!(std::fs::read_to_string(&config).unwrap(), text);
+            assert!(super::uninstall_hooks(home.path()).is_err());
+            assert_eq!(std::fs::read_to_string(&config).unwrap(), text);
+            assert!(home.path().join("hooks").join(super::hooks::INDEX_NAME).is_file());
+        }
+    }
+
+    #[test]
+    fn unreadable_hooks_are_not_treated_as_missing() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join("hooks.json")).unwrap();
+        let error = super::install_hooks(home.path(), None).unwrap_err();
+        assert!(error.to_string().contains("reading"), "{error:#}");
+        assert!(!home.path().join("hooks").exists());
+    }
 
     #[test]
     fn bakes_the_memory_only_when_present() {

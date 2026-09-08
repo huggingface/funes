@@ -108,7 +108,16 @@ pub(crate) fn apply_funes_hooks(mut cfg: Value, desired: &[Hook]) -> Value {
 
     for group_list in hooks.values_mut() {
         if let Some(list) = group_list.as_array_mut() {
-            list.retain(|g| !is_funes_group(g));
+            list.retain_mut(|group| {
+                let Some(hooks) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
+                    return true;
+                };
+                let previous_len = hooks.len();
+                hooks.retain(|hook| !is_funes_hook(hook));
+                // A group can hold both Funes and user commands. Preserve its metadata and
+                // unrelated commands; only drop a group emptied by removing our own hooks.
+                hooks.len() == previous_len || !hooks.is_empty()
+            });
         }
     }
     for d in desired {
@@ -127,12 +136,23 @@ pub(crate) fn apply_funes_hooks(mut cfg: Value, desired: &[Hook]) -> Value {
 }
 
 /// A hook group is funes's if any of its commands invokes a funes script.
+#[cfg(test)]
 fn is_funes_group(group: &Value) -> bool {
     group
         .get("hooks")
         .and_then(Value::as_array)
         .map(|hs| hs.iter().any(is_funes_hook))
         .unwrap_or(false)
+}
+
+/// Check the structure consumed by merging before modifying an on-disk user configuration.
+pub(crate) fn config_is_mergeable(cfg: &Value) -> bool {
+    cfg.is_object()
+        && cfg.get("hooks").is_none_or(|hooks| {
+            hooks
+                .as_object()
+                .is_some_and(|events| events.values().all(Value::is_array))
+        })
 }
 
 fn is_funes_hook(hook: &Value) -> bool {
@@ -192,6 +212,37 @@ fn file_matches(path: &Path, want: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mixed_groups_preserve_user_commands_and_metadata() {
+        for owned in [
+            command("/h/funes-index.sh", &["codex"]),
+            powershell_command(r"C:\hooks\funes-index.ps1", &["codex"]),
+        ] {
+            let user = json!({"command":"user-command", "timeout":42});
+            let cfg = json!({"hooks":{"Stop":[{"matcher":"custom", "hooks":[{"command":owned}, user.clone()]}]}});
+            let expected = json!({"hooks":{"Stop":[{"matcher":"custom", "hooks":[user]}]}});
+            assert_eq!(apply_funes_hooks(cfg.clone(), &[]), expected);
+            let replaced = apply_funes_hooks(cfg, &[idx("codex")]);
+            assert_eq!(replaced["hooks"]["Stop"], expected["hooks"]["Stop"]);
+            assert_eq!(apply_funes_hooks(replaced.clone(), &[idx("codex")]), replaced);
+        }
+    }
+
+    #[test]
+    fn malformed_event_shapes_are_not_mergeable() {
+        for cfg in [
+            json!([]),
+            json!({"hooks":null}),
+            json!({"hooks":[]}),
+            json!({"hooks":{"Stop":{}}}),
+            json!({"hooks":{"Stop":"command"}}),
+        ] {
+            assert!(!config_is_mergeable(&cfg), "{cfg}");
+        }
+        assert!(config_is_mergeable(&json!({})));
+        assert!(config_is_mergeable(&json!({"hooks":{"Stop":[]}})));
+    }
 
     #[test]
     fn powershell_preserves_literals_and_owned_hook_cleanup() {
