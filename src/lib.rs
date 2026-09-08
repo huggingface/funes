@@ -24,11 +24,9 @@
 //! *what is this memory, what state is it in* → domain; decides *what to do about it* → command.
 //! Commands ask the layers below for state; they never infer it from error shapes.
 
-// funes is unix-only (Linux/macOS): the release targets, install.sh, and the in-place
-// self-update all assume unix semantics. Fail with a clear message on other platforms rather
-// than a confusing missing-symbol error deep in a module.
-#[cfg(not(unix))]
-compile_error!("funes is unix-only (Linux/macOS)");
+// Windows is being validated on MSVC before it is advertised as a supported release.
+#[cfg(not(any(unix, windows)))]
+compile_error!("funes requires Unix or Windows");
 
 pub mod agents;
 pub mod chunk;

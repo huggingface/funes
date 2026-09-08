@@ -7,6 +7,7 @@
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
@@ -93,14 +94,21 @@ fn is_funes_hook(hook: &Value) -> bool {
 /// Write the embedded scripts into an agent-chosen `dir`, executable. Returns whether anything
 /// changed (a drifted or absent copy is rewritten); the executable bit is (re)set every time.
 pub fn write_scripts(dir: &Path) -> Result<bool> {
+    // This build probe must never install Bash automation on native Windows.
+    if cfg!(windows) {
+        anyhow::bail!("Windows automation is not implemented yet; use explicit-path index and MCP manually");
+    }
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let mut changed = false;
     for (name, content) in [("funes-index.sh", INDEX_SH), ("funes-push.sh", PUSH_SH)] {
         let path = dir.join(name);
         changed |= write_if_changed(&path, content)?;
-        let mut perms = std::fs::metadata(&path)?.permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&path, perms).with_context(|| format!("chmod +x {}", path.display()))?;
+        #[cfg(unix)]
+        {
+            let mut perms = std::fs::metadata(&path)?.permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).with_context(|| format!("chmod +x {}", path.display()))?;
+        }
     }
     Ok(changed)
 }

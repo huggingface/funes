@@ -12,8 +12,11 @@ use hf_hub::buckets::BucketDownload;
 use hf_hub::HFBucket;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
-use std::fs::{File, Permissions};
+use std::fs::File;
+#[cfg(unix)]
+use std::fs::Permissions;
 use std::io::Read;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
@@ -47,6 +50,11 @@ const ASSET: Option<&str> = if cfg!(all(target_os = "linux", target_arch = "x86_
 /// `funes update`: fetch the latest release binary for this platform and replace the running
 /// executable in place. Idempotent — with `force`, reinstalls even when already up to date.
 pub async fn run(force: bool) -> Result<()> {
+    if cfg!(windows) {
+        bail!(
+            "Windows self-update is not supported yet; replace funes.exe after closing running agents and MCP servers"
+        );
+    }
     let asset = ASSET.ok_or_else(|| {
         anyhow!(
             "no prebuilt funes binary for this platform ({}/{}) — build from source: {REPO}#building-from-source",
@@ -117,6 +125,7 @@ pub async fn run(force: bool) -> Result<()> {
 /// Verify the staged binary, confirm its reported version, and atomically rename it over `exe`.
 fn install_verified(staged: &Path, exe: &Path, manifest: &Path, asset: &str, expected_version: &str) -> Result<String> {
     verify_checksum(staged, manifest, asset)?;
+    #[cfg(unix)]
     std::fs::set_permissions(staged, Permissions::from_mode(0o755)).context("making the new binary executable")?;
 
     let out = verify_runs(staged)?;
@@ -130,9 +139,11 @@ fn install_verified(staged: &Path, exe: &Path, manifest: &Path, asset: &str, exp
 
     // Preserve the existing binary's mode so an update never broadens it (e.g. 0700 → 0755); fall
     // back to 0755 when there's no existing binary to copy the mode from.
+    #[cfg(unix)]
     let mode = std::fs::metadata(exe)
         .map(|m| m.permissions().mode() & 0o777)
         .unwrap_or(0o755);
+    #[cfg(unix)]
     std::fs::set_permissions(staged, Permissions::from_mode(mode)).context("setting the new binary's permissions")?;
 
     // Same-filesystem rename (staged sits in a temp dir beside exe), so this is atomic. The live

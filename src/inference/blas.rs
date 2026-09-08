@@ -94,7 +94,7 @@ mod seam {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 mod seam {
     use faer::linalg::matmul::matmul;
     use faer::{Accum, MatMut, MatRef, Par};

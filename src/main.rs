@@ -322,7 +322,13 @@ impl MemoryOpts {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    match Cli::parse().cmd {
+    let cmd = Cli::parse().cmd;
+    if cfg!(windows) && matches!(&cmd, Cmd::Add { .. } | Cmd::Remove { .. }) {
+        return Err(anyhow!(
+            "Windows integration is still under development; use explicit-path index and manual MCP configuration"
+        ));
+    }
+    match cmd {
         Cmd::Recall {
             query,
             k,
