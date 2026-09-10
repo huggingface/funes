@@ -3,9 +3,11 @@
 //! compares whatever backends are compiled in, with ONNX (fastembed) as the reference when present:
 //!   cargo run --release --features onnx --example bench_backends
 //!
-//! Two workloads, because they stress different things: a batch of short docs is dominated by
+//! Three workloads, because they stress different things: a batch of short docs is dominated by
 //! per-call overheads (tokenization, thread spawns), while 30 docs at the 512-token truncation
-//! cap — recall's rerank worst case — is dominated by GEMM throughput and memory behavior.
+//! cap — recall's rerank worst case — is dominated by GEMM throughput and memory behavior. The
+//! ragged batch is real indexing's shape — batch-longest padding masks most attention columns,
+//! the x86 denormal case (see `FtzDazGuard` in src/inference/blas.rs).
 //!
 //! Adding a backend = impl Embedder+Reranker, gate it behind a feature, and push it in `backends()`.
 
@@ -39,12 +41,25 @@ fn short_docs() -> Vec<String> {
     .to_vec()
 }
 
-fn long_docs() -> Vec<String> {
+fn capped_docs(n: usize) -> Vec<String> {
     let sent = "recall fuses vector ann and bm25 hits by reciprocal rank before the cross-encoder \
                 rescores each candidate against the query using joint attention over the pair. ";
     // ~500 tokens after tokenization, truncated at 512 — recall's rerank candidates at the cap.
     let doc = sent.repeat(18);
-    vec![doc; 30]
+    vec![doc; n]
+}
+
+fn long_docs() -> Vec<String> {
+    capped_docs(30)
+}
+
+/// A ragged batch — a couple of ~512-token docs, the rest short: real indexing's shape, and the
+/// one that exposes padding stalls.
+fn mixed_docs() -> Vec<String> {
+    let short = short_docs();
+    let mut docs = capped_docs(2);
+    docs.extend((0..16 - docs.len()).map(|i| short[i % short.len()].clone()));
+    docs
 }
 
 struct Backend {
@@ -101,9 +116,12 @@ fn main() -> Result<()> {
         eprintln!("note: only one backend is compiled — build with `--features onnx` to A/B against the reference\n");
     }
 
-    // (label, docs, warmups, timed iters) — fewer iterations for the long shape, where a single
-    // forward runs for seconds.
-    let workloads = [("16×short", short_docs(), 2, 5), ("30×~500tok", long_docs(), 1, 3)];
+    // (label, docs, warmups, timed iters) — fewer iterations where a single forward runs seconds.
+    let workloads = [
+        ("16×short", short_docs(), 2, 5),
+        ("30×~500tok", long_docs(), 1, 3),
+        ("16×mixed", mixed_docs(), 1, 1),
+    ];
 
     println!(
         "{:<12} {:<12} {:>10} {:>11} {:>16} {:>16}",
