@@ -672,6 +672,50 @@ fn to_batch(encs: &[tokenizers::Encoding]) -> (Vec<i64>, Vec<i64>, usize, usize)
     (ids, mask, n, l)
 }
 
+/// RAII: MXCSR FTZ|DAZ, restored on drop (x86_64 no-op elsewhere) — padded batches leave
+/// softmax's masked scores at ≈FLT_MIN and the scores×V GEMM then stalls on denormals, which
+/// ARM (default FTZ) never sees.
+#[cfg(target_arch = "x86_64")]
+struct FtzDazGuard(u32);
+
+#[cfg(target_arch = "x86_64")]
+impl FtzDazGuard {
+    #[inline]
+    fn new() -> Self {
+        let mut old: u32 = 0;
+        unsafe {
+            core::arch::asm!("stmxcsr [{}]", in(reg) &mut old as *mut u32 as usize,
+                             options(nostack, preserves_flags));
+            let new = old | 0x8040;
+            core::arch::asm!("ldmxcsr [{}]", in(reg) &new as *const u32 as usize,
+                             options(nostack, preserves_flags, readonly));
+        }
+        Self(old)
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+impl Drop for FtzDazGuard {
+    #[inline]
+    fn drop(&mut self) {
+        unsafe {
+            core::arch::asm!("ldmxcsr [{}]", in(reg) &self.0 as *const u32 as usize,
+                             options(nostack, preserves_flags, readonly));
+        }
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+struct FtzDazGuard;
+
+#[cfg(not(target_arch = "x86_64"))]
+impl FtzDazGuard {
+    #[inline]
+    fn new() -> Self {
+        Self
+    }
+}
+
 /// bge-small-en-v1.5 embedder: BERT encoder → CLS → L2-normalize.
 pub struct BlasEmbedder {
     w: HashMap<String, Vec<f32>>,
@@ -692,6 +736,7 @@ impl BlasEmbedder {
 
 impl Embedder for BlasEmbedder {
     fn embed(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        let _ftz = FtzDazGuard::new();
         let encs = self
             .tok
             .encode_batch(texts.to_vec(), true)
@@ -730,6 +775,7 @@ impl BlasReranker {
 
 impl Reranker for BlasReranker {
     fn rerank(&mut self, query: &str, docs: &[&str]) -> Result<Vec<f32>> {
+        let _ftz = FtzDazGuard::new();
         let pairs: Vec<(&str, &str)> = docs.iter().map(|d| (query, *d)).collect();
         let encs = self
             .tok
