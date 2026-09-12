@@ -284,6 +284,31 @@ mod tests {
     }
 
     #[test]
+    fn windows_rollout_preserves_powershell_calls_and_provenance() {
+        let f = write_jsonl(&[
+            r#"{"type":"session_meta","payload":{"id":"windows-session","cwd":"C:\\Users\\Alice\\My Project"}}"#,
+            r#"{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"Get-Content 'C:\\\\My Project\\\\测试.txt'\",\"shell\":\"powershell\"}","call_id":"ps1"}}"#,
+            r#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"ps1","output":"第一行\r\n第二行\r\n"}}"#,
+        ]);
+        let turns = turns_from_jsonl_file(f.path(), "fallback").unwrap();
+        assert_eq!(turns.len(), 2);
+        for turn in &turns {
+            assert_eq!(turn.session_id, "windows-session");
+            assert_eq!(turn.workdir, "C--Users-Alice-My-Project");
+            assert_eq!(turn.harness, "codex");
+            assert_eq!(turn.blocks[0].tool_name.as_deref(), Some("exec_command"));
+            assert_eq!(turn.blocks[0].tool_use_id.as_deref(), Some("ps1"));
+        }
+        assert_eq!(turns[0].blocks[0].block_type, "tool_use");
+        assert_eq!(
+            turns[0].blocks[0].text,
+            r#"{"cmd":"Get-Content 'C:\\My Project\\测试.txt'","shell":"powershell"}"#
+        );
+        assert_eq!(turns[1].blocks[0].block_type, "tool_result");
+        assert_eq!(turns[1].blocks[0].text, "第一行\r\n第二行\r\n");
+    }
+
+    #[test]
     fn custom_tool_call_uses_input_not_arguments() {
         let f = write_jsonl(&[
             r#"{"type":"response_item","timestamp":"t","payload":{"type":"custom_tool_call","name":"apply_patch","input":"*** Begin Patch","call_id":"c2"}}"#,

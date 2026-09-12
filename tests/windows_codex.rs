@@ -40,6 +40,33 @@ fn main() {
     let log = root.path().join("calls.txt");
     std::env::set_var("USERPROFILE", &home);
     std::env::remove_var("HOME");
+    std::env::remove_var("FUNES_HOME");
+    assert_eq!(funes::platform::user_home(), Some(home.clone()));
+    assert_eq!(funes::memory::dataset::funes_dir(), home.join(".funes"));
+    let state = root.path().join("custom memory");
+    std::env::set_var("FUNES_HOME", &state);
+    assert_eq!(funes::memory::dataset::funes_dir(), state);
+
+    // Exercise cache fallback with invented token files, never the user's credentials.
+    for key in [
+        "HF_HOME",
+        "HF_TOKEN_PATH",
+        "HF_TOKEN",
+        "HUGGING_FACE_HUB_TOKEN",
+        "HUGGINGFACE_TOKEN",
+    ] {
+        std::env::remove_var(key);
+    }
+    let cache = home.join(".cache/huggingface");
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join("token"), "profile-fixture").unwrap();
+    assert_eq!(funes::hub::hf_token().as_deref(), Some("profile-fixture"));
+    let cache_override = root.path().join("custom HF cache");
+    fs::create_dir_all(&cache_override).unwrap();
+    fs::write(cache_override.join("token"), "override-fixture").unwrap();
+    std::env::set_var("HF_HOME", &cache_override);
+    assert_eq!(funes::hub::hf_token().as_deref(), Some("override-fixture"));
+
     std::env::set_var("CODEX_HOME", root.path().join("wrong fallback"));
     std::env::set_var("PATH", &bin);
     std::env::set_var("FUNES_TEST_CLI_LOG", &log);
