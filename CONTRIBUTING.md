@@ -42,6 +42,10 @@ You need:
 
 ## Building and testing
 
+For native Windows setup and the PowerShell test suite, see [docs/windows.md](docs/windows.md).
+Run `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows.ps1` for the
+hermetic installer and detached-worker tests.
+
 ```bash
 cargo build --release          # binary at target/release/funes
 cargo test --lib               # unit tests — hermetic, no network
@@ -80,6 +84,7 @@ fine; CI runs them with the repository secret.
   | `commands/` | what funes does when you run it: orchestration and decisions |
   | `ui/` | how a result reaches the terminal |
   | `agents/` | registering funes with a coding agent (MCP + automation hooks) |
+  | `platform.rs` | shared host filesystem conventions (profile discovery and path classification) |
 
   Where does a new function go? Names an HF concept → transport. Names Lance → mechanics.
   Answers *what is this memory, what state is it in* → domain. Decides *what to do about it* →

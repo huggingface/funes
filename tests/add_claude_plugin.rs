@@ -4,6 +4,8 @@
 //! files are written regardless, which is what we assert (registering with `claude` is exercised
 //! manually, not here).
 
+#![cfg(unix)]
+
 use funes::agents::claude;
 use serde_json::Value;
 use std::fs;

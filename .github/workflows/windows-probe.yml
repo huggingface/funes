@@ -1,0 +1,77 @@
+name: Windows native
+
+on:
+  push:
+    branches: [main, feature/windows-minimum-support]
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'scripts/**'
+      - 'Cargo.*'
+      - 'build.rs'
+      - '.github/workflows/windows-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    name: MSVC (${{ matrix.backend }})
+    runs-on: windows-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [blas]
+    env:
+      RUST_BACKTRACE: '1'
+      RUST_MIN_STACK: '16777216'
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582
+        with:
+          toolchain: 1.95.0
+          targets: x86_64-pc-windows-msvc
+          components: clippy
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16
+        with:
+          key: windows-probe-${{ matrix.backend }}
+          cache-directories: ~/.cache/huggingface
+      - name: PowerShell installer and automation tests
+        shell: powershell
+        run: ./scripts/test-windows.ps1
+      - name: Install pinned protoc
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'funes-protoc.zip'
+          $destination = Join-Path $env:RUNNER_TEMP 'funes-protoc'
+          Invoke-WebRequest 'https://github.com/protocolbuffers/protobuf/releases/download/v28.3/protoc-28.3-win64.zip' -OutFile $archive
+          Expand-Archive $archive -DestinationPath $destination
+          "PROTOC=$destination\bin\protoc.exe" >> $env:GITHUB_ENV
+      - name: Check native crate and exact dependency graph
+        shell: pwsh
+        run: |
+          cargo check --locked --profile ci --bin funes --target x86_64-pc-windows-msvc --no-default-features --features '${{ matrix.backend }}'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build and run real index and recall
+        shell: pwsh
+        run: |
+          cargo test --locked --profile ci --test index_recall --target x86_64-pc-windows-msvc --no-default-features --features '${{ matrix.backend }}' -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Clippy
+        shell: pwsh
+        run: |
+          cargo clippy --locked --all-targets --profile ci --target x86_64-pc-windows-msvc -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Unit and native Codex tests
+        shell: pwsh
+        run: |
+          cargo test --locked --profile ci --lib --test add_codex_hooks --test windows_codex --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

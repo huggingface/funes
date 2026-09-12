@@ -9,10 +9,17 @@ pub mod pi;
 
 use anyhow::{bail, Context, Result};
 use std::path::Path;
-use std::process::Command;
 
-/// Render an argv as a copy/paste-safe POSIX shell command.
+/// Render argv as a copy/paste hint for POSIX shells or Windows PowerShell.
 pub(crate) fn shell_command<S: AsRef<str>>(program: &str, args: &[S]) -> String {
+    if cfg!(windows) {
+        let values = std::iter::once(program)
+            .chain(args.iter().map(AsRef::as_ref))
+            .map(|arg| format!("'{}'", arg.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(" ");
+        return format!("& {values}");
+    }
     std::iter::once(program)
         .chain(args.iter().map(AsRef::as_ref))
         .map(shell_arg)
@@ -48,7 +55,7 @@ pub(crate) enum RemoveCommand {
 /// diagnostics and fail rather than claiming a partial uninstall succeeded.
 pub(crate) fn run_remove(program: &str, args: &[&str], absent_markers: &[&str]) -> Result<RemoveCommand> {
     let command = shell_command(program, args);
-    let output = match Command::new(program).args(args).output() {
+    let output = match crate::platform::command(program).args(args).output() {
         Ok(output) => output,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(RemoveCommand::MissingCli),
         Err(e) => return Err(anyhow::Error::new(e).context(format!("running `{command}`"))),
@@ -114,6 +121,7 @@ mod tests {
     use super::shell_command;
 
     #[test]
+    #[cfg(unix)]
     fn shell_command_quotes_only_unsafe_arguments() {
         assert_eq!(
             shell_command(
@@ -127,5 +135,14 @@ mod tests {
             "pi remove '/Users/O'\"'\"'Brien/funes'"
         );
         assert_eq!(shell_command("agent", &[""]), "agent ''");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn shell_command_is_a_powershell_literal_invocation() {
+        assert_eq!(
+            shell_command("codex", &["mcp", "a'b & %PATH%"]),
+            "& 'codex' 'mcp' 'a''b & %PATH%'"
+        );
     }
 }

@@ -22,6 +22,7 @@ parquet = "58"                   # read agent-trace datasets stored as parquet (
 object_store = "=0.13.2"         # the ObjectStore trait the capture wrapper implements (matches lance-io)
 async-trait = "0.1"              # for the ObjectStore impl in src/memory/capture_store.rs
 bytes = "1"                      # captured write payloads
+base64 = "0.22"                  # shell-safe UTF-16 PowerShell hook commands
 chrono = "0.4"                   # recency weighting
 rusqlite = { version = "0.32", features = ["bundled"] }  # read hermes' ~/.hermes/state.db; bundled = SQLite compiled in, no runtime dep
 serde_yaml = "0.9"               # merge funes' hooks into hermes' ~/.hermes/config.yaml
@@ -50,7 +51,7 @@ safetensors = { version = "0.8", optional = true }
 
 # The `blas` backend's Linux seam. Both are pure Rust with runtime CPU dispatch, so release
 # binaries stay baseline x86-64/aarch64 yet use AVX2/AVX-512/NEON where the host has them.
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 faer = { version = "0.24", optional = true, default-features = false, features = ["std", "rayon"] }  # GEMM ("std" pulls its fast x86 kernels)
 multiversion = { version = "0.8", optional = true }  # per-CPU clones of the vectorized exp
 

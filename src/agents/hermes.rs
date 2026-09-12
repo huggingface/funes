@@ -72,9 +72,9 @@ pub fn uninstall() -> Result<()> {
 /// command drives a detached script and is the exact string the allowlist must match.
 fn desired(hooks_dir: &Path, memory: Option<&str>) -> Vec<(&'static str, String)> {
     let index_script = hooks_dir.join("funes-index.sh").display().to_string();
-    let mut out = vec![("post_llm_call", hooks::command(&index_script, &["hermes"]))];
+    let mut out = vec![("post_llm_call", hooks::posix_command(&index_script, &["hermes"]))];
     if let Some(s) = memory {
-        let push = hooks::command(&hooks_dir.join("funes-push.sh").display().to_string(), &[s, "hermes"]);
+        let push = hooks::posix_command(&hooks_dir.join("funes-push.sh").display().to_string(), &[s, "hermes"]);
         out.push(("on_session_start", push.clone()));
         out.push(("on_session_finalize", push));
     }
@@ -414,13 +414,10 @@ mod tests {
     fn adds_hooks_to_a_fresh_config() {
         let entries = desired(Path::new("/h/hooks"), Some("acme/kb"));
         let out = apply_config_hooks(serde_yaml::Value::Mapping(Default::default()), &entries);
-        assert_eq!(
-            funes_cmd(&out, "post_llm_call").as_deref(),
-            Some("bash \"/h/hooks/funes-index.sh\" \"hermes\"")
-        );
+        assert_eq!(funes_cmd(&out, "post_llm_call").as_deref(), Some(entries[0].1.as_str()));
         assert_eq!(
             funes_cmd(&out, "on_session_finalize").as_deref(),
-            Some("bash \"/h/hooks/funes-push.sh\" \"acme/kb\" \"hermes\"")
+            Some(entries[2].1.as_str())
         );
         assert!(funes_cmd(&out, "on_session_start").is_some());
     }
@@ -460,10 +457,7 @@ mod tests {
             .iter()
             .any(|e| e.get("command").unwrap().as_str() == Some("make lint")));
         assert_eq!(list.iter().filter(|e| is_funes_entry(e)).count(), 1);
-        assert_eq!(
-            funes_cmd(&out, "post_llm_call").as_deref(),
-            Some("bash \"/h/hooks/funes-index.sh\" \"hermes\"")
-        );
+        assert_eq!(funes_cmd(&out, "post_llm_call").as_deref(), Some(entries[0].1.as_str()));
     }
 
     #[test]

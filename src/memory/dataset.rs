@@ -35,11 +35,12 @@ pub const DIM: i32 = 384;
 /// funes's home directory: `$FUNES_HOME`, else `~/.funes`. Holds the incremental state and the
 /// local memory.
 pub fn funes_dir() -> PathBuf {
-    if let Ok(d) = std::env::var("FUNES_HOME") {
+    if let Some(d) = std::env::var_os("FUNES_HOME").filter(|value| !value.is_empty()) {
         return PathBuf::from(d);
     }
-    let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".funes")
+    crate::platform::user_home()
+        .expect("cannot resolve the user profile; set FUNES_HOME to an explicit state directory")
+        .join(".funes")
 }
 
 /// Directory holding the local memory (the `chunks` dataset is at `<dir>/chunks.lance`).

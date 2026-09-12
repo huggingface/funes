@@ -12,8 +12,11 @@ use hf_hub::buckets::BucketDownload;
 use hf_hub::HFBucket;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
-use std::fs::{File, Permissions};
+use std::fs::File;
+#[cfg(unix)]
+use std::fs::Permissions;
 use std::io::Read;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
@@ -25,6 +28,7 @@ const BUCKET_NAME: &str = "funes";
 
 /// Repo, for the build-from-source pointer on platforms with no prebuilt binary.
 const REPO: &str = "https://github.com/huggingface/funes";
+const WINDOWS_REINSTALL: &str = r#"Invoke-WebRequest https://huggingface.co/buckets/huggingface/funes/resolve/install.ps1 -OutFile "$env:TEMP\funes-install.ps1"; powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\funes-install.ps1""#;
 
 /// How long the CLI `funes status` version check waits before giving up (silently). Short so an
 /// offline or slow Hub barely delays status; the update command itself has no such cap.
@@ -40,6 +44,8 @@ const ASSET: Option<&str> = if cfg!(all(target_os = "linux", target_arch = "x86_
     Some("funes-aarch64-linux")
 } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
     Some("funes-arm64-apple-darwin")
+} else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+    Some("funes-x86_64-windows.exe")
 } else {
     None
 };
@@ -47,6 +53,11 @@ const ASSET: Option<&str> = if cfg!(all(target_os = "linux", target_arch = "x86_
 /// `funes update`: fetch the latest release binary for this platform and replace the running
 /// executable in place. Idempotent — with `force`, reinstalls even when already up to date.
 pub async fn run(force: bool) -> Result<()> {
+    if cfg!(windows) {
+        bail!(
+            "Windows self-update is not supported; close running agents and MCP servers, then reinstall from PowerShell:\n{WINDOWS_REINSTALL}"
+        );
+    }
     let asset = ASSET.ok_or_else(|| {
         anyhow!(
             "no prebuilt funes binary for this platform ({}/{}) — build from source: {REPO}#building-from-source",
@@ -117,6 +128,7 @@ pub async fn run(force: bool) -> Result<()> {
 /// Verify the staged binary, confirm its reported version, and atomically rename it over `exe`.
 fn install_verified(staged: &Path, exe: &Path, manifest: &Path, asset: &str, expected_version: &str) -> Result<String> {
     verify_checksum(staged, manifest, asset)?;
+    #[cfg(unix)]
     std::fs::set_permissions(staged, Permissions::from_mode(0o755)).context("making the new binary executable")?;
 
     let out = verify_runs(staged)?;
@@ -130,9 +142,11 @@ fn install_verified(staged: &Path, exe: &Path, manifest: &Path, asset: &str, exp
 
     // Preserve the existing binary's mode so an update never broadens it (e.g. 0700 → 0755); fall
     // back to 0755 when there's no existing binary to copy the mode from.
+    #[cfg(unix)]
     let mode = std::fs::metadata(exe)
         .map(|m| m.permissions().mode() & 0o777)
         .unwrap_or(0o755);
+    #[cfg(unix)]
     std::fs::set_permissions(staged, Permissions::from_mode(mode)).context("setting the new binary's permissions")?;
 
     // Same-filesystem rename (staged sits in a temp dir beside exe), so this is atomic. The live
@@ -247,6 +261,9 @@ fn notice_for(latest_raw: &str, current_raw: &str) -> Option<String> {
     let latest = parse_semver(latest_raw)?;
     let current = parse_semver(current_raw)?;
     (latest > current).then(|| {
+        if cfg!(windows) {
+            return format!("update available: funes {} (you have {current_raw}) — close running agents/MCP servers, then reinstall from PowerShell:\n{WINDOWS_REINSTALL}\n", latest_raw.trim().trim_start_matches('v'));
+        }
         format!(
             "update available: funes {} (you have {current_raw}) — run `funes update`; restart running agents/MCP servers afterward to load it.\n",
             latest_raw.trim().trim_start_matches('v'),
@@ -311,15 +328,20 @@ pub(crate) fn parse_semver(s: &str) -> Option<(u32, u32, u32)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{expected_digest, install_verified, notice_for, parse_semver, read_release_version, sha256_file};
+    #[cfg(unix)]
+    use super::sha256_file;
+    use super::{expected_digest, install_verified, notice_for, parse_semver, read_release_version};
+    #[cfg(unix)]
     use std::path::Path;
 
+    #[cfg(unix)]
     fn write_manifest(path: &Path, binary: &Path, asset: &str) {
         let digest = hex::encode(sha256_file(binary).unwrap());
         std::fs::write(path, format!("{digest}  {asset}\n")).unwrap();
     }
 
     #[test]
+    #[cfg(unix)]
     fn install_verified_atomically_replaces() {
         use std::fs::Permissions;
         use std::os::unix::fs::PermissionsExt;
@@ -346,6 +368,7 @@ mod tests {
 
     #[test]
     fn checksum_mismatch_is_rejected_before_execution() {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().unwrap();
@@ -363,11 +386,13 @@ mod tests {
 
         assert!(install_verified(&staged, &exe, &manifest, "funes-test", "9.9.9").is_err());
         assert!(!marker.exists());
+        #[cfg(unix)]
         assert_eq!(std::fs::metadata(&staged).unwrap().permissions().mode() & 0o111, 0);
         assert_eq!(std::fs::read_to_string(&exe).unwrap(), "old binary");
     }
 
     #[test]
+    #[cfg(unix)]
     fn reported_version_mismatch_does_not_replace() {
         let dir = tempfile::tempdir().unwrap();
         let staged = dir.path().join("staged");
@@ -430,7 +455,8 @@ mod tests {
     fn notice_only_when_strictly_newer() {
         // newer release available → notice, naming both versions and the command
         let n = notice_for("0.8.1", "0.8.0").unwrap();
-        assert!(n.contains("0.8.1") && n.contains("0.8.0") && n.contains("funes update"));
+        let guidance = if cfg!(windows) { "install.ps1" } else { "funes update" };
+        assert!(n.contains("0.8.1") && n.contains("0.8.0") && n.contains(guidance));
         // a `v` prefix on the published version is stripped in the message
         assert!(notice_for("v0.9.0", "0.8.0").unwrap().contains("funes 0.9.0"));
         // equal, and older, → no notice

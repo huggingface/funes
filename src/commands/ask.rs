@@ -11,7 +11,7 @@
 use anyhow::{anyhow, bail, Result};
 use serde_json::Value;
 use std::io::{BufRead, BufReader, IsTerminal, Read};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{ExitStatus, Stdio};
 
 use super::recall::{check_readable, memory_hint, recall_hits};
 use crate::memory::Memory;
@@ -141,7 +141,7 @@ pub async fn grounding(memory: Memory, question: &str, progress: &(dyn Fn(&str) 
 
 /// Probe that an agent CLI exists before any expensive work is done on its behalf.
 pub fn preflight(agent: &str) -> Result<()> {
-    match Command::new(agent)
+    match crate::platform::command(agent)
         .arg("--version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -234,7 +234,7 @@ fn run_streaming(
     event: fn(&str) -> Event,
     progress: &(dyn Fn(&str) + Sync),
 ) -> Result<Run> {
-    let mut child = match Command::new(agent)
+    let mut child = match crate::platform::command(agent)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
