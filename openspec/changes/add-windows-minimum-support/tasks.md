@@ -39,7 +39,7 @@
 - [x] 3.2 Add a Windows fixture with a drive-rooted Codex transcript and PowerShell tool blocks
 - [x] 3.3 Add an end-to-end explicit-path index -> recall test under a path containing spaces and
   non-ASCII characters
-- [ ] 3.4 Verify a Windows-created memory opens on Linux and a Linux-created memory opens on Windows
+- [x] 3.4 Verify a Windows-created memory opens on Linux and a Linux-created memory opens on Windows
 - [x] 3.5 Verify MCP stdio keeps diagnostics off stdout
 - [x] 3.6 Verify Hub read/push and trufflehog discovery on Windows; document/install the required
   trufflehog executable if the push path is enabled in the minimum tier
@@ -106,7 +106,7 @@
 
 - [x] 9.1 Run the full Linux unit/integration and installer suite unchanged
 - [ ] 9.2 Run the macOS release build and existing automation integration tests unchanged
-- [ ] 9.3 Run the complete required Windows job twice to verify cache-independent repeatability
+- [x] 9.3 Run the complete required Windows job twice to verify cache-independent repeatability
 - [ ] 9.4 Perform a clean Windows 11 smoke test: install -> CMD version -> index -> recall -> add Codex ->
   complete a Codex turn -> verify background index -> remove Codex
 - [ ] 9.5 Perform a Windows 10 smoke test or document the exact CI/VM evidence used to claim support

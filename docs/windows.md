@@ -81,5 +81,6 @@ The Windows job runs PowerShell installer/hook tests, the real-memory test under
 paths, Clippy, unit tests, and Codex integration tests with a compiled native fixture. Before
 advertising a desktop release, run a clean Windows 10/11 install → CMD version → index → recall →
 Codex turn/hook → remove journey. CI uses a Windows Server runner; it does not constitute that
-manual desktop test. Authenticated Hub round trips passed with synthetic data; cross-OS memory
-transfer and installation from a versioned release asset remain unverified.
+manual desktop test. Authenticated Hub round trips and Windows/Linux memory exchange passed with
+synthetic data. Clean desktop installation and installation from a versioned release asset remain
+unverified.
