@@ -10,8 +10,17 @@ function Write-Log([string]$Message) {
 }
 function Invoke-Funes([string[]]$Arguments) {
     $ErrorActionPreference = "Continue"
-    $null | & $binary @Arguments 2>&1 | ForEach-Object { Add-Content -LiteralPath $logPath -Encoding UTF8 -Value "$_" }
-    return $LASTEXITCODE
+    $encoding = [Console]::OutputEncoding
+    try {
+        # Rust emits UTF-8; PowerShell 5.1 otherwise decodes native output with the console code page.
+        [Console]::OutputEncoding = New-Object Text.UTF8Encoding $false
+        $null | & $binary @Arguments 2>&1 | ForEach-Object {
+            # Empty stderr lines stringify as RemoteException in Windows PowerShell.
+            $line = if ($_ -is [Management.Automation.ErrorRecord]) { $_.Exception.Message } else { "$_" }
+            Add-Content -LiteralPath $logPath -Encoding UTF8 -Value $line
+        }
+        return $LASTEXITCODE
+    } finally { [Console]::OutputEncoding = $encoding }
 }
 function Quote-Literal([string]$Value) { "'" + $Value.Replace("'", "''") + "'" }
 

@@ -27,7 +27,11 @@ public class FunesFixture {
         }
         if (!Console.IsInputRedirected) return 42;
         File.AppendAllText(log, String.Join("|", args) + "\n");
+        Console.OutputEncoding = new System.Text.UTF8Encoding(false);
         Console.Error.WriteLine("fixture diagnostic on stderr");
+        Console.Error.WriteLine("\u6d4b\u8bd5 \u2014 \u00d7 " + args[0]);
+        Console.Error.WriteLine();
+        Console.WriteLine("stdout \u6d4b\u8bd5 " + args[0]);
         if (args[0] == "index") Thread.Sleep(Int32.Parse(Environment.GetEnvironmentVariable("FUNES_TEST_DELAY") ?? "0"));
         File.AppendAllText(log, "done:" + args[0] + "\n");
         return args[0] == "push" ? 2 : 0;
@@ -101,8 +105,16 @@ public class FunesFixture {
     do {
         Start-Sleep -Milliseconds 200
         $calls = if (Test-Path -LiteralPath $env:FUNES_TEST_LOG) { [IO.File]::ReadAllText($env:FUNES_TEST_LOG) } else { '' }
-    } until ($calls.Contains('done:index') -or (Get-Date) -gt $deadline)
+        $logFile = Join-Path $hooks 'funes-sync.log'
+        $indexLog = if (Test-Path -LiteralPath $logFile) { [IO.File]::ReadAllText($logFile) } else { '' }
+    } until ($indexLog.Contains('index[codex]: ok') -or (Get-Date) -gt $deadline)
+    $calls = if (Test-Path -LiteralPath $env:FUNES_TEST_LOG) { [IO.File]::ReadAllText($env:FUNES_TEST_LOG) } else { '' }
     Assert ($calls.Contains("index|--harness|codex`ndone:index")) 'Detached worker lost its arguments or did not finish'
+    Assert ($indexLog.Contains('index[codex]: ok')) 'Index worker did not log success'
+    $unicode = "$([char]0x6d4b)$([char]0x8bd5) $([char]0x2014) $([char]0x00d7)"
+    Assert ($indexLog.Contains("$unicode index")) 'Index worker corrupted UTF-8 stderr'
+    Assert ($indexLog.Contains("stdout $([char]0x6d4b)$([char]0x8bd5) index")) 'Index worker corrupted UTF-8 stdout'
+    Assert (-not $indexLog.Contains('System.Management.Automation.RemoteException')) 'Index blank stderr became a false exception'
     $script = Join-Path $hooks 'funes-push.ps1'
     $command = "& '" + $script.Replace("'", "''") + "' -Memory 'acme/a''b & (x) %PATH%' -Harness 'codex'"
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
@@ -121,6 +133,9 @@ public class FunesFixture {
     $calls = [IO.File]::ReadAllText($env:FUNES_TEST_LOG)
     Assert ($calls.Contains("push|acme/a'b & (x) %PATH%")) 'Push arguments were interpreted as commands'
     Assert ($hookLog.Contains('WARN - secrets held back')) 'Secret-gate exit code was not recorded'
+    Assert ($hookLog.Contains("$unicode push")) 'Push worker corrupted UTF-8 stderr'
+    Assert ($hookLog.Contains("stdout $([char]0x6d4b)$([char]0x8bd5) push")) 'Worker corrupted UTF-8 stdout'
+    Assert (-not $hookLog.Contains('System.Management.Automation.RemoteException')) 'Blank stderr became a false exception'
     Write-Host 'Windows installer and hook tests passed.'
 } finally {
     $env:LOCALAPPDATA = $savedLocal
