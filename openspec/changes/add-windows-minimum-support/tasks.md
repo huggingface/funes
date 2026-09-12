@@ -20,7 +20,7 @@
   and agent integration paths
 - [x] 1.4 Replace string separator matching in `Harness::from_known_dir` with component matching
 - [x] 1.5 Make local-path classification recognize Windows drive and UNC paths before Hub shorthand
-- [ ] 1.6 Add tests for unset `HOME`, overrides, drive paths, UNC paths, spaces, Unicode, and Unix
+- [x] 1.6 Add tests for unset `HOME`, overrides, drive paths, UNC paths, spaces, Unicode, and Unix
   non-regression
 
 ## 2. Native Windows Compilation
@@ -36,7 +36,7 @@
 
 - [x] 3.1 Verify `--version`, `status`, explicit-path `index`, `recall`, `get`, `sessions`, `sketch`,
   `scan`, `scrub`, `push`, `ask codex`, and `mcp` on native Windows
-- [ ] 3.2 Add a Windows fixture with a drive-rooted Codex transcript and PowerShell tool blocks
+- [x] 3.2 Add a Windows fixture with a drive-rooted Codex transcript and PowerShell tool blocks
 - [x] 3.3 Add an end-to-end explicit-path index -> recall test under a path containing spaces and
   non-ASCII characters
 - [ ] 3.4 Verify a Windows-created memory opens on Linux and a Linux-created memory opens on Windows
@@ -104,7 +104,7 @@
 
 ## 9. Final Verification
 
-- [ ] 9.1 Run the full Linux unit/integration and installer suite unchanged
+- [x] 9.1 Run the full Linux unit/integration and installer suite unchanged
 - [ ] 9.2 Run the macOS release build and existing automation integration tests unchanged
 - [ ] 9.3 Run the complete required Windows job twice to verify cache-independent repeatability
 - [ ] 9.4 Perform a clean Windows 11 smoke test: install -> CMD version -> index -> recall -> add Codex ->

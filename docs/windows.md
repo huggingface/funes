@@ -74,11 +74,12 @@ installer, and Bash automation separately.
 The native dependency probe passed real index/recall tests with both BLAS and ONNX on an MSVC
 Windows runner. The release backend remains the default BLAS/faer; the models and memory schema
 are unchanged. See the [execution record](../openspec/changes/add-windows-minimum-support/execution.md)
-for exact commits, runs, and remaining validation.
+for the initial build evidence and the [acceptance record](../openspec/changes/add-windows-minimum-support/acceptance.md)
+for subsequent desktop and authenticated Hub validation.
 
 The Windows job runs PowerShell installer/hook tests, the real-memory test under space/non-ASCII
 paths, Clippy, unit tests, and Codex integration tests with a compiled native fixture. Before
 advertising a desktop release, run a clean Windows 10/11 install → CMD version → index → recall →
 Codex turn/hook → remove journey. CI uses a Windows Server runner; it does not constitute that
-manual desktop test. Authenticated Hub round trips and cross-OS memory transfer remain release
-checks where the required credentials and machines are available.
+manual desktop test. Authenticated Hub round trips passed with synthetic data; cross-OS memory
+transfer and installation from a versioned release asset remain unverified.

@@ -20,7 +20,7 @@ case; it was fixed and reviewed again before final validation.
 ## Local verification
 
 - `cargo fmt --check` and `git diff --check` passed.
-- `cargo test --locked --profile ci --target x86_64-pc-windows-msvc` passed, including 257 library
+- `cargo test --locked --profile ci --target x86_64-pc-windows-msvc` passed, including 258 library
   tests and the main/integration targets. Unix-only/prerequisite-gated cases and tests gated on the upstream HF fixture token did not
   perform remote work; the separate authenticated checks below supply that evidence.
 - All-target Clippy with `-D warnings` passed for both default and `--no-default-features
@@ -33,6 +33,10 @@ case; it was fixed and reviewed again before final validation.
 - The actual npm Codex `.CMD` shim was exercised under space/Unicode paths. Add/repeat/remove and
   user-hook preservation passed. The ownership regression also failed on the old executable and
   passed on the repaired executable.
+- A synthetic drive-rooted Codex rollout preserves PowerShell arguments, Unicode paths, CRLF
+  output, and tool-call correlation. All eight Codex parser tests passed on Windows.
+- The native Codex test also checks profile/state/cache resolution with `HOME` unset and explicit
+  `FUNES_HOME`/`HF_HOME` overrides, using isolated directories and invented token files.
 
 ## Authenticated Hub checks
 
@@ -54,10 +58,15 @@ was uploaded or bound to automatic publishing.
 - Clean Windows 10/11 installation and standard-user CMD/PowerShell journeys.
 - Windows-created memory queried on Linux and Linux-created memory queried on Windows.
 - Installation from a real versioned release asset and matching manifest.
-- Current-commit Windows/Linux CI and release build results must be checked separately; older
-  successful runs are not proof for the repaired source.
 
-No Windows release has been published. The earlier CI evidence is in
-[the Windows run](https://github.com/wellorbetter/funes/actions/runs/34239759269),
-[Linux CI](https://github.com/wellorbetter/funes/actions/runs/34239759267), and
-[release builds](https://github.com/wellorbetter/funes/actions/runs/34239759213).
+## CI evidence
+
+Runtime repair `ad776ee8c026037b972611d52597c591c55de0de` passed
+[Windows native](https://github.com/wellorbetter/funes/actions/runs/34672802662),
+[Linux unit/integration and installer tests](https://github.com/wellorbetter/funes/actions/runs/34672802666),
+and [all four release builds](https://github.com/wellorbetter/funes/actions/runs/34672802674).
+Both Windows jobs started without a cache. The Windows release binary passed its version check
+and was uploaded as a CI artifact. No Windows release has been published.
+
+Subsequent changes add only the regression fixtures described above and documentation. The PR
+checks report their final-head results separately from this runtime-repair evidence.
