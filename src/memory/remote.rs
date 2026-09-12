@@ -493,6 +493,20 @@ impl FileFetcher for HubFetcher {
             .await
             .with_context(|| format!("caching {filename}@{}", self.revision))
     }
+
+    /// A cache entry links to a blob named by the object's expected hash rather than by the bytes
+    /// on disk, so dropping the entry alone would resolve to those same bytes again.
+    async fn discard(&self, path: &Path) -> Result<()> {
+        let blob = std::fs::read_link(path).ok().map(|target| match path.parent() {
+            Some(dir) if target.is_relative() => dir.join(target),
+            _ => target,
+        });
+        std::fs::remove_file(path).with_context(|| format!("discarding {}", path.display()))?;
+        if let Some(blob) = blob {
+            let _ = std::fs::remove_file(blob);
+        }
+        Ok(())
+    }
 }
 
 /// Installs a [`FetchStore`] backed by a [`HubFetcher`] in front of the store Lance built for a
