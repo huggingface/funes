@@ -8,6 +8,18 @@ use std::{fs, process::Command};
 #[test]
 fn native_codex_registration_and_independent_cleanup() {
     let root = tempfile::Builder::new().prefix("funes 用户 & (x) ").tempdir().unwrap();
+    // Exercise the actual CLI entrypoint: library tests missed an unoptimized MSVC stack overflow.
+    let version = Command::new(env!("CARGO_BIN_EXE_funes"))
+        .arg("--version")
+        .env_remove("RUST_MIN_STACK")
+        .env("FUNES_HOME", root.path().join("cli-memory"))
+        .output()
+        .unwrap();
+    assert!(version.status.success(), "CLI startup failed: {:?}", version);
+    assert_eq!(
+        String::from_utf8(version.stdout).unwrap().trim(),
+        concat!("funes ", env!("CARGO_PKG_VERSION"))
+    );
     let bin = root.path().join("bin");
     fs::create_dir(&bin).unwrap();
     let fixture = bin.join("fixture.rs");
