@@ -156,16 +156,76 @@ pub(crate) fn config_is_mergeable(cfg: &Value) -> bool {
 }
 
 fn is_funes_hook(hook: &Value) -> bool {
-    hook.get("command")
-        .and_then(Value::as_str)
-        .map(|c| {
-            let decoded = decoded_command(c);
-            let c = decoded.as_deref().unwrap_or(c);
-            ["funes-index.sh", "funes-push.sh", "funes-index.ps1", "funes-push.ps1"]
-                .iter()
-                .any(|name| c.contains(name))
-        })
-        .unwrap_or(false)
+    let Some(command) = hook.get("command").and_then(Value::as_str) else {
+        return false;
+    };
+    // Recognize the invocation templates we install, not mentions in another command's
+    // arguments. Also require the whole command to match: a compound user hook is not ours.
+    let decoded;
+    let (arguments, quote) = if let Some(rest) = command.strip_prefix("bash ") {
+        (rest, '"')
+    } else if command
+        .starts_with("powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ")
+    {
+        decoded = decoded_command(command).unwrap_or_default();
+        let Some(rest) = decoded.strip_prefix("& ") else {
+            return false;
+        };
+        (rest, '\'')
+    } else {
+        return false;
+    };
+    let Some(args) = quoted_arguments(arguments, quote) else {
+        return false;
+    };
+    args.first().is_some_and(|script| {
+        let name = script.rsplit(['/', '\\']).next().unwrap_or(script);
+        matches!(
+            name,
+            "funes-index.sh" | "funes-push.sh" | "funes-index.ps1" | "funes-push.ps1"
+        )
+    })
+}
+
+/// Parse our quoted templates, preserving ordinary environment references but not user commands.
+fn quoted_arguments(mut input: &str, quote: char) -> Option<Vec<String>> {
+    if quote == '"' && (input.contains("$(") || input.contains('`')) {
+        return None;
+    }
+    let mut args = Vec::new();
+    while !input.is_empty() {
+        input = input.strip_prefix(quote)?;
+        let mut value = String::new();
+        let mut chars = input.char_indices();
+        let end = loop {
+            let (i, ch) = chars.next()?;
+            if ch == quote {
+                if quote == '\'' && chars.clone().next().is_some_and(|(_, c)| c == '\'') {
+                    chars.next();
+                    value.push('\'');
+                } else {
+                    break i + ch.len_utf8();
+                }
+            } else if quote == '"' && ch == '\\' {
+                let (_, escaped) = chars.next()?;
+                if !matches!(escaped, '\\' | '"') {
+                    return None;
+                }
+                value.push(escaped);
+            } else {
+                value.push(ch);
+            }
+        };
+        args.push(value);
+        input = &input[end..];
+        if !input.is_empty() {
+            input = input.strip_prefix(' ')?;
+            if input.is_empty() {
+                return None;
+            }
+        }
+    }
+    Some(args)
 }
 
 /// Write the embedded scripts into an agent-chosen `dir`, executable. Returns whether anything
@@ -212,6 +272,33 @@ fn file_matches(path: &Path, want: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hook_cleanup_preserves_references_and_compound_commands() {
+        let encoded_reference = powershell_command("Copy-Item", &[r"C:\hooks\funes-index.ps1", "backup"]);
+        let owned = powershell_command(r"C:\hooks\funes-index.ps1", &["codex"]);
+        let commands = [
+            r"Copy-Item C:\hooks\funes-index.ps1 C:\backup\index.ps1".to_string(),
+            posix_command("/tools/other.sh", &["funes-index.sh"]),
+            posix_command("/tools/funes-index.sh.backup", &[]),
+            format!("{}; echo user-work", posix_command("/tools/funes-index.sh", &[])),
+            format!("echo {owned}"),
+            encoded_reference,
+            posix_command("/tools/funes-index.sh", &["$(touch /tmp/user-marker)"]),
+            posix_command("/tools/funes-index.sh", &["`touch /tmp/user-marker`"]),
+        ];
+        for command in commands {
+            let cfg = json!({"hooks":{"Stop":[{"hooks":[{"type":"command","command":command}]}]}});
+            assert_eq!(apply_funes_hooks(cfg.clone(), &[]), cfg);
+        }
+        for command in [
+            posix_command("/old space/it's/funes-index.sh", &["codex"]),
+            posix_command("${CLAUDE_PLUGIN_ROOT}/funes-index.sh", &["claude"]),
+            owned,
+        ] {
+            assert!(is_funes_hook(&json!({"command":command})));
+        }
+    }
 
     #[test]
     fn mixed_groups_preserve_user_commands_and_metadata() {

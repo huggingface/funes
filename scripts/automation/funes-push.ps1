@@ -11,7 +11,7 @@ function Write-Log([string]$Message) {
 }
 function Invoke-Funes([string[]]$Arguments) {
     $ErrorActionPreference = "Continue"
-    & $binary @Arguments 2>&1 | ForEach-Object { Add-Content -LiteralPath $logPath -Encoding UTF8 -Value "$_" }
+    $null | & $binary @Arguments 2>&1 | ForEach-Object { Add-Content -LiteralPath $logPath -Encoding UTF8 -Value "$_" }
     return $LASTEXITCODE
 }
 function Quote-Literal([string]$Value) { "'" + $Value.Replace("'", "''") + "'" }

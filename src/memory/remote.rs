@@ -37,7 +37,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{ensure, Context, Result};
@@ -59,6 +59,14 @@ use super::capture_store::{CaptureStore, Captured};
 use super::dataset;
 use super::fetch_store::{FetchStore, FileFetcher};
 use crate::hub;
+
+/// Hub keys use slashes, including when the staged files live on Windows.
+fn repo_path(path: &Path) -> String {
+    path.components()
+        .map(|part| part.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
 
 /// Outcome of an [`append`] commit.
 pub(crate) enum Appended {
@@ -159,11 +167,8 @@ pub(crate) async fn first_publish(
         if !entry.file_type().is_file() {
             continue;
         }
-        let rel = entry.path().strip_prefix(staging.path()).unwrap_or(entry.path());
-        ops.push(CommitOperation::add_file(
-            rel.to_string_lossy().into_owned(),
-            entry.path().to_path_buf(),
-        ));
+        let rel = entry.path().strip_prefix(staging.path())?;
+        ops.push(CommitOperation::add_file(repo_path(rel), entry.path().to_path_buf()));
     }
     if ops.is_empty() {
         return Ok(None);
@@ -536,6 +541,15 @@ mod tests {
     use arrow_schema::{DataType, Field, Schema};
     use lance_index::scalar::InvertedIndexParams;
     use lance_index::IndexType;
+
+    #[test]
+    fn upload_keys_use_repo_separators() {
+        let path = PathBuf::from("prefix 中文")
+            .join("chunks.lance")
+            .join("_versions")
+            .join("1.manifest");
+        assert_eq!(repo_path(&path), "prefix 中文/chunks.lance/_versions/1.manifest");
+    }
 
     /// Pins the Lance behavior [`reindex`] relies on: `append()` adds one delta sub-index per
     /// backlog, and `merge(deltas)` folds the deltas back into one without touching the base.

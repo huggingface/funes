@@ -25,6 +25,7 @@ public class FunesFixture {
             Console.WriteLine("funes " + (Environment.GetEnvironmentVariable("FUNES_TEST_VERSION") ?? "1.3.0"));
             return 0;
         }
+        if (!Console.IsInputRedirected) return 42;
         File.AppendAllText(log, String.Join("|", args) + "\n");
         Console.Error.WriteLine("fixture diagnostic on stderr");
         if (args[0] == "index") Thread.Sleep(Int32.Parse(Environment.GetEnvironmentVariable("FUNES_TEST_DELAY") ?? "0"));
@@ -102,11 +103,23 @@ public class FunesFixture {
         $calls = if (Test-Path -LiteralPath $env:FUNES_TEST_LOG) { [IO.File]::ReadAllText($env:FUNES_TEST_LOG) } else { '' }
     } until ($calls.Contains('done:index') -or (Get-Date) -gt $deadline)
     Assert ($calls.Contains("index|--harness|codex`ndone:index")) 'Detached worker lost its arguments or did not finish'
-    $env:FUNES_TEST_DELAY = '0'
-    & (Join-Path $hooks 'funes-push.ps1') -Worker -Memory "acme/a'b & (x) %PATH%" -Harness codex
+    $script = Join-Path $hooks 'funes-push.ps1'
+    $command = "& '" + $script.Replace("'", "''") + "' -Memory 'acme/a''b & (x) %PATH%' -Harness 'codex'"
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+    $info.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ' + $encoded
+    $process = [Diagnostics.Process]::Start($info)
+    $process.StandardInput.WriteLine('{}')
+    $process.StandardInput.Close()
+    Assert ($process.WaitForExit(5000)) 'Foreground push hook blocked on indexing'
+    Assert ($process.ExitCode -eq 0) 'Foreground push hook failed'
+    $process.Dispose()
+    $deadline = (Get-Date).AddSeconds(20)
+    do {
+        Start-Sleep -Milliseconds 200
+        $hookLog = [IO.File]::ReadAllText((Join-Path $hooks 'funes-sync.log'))
+    } until ($hookLog.Contains('WARN - secrets held back') -or (Get-Date) -gt $deadline)
     $calls = [IO.File]::ReadAllText($env:FUNES_TEST_LOG)
     Assert ($calls.Contains("push|acme/a'b & (x) %PATH%")) 'Push arguments were interpreted as commands'
-    $hookLog = [IO.File]::ReadAllText((Join-Path $hooks 'funes-sync.log'))
     Assert ($hookLog.Contains('WARN - secrets held back')) 'Secret-gate exit code was not recorded'
     Write-Host 'Windows installer and hook tests passed.'
 } finally {

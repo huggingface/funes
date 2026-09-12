@@ -1,58 +1,63 @@
-# Windows acceptance review — 2026-09-09
+# Windows acceptance — 2026-09-12
 
-Tested implementation: `176a3790bc7a750c5af5f3202ee2dafbe76c2dc3`.
+The native Windows 11 CLI/Codex and authenticated Hub journeys have been exercised on
+Windows 11 build 26200 with Rust 1.95.0 MSVC and Codex 0.153.4. Release qualification remains
+open for clean Windows 10/11 installations and cross-OS memory exchange.
 
-## Decision
+## Regression fixes
 
-Automated CI acceptance passes for the covered scenarios. Full desktop/release acceptance remains
-open. This review inspected completed job logs and artifact metadata; it did not execute a new
-Windows desktop session. Keep the PR as a draft until the intended acceptance scope is resolved.
+- First publish now converts staged filesystem paths into slash-separated Hub keys. Before the
+  fix, Windows uploaded backslash-containing filenames, recall could not find the manifest, and
+  a second push repeated first publication.
+- Detached PowerShell workers redirect stdin. Previously, the native child inherited a terminal
+  and could wait indefinitely at the index budget prompt while holding the memory lock.
+- Hook cleanup recognizes complete generated invocations and exact script basenames. References
+  to the same filename, compound commands, and Bash command substitutions remain untouched.
 
-## Verified evidence
+Each fix has a regression test. Read-only independent review found an additional Bash substitution
+case; it was fixed and reviewed again before final validation.
 
-| Area | Result | Evidence and limit |
-| --- | --- | --- |
-| Windows native tests | Pass | Windows Server 2025: 255 unit tests, one real index/recall integration test, add_codex_hooks and windows_codex each passed |
-| Configuration regression fixes | Pass | The 255 unit tests include the four review regressions for mixed hook groups, invalid containers, preservation, and read errors |
-| Installer and background hooks | Pass with fixtures | PowerShell suite reports success; installation uses mocked downloads and hooks invoke a fixture executable |
-| Codex registration and cleanup | Pass with fixture | Compiled codex.exe verifies argument forwarding, home selection, idempotency and cleanup; this does not prove a real Codex conversation triggers hooks |
-| Windows static checks | Pass | Native dependency check and all-target Clippy completed successfully |
-| Linux regression CI | Pass | Completed CI workflow at the tested implementation |
-| Release builds | Pass | Windows x64, Linux x64/ARM64 and macOS ARM64 built successfully; Windows job checks the staged executable's version |
-| Published release | Not performed | Publish Release was skipped for this PR build |
+## Local verification
 
-- [Windows tests and full log](https://github.com/wellorbetter/funes/actions/runs/34239759269/job/102106600876)
-- [Linux CI](https://github.com/wellorbetter/funes/actions/runs/34239759267)
-- [Release builds](https://github.com/wellorbetter/funes/actions/runs/34239759213)
+- `cargo fmt --check` and `git diff --check` passed.
+- `cargo test --locked --profile ci --target x86_64-pc-windows-msvc` passed, including 257 library
+  tests and the main/integration targets. Unix-only/prerequisite-gated cases and tests gated on the upstream HF fixture token did not
+  perform remote work; the separate authenticated checks below supply that evidence.
+- All-target Clippy with `-D warnings` passed for both default and `--no-default-features
+  --features onnx` builds under the same locked CI profile and target.
+- `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows.ps1` passed.
+  Its native fixture rejects nonredirected stdin, exercising both detached workers.
+- The optimized default-backend executable builds and starts without a custom stack argument.
+- Real Codex MCP status, a completed turn, background indexing, and retrieval of that turn passed.
+  MCP initialize/list/recall and the remaining local read commands also passed.
+- The actual npm Codex `.CMD` shim was exercised under space/Unicode paths. Add/repeat/remove and
+  user-hook preservation passed. The ownership regression also failed on the old executable and
+  passed on the repaired executable.
 
-The Windows artifact is `windows-x86_64`, artifact ID `10064575172`, ZIP size 74,993,499 bytes.
-GitHub reports ZIP SHA-256
-`880ac0448b453e61e21507391ed219c1918a5669c5f9f9b35699e57bc95620a4`.
-This is the archive digest, not the executable digest. The artifact download connector succeeded,
-but transferring its returned URL into the local inspection process returned HTTP 403; independent
-ZIP/PE/hash inspection was therefore not completed or claimed.
+## Authenticated Hub checks
 
-## Remaining acceptance checks
+Only invented transcripts were used in a private, user-authorized dataset. In a fresh prefix:
 
-| Check | Required evidence |
-| --- | --- |
-| Clean Windows 11 and Windows 10 journey | Standard user installation, new CMD and PowerShell sessions, version, explicit-path index, recall, real Codex add/turn/background index/remove; retain logs and exact OS versions |
-| Real Codex and npm shim | Record supported Codex version, test native executable and npm .cmd invocation with space/Unicode paths, trust hooks, complete a turn and observe real indexing |
-| MCP stdio | Initialize/list tools/call a recall tool through the actual funes process; verify stdout contains protocol messages only |
-| Full CLI surface | Exercise status, get, sessions, sketch, scan, scrub, ask codex and relevant error paths; a passing index/recall test is not evidence for every CLI command |
-| Authenticated Hub and scanner | Use an authorized disposable memory and synthetic data; verify read/push, real trufflehog discovery, missing-scanner failure and secret rejection |
-| Cross-OS memory compatibility | Open/query a Windows-created memory on Linux and a Linux-created memory on Windows; assert records and metadata survive both directions |
-| Installer with the actual release asset | Use the staged release executable and matching manifest in a clean profile; verify first install, reinstall, version, PATH and failed-update preservation |
-| Repeatability | Two native runs succeeded, but no deliberate cold-cache/warm-cache comparison was performed; do not mark cache-independent repeatability complete |
+1. First push published 6 chunks; remote recall returned the expected marker.
+2. Repeated push reported all 6 chunks already present.
+3. One appended transcript record produced exactly one new remote chunk; scan found its marker.
+4. Status reported 7 remote chunks; forced reindex completed and recall still found the new marker.
+5. Missing-scanner push failed. A separate, unused generated private-key sample was held back
+   with exit code 2; the corresponding remote prefix contained no files.
+6. The Hub listing contained the expected manifest and no backslash-containing keys in the new prefix.
 
-No Windows desktop/VM runtime, real Codex session, or authenticated Hub test environment was available
-for this review. The existing OpenSpec checklist remains authoritative for uncompleted work. A
-successful macOS build also does not establish that macOS automation integration tests ran.
+The original malformed prefix was retained as diagnostic evidence. No real conversation history
+was uploaded or bound to automatic publishing.
 
-## Next acceptance session
+## Remaining release checks
 
-Use a clean Windows machine or connected Windows runner and a synthetic transcript. Keep application
-state under a temporary FUNES_HOME and Codex configuration under a temporary CODEX_HOME. Capture
-commands, exit codes, tool versions and hook logs. Establish the local and MCP journeys before
-performing authenticated Hub tests with a separately authorized disposable target. Do not use real
-conversation history as acceptance data.
+- Clean Windows 10/11 installation and standard-user CMD/PowerShell journeys.
+- Windows-created memory queried on Linux and Linux-created memory queried on Windows.
+- Installation from a real versioned release asset and matching manifest.
+- Current-commit Windows/Linux CI and release build results must be checked separately; older
+  successful runs are not proof for the repaired source.
+
+No Windows release has been published. The earlier CI evidence is in
+[the Windows run](https://github.com/wellorbetter/funes/actions/runs/34239759269),
+[Linux CI](https://github.com/wellorbetter/funes/actions/runs/34239759267), and
+[release builds](https://github.com/wellorbetter/funes/actions/runs/34239759213).

@@ -30,18 +30,18 @@
 - [x] 2.2 Move/gate target-specific dependencies in `Cargo.toml` for MSVC compilation
 - [x] 2.3 Gate `PermissionsExt`, chmod behavior, `ExecutableFileBusy`, and Unix-only updater tests
 - [x] 2.4 Add Windows-safe fake executable/test helpers (`.cmd` or fixture executables as appropriate)
-- [ ] 2.5 Run `cargo clippy --all-targets --profile ci -- -D warnings` and unit tests on Windows
+- [x] 2.5 Run `cargo clippy --all-targets --profile ci -- -D warnings` and unit tests on Windows
 
 ## 3. Core CLI and Memory Validation
 
-- [ ] 3.1 Verify `--version`, `status`, explicit-path `index`, `recall`, `get`, `sessions`, `sketch`,
+- [x] 3.1 Verify `--version`, `status`, explicit-path `index`, `recall`, `get`, `sessions`, `sketch`,
   `scan`, `scrub`, `push`, `ask codex`, and `mcp` on native Windows
 - [ ] 3.2 Add a Windows fixture with a drive-rooted Codex transcript and PowerShell tool blocks
-- [ ] 3.3 Add an end-to-end explicit-path index -> recall test under a path containing spaces and
+- [x] 3.3 Add an end-to-end explicit-path index -> recall test under a path containing spaces and
   non-ASCII characters
 - [ ] 3.4 Verify a Windows-created memory opens on Linux and a Linux-created memory opens on Windows
-- [ ] 3.5 Verify MCP stdio keeps diagnostics off stdout
-- [ ] 3.6 Verify Hub read/push and trufflehog discovery on Windows; document/install the required
+- [x] 3.5 Verify MCP stdio keeps diagnostics off stdout
+- [x] 3.6 Verify Hub read/push and trufflehog discovery on Windows; document/install the required
   trufflehog executable if the push path is enabled in the minimum tier
 
 ## 4. Windows PowerShell Automation
@@ -62,9 +62,9 @@
 - [x] 5.1 Make Codex home fallback use the platform profile after `codex doctor --json` and
   `CODEX_HOME`
 - [x] 5.2 Install Windows PowerShell hooks and keep the existing Funes-only JSON merge semantics
-- [ ] 5.3 Verify `codex mcp add/remove` uses argv-based process spawning and supports `funes.exe` paths
+- [x] 5.3 Verify `codex mcp add/remove` uses argv-based process spawning and supports `funes.exe` paths
 - [x] 5.4 Port add/remove integration tests to `windows-latest` with a fake `codex.exe`
-- [ ] 5.5 Test local and bound-memory installs, repeat-run idempotency, malformed config safety, and
+- [x] 5.5 Test local and bound-memory installs, repeat-run idempotency, malformed config safety, and
   independent cleanup failures
 - [x] 5.6 Add pre-write Windows capability guards for Claude, pi, and Hermes until separate changes
   declare those integrations supported
