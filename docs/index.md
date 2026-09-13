@@ -10,15 +10,9 @@ funes index      # a fast, text-first pass over every known harness dir, into on
 
 ## What it indexes
 
-With **no argument**, in a terminal, `funes index` sweeps every supported agent's session dir it
-finds — `~/.claude/projects`, `~/.codex/sessions`, `~/.pi/agent/sessions`, `~/.hermes/state.db`, `~/.copilot/session-state` — into
-one memory, then offers to finish any deeper work left. Scope it to a single agent with `--harness`:
-
-```bash
-funes index --harness codex        # only ~/.codex/sessions
-```
-
-Copilot honors `COPILOT_HOME` when set (default `~/.copilot`).
+With **no argument**, in a terminal, `funes index` sweeps the supported session stores below
+into one memory, then offers to finish any deeper work left. Use `--harness <name>` to select
+one harness.
 
 Point it at a **path** to index one place in full — a transcript file or tree, or a `.parquet` trace
 export — or at a **Hub trace repo** to index its auto-converted parquet:
@@ -31,6 +25,61 @@ funes index <org>/<repo>                   # a Hub trace dataset (or a full hf:/
 An existing local path always wins over reading the same string as a repo ref. An **automated
 (non-terminal) run must name a target** — a path or `--harness <name>`; funes refuses to sweep every
 harness root unattended (a Claude session-end shouldn't pull in Codex or pi sessions).
+
+> [!IMPORTANT]
+> **Agent-written harness reference.** Austin approved the structure of the harness subsections
+> below. Their wording is agent-generated and has not been independently reviewed by Austin.
+>
+> **Last Ratified** 2026-09-12
+
+---
+
+### Claude Code
+
+```bash
+funes index --harness claude
+```
+
+Reads JSONL transcripts under `~/.claude/projects`. To select one project or another location,
+pass a `.jsonl` file or a directory with `--harness claude`.
+
+### Codex
+
+```bash
+funes index --harness codex
+```
+
+Reads JSONL transcripts under `~/.codex/sessions`. An explicit path can select a `.jsonl` file
+or directory. To include archived sessions, pass `~/.codex/archived_sessions` with `--harness codex`.
+
+### pi
+
+```bash
+funes index --harness pi
+```
+
+Reads JSONL transcripts under `~/.pi/agent/sessions`, or `$PI_CODING_AGENT_DIR/sessions` when
+`PI_CODING_AGENT_DIR` is set. An explicit `.jsonl` file or directory with `--harness pi` selects
+another location.
+
+### Hermes
+
+```bash
+funes index --harness hermes
+```
+
+Reads the SQLite session store at `~/.hermes/state.db`. To use another store or a copied database,
+pass its `state.db` file or the directory containing it with `--harness hermes`.
+
+### Copilot CLI
+
+```bash
+funes index --harness copilot
+```
+
+Reads sessions under `~/.copilot/session-state`, or `$COPILOT_HOME/session-state` when
+`COPILOT_HOME` is set. An explicit path with `--harness copilot` can select the session-state
+directory, one session directory, or its `events.jsonl` file.
 
 ### Parquet trace format
 
