@@ -1,44 +1,83 @@
 //! A write-capturing object-store decorator.
 //!
-//! [`CaptureStore`] wraps an inner [`ObjectStore`](object_store::ObjectStore): it records every
-//! write in memory instead of forwarding it, and delegates reads to the inner store — except for a
-//! path it has already captured, which it serves back (read-your-writes). A caller can run a
-//! sequence of writes against it and then recover exactly the files that would have been written,
-//! keyed by path, with nothing reaching the backend.
-//!
-//! ```text
-//!   put → captured in memory      (never reaches the inner store)
-//!   get → captured if present, else delegated to the inner store
-//! ```
-//!
-//! It is generic: the inner store is any `ObjectStore`, so the tests exercise it over an in-memory
-//! backend, and what to do with the captured files is left to the caller.
-//!
-//! **A decorator, because Rust has no inheritance.** You can't subclass a store and override
-//! `put`; the idiomatic stand-in is to hold the `inner` store, forward every method unchanged, and
-//! intercept the ones that matter. The cost is the hand-written delegation of each `ObjectStore`
-//! method below — Rust has no auto-delegation.
+//! Writes land in immutable temporary files and never reach the inner store. Reads serve the
+//! capture first, then delegate. Snapshots retain the temporary directory and the exact files
+//! selected at snapshot time, even if a later write replaces the same logical path.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use bytes::Bytes;
-use chrono::Utc;
-use futures::stream::{self, BoxStream, StreamExt};
+use futures::stream::{self, BoxStream, StreamExt, TryStreamExt};
+use object_store::local::LocalFileSystem;
 use object_store::path::Path as OPath;
+use object_store::ObjectStoreExt;
 use object_store::{
-    Attributes, CopyOptions, GetOptions, GetRange, GetResult, GetResultPayload, ListResult, MultipartUpload,
-    ObjectMeta, ObjectStore as OSObjectStore, PutMultipartOptions, PutOptions, PutPayload, PutResult,
-    Result as OSResult, UploadPart,
+    CopyOptions, GetOptions, GetResult, GetResultPayload, ListResult, MultipartUpload, ObjectMeta,
+    ObjectStore as OSObjectStore, PutMultipartOptions, PutOptions, PutPayload, PutResult, Result as OSResult,
+    UploadPart,
 };
 
-/// In-memory capture of object-store writes: path → bytes. Shared between a [`CaptureStore`] and
-/// whatever holds it, so the writes can be read back after the fact.
-pub(crate) type Captured = Arc<Mutex<BTreeMap<OPath, Bytes>>>;
+/// One immutable capture. Clones keep its backing directory alive through an upload or read.
+#[derive(Clone, Debug)]
+pub(crate) struct CapturedFile {
+    pub(crate) path: PathBuf,
+    physical: OPath,
+    meta: ObjectMeta,
+    _dir: Arc<tempfile::TempDir>,
+}
 
-/// Reads delegate to `inner` unless the path was already captured (read-your-writes, so a caller
-/// can read back what it just wrote); writes are captured and never forwarded.
+#[derive(Debug)]
+struct CaptureState {
+    files: Mutex<BTreeMap<OPath, CapturedFile>>,
+    local: LocalFileSystem,
+    dir: Arc<tempfile::TempDir>,
+    next: AtomicU64,
+}
+
+/// Shared disk-backed writes, with snapshots independent of subsequent logical overwrites.
+#[derive(Clone, Debug)]
+pub(crate) struct Captured(Arc<CaptureState>);
+
+impl Captured {
+    pub(crate) fn new() -> anyhow::Result<Self> {
+        let dir = Arc::new(tempfile::tempdir()?);
+        let local = LocalFileSystem::new_with_prefix(dir.path())?;
+        Ok(Self(Arc::new(CaptureState {
+            files: Mutex::new(BTreeMap::new()),
+            local,
+            dir,
+            next: AtomicU64::new(0),
+        })))
+    }
+
+    pub(crate) fn snapshot(&self) -> BTreeMap<OPath, CapturedFile> {
+        self.0.files.lock().unwrap().clone()
+    }
+
+    fn next_path(&self) -> OPath {
+        // Physical names never derive from logical paths, which may have characters or suffixes
+        // reserved by the local filesystem store. Nor can a logical overwrite reuse a file.
+        OPath::from(format!("f{}", self.0.next.fetch_add(1, Ordering::Relaxed)))
+    }
+
+    async fn record(&self, location: OPath, physical: OPath) -> OSResult<()> {
+        let mut meta = self.0.local.head(&physical).await?;
+        meta.location = location.clone();
+        let file = CapturedFile {
+            path: self.0.local.path_to_filesystem(&physical)?,
+            physical,
+            meta,
+            _dir: self.0.dir.clone(),
+        };
+        self.0.files.lock().unwrap().insert(location, file);
+        Ok(())
+    }
+}
+
+/// Reads delegate to `inner` unless captured; writes remain local until the caller commits them.
 #[derive(Debug)]
 pub(crate) struct CaptureStore {
     inner: Arc<dyn OSObjectStore>,
@@ -46,7 +85,6 @@ pub(crate) struct CaptureStore {
 }
 
 impl CaptureStore {
-    /// Decorate `inner`, recording writes into the shared `captured` map.
     pub(crate) fn new(inner: Arc<dyn OSObjectStore>, captured: Captured) -> Self {
         Self { inner, captured }
     }
@@ -61,15 +99,10 @@ impl std::fmt::Display for CaptureStore {
 #[async_trait]
 impl OSObjectStore for CaptureStore {
     async fn put_opts(&self, location: &OPath, payload: PutPayload, _opts: PutOptions) -> OSResult<PutResult> {
-        let mut buf = Vec::new();
-        for b in payload {
-            buf.extend_from_slice(&b);
-        }
-        self.captured.lock().unwrap().insert(location.clone(), Bytes::from(buf));
-        Ok(PutResult {
-            e_tag: None,
-            version: None,
-        })
+        let physical = self.captured.next_path();
+        let result = self.captured.0.local.put(&physical, payload).await?;
+        self.captured.record(location.clone(), physical).await?;
+        Ok(result)
     }
 
     async fn put_multipart_opts(
@@ -77,30 +110,36 @@ impl OSObjectStore for CaptureStore {
         location: &OPath,
         _opts: PutMultipartOptions,
     ) -> OSResult<Box<dyn MultipartUpload>> {
+        let physical = self.captured.next_path();
+        let upload = self.captured.0.local.put_multipart(&physical).await?;
         Ok(Box::new(CaptureMultipart {
             location: location.clone(),
-            buf: Vec::new(),
+            physical,
+            upload,
             captured: self.captured.clone(),
         }))
     }
 
     async fn get_opts(&self, location: &OPath, options: GetOptions) -> OSResult<GetResult> {
-        let hit = self.captured.lock().unwrap().get(location).cloned();
+        let hit = self.captured.0.files.lock().unwrap().get(location).cloned();
         match hit {
-            Some(full) => {
-                let total = full.len() as u64;
-                let range = match &options.range {
-                    None => 0..total,
-                    Some(GetRange::Bounded(r)) => r.start..r.end.min(total),
-                    Some(GetRange::Offset(o)) => (*o).min(total)..total,
-                    Some(GetRange::Suffix(n)) => total.saturating_sub(*n)..total,
-                };
-                let body = full.slice(range.start as usize..range.end as usize);
+            Some(file) => {
+                let result = self.captured.0.local.get_opts(&file.physical, options).await?;
+                let range = result.range.clone();
+                let attributes = result.attributes.clone();
+                let mut meta = result.meta.clone();
+                meta.location = location.clone();
+                // The returned stream owns the capture, so dropping the store before consuming
+                // a read cannot remove its directory. LocalFileSystem streams bounded chunks.
+                let body = result.into_stream().map(move |chunk| {
+                    let _keep_alive = &file;
+                    chunk
+                });
                 Ok(GetResult {
-                    payload: GetResultPayload::Stream(stream::once(async move { Ok(body) }).boxed()),
-                    meta: meta(location.clone(), total),
+                    payload: GetResultPayload::Stream(body.boxed()),
+                    meta,
                     range,
-                    attributes: Attributes::default(),
+                    attributes,
                 })
             }
             None => self.inner.get_opts(location, options).await,
@@ -112,11 +151,17 @@ impl OSObjectStore for CaptureStore {
         let prefix = prefix.cloned();
         let extra: Vec<OSResult<ObjectMeta>> = self
             .captured
+            .0
+            .files
             .lock()
             .unwrap()
             .iter()
             .filter(|(p, _)| prefix.as_ref().is_none_or(|pre| p.as_ref().starts_with(pre.as_ref())))
-            .map(|(p, b)| Ok(meta(p.clone(), b.len() as u64)))
+            .map(|(p, file)| {
+                let mut meta = file.meta.clone();
+                meta.location = p.clone();
+                Ok(meta)
+            })
             .collect();
         inner.chain(stream::iter(extra)).boxed()
     }
@@ -130,7 +175,7 @@ impl OSObjectStore for CaptureStore {
         locations
             .map(move |loc| {
                 if let Ok(p) = &loc {
-                    captured.lock().unwrap().remove(p);
+                    captured.0.files.lock().unwrap().remove(p);
                 }
                 loc
             })
@@ -138,72 +183,67 @@ impl OSObjectStore for CaptureStore {
     }
 
     async fn copy_opts(&self, from: &OPath, to: &OPath, _opts: CopyOptions) -> OSResult<()> {
-        // The decorator never writes to the underlying store — a copy lands in the capture. The
-        // source comes from the capture if present, else a read of the underlying store.
-        let hit = self.captured.lock().unwrap().get(from).cloned();
-        let body = match hit {
-            Some(b) => b,
-            None => self.inner.get_opts(from, GetOptions::default()).await?.bytes().await?,
-        };
-        self.captured.lock().unwrap().insert(to.clone(), body);
-        Ok(())
+        let hit = self.captured.0.files.lock().unwrap().get(from).cloned();
+        if let Some(file) = hit {
+            // Immutable files can be shared safely, including across later overwrites of `from`.
+            self.captured.0.files.lock().unwrap().insert(to.clone(), file);
+            return Ok(());
+        }
+        let mut input = self.inner.get(from).await?.into_stream();
+        let mut upload = self.put_multipart(to).await?;
+        let result = async {
+            while let Some(chunk) = input.try_next().await? {
+                upload.put_part(chunk.into()).await?;
+            }
+            upload.complete().await?;
+            OSResult::Ok(())
+        }
+        .await;
+        if result.is_err() {
+            let _ = upload.abort().await;
+        }
+        result
     }
 }
 
-fn meta(location: OPath, size: u64) -> ObjectMeta {
-    ObjectMeta {
-        location,
-        last_modified: Utc::now(),
-        size,
-        e_tag: None,
-        version: None,
-    }
-}
-
-/// A captured multipart upload: parts are buffered and stored under `location` on `complete`.
+/// Parts go straight to a local multipart writer; only completion exposes the logical path.
+#[derive(Debug)]
 struct CaptureMultipart {
     location: OPath,
-    buf: Vec<u8>,
+    physical: OPath,
+    upload: Box<dyn MultipartUpload>,
     captured: Captured,
 }
 
 #[async_trait]
 impl MultipartUpload for CaptureMultipart {
     fn put_part(&mut self, data: PutPayload) -> UploadPart {
-        for b in data {
-            self.buf.extend_from_slice(&b);
-        }
-        Box::pin(async { Ok(()) })
+        self.upload.put_part(data)
     }
 
     async fn complete(&mut self) -> OSResult<PutResult> {
-        let bytes = Bytes::from(std::mem::take(&mut self.buf));
-        self.captured.lock().unwrap().insert(self.location.clone(), bytes);
-        Ok(PutResult {
-            e_tag: None,
-            version: None,
-        })
+        let result = self.upload.complete().await?;
+        self.captured
+            .record(self.location.clone(), self.physical.clone())
+            .await?;
+        Ok(result)
     }
 
     async fn abort(&mut self) -> OSResult<()> {
-        Ok(())
-    }
-}
-
-impl std::fmt::Debug for CaptureMultipart {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "CaptureMultipart({})", self.location)
+        self.upload.abort().await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use object_store::memory::InMemory;
+    use object_store::GetRange;
 
     fn capture_over_memory() -> (CaptureStore, Arc<InMemory>) {
         let inner = Arc::new(InMemory::new());
-        let store = CaptureStore::new(inner.clone(), Captured::default());
+        let store = CaptureStore::new(inner.clone(), Captured::new().unwrap());
         (store, inner)
     }
 
@@ -218,7 +258,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            store.captured.lock().unwrap().contains_key(&p),
+            store.captured.0.files.lock().unwrap().contains_key(&p),
             "write must be captured"
         );
         assert!(
@@ -273,7 +313,7 @@ mod tests {
             .await
             .unwrap();
         store.copy_opts(&from, &to, CopyOptions::default()).await.unwrap();
-        assert!(store.captured.lock().unwrap().contains_key(&to));
+        assert!(store.captured.0.files.lock().unwrap().contains_key(&to));
         assert!(
             inner.get_opts(&to, GetOptions::default()).await.is_err(),
             "copy must not write to the underlying store"
@@ -308,5 +348,113 @@ mod tests {
             .await;
         assert!(names.contains("data/base.lance"), "underlying file listed");
         assert!(names.contains("_versions/2.manifest"), "captured file listed");
+    }
+
+    #[tokio::test]
+    async fn snapshot_survives_overwrite_delete_and_store_drop() {
+        let (store, inner) = capture_over_memory();
+        let p = OPath::from("_latest.manifest");
+        store.put(&p, "old".into()).await.unwrap();
+        let snapshot = store.captured.snapshot();
+        let original = snapshot.get(&p).unwrap().path.clone();
+        store.put(&p, "new".into()).await.unwrap();
+        assert_eq!(std::fs::read(&original).unwrap(), b"old");
+        assert_eq!(store.get(&p).await.unwrap().bytes().await.unwrap(), b"new"[..]);
+        store.delete(&p).await.unwrap();
+        drop(store);
+        assert_eq!(std::fs::read(&original).unwrap(), b"old");
+        assert!(inner.get(&p).await.is_err());
+        drop(snapshot);
+        assert!(!original.exists(), "last snapshot releases the scratch directory");
+    }
+
+    #[tokio::test]
+    async fn multipart_is_visible_only_after_completion_and_abort_preserves_old_value() {
+        let (store, inner) = capture_over_memory();
+        let p = OPath::from("data/fragment.lance");
+        let mut upload = store.put_multipart(&p).await.unwrap();
+        let part1 = upload.put_part("first".into());
+        let part2 = upload.put_part("second".into());
+        // Local multipart offsets follow invocation order, even when parts finish out of order.
+        part2.await.unwrap();
+        part1.await.unwrap();
+        assert!(store.get(&p).await.is_err());
+        upload.complete().await.unwrap();
+        assert_eq!(store.get(&p).await.unwrap().bytes().await.unwrap(), b"firstsecond"[..]);
+        assert!(inner.get(&p).await.is_err());
+
+        let mut aborted = store.put_multipart(&p).await.unwrap();
+        aborted.put_part("replacement".into()).await.unwrap();
+        aborted.abort().await.unwrap();
+        assert!(aborted.complete().await.is_err());
+        assert_eq!(store.get(&p).await.unwrap().bytes().await.unwrap(), b"firstsecond"[..]);
+    }
+
+    #[tokio::test]
+    async fn captured_reads_preserve_ranges_and_logical_metadata() {
+        let (store, _) = capture_over_memory();
+        let p = OPath::from("_versions/1.manifest");
+        store.put(&p, "0123456789".into()).await.unwrap();
+        for (range, expected, bytes) in [
+            (GetRange::Bounded(2..5), 2..5, "234"),
+            (GetRange::Bounded(8..20), 8..10, "89"),
+            (GetRange::Offset(6), 6..10, "6789"),
+            (GetRange::Suffix(3), 7..10, "789"),
+        ] {
+            let result = store
+                .get_opts(
+                    &p,
+                    GetOptions {
+                        range: Some(range),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(result.meta.location, p);
+            assert_eq!(result.meta.size, 10);
+            assert_eq!(result.range, expected);
+            assert_eq!(result.bytes().await.unwrap(), bytes.as_bytes());
+        }
+        let result = store.get(&p).await.unwrap();
+        drop(store);
+        assert_eq!(
+            result.bytes().await.unwrap(),
+            b"0123456789"[..],
+            "read owns its backing file"
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_copy_and_captured_alias_survive_source_overwrite() {
+        let (store, inner) = capture_over_memory();
+        let source = OPath::from("remote");
+        let copy = OPath::from("copied");
+        let alias = OPath::from("alias");
+        inner.put(&source, "base".into()).await.unwrap();
+        store.copy(&source, &copy).await.unwrap();
+        store.copy(&copy, &alias).await.unwrap();
+        store.put(&copy, "replacement".into()).await.unwrap();
+        assert_eq!(store.get(&alias).await.unwrap().bytes().await.unwrap(), b"base"[..]);
+        assert_eq!(store.head(&alias).await.unwrap().location, alias);
+        assert_eq!(inner.get(&source).await.unwrap().bytes().await.unwrap(), b"base"[..]);
+        assert!(inner.get(&copy).await.is_err());
+        assert!(inner.get(&alias).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn disk_write_failure_exposes_no_capture() {
+        let (store, inner) = capture_over_memory();
+        let p = OPath::from("data/fragment.lance");
+        // Make the scratch root a regular file. This fails independent of privileges, unlike
+        // permission-bit tests (which can succeed as root).
+        let root = store.captured.0.dir.path();
+        std::fs::remove_dir(root).unwrap();
+        std::fs::write(root, b"not a directory").unwrap();
+        assert!(store.put(&p, "payload".into()).await.is_err());
+        assert!(store.captured.snapshot().is_empty());
+        assert!(inner.get(&p).await.is_err());
+        std::fs::remove_file(root).unwrap();
+        std::fs::create_dir(root).unwrap();
     }
 }

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::io::{self, Write};
 
 const MAX_CHARS: usize = 1200;
 /// Consecutive splits of one block share this many leading/trailing chars, so reassembly
@@ -201,6 +202,48 @@ pub(crate) fn stitch(a: &str, b: &str) -> String {
     format!("{a}{b}")
 }
 
+/// Reconstruct ordered splits directly into a writer, with the same seams as [`stitch`]. Only
+/// the last [`OVERLAP`] code points are retained; the writer can stage arbitrarily large blocks
+/// without retaining their text. Callers must finish one block before starting another.
+pub(crate) struct BlockWriter<W> {
+    writer: W,
+    tail: Vec<char>,
+}
+
+impl<W: Write> BlockWriter<W> {
+    pub(crate) fn new(writer: W) -> Self {
+        Self {
+            writer,
+            tail: Vec::new(),
+        }
+    }
+
+    pub(crate) fn push(&mut self, piece: &str) -> io::Result<()> {
+        let head: Vec<char> = piece.chars().take(OVERLAP).collect();
+        let overlap = (1..=self.tail.len().min(head.len()))
+            .rev()
+            .find(|&n| self.tail[self.tail.len() - n..] == head[..n])
+            .unwrap_or(0);
+        let start = piece.char_indices().nth(overlap).map_or(piece.len(), |(i, _)| i);
+        let appended = &piece[start..];
+        self.writer.write_all(appended.as_bytes())?;
+        let mut tail: Vec<char> = appended
+            .chars()
+            .rev()
+            .chain(self.tail.iter().rev().copied())
+            .take(OVERLAP)
+            .collect();
+        tail.reverse();
+        self.tail = tail;
+        Ok(())
+    }
+
+    pub(crate) fn finish(mut self) -> io::Result<W> {
+        self.writer.flush()?;
+        Ok(self.writer)
+    }
+}
+
 /// Group `chunks` into their blocks, keyed by (session, turn, block_idx). Returns, in first-seen
 /// block order, the indices into `chunks` for each block, ordered by `split_idx` — so a caller can
 /// [`reconstruct`] each block and map a per-block result back to its rows.
@@ -283,8 +326,8 @@ pub(crate) fn chunks_from_batches(batches: &[RecordBatch]) -> Vec<Chunk> {
     out
 }
 
-/// Group `chunks` into blocks and reconstruct each block's contiguous text in one step — the single
-/// entry point both the push gate and `scrub` use to scan whole blocks. Returns, in first-seen block
+/// Group `chunks` into blocks and reconstruct contiguous text for in-memory callers such as
+/// `scrub`. Push uses [`BlockWriter`] to stage the same reconstructed text without retaining it. Returns, in first-seen block
 /// order, each block's chunk indices (ordered by `split_idx`) paired with its reconstructed text, so
 /// a per-block scan result maps straight back to the rows it covers.
 pub(crate) fn reconstruct_blocks(chunks: &[Chunk]) -> Vec<(Vec<usize>, String)> {
@@ -503,6 +546,61 @@ mod tests {
     fn reconstruct_handles_single_and_empty() {
         assert_eq!(reconstruct(&["whole block"]), "whole block");
         assert_eq!(reconstruct(&[]), "");
+    }
+
+    #[test]
+    fn block_writer_matches_reconstruction() {
+        let periodic = "界🙂abc".repeat(300);
+        let large = "large Unicode block 界🙂".repeat(10_000);
+        let cases: Vec<Vec<&str>> = vec![
+            vec![],
+            vec![""],
+            vec!["", "alpha", "", "beta", ""],
+            vec!["HEAD the quick brown fox", "the quick brown fox TAIL"],
+            vec!["prefix 界🙂e\u{301}", "界🙂e\u{301} suffix", "suffix"],
+            vec!["identical", "identical", "identical", "tail"],
+            vec![&periodic, &periodic, "", &periodic],
+            vec![&large, "🙂END"],
+        ];
+        for pieces in cases {
+            let mut writer = BlockWriter::new(Vec::new());
+            for piece in &pieces {
+                writer.push(piece).unwrap();
+                assert!(writer.tail.len() <= OVERLAP);
+            }
+            assert_eq!(
+                String::from_utf8(writer.finish().unwrap()).unwrap(),
+                reconstruct(&pieces)
+            );
+        }
+    }
+
+    #[test]
+    fn block_writer_handles_many_pieces_with_bounded_tail() {
+        let text: String = (0..5_000).map(|i| format!("word{i}界🙂 ")).collect();
+        let pieces = split(&text);
+        let refs: Vec<&str> = pieces.iter().map(String::as_str).collect();
+        let mut writer = BlockWriter::new(Vec::new());
+        for piece in &pieces {
+            writer.push(piece).unwrap();
+            assert!(writer.tail.len() <= OVERLAP);
+        }
+        assert_eq!(String::from_utf8(writer.finish().unwrap()).unwrap(), reconstruct(&refs));
+    }
+
+    #[test]
+    fn block_writer_propagates_staging_failures() {
+        struct FailingWriter;
+        impl Write for FailingWriter {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::Error::other("staging failed"))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Err(io::Error::other("flush failed"))
+            }
+        }
+        assert!(BlockWriter::new(FailingWriter).push("text").is_err());
+        assert!(BlockWriter::new(FailingWriter).finish().is_err());
     }
 
     #[test]

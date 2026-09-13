@@ -6,6 +6,8 @@ Three runnable examples, each `cargo run --release --example <name>`:
 - **`bench_index`** — `index` build time, throughput, and memory compactness (at the end).
 - **`bench_backends`** — latency and output agreement between the BLAS and ONNX inference backends.
 
+[Push preparation and capture](push-memory.md) have opt-in workload tests and a macOS resource runner. They run separately from ordinary correctness tests.
+
 ## `bench_recall` — recall latency
 
 `bench_recall.rs` times the full `recall()` call over **one dataset, local vs remote and cold vs

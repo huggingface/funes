@@ -17,8 +17,9 @@
 //!
 //! A multi-file write would then be several commits — non-atomic, no CAS. So the op runs through a
 //! [`CaptureStore`](super::capture_store::CaptureStore) installed via Lance's
-//! [`WrappingObjectStore`] seam: Lance's writes are captured in memory instead of hitting the Hub,
-//! and we ship the whole set as one guarded `create_commit`.
+//! [`WrappingObjectStore`] seam: Lance's writes are captured in temporary files instead of hitting the Hub,
+//! and we ship the whole set as one guarded `create_commit`. The Hub client streams Xet files
+//! from these paths; its regular-file/non-Xet fallback still buffers inline commit content.
 //!
 //! # Why this shape
 //!
@@ -41,8 +42,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{ensure, Context, Result};
-use arrow_array::{RecordBatch, RecordBatchIterator};
-use arrow_schema::SchemaRef;
+use arrow_array::RecordBatchReader;
 use async_trait::async_trait;
 use bytes::Bytes;
 use hf_hub::progress::{Progress, ProgressEvent, ProgressHandler, UploadEvent};
@@ -55,7 +55,7 @@ use lance_index::optimize::OptimizeOptions;
 use lance_io::object_store::WrappingObjectStore;
 use object_store::ObjectStore as OSObjectStore;
 
-use super::capture_store::{CaptureStore, Captured};
+use super::capture_store::{CaptureStore, Captured, CapturedFile};
 use super::dataset;
 use super::fetch_store::{FetchStore, FileFetcher};
 use crate::hub;
@@ -78,7 +78,7 @@ pub(crate) enum Reindexed {
     Conflict,
 }
 
-/// Append `batches` to the remote Lance dataset at `dataset_uri` (an `hf://…/<table>.lance` URI)
+/// Append `reader` to the remote Lance dataset at `dataset_uri` (an `hf://…/<table>.lance` URI)
 /// and land them in one `create_commit` on branch `rev`, guarded by the current head. The append
 /// writes only data — a new fragment, manifest, and transaction — and leaves the new rows
 /// unindexed (refresh the index separately with [`reindex`]). `extra_files` (repo path → bytes,
@@ -94,27 +94,23 @@ pub(crate) async fn append(
     storage_options: HashMap<String, String>,
     rev: &str,
     message: String,
-    batches: Vec<RecordBatch>,
-    schema: SchemaRef,
+    reader: impl RecordBatchReader + Send + 'static,
     extra_files: &BTreeMap<String, Bytes>,
 ) -> Result<Appended> {
     let parent = head_oid(repo, rev).await?;
     let (mut ds, wrapper) = open_capturing(dataset_uri, storage_options).await?;
 
-    let reader = RecordBatchIterator::new(batches.into_iter().map(Ok), schema);
     ds.append(reader, None)
         .await
         .context("appending to the remote dataset")?;
 
     // Snapshot the captured writes before reading index stats: `index_statistics` can write a stats
     // migration through the same wrapper, and that must not leak into the data commit.
-    let mut files = captured_files(&wrapper);
+    let files = captured_files(&wrapper);
     let unindexed = max_unindexed_rows(&ds).await;
-    for (path, body) in extra_files {
-        files.insert(path.clone(), body.clone());
-    }
-
-    let (ops, _dir) = write_ops(&files)?;
+    let mut ops = capture_ops(&files);
+    let (extra_ops, _extra_dir) = write_ops(extra_files)?;
+    ops.extend(extra_ops);
     match send_commit(repo, ops, parent, rev, message).await {
         Ok(info) => Ok(Appended::Committed {
             oid: info.commit_oid.unwrap_or_else(|| "?".to_string()),
@@ -125,6 +121,84 @@ pub(crate) async fn append(
     }
 }
 
+/// Exercise native append and disk capture without a network commit or index construction.
+#[cfg(test)]
+pub(crate) async fn benchmark_append(mut reader: impl RecordBatchReader + Send + 'static) -> Result<(usize, u64)> {
+    use arrow_array::RecordBatchIterator;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let schema = reader.schema();
+    let (reader, first) = tokio::task::spawn_blocking(move || {
+        let first = loop {
+            match reader.next() {
+                Some(Ok(batch)) if batch.num_rows() == 0 => continue,
+                first => break first,
+            }
+        };
+        (reader, first)
+    })
+    .await?;
+    let Some(first) = first else {
+        return Ok((0, 0));
+    };
+    let first = first?;
+    let seed = RecordBatchIterator::new([Ok(first.slice(0, 1))], schema.clone());
+    // Native local paths bypass ObjectStore when writing data. A live memory:// base exercises
+    // ObjectWriter, the same route hf:// takes, and keeps only the one-row seed in memory.
+    let base = Dataset::write(seed, "memory://capture-benchmark", None).await?;
+    let store = base.object_store(None).await?;
+    ensure!(!store.is_local(), "capture benchmark must use ObjectWriter");
+    let before = store_inventory(store.inner.as_ref()).await?;
+    let seed_bytes: u64 = before.values().map(|bytes| bytes.len() as u64).sum();
+    let wrapper = Arc::new(CaptureWrapper {
+        captured: Captured::new()?,
+    });
+    let mut ds = base.with_object_store_wrappers([wrapper.clone() as Arc<dyn WrappingObjectStore>]);
+
+    let rows = Arc::new(AtomicUsize::new(0));
+    let counted = rows.clone();
+    let batches = std::iter::once(Ok(first)).chain(reader).inspect(move |batch| {
+        if let Ok(batch) = batch {
+            counted.fetch_add(batch.num_rows(), Ordering::Relaxed);
+        }
+    });
+    ds.append(RecordBatchIterator::new(batches, schema), None).await?;
+    let files = captured_files(&wrapper);
+    let appended = rows.load(Ordering::Relaxed);
+    ensure!(ds.count_rows(None).await? == appended + 1, "captured row count differs");
+    ensure!(
+        store_inventory(store.inner.as_ref()).await? == before,
+        "benchmark modified the base store"
+    );
+    ensure!(
+        files.keys().any(|path| path.contains("/data/")),
+        "capture contains no data files"
+    );
+    let bytes = files.values().try_fold(0u64, |total, file| {
+        std::fs::metadata(&file.path).map(|meta| total + meta.len())
+    })?;
+    ensure!(bytes > seed_bytes, "capture is smaller than its one-row seed");
+    Ok((appended, bytes))
+}
+
+/// Exact inventory of the tiny seed backend, detecting stray data writes as well as commits.
+#[cfg(test)]
+async fn store_inventory(store: &dyn OSObjectStore) -> Result<BTreeMap<String, Bytes>> {
+    use futures::TryStreamExt;
+
+    let mut listed = store.list(None);
+    let mut files = BTreeMap::new();
+    while let Some(meta) = listed.try_next().await? {
+        let bytes = store
+            .get_opts(&meta.location, Default::default())
+            .await?
+            .bytes()
+            .await?;
+        files.insert(meta.location.to_string(), bytes);
+    }
+    Ok(files)
+}
+
 /// Build the whole dataset locally (data + indexes) and upload it in one `create_commit` — unlike
 /// [`append`]/[`reindex`], no head to guard against, since the dataset doesn't exist yet. `None` if
 /// the build produced no files.
@@ -132,8 +206,7 @@ pub(crate) async fn append(
 pub(crate) async fn first_publish(
     repo: &HFRepository<RepoTypeDataset>,
     prefix: &str,
-    batches: Vec<RecordBatch>,
-    schema: SchemaRef,
+    reader: impl RecordBatchReader + Send + 'static,
     rev: &str,
     message: String,
     extra_files: &BTreeMap<String, Bytes>,
@@ -148,14 +221,14 @@ pub(crate) async fn first_publish(
     };
     std::fs::create_dir_all(&db_dir)?;
     let table_uri = dataset::table_uri(&db_dir.to_string_lossy());
-    let reader = RecordBatchIterator::new(batches.into_iter().map(Ok), schema);
     let mut ds = Dataset::write(reader, &table_uri, Some(WriteParams::default()))
         .await
         .context("building the dataset for first publish")?;
     dataset::build_indexes(&mut ds, on_phase).await;
 
     let mut ops = Vec::new();
-    for entry in walkdir::WalkDir::new(&db_dir).into_iter().filter_map(|e| e.ok()) {
+    for entry in walkdir::WalkDir::new(&db_dir) {
+        let entry = entry.context("enumerating files for first publish")?;
         if !entry.file_type().is_file() {
             continue;
         }
@@ -222,7 +295,7 @@ pub(crate) async fn reindex(
     if files.is_empty() {
         return Ok(Reindexed::AlreadyCurrent);
     }
-    let (ops, _dir) = write_ops(&files)?;
+    let ops = capture_ops(&files);
     match send_commit(repo, ops, parent, rev, message).await {
         Ok(info) => Ok(Reindexed::Committed(info.commit_oid.unwrap_or_else(|| "?".to_string()))),
         Err(e) if head_moved(&e) => Ok(Reindexed::Conflict),
@@ -251,7 +324,7 @@ pub async fn add_column(
         .context("adding the remote column")?;
     let files = captured_files(&wrapper);
     ensure!(!files.is_empty(), "add_columns produced no files to commit");
-    let (ops, _dir) = write_ops(&files)?;
+    let ops = capture_ops(&files);
     let info = send_commit(repo, ops, parent, rev, message)
         .await
         .map_err(|e| anyhow::Error::new(e).context("add_column commit failed"))?;
@@ -265,7 +338,7 @@ async fn open_capturing(
     storage_options: HashMap<String, String>,
 ) -> Result<(Dataset, Arc<CaptureWrapper>)> {
     let wrapper = Arc::new(CaptureWrapper {
-        captured: Captured::default(),
+        captured: Captured::new()?,
     });
     let ds = DatasetBuilder::from_uri(dataset_uri)
         .with_storage_options(storage_options)
@@ -276,14 +349,21 @@ async fn open_capturing(
     Ok((ds, wrapper))
 }
 
-/// The captured writes as repo-path → bytes — the files Lance wrote, ready to commit.
-fn captured_files(wrapper: &CaptureWrapper) -> BTreeMap<String, Bytes> {
+/// The captured writes as repo-path → immutable local file, retaining their backing directory.
+fn captured_files(wrapper: &CaptureWrapper) -> BTreeMap<String, CapturedFile> {
     wrapper
         .captured
-        .lock()
-        .unwrap()
+        .snapshot()
+        .into_iter()
+        .map(|(p, file)| (p.to_string(), file))
+        .collect()
+}
+
+/// Upload directly from captured files. `files` must outlive the commit.
+fn capture_ops(files: &BTreeMap<String, CapturedFile>) -> Vec<CommitOperation> {
+    files
         .iter()
-        .map(|(p, b)| (p.to_string(), b.clone()))
+        .map(|(path, file)| CommitOperation::add_file(path.clone(), file.path.clone()))
         .collect()
 }
 
@@ -329,8 +409,8 @@ async fn head_oid(repo: &HFRepository<RepoTypeDataset>, rev: &str) -> Result<Str
         .context("target branch not found on the remote")
 }
 
-/// Write captured files (path → bytes) to a scratch dir and turn them into add-file commit
-/// operations — hf-hub uploads from local paths. The returned `TempDir` must outlive the commit.
+/// Stage small extra files (such as the dataset card) for path-based uploads. Captured Lance
+/// data already lives on disk. The returned `TempDir` must outlive the commit.
 fn write_ops(files: &BTreeMap<String, Bytes>) -> Result<(Vec<CommitOperation>, tempfile::TempDir)> {
     let dir = tempfile::tempdir()?;
     let mut ops = Vec::with_capacity(files.len());
@@ -546,10 +626,146 @@ pub(crate) async fn fetch_wrapper(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow_array::StringArray;
+    use arrow_array::{
+        new_null_array, types::Float32Type, ArrayRef, FixedSizeListArray, RecordBatch, RecordBatchIterator, StringArray,
+    };
     use arrow_schema::{DataType, Field, Schema};
     use lance_index::scalar::InvertedIndexParams;
     use lance_index::IndexType;
+
+    #[tokio::test]
+    async fn capture_benchmark_empty_input_is_a_noop() {
+        let schema = dataset::schema();
+        let batches = [Ok(RecordBatch::new_empty(schema.clone()))];
+        assert_eq!(
+            benchmark_append(RecordBatchIterator::new(batches, schema))
+                .await
+                .unwrap(),
+            (0, 0)
+        );
+    }
+
+    /// Exercises native Lance writes through the capture wrapper. A failed/conflicted commit
+    /// leaves the base unchanged, and replaying the same reader produces the same logical rows.
+    #[tokio::test]
+    async fn captured_append_is_readable_and_replay_leaves_base_unchanged() {
+        let schema = dataset::schema();
+        let batch = |texts: &[&str]| {
+            let columns: Vec<ArrayRef> = schema
+                .fields()
+                .iter()
+                .map(|field| match field.name().as_str() {
+                    "id" | "text" => Arc::new(StringArray::from(texts.to_vec())) as ArrayRef,
+                    "vector" => Arc::new(FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
+                        texts.iter().map(|text| {
+                            Some((0..dataset::DIM).map(move |i| Some(text.len() as f32 + i as f32 / 100.0)))
+                        }),
+                        dataset::DIM,
+                    )),
+                    _ => new_null_array(field.data_type(), texts.len()),
+                })
+                .collect();
+            RecordBatch::try_new(schema.clone(), columns).unwrap()
+        };
+        let reader = |batch: RecordBatch| RecordBatchIterator::new([Ok(batch)], schema.clone());
+        let base = Dataset::write(reader(batch(&["original"])), "memory://capture-replay", None)
+            .await
+            .unwrap();
+        let store = base.object_store(None).await.unwrap();
+        assert!(!store.is_local());
+        let before = store_inventory(store.inner.as_ref()).await.unwrap();
+        let mut prior_snapshot = None;
+        for _ in 0..2 {
+            let wrapper = Arc::new(CaptureWrapper {
+                captured: Captured::new().unwrap(),
+            });
+            let mut ds = base.with_object_store_wrappers([wrapper.clone() as Arc<dyn WrappingObjectStore>]);
+            ds.append(reader(batch(&["new", "new"])), None).await.unwrap();
+            let files = captured_files(&wrapper);
+            assert!(
+                files.keys().any(|path| path.contains("/data/")),
+                "data must be captured"
+            );
+            assert_eq!(
+                store_inventory(store.inner.as_ref()).await.unwrap(),
+                before,
+                "no stray writes"
+            );
+            assert_eq!(Schema::from(ds.schema()).metadata(), schema.metadata());
+            let batches = dataset::scan_rows(&ds, &[], None, None).await.unwrap();
+            assert_eq!(
+                arrow_select::concat::concat_batches(&schema, &batches).unwrap(),
+                batch(&["original", "new", "new"]),
+                "duplicate rows, embeddings, null metadata and column order survive replay"
+            );
+            drop(ds);
+            drop(wrapper);
+            assert!(
+                files.values().all(|file| file.path.is_file()),
+                "snapshot owns its files"
+            );
+            if let Some(previous) = prior_snapshot.replace(files) {
+                assert!(
+                    previous.values().all(|file| file.path.is_file()),
+                    "retry cannot replace earlier capture files"
+                );
+            }
+            assert_eq!(store_inventory(store.inner.as_ref()).await.unwrap(), before);
+        }
+    }
+
+    /// Independently measures native capture with a bounded scan of a frozen local fixture.
+    /// No secret scan, receipt, index, or network operation is involved.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "explicit frozen fixture and process memory guard required"]
+    async fn benchmark_capture_only() {
+        use arrow_schema::ArrowError;
+        use futures::TryStreamExt;
+
+        let uri = std::env::var("FUNES_BENCH_DATASET").expect("FUNES_BENCH_DATASET");
+        let start = std::time::Instant::now();
+        let fixture = Dataset::open(&uri).await.unwrap();
+        let expected = fixture.count_rows(None).await.unwrap();
+        let schema = Arc::new(Schema::from(fixture.schema()));
+        let version = fixture.version_id();
+        let mut scan = fixture.scan();
+        scan.batch_size(8192)
+            .batch_readahead(2)
+            .fragment_readahead(2)
+            .scan_in_order(true);
+        let mut stream = scan.try_into_stream().await.unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        let feeder = tokio::spawn(async move {
+            while let Some(batch) = stream
+                .try_next()
+                .await
+                .map_err(|error| ArrowError::ExternalError(Box::new(error)))
+                .transpose()
+            {
+                let failed = batch.is_err();
+                if tx.send(batch).await.is_err() || failed {
+                    break;
+                }
+            }
+        });
+        let reader = RecordBatchIterator::new(std::iter::from_fn(move || rx.blocking_recv()), schema);
+        eprintln!(
+            "BENCH capture_append rows={expected} version={version} seconds={:.3}",
+            start.elapsed().as_secs_f64()
+        );
+        let result = benchmark_append(reader).await;
+        feeder.await.unwrap();
+        let (rows, bytes) = result.unwrap();
+        assert_eq!(rows, expected);
+        assert!(
+            (rows == 0 && bytes == 0) || bytes > rows as u64,
+            "full capture must contain substantial data, not just a manifest"
+        );
+        eprintln!(
+            "BENCH capture_done seconds={:.3} rows={rows} captured_bytes={bytes}",
+            start.elapsed().as_secs_f64()
+        );
+    }
 
     /// Pins the Lance behavior [`reindex`] relies on: `append()` adds one delta sub-index per
     /// backlog, and `merge(deltas)` folds the deltas back into one without touching the base.

@@ -10,6 +10,7 @@ repository = "https://github.com/huggingface/funes"
 # The `onnx` backend (feature below): embeddings + rerank on the ONNX Runtime. Off by default —
 # ort ships prebuilt against glibc 2.38, above the glibc 2.35 floor releases target (Ubuntu 22.04).
 fastembed = { version = "5", optional = true }
+arrow-ipc = "58"                 # replayable bounded-batch push spool
 arrow-array = "58"               # RecordBatch types (must match lance's arrow version)
 arrow-schema = "58"              # Schema/Field/DataType for building batches
 arrow-select = "58"              # filter_record_batch: drop secret-bearing rows before a push
