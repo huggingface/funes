@@ -52,9 +52,8 @@ funes index --harness copilot
 
 Includes Copilot CLI sessions and local Copilot sessions from VS Code’s editor and Agents window.
 
-Reads sessions under `~/.copilot/session-state`, or `$COPILOT_HOME/session-state` when
-`COPILOT_HOME` is set. An explicit path with `--harness copilot` can select the session-state
-directory, one session directory, or its `events.jsonl` file.
+Reads sessions under `~/.copilot/session-state`. An explicit path with `--harness copilot`
+can select the session-state directory, one session directory, or its `events.jsonl` file.
 
 ### pi
 
@@ -62,9 +61,8 @@ directory, one session directory, or its `events.jsonl` file.
 funes index --harness pi
 ```
 
-Reads JSONL transcripts under `~/.pi/agent/sessions`, or `$PI_CODING_AGENT_DIR/sessions` when
-`PI_CODING_AGENT_DIR` is set. An explicit `.jsonl` file or directory with `--harness pi` selects
-another location.
+Reads JSONL transcripts under `~/.pi/agent/sessions`. An explicit `.jsonl` file or directory
+with `--harness pi` selects another location.
 
 ### Hermes
 
