@@ -45,7 +45,7 @@ presentation; don't parse it loosely.
 | `--half-life` | 30 | recency decay in days (a hit this old keeps half its weight); 0 disables |
 | `--neighbors` | 1 | adjacent chunks (by seq) attached per hit; 0 disables |
 | `--type` | — | restrict to `text \| thinking \| tool_use \| tool_result` |
-| `--harness` | — | restrict to `claude \| codex \| pi \| hermes \| copilot` |
+| `--harness` | — | restrict to `claude \| codex \| copilot \| pi \| hermes` |
 | `--memory` | local | the memory to read (see below) |
 
 The MCP `recall` tool takes the same parameters and defaults, so an agent can widen a search —

@@ -44,6 +44,16 @@ funes index --harness codex
 Reads JSONL transcripts under `~/.codex/sessions`. An explicit path can select a `.jsonl` file
 or directory. To include archived sessions, pass `~/.codex/archived_sessions` with `--harness codex`.
 
+### Copilot CLI
+
+```bash
+funes index --harness copilot
+```
+
+Reads sessions under `~/.copilot/session-state`, or `$COPILOT_HOME/session-state` when
+`COPILOT_HOME` is set. An explicit path with `--harness copilot` can select the session-state
+directory, one session directory, or its `events.jsonl` file.
+
 ### pi
 
 ```bash
@@ -62,16 +72,6 @@ funes index --harness hermes
 
 Reads the SQLite session store at `~/.hermes/state.db`. To use another store or a copied database,
 pass its `state.db` file or the directory containing it with `--harness hermes`.
-
-### Copilot CLI
-
-```bash
-funes index --harness copilot
-```
-
-Reads sessions under `~/.copilot/session-state`, or `$COPILOT_HOME/session-state` when
-`COPILOT_HOME` is set. An explicit path with `--harness copilot` can select the session-state
-directory, one session directory, or its `events.jsonl` file.
 
 ### Parquet trace format
 
@@ -147,7 +147,7 @@ scanned or stored: a pasted screenshot is megabytes of base64 with nothing recal
 
 | Flag | Meaning |
 | --- | --- |
-| `--harness <name>` | Override auto-detection for a path, or (with no path) target one harness's dir: `claude \| codex \| pi \| hermes \| copilot`. |
+| `--harness <name>` | Override auto-detection for a path, or (with no path) target one harness's dir: `claude \| codex \| copilot \| pi \| hermes`. |
 | `--limit <N>` | Index only the most recent N sessions per source. Omit to index all. A Hub repo ignores it and indexes every shard. |
 | `--no-thinking` | Exclude thinking blocks. |
 | `--yes` | Don't ask: a budgeted (no-path) run finishes all remaining work; an explicit path skips the first-index size confirmation. |
@@ -157,7 +157,7 @@ scanned or stored: a pasted screenshot is megabytes of base64 with nothing recal
 Indexing and recall are one deterministic pipeline:
 
 ```
-~/.claude/projects, ~/.codex/sessions, ~/.pi/agent/sessions, ~/.hermes/state.db, ~/.copilot/session-state   (or a .parquet trace)
+~/.claude/projects, ~/.codex/sessions, ~/.copilot/session-state, ~/.pi/agent/sessions, ~/.hermes/state.db   (or a .parquet trace)
    │  parse        deterministic — turns (text / thinking / tool_use / tool_result), tagged by agent
    │  chunk        one chunk per content block, tight provenance
    │  embed        pinned local model (BAAI/bge-small-en-v1.5)

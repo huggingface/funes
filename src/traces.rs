@@ -33,6 +33,6 @@ pub struct Turn {
     pub role: String,
     pub blocks: Vec<Block>,
     pub source_path: String,
-    /// Which coding agent produced this session: `claude_code` | `codex` | `pi` | `hermes` | `copilot`.
+    /// Transcript source recorded for this session: `claude_code` | `codex` | `copilot` | `pi` | `hermes`.
     pub harness: String,
 }
