@@ -18,7 +18,9 @@ one memory, then offers to finish any deeper work left. Scope it to a single age
 funes index --harness codex        # only ~/.codex/sessions
 ```
 
-Point it at a **path** to index one place in full — a transcript tree or a single `.parquet` trace
+Copilot honors `COPILOT_HOME` when set (default `~/.copilot`).
+
+Point it at a **path** to index one place in full — a transcript file or tree, or a `.parquet` trace
 export — or at a **Hub trace repo** to index its auto-converted parquet:
 
 ```bash
@@ -29,18 +31,6 @@ funes index <org>/<repo>                   # a Hub trace dataset (or a full hf:/
 An existing local path always wins over reading the same string as a repo ref. An **automated
 (non-terminal) run must name a target** — a path or `--harness <name>`; funes refuses to sweep every
 harness root unattended (a Claude session-end shouldn't pull in Codex or pi sessions).
-
-### Copilot CLI sessions
-
-`funes index --harness copilot` reads `session-state/<id>/events.jsonl` under
-`COPILOT_HOME` (default `~/.copilot`). An explicit path can name the session-state directory,
-one session directory, or its `events.jsonl`. SDK and IDE-hosted CLI sessions using this
-format are imported the same way.
-
-The importer keeps durable messages, readable reasoning, tool calls, and tool results. It
-excludes streaming deltas, encrypted reasoning, diagnostic logs, and the separate SQLite
-search index. Event IDs provide stable provenance; working-directory context comes from the
-events or `workspace.yaml`. Run indexing explicitly; this support does not install client hooks.
 
 ### Parquet trace format
 
