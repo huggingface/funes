@@ -26,14 +26,6 @@ An existing local path always wins over reading the same string as a repo ref. A
 (non-terminal) run must name a target** — a path or `--harness <name>`; funes refuses to sweep every
 harness root unattended (a Claude session-end shouldn't pull in Codex or pi sessions).
 
-> [!IMPORTANT]
-> **Agent-written harness reference.** Austin approved the structure of the harness subsections
-> below. Their wording is agent-generated and has not been independently reviewed by Austin.
->
-> **Last Ratified** 2026-09-12
-
----
-
 ### Claude Code
 
 ```bash
