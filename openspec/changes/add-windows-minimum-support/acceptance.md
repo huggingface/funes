@@ -1,4 +1,40 @@
-# Windows acceptance — 2026-09-12
+# Windows acceptance
+
+## Upstream synchronization — 2026-09-13
+
+Merged upstream `72c1081` (including Lance 11 and remote-cache repair) into the Windows branch.
+The following checks are local Windows results for the updated implementation; the CI links
+below document the earlier Lance 7 implementation, not this merged revision.
+
+- Full locked Windows Cargo suite passed with 260 library tests and the main/integration targets.
+  Both all-target Clippy backend variants passed with warnings denied, along with formatting.
+  Upstream-token-gated and Unix-only cases remain distinct from live remote checks.
+- A direct unoptimized CLI launch exposed a main-thread stack overflow missed by library tests.
+  The MSVC `funes` executable now reserves a 16 MiB main-thread stack. The Windows regression
+  test launches the actual CLI without `RUST_MIN_STACK` and asserts its version output; it passed.
+- PowerShell hooks now decode native UTF-8 output explicitly and log stderr messages instead of
+  rendering empty lines as `System.Management.Automation.RemoteException`. Detached-worker tests
+  check Unicode stdout/stderr and blank-line handling independently for both hooks, as well as
+  preserved exit codes, argument boundaries and nonblocking foreground behavior; all passed.
+- The updated unoptimized CLI passed ten authenticated checks against synthetic test memories:
+  status/recall of the previous Lance 7 remote memory, first publication of six chunks, remote
+  recall, repeat no-op, missing-scanner rejection, one-chunk append, retrieval/count verification,
+  and recall after forced reindexing. No real conversation history was uploaded.
+- Independent static review of the merge, logging fix and stack fix found no remaining blockers.
+  Review feedback corrected the standalone-hook coverage and a polling race in its test.
+- The optimized executable at `6baa7f4` was rebuilt after the stack fix, packaged, and extracted
+  into a Unicode/space path. Its PE stack reserve, ZIP CRC and payload SHA-256 checks passed.
+  The bundled demo and fresh CLI indexing/recall passed; MCP initialize/list/recall passed with
+  clean JSON stdout. Actual npm Codex add/repeat/remove preserved unrelated configuration.
+- The packaged executable read a copied Lance 7 local memory and recalled its marker without
+  changing any file hashes. Its installed native Codex hook then indexed a fresh synthetic
+  memory (two new chunks), logged `index[codex]: ok`, and the CLI recalled the result. This test
+  reused the host's downloaded inference models; it does not establish a cold-cache download.
+
+Clean Windows 10/11 installation and real versioned release-asset installation remain release
+qualification checks. They are not claimed by the local tests above.
+
+## Earlier validation — 2026-09-12
 
 The native Windows 11 CLI/Codex and authenticated Hub journeys have been exercised on
 Windows 11 build 26200 with Rust 1.95.0 MSVC and Codex 0.153.4. Release qualification remains

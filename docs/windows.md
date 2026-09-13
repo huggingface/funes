@@ -51,6 +51,8 @@ Drive paths and UNC paths remain local memory paths rather than Hub repository s
 `codex doctor --json` selects Codex's configuration directory when available, followed by
 `CODEX_HOME`, then the user's Windows profile plus `.codex`. The installed scripts are
 `hooks\funes-index.ps1` and `hooks\funes-push.ps1`; logs go beside them in `funes-sync.log`.
+The log preserves UTF-8 output; `index[codex]: ok` marks completed indexing, while
+`FAILED (exit ...)` records an unsuccessful command.
 The foreground hook drains its input and starts a detached worker. Encoded PowerShell commands keep
 paths and arguments out of CMD's expansion rules. The push worker retries indexing up to five times
 before publishing what is already stored; secret-gate exit code 2 is logged as a warning.
