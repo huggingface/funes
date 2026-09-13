@@ -29,6 +29,8 @@ use crate::memory::{Memory, MemoryState};
 #[cfg(test)]
 use crate::{chunk, scan};
 
+#[cfg(test)]
+mod benchmark;
 mod prepare;
 use anyhow::{bail, Context, Result};
 #[cfg(test)]
@@ -1075,7 +1077,14 @@ mod tests {
             .map(|i| vec![i as f32; dataset::DIM as usize])
             .collect();
         let b = dataset::build_batch(&chunks, &vectors).unwrap();
-        let schema = b.schema();
+        let mut fields: Vec<_> = b.schema().fields().iter().map(|field| field.as_ref().clone()).collect();
+        fields[0] = fields[0]
+            .clone()
+            .with_metadata(HashMap::from([("fixture-field".into(), "id-metadata".into())]));
+        let mut metadata = b.schema().metadata().clone();
+        metadata.insert("fixture-schema".into(), "preserved-through-ipc".into());
+        let schema = Arc::new(arrow_schema::Schema::new_with_metadata(fields, metadata));
+        let b = RecordBatch::try_new(schema.clone(), b.columns().to_vec()).unwrap();
         let uri = dataset::table_uri(&dir.path().to_string_lossy());
         let mut ds = Dataset::write(
             RecordBatchIterator::new([Ok(b.slice(0, 1))], schema.clone()),
@@ -1097,7 +1106,16 @@ mod tests {
         assert_eq!(held.rows, expected_held.rows);
         assert_eq!(held.summary, expected_held.summary);
         let prepared = clean.spool(&ds).await.unwrap();
+        assert_eq!(
+            prepared.reader().unwrap().schema(),
+            schema,
+            "the IPC reader retains schema and field metadata"
+        );
         let first: Vec<_> = prepared.reader().unwrap().collect::<Result<_, _>>().unwrap();
+        assert!(
+            first.iter().all(|batch| batch.schema() == schema),
+            "check serialized metadata before concat restamps it"
+        );
         let retry: Vec<_> = prepared.reader().unwrap().collect::<Result<_, _>>().unwrap();
         assert_eq!(first, retry, "a commit retry replays identical rows and schema");
         assert_eq!(prepared.ids, ids_in_batches(&legacy));
@@ -1183,97 +1201,6 @@ mod tests {
         let prepared = clean.spool(&ds).await.unwrap();
         assert_eq!(prepared.rows, 0);
         assert_eq!(prepared.reader().unwrap().count(), 0);
-    }
-
-    /// Opt-in paired benchmark. It only reads the specified local dataset and writes temporary
-    /// files; it never publishes or changes a receipt. See benchmark/push-memory.md.
-    #[tokio::test]
-    #[ignore = "explicit local dataset and process memory guard required"]
-    async fn benchmark_push_preparation() {
-        use arrow_array::{Array, FixedSizeListArray, Float32Array};
-        use sha2::{Digest, Sha256};
-        let uri = std::env::var("FUNES_BENCH_DATASET").expect("FUNES_BENCH_DATASET");
-        let mode = std::env::var("FUNES_BENCH_MODE").expect("FUNES_BENCH_MODE: legacy or staged");
-        assert!(matches!(mode.as_str(), "legacy" | "staged"));
-        let start = std::time::Instant::now();
-        let ds = dataset::open(&uri, HashMap::new()).await.unwrap();
-        eprintln!(
-            "BENCH opened version={} rows={} seconds={:.3}",
-            ds.version().version,
-            ds.count_rows(None).await.unwrap(),
-            start.elapsed().as_secs_f64()
-        );
-        let ids = all_ids(&ds).await.unwrap();
-        eprintln!("BENCH selection seconds={:.3}", start.elapsed().as_secs_f64());
-        let mut hashes = [Sha256::new(), Sha256::new(), Sha256::new()];
-        let mut rows = 0usize;
-        let mut fingerprint = |batch: RecordBatch| {
-            rows += batch.num_rows();
-            for (col, name) in ["id", "text"].iter().enumerate() {
-                let values = batch
-                    .column_by_name(name)
-                    .unwrap()
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .unwrap();
-                for value in values.iter() {
-                    let value = value.unwrap();
-                    hashes[col].update((value.len() as u64).to_le_bytes());
-                    hashes[col].update(value.as_bytes());
-                }
-            }
-            let vectors = batch
-                .column_by_name("vector")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<FixedSizeListArray>()
-                .unwrap();
-            if !vectors.is_empty() {
-                let values = vectors.values().as_any().downcast_ref::<Float32Array>().unwrap();
-                let used = values.slice(
-                    vectors.value_offset(0) as usize,
-                    vectors.len() * vectors.value_length() as usize,
-                );
-                hashes[2].update(used.values().inner().as_slice());
-            }
-        };
-        let held;
-        if mode == "legacy" {
-            let batches = rows_with_ids(&ds, &ids).await.unwrap();
-            eprintln!("BENCH secret_gate seconds={:.3}", start.elapsed().as_secs_f64());
-            let (batches, skipped) = drop_secret_rows(batches).unwrap();
-            held = skipped.rows;
-            eprintln!("BENCH fingerprint seconds={:.3}", start.elapsed().as_secs_f64());
-            for batch in batches {
-                fingerprint(batch);
-            }
-        } else {
-            let selection = prepare::Selection::read(&ds, &ids).await.unwrap();
-            drop(ids);
-            eprintln!("BENCH secret_gate seconds={:.3}", start.elapsed().as_secs_f64());
-            let (clean, skipped) = selection.scan(&ds).await.unwrap();
-            held = skipped.rows;
-            eprintln!("BENCH spool seconds={:.3}", start.elapsed().as_secs_f64());
-            let prepared = clean.spool(&ds).await.unwrap();
-            eprintln!("BENCH fingerprint seconds={:.3}", start.elapsed().as_secs_f64());
-            for batch in prepared.reader().unwrap() {
-                fingerprint(batch.unwrap());
-            }
-            if std::env::var_os("FUNES_BENCH_CAPTURE").is_some() {
-                eprintln!("BENCH capture_append seconds={:.3}", start.elapsed().as_secs_f64());
-                let (written, bytes) = remote::benchmark_append(prepared.reader().unwrap()).await.unwrap();
-                assert_eq!(written, prepared.rows);
-                eprintln!(
-                    "BENCH capture_complete bytes={bytes} seconds={:.3}",
-                    start.elapsed().as_secs_f64()
-                );
-            }
-        }
-        let fingerprints: Vec<_> = hashes.into_iter().map(|h| hex::encode(h.finalize())).collect();
-        eprintln!(
-            "BENCH complete mode={mode} rows={rows} held={held} digests={fingerprints:?} seconds={:.3}",
-            start.elapsed().as_secs_f64()
-        );
     }
 
     #[tokio::test]

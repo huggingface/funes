@@ -129,12 +129,19 @@ pub(crate) async fn benchmark_append(mut reader: impl RecordBatchReader + Send +
 
     let schema = reader.schema();
     let (reader, first) = tokio::task::spawn_blocking(move || {
-        let first = reader.next();
+        let first = loop {
+            match reader.next() {
+                Some(Ok(batch)) if batch.num_rows() == 0 => continue,
+                first => break first,
+            }
+        };
         (reader, first)
     })
     .await?;
-    let first = first.context("benchmark input is empty")??;
-    ensure!(first.num_rows() > 0, "benchmark first batch is empty");
+    let Some(first) = first else {
+        return Ok((0, 0));
+    };
+    let first = first?;
     let seed = RecordBatchIterator::new([Ok(first.slice(0, 1))], schema.clone());
     // Native local paths bypass ObjectStore when writing data. A live memory:// base exercises
     // ObjectWriter, the same route hf:// takes, and keeps only the one-row seed in memory.
@@ -619,21 +626,49 @@ pub(crate) async fn fetch_wrapper(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow_array::{RecordBatch, RecordBatchIterator, StringArray};
+    use arrow_array::{
+        new_null_array, types::Float32Type, ArrayRef, FixedSizeListArray, RecordBatch, RecordBatchIterator, StringArray,
+    };
     use arrow_schema::{DataType, Field, Schema};
     use lance_index::scalar::InvertedIndexParams;
     use lance_index::IndexType;
+
+    #[tokio::test]
+    async fn capture_benchmark_empty_input_is_a_noop() {
+        let schema = dataset::schema();
+        let batches = [Ok(RecordBatch::new_empty(schema.clone()))];
+        assert_eq!(
+            benchmark_append(RecordBatchIterator::new(batches, schema))
+                .await
+                .unwrap(),
+            (0, 0)
+        );
+    }
 
     /// Exercises native Lance writes through the capture wrapper. A failed/conflicted commit
     /// leaves the base unchanged, and replaying the same reader produces the same logical rows.
     #[tokio::test]
     async fn captured_append_is_readable_and_replay_leaves_base_unchanged() {
-        let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
-        let reader = |texts: &[&str]| {
-            let rows = RecordBatch::try_new(schema.clone(), vec![Arc::new(StringArray::from(texts.to_vec()))]);
-            RecordBatchIterator::new([rows], schema.clone())
+        let schema = dataset::schema();
+        let batch = |texts: &[&str]| {
+            let columns: Vec<ArrayRef> = schema
+                .fields()
+                .iter()
+                .map(|field| match field.name().as_str() {
+                    "id" | "text" => Arc::new(StringArray::from(texts.to_vec())) as ArrayRef,
+                    "vector" => Arc::new(FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
+                        texts.iter().map(|text| {
+                            Some((0..dataset::DIM).map(move |i| Some(text.len() as f32 + i as f32 / 100.0)))
+                        }),
+                        dataset::DIM,
+                    )),
+                    _ => new_null_array(field.data_type(), texts.len()),
+                })
+                .collect();
+            RecordBatch::try_new(schema.clone(), columns).unwrap()
         };
-        let base = Dataset::write(reader(&["original"]), "memory://capture-replay", None)
+        let reader = |batch: RecordBatch| RecordBatchIterator::new([Ok(batch)], schema.clone());
+        let base = Dataset::write(reader(batch(&["original"])), "memory://capture-replay", None)
             .await
             .unwrap();
         let store = base.object_store(None).await.unwrap();
@@ -645,7 +680,7 @@ mod tests {
                 captured: Captured::new().unwrap(),
             });
             let mut ds = base.with_object_store_wrappers([wrapper.clone() as Arc<dyn WrappingObjectStore>]);
-            ds.append(reader(&["new", "new"]), None).await.unwrap();
+            ds.append(reader(batch(&["new", "new"])), None).await.unwrap();
             let files = captured_files(&wrapper);
             assert!(
                 files.keys().any(|path| path.contains("/data/")),
@@ -656,22 +691,12 @@ mod tests {
                 before,
                 "no stray writes"
             );
-            let batches = dataset::scan_rows(&ds, &["text"], None, None).await.unwrap();
-            let texts: Vec<_> = batches
-                .iter()
-                .flat_map(|b| {
-                    b.column(0)
-                        .as_any()
-                        .downcast_ref::<StringArray>()
-                        .unwrap()
-                        .iter()
-                        .map(|s| s.unwrap().to_owned())
-                })
-                .collect();
+            assert_eq!(Schema::from(ds.schema()).metadata(), schema.metadata());
+            let batches = dataset::scan_rows(&ds, &[], None, None).await.unwrap();
             assert_eq!(
-                texts,
-                ["original", "new", "new"],
-                "physical duplicate rows are preserved"
+                arrow_select::concat::concat_batches(&schema, &batches).unwrap(),
+                batch(&["original", "new", "new"]),
+                "duplicate rows, embeddings, null metadata and column order survive replay"
             );
             drop(ds);
             drop(wrapper);
@@ -691,7 +716,7 @@ mod tests {
 
     /// Independently measures native capture with a bounded scan of a frozen local fixture.
     /// No secret scan, receipt, index, or network operation is involved.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tokio::test(flavor = "multi_thread")]
     #[ignore = "explicit frozen fixture and process memory guard required"]
     async fn benchmark_capture_only() {
         use arrow_schema::ArrowError;
@@ -733,7 +758,7 @@ mod tests {
         let (rows, bytes) = result.unwrap();
         assert_eq!(rows, expected);
         assert!(
-            bytes > rows as u64,
+            (rows == 0 && bytes == 0) || bytes > rows as u64,
             "full capture must contain substantial data, not just a manifest"
         );
         eprintln!(
