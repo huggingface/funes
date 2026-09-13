@@ -59,6 +59,48 @@ impl Trufflehog {
             bin: find_in(|k| std::env::var_os(k), |p| p.is_file())?,
         })
     }
+
+    /// Scan already staged complete blocks in one pass. Files must be named `0` through
+    /// `blocks - 1`, with no other directory entries. Missing or unexpected files fail closed.
+    pub(crate) fn scan_directory(&self, dir: &Path, blocks: usize) -> Result<Vec<Vec<Finding>>> {
+        if blocks == 0 {
+            return Ok(Vec::new());
+        }
+        let mut staged = 0;
+        for entry in std::fs::read_dir(dir).context("reading the staged secret scan directory")? {
+            let entry = entry.context("reading a staged secret scan entry")?;
+            let name = entry.file_name();
+            let valid_name = name
+                .to_str()
+                .and_then(|n| n.parse::<usize>().ok().filter(|&i| i < blocks && i.to_string() == n))
+                .is_some();
+            if !valid_name || !entry.file_type()?.is_file() {
+                bail!("unexpected entry in the staged secret scan directory; refusing to treat the text as clean");
+            }
+            staged += 1;
+        }
+        if staged != blocks {
+            bail!(
+                "secret scan expected {blocks} staged text(s) but found {staged}; refusing to treat the text as clean"
+            );
+        }
+        let out = Command::new(&self.bin)
+            .arg("filesystem")
+            .arg(dir)
+            .args([
+                "--json",
+                "--no-verification",
+                "--no-update",
+                "--fail",
+                "--fail-on-scan-errors",
+                "--results=verified,unknown,unverified",
+            ])
+            .output()
+            .with_context(|| format!("running trufflehog at {}", self.bin.display()))?;
+
+        let records = interpret_scan_output(out.status.code(), &out.stdout, &out.stderr)?;
+        group_by_file(records, blocks)
+    }
 }
 
 impl SecretScanner for Trufflehog {
@@ -74,22 +116,7 @@ impl SecretScanner for Trufflehog {
             std::fs::write(dir.path().join(i.to_string()), text)
                 .with_context(|| format!("staging text {i} for the scan"))?;
         }
-        let out = Command::new(&self.bin)
-            .arg("filesystem")
-            .arg(dir.path())
-            .args([
-                "--json",
-                "--no-verification",
-                "--no-update",
-                "--fail",
-                "--fail-on-scan-errors",
-                "--results=verified,unknown,unverified",
-            ])
-            .output()
-            .with_context(|| format!("running trufflehog at {}", self.bin.display()))?;
-
-        let records = interpret_scan_output(out.status.code(), &out.stdout, &out.stderr)?;
-        group_by_file(records, texts.len())
+        self.scan_directory(dir.path(), texts.len())
     }
 }
 
@@ -218,7 +245,7 @@ fn find_in(env: impl Fn(&str) -> Option<OsString>, exists: impl Fn(&Path) -> boo
     })
 }
 
-/// The one place a scanner is invoked for *block-level* detection: scans `texts` in one pass and
+/// Block-level detection for in-memory callers: scans `texts` in one pass and
 /// returns what it found in each of them. `texts` must each be a contiguous unit (a reconstructed
 /// block), so a secret never straddles two. Redaction ([`excise`]) and the drop/hold-back decisions
 /// come from this result without re-scanning. Fail-closed on the scanner, and on one that answers
@@ -403,6 +430,37 @@ mod tests {
         let err = interpret_scan_output(Some(FOUND), output, b"").unwrap_err().to_string();
         assert!(err.contains("record 1"), "{err}");
         assert!(!err.contains("DO_NOT_ECHO"), "scanner output leaked in error: {err}");
+    }
+
+    #[test]
+    fn scan_directory_rejects_incomplete_or_unexpected_staging_before_running() {
+        let scanner = Trufflehog {
+            bin: PathBuf::from("a-scanner-that-does-not-exist"),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("0"), "text").unwrap();
+        let error = scanner.scan_directory(dir.path(), 2).unwrap_err().to_string();
+        assert!(error.contains("expected 2 staged text(s) but found 1"), "{error}");
+        for name in ["01", "extra", "2"] {
+            let extra = tempfile::tempdir().unwrap();
+            std::fs::write(extra.path().join(name), "text").unwrap();
+            let error = scanner.scan_directory(extra.path(), 2).unwrap_err().to_string();
+            assert!(error.contains("unexpected entry"), "{name}: {error}");
+        }
+        let nested = tempfile::tempdir().unwrap();
+        std::fs::create_dir(nested.path().join("0")).unwrap();
+        assert!(scanner.scan_directory(nested.path(), 1).is_err());
+    }
+
+    #[test]
+    fn scan_directory_rejects_an_unavailable_scanner() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("0"), "text").unwrap();
+        let scanner = Trufflehog {
+            bin: dir.path().join("missing-scanner"),
+        };
+        let error = scanner.scan_directory(dir.path(), 1).unwrap_err().to_string();
+        assert!(error.contains("running trufflehog"), "{error}");
     }
 
     #[test]

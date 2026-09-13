@@ -37,6 +37,21 @@ One publish per memory at a time on a machine: a push that starts while another 
 says so and stops, and the next one picks up what it left. The hooks [`funes add`](add.md) installs
 run this at session boundaries automatically; see [automation.md](automation.md).
 
+### Temporary space
+
+> [!NOTE]
+> **Agent-written guidance (this subsection).** This addition is agent-generated; Austin has not necessarily reviewed or verified it.
+>
+> **Last Updated** 2026-09-12
+
+---
+
+Large pushes stage reconstructed blocks, clean rows, and upload files in the OS temporary directory.
+Allow enough free space there for the clean-row spool and generated dataset files together. Staging
+failures stop the data publication; the next push compares against the remote again. Temporary files
+are removed when preparation or publication returns. ID and block metadata still scale with the
+backlog, and secret scanning and index construction have their own memory costs.
+
 ## Keeping secrets out: the gate and `funes scrub`
 
 When TruffleHog is available, indexing redacts detected credentials before storing a session. That
