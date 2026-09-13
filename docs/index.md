@@ -44,11 +44,13 @@ funes index --harness codex
 Reads JSONL transcripts under `~/.codex/sessions`. An explicit path can select a `.jsonl` file
 or directory. To include archived sessions, pass `~/.codex/archived_sessions` with `--harness codex`.
 
-### Copilot CLI
+### Copilot
 
 ```bash
 funes index --harness copilot
 ```
+
+Includes Copilot CLI sessions and local Copilot sessions from VS Code’s editor and Agents window.
 
 Reads sessions under `~/.copilot/session-state`, or `$COPILOT_HOME/session-state` when
 `COPILOT_HOME` is set. An explicit path with `--harness copilot` can select the session-state
