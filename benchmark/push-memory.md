@@ -1,10 +1,3 @@
-> [!NOTE]
-> **Agent-written document.** An agent produced this document. Austin did not necessarily write, review, endorse, or verify its contents. Evaluate its claims with the same care as other agent-generated output.
->
-> **Last Updated** 2026-09-12
-
----
-
 # Push memory comparison
 
 `commands::push::tests::benchmark_push_preparation` is an opt-in local benchmark. It compares the pre-change full-row selection and block gate with staged preparation. It never uploads or changes a receipt. Ordinary tests do not run it.
