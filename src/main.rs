@@ -48,7 +48,7 @@ enum Cmd {
         /// Restrict to a block type: text | thinking | tool_use | tool_result.
         #[arg(long = "type", value_name = "BLOCK_TYPE")]
         block_type: Option<String>,
-        /// Restrict to a harness: claude | codex | pi | hermes.
+        /// Restrict to a transcript source: claude | codex | copilot | pi | hermes.
         #[arg(long)]
         harness: Option<String>,
         #[command(flatten)]
@@ -87,7 +87,7 @@ enum Cmd {
         /// ~/.pi/agent/sessions); `--harness <name>` alone targets one. An automated (non-terminal)
         /// run must name a target.
         path: Option<String>,
-        /// Override harness auto-detection for PATH: claude | codex | pi | hermes.
+        /// Select the transcript source for PATH: claude | codex | copilot | pi | hermes.
         #[arg(long)]
         harness: Option<String>,
         /// Exclude thinking blocks.
@@ -457,7 +457,7 @@ async fn main() -> Result<()> {
                 None => {
                     if !std::io::stdin().is_terminal() {
                         return Err(anyhow!(
-                            "automated `funes index` needs a target — pass a path or `--harness <claude|codex|pi|hermes>`; \
+                            "automated `funes index` needs a target — pass a path or `--harness <claude|codex|copilot|pi|hermes>`; \
                              refusing to index all harness roots unattended"
                         ));
                     }
@@ -472,7 +472,7 @@ async fn main() -> Result<()> {
                     Some(h) => println!("no {} sessions on this machine yet — nothing to index.", h.cli_name()),
                     None => println!(
                         "no sessions on this machine yet — nothing to index (looked in ~/.claude/projects, \
-                         ~/.codex/sessions, ~/.pi/agent/sessions, ~/.hermes/state.db)."
+                         ~/.codex/sessions, ~/.copilot/session-state, ~/.pi/agent/sessions, ~/.hermes/state.db)."
                     ),
                 }
                 return Ok(());

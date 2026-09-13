@@ -46,6 +46,12 @@ pub trait TraceSource {
     /// Parse one unit into turns (each [`Turn`] already carries its `session_id` and `workdir`).
     fn read(&self, unit: &Unit) -> Result<Vec<Turn>>;
 
+    /// Raw local working directory for repository attribution. Sources whose metadata is not
+    /// ordinary JSONL override this; an absent or remote directory leaves the repo facet empty.
+    fn cwd(&self, unit: &Unit) -> Option<String> {
+        super::repo::cwd_of_transcript(Path::new(&unit.key))
+    }
+
     /// Whether a `read` error aborts the whole index. Best-effort sources (a JSONL tree, where one
     /// unreadable file shouldn't sink the run) return `false`; a single-artifact source (a parquet
     /// dataset) returns `true`, so a corrupt file is a hard failure rather than a silent skip.
@@ -89,6 +95,9 @@ pub fn open_with_harness(path: &Path, limit: Option<usize>, harness: Option<Harn
         })
     } else {
         let harness = harness.unwrap_or_else(|| detect_harness(path));
+        if harness == Harness::Copilot {
+            return Box::new(super::copilot::CopilotSource::new(path.to_path_buf(), limit));
+        }
         Box::new(JsonlTree {
             root: path.to_path_buf(),
             limit,
@@ -120,6 +129,9 @@ fn hermes_db_path(path: &Path) -> PathBuf {
 /// Detect a JSONL tree's harness: a known session dir wins (a cheap tail match), else sniff the
 /// first transcript's first record — only then is the tree walked (see [`Harness::detect`]).
 fn detect_harness(root: &Path) -> Harness {
+    if root.join("events.jsonl").is_file() || root.file_name().is_some_and(|n| n == "events.jsonl") {
+        return Harness::Copilot;
+    }
     if let Some(h) = Harness::from_known_dir(root) {
         return h;
     }
@@ -208,6 +220,7 @@ impl TraceSource for JsonlTree {
             Harness::Pi => pi::turns_from_jsonl_file(p, &jsonl::session_id_of(p), &fallback)?,
             // hermes keeps its sessions in a SQLite state.db, not a JSONL tree, so it's read by a
             // dedicated source and never reaches here.
+            Harness::Copilot => anyhow::bail!("copilot sessions are read from events.jsonl by their dedicated source"),
             Harness::Hermes => anyhow::bail!("hermes sessions are read from state.db, not a JSONL tree"),
         };
         Ok(turns)

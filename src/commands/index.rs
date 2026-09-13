@@ -461,7 +461,8 @@ impl Indexer {
             redact_turns(&mut turns, scanner, tiers, self.include_thinking)?;
         }
         let mut chunks = chunk::chunks_from_turns(&turns, tiers, self.include_thinking);
-        let repo = self.repo_for(&key);
+        let cwd = self.sources[src_i].cwd(&self.units[i].1);
+        let repo = self.repo_for(cwd);
         if !repo.is_empty() {
             for c in &mut chunks {
                 c.repo.clone_from(&repo);
@@ -505,11 +506,11 @@ impl Indexer {
         Ok(added)
     }
 
-    /// The session's repo(s) for the unit at `key`, resolved from its transcript's cwd and cached
-    /// per cwd so each distinct checkout runs `git` once across the run. Empty for a non-transcript
-    /// unit (a parquet shard) or a checkout that can't be resolved (gone, not a git repo).
-    fn repo_for(&mut self, key: &str) -> String {
-        let Some(cwd) = repo::cwd_of_transcript(Path::new(key)) else {
+    /// The session's repo(s), resolved from the source's raw cwd and cached so each distinct
+    /// checkout runs `git` once across the run. Empty when the source has no local cwd or the
+    /// checkout can't be resolved (gone, not a git repo).
+    fn repo_for(&mut self, cwd: Option<String>) -> String {
+        let Some(cwd) = cwd else {
             return String::new();
         };
         self.repo_cache

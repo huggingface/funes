@@ -1,7 +1,7 @@
 # funes
 
 **Durable memory for your AI coding agents.** `funes` indexes your past sessions across Claude
-Code, Codex, pi, and Hermes and lets any agent recall the past decisions, rationale, and findings.
+Code, Codex, Copilot, pi, and Hermes and lets any agent recall the past decisions, rationale, and findings.
 Your memory is a dataset you can publish to the Hugging Face Hub — then any machine, teammate, or
 agent can recall from it.
 
@@ -12,7 +12,7 @@ agent can recall from it.
 ## Features at a glance
 
 - **Your agent recalls your past work.** The model spontaneously uses `funes` to recall prior decisions, rationale, and findings mid-task.
-- **One memory across your agents.** Index Claude Code, Codex, pi, and Hermes into a single memory;
+- **One memory across your agents.** Index Claude Code, Codex, Copilot, pi, and Hermes into a single memory;
   recall spans all of them, and every hit shows which agent it came from.
 - **Your memory is a Hugging Face dataset.** Publish it to the Hugging Face Hub; a teammate,
   another of your machines — or anyone, if you make it public — recalls from it with one flag.
@@ -31,7 +31,7 @@ default):
 curl -fsSL https://huggingface.co/buckets/huggingface/funes/resolve/install.sh | sh
 ```
 
-Then add it to your agent:
+Then add it to an agent with an installation integration:
 
 ```bash
 funes add claude    # or codex, pi, hermes
@@ -61,11 +61,15 @@ out. To build it yourself, see [Building from source](#building-from-source).
 
 ## Works across your agents (and models)
 
-Your memory isn't tied to one tool. Because Claude Code, Codex, pi, and Hermes all index into a single
+Your memory isn't tied to one tool. Because Claude Code, Codex, Copilot, pi, and Hermes all index into a single
 memory, you can **switch agents without losing anything** — start a task in Claude Code, pick it up
 in Codex next week, and each one recalls the *entire* history, not just its own sessions (every hit
 shows which agent it came from). Another agent can join through a compatible `.parquet` trace
 export; [the import contract](docs/index.md#parquet-trace-format) defines the required schema.
+
+`funes index --harness copilot` imports Copilot CLI sessions and local Copilot sessions from
+VS Code’s editor and Agents window.
+Client installation and hooks for Copilot are separate from transcript support.
 
 Models work the same way. funes runs pinned local embedding and reranking models, but no generative
 model of its own: you reason with whatever your agent uses — through **pi**, any local model or one
@@ -135,7 +139,7 @@ you just did, so it's recallable next time. Both halves are one deterministic pi
 is parsed into a generic turn/block shape, chunked, embedded with a pinned local model, and written to
 a local Lance dataset; recall fuses vector + BM25 search, reranks, and reweights by recency. Because
 everything downstream of parsing is source-agnostic, adding an agent means implementing one
-[`TraceSource`](src/source.rs) trait — not touching the indexing or query path.
+[`TraceSource`](src/traces/source.rs) trait — not touching the indexing or query path.
 
 `funes` shapes its output for agents, not people — so to put a question to a memory yourself, borrow
 an agent: `funes ask` recalls from the memory and answers grounded in what it finds, installing

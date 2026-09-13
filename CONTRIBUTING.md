@@ -18,7 +18,7 @@ Two more places to look before proposing:
 - [AGENTS.md](AGENTS.md) holds the conventions and the hardened decisions, and names the four
   surfaces that describe a verb — CLI help, MCP tool descriptions, docs, and the output shape. A
   change to one of them is a change to all four.
-- Adding support for another agent means implementing the [`TraceSource`](src/source.rs)
+- Adding support for another agent means implementing the [`TraceSource`](src/traces/source.rs)
   trait — the indexing and query paths should not need to change.
 
 ## Development setup
