@@ -82,7 +82,8 @@ enum Cmd {
     },
     /// Build or update your local memory from session transcripts.
     Index {
-        /// A transcript tree or `.parquet` file, or a Hub trace repo `<org>/<repo>`. Omit — in a
+        /// A transcript tree, SQLite session store, `.parquet` file, or Hub trace repo `<org>/<repo>`.
+        /// Cursor accepts its database file or user-data, User, or globalStorage directory. Omit — in a
         /// terminal — to index every known harness dir (~/.claude/projects, ~/.codex/sessions,
         /// ~/.pi/agent/sessions); `--harness <name>` alone targets one. An automated (non-terminal)
         /// run must name a target.
@@ -469,6 +470,10 @@ async fn main() -> Result<()> {
             };
             if roots.is_empty() {
                 match harness {
+                    Some(Harness::Cursor) => println!(
+                        "no Cursor database found at the default user-data location — \
+                         pass its database file or user-data directory: `funes index PATH --harness cursor`."
+                    ),
                     Some(h) => println!("no {} sessions on this machine yet — nothing to index.", h.cli_name()),
                     None => println!(
                         "no sessions on this machine yet — nothing to index (looked in ~/.claude/projects, \

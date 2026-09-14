@@ -63,16 +63,15 @@ pub trait TraceSource {
     fn unit_keys(&self) -> Result<Vec<String>>;
 }
 
-/// Pick the source for `path`: a `*.parquet` file is a parquet trace dataset, a hermes `state.db`
-/// (or the `~/.hermes` dir holding it) is its SQLite session store, and anything else is a JSONL
-/// transcript tree whose harness is auto-detected. `limit` caps how many sessions are read
+/// Pick the source for `path`: parquet by extension, Cursor by its SQLite schema, Hermes by its
+/// `state.db` path, or a JSONL transcript tree whose harness is auto-detected. `limit` caps how many sessions are read
 /// (`None` = all) — used to bound a benchmark's build time.
 pub fn open(path: &Path, limit: Option<usize>) -> Box<dyn TraceSource> {
     open_with_harness(path, limit, None)
 }
 
-/// Like [`open`], but a `Some` `harness` forces the JSONL tree's harness (the CLI's `--harness`)
-/// instead of detecting it. A `*.parquet` path is a parquet dataset regardless.
+/// Like [`open`], but a `Some` `harness` selects the parser (the CLI's `--harness`) instead of
+/// auto-detecting Cursor or the JSONL harness. A `*.parquet` path is a parquet dataset regardless.
 pub fn open_with_harness(path: &Path, limit: Option<usize>, harness: Option<Harness>) -> Box<dyn TraceSource> {
     let is_parquet = path
         .extension()
@@ -83,7 +82,7 @@ pub fn open_with_harness(path: &Path, limit: Option<usize>, harness: Option<Harn
             path: path.to_path_buf(),
             limit,
         })
-    } else if harness == Some(Harness::Cursor) || is_cursor_path(path) {
+    } else if harness == Some(Harness::Cursor) || (harness.is_none() && is_cursor_path(path)) {
         Box::new(CursorDb {
             path: cursor_db_path(path),
             limit,
@@ -114,15 +113,36 @@ fn is_hermes_path(path: &Path) -> bool {
 }
 
 fn is_cursor_path(path: &Path) -> bool {
-    path.file_name().and_then(|n| n.to_str()) == Some("state.vscdb") && path.to_string_lossy().contains("Cursor")
+    let db = cursor_db_path(path);
+    if !db.is_file() {
+        return false;
+    }
+    // Identify the store by its schema, not its directory name. Other editors also use state.vscdb.
+    rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'cursorDiskKV')",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn cursor_db_path(path: &Path) -> PathBuf {
-    if path.file_name().and_then(|n| n.to_str()) == Some("state.vscdb") {
-        path.to_path_buf()
-    } else {
-        path.join("User/globalStorage/state.vscdb")
+    if path.is_file() || path.file_name().and_then(|n| n.to_str()) == Some("state.vscdb") {
+        return path.to_path_buf();
     }
+    // Accept the user-data root, User directory, or globalStorage directory.
+    [
+        "User/globalStorage/state.vscdb",
+        "globalStorage/state.vscdb",
+        "state.vscdb",
+    ]
+    .into_iter()
+    .map(|suffix| path.join(suffix))
+    .find(|candidate| candidate.is_file())
+    .unwrap_or_else(|| path.join("User/globalStorage/state.vscdb"))
 }
 
 /// The `state.db` file for a hermes path: the file itself, or `<dir>/state.db` when handed the
@@ -611,16 +631,42 @@ mod tests {
     }
 
     #[test]
-    fn open_routes_cursor_state_db_and_dir() {
-        assert!(open(
-            Path::new("/x/Library/Application Support/Cursor/User/globalStorage/state.vscdb"),
-            None
-        )
-        .describe()
-        .contains("cursor"));
-        assert!(open_with_harness(Path::new("/x/Cursor"), None, Some(Harness::Cursor))
+    fn open_routes_cursor_by_schema_in_custom_locations() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("custom-data");
+        let storage = root.join("User/globalStorage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let db = storage.join("state.vscdb");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch("CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value BLOB)")
+            .unwrap();
+        for path in [&root, &root.join("User"), &storage, &db] {
+            let source = open(path, None);
+            assert!(source.describe().contains("cursor"));
+            assert!(source.units().unwrap().is_empty());
+            assert!(open_with_harness(path, None, Some(Harness::Cursor))
+                .units()
+                .unwrap()
+                .is_empty());
+        }
+        let renamed = root.join("conversation.sqlite");
+        std::fs::copy(&db, &renamed).unwrap();
+        assert!(open(&renamed, None).describe().contains("cursor"));
+        assert!(open_with_harness(&db, None, Some(Harness::Codex))
             .describe()
-            .contains("cursor"));
+            .contains("codex"));
+    }
+
+    #[test]
+    fn other_editor_databases_are_not_cursor_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("state.vscdb");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value BLOB)")
+            .unwrap();
+        assert!(!is_cursor_path(&db));
+        assert!(!is_cursor_path(&dir.path().join("missing/state.vscdb")));
+        assert!(!dir.path().join("missing").exists());
     }
 
     #[test]

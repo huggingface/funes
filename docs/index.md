@@ -16,8 +16,21 @@ one memory, then offers to finish any deeper work left. Scope it to a single age
 
 ```bash
 funes index --harness codex        # only ~/.codex/sessions
-funes index --harness cursor      # only Cursor's global conversation store (macOS)
+funes index --harness cursor      # only Cursor's default global conversation store
 ```
+
+Cursor discovery uses the platform's default user-data root: `~/Library/Application Support/Cursor`
+on macOS, `%APPDATA%/Cursor` on Windows, and `${XDG_CONFIG_HOME:-~/.config}/Cursor` on Linux.
+It reads `User/globalStorage/state.vscdb` beneath that root. For a custom `--user-data-dir`, pass
+that directory or the database file explicitly:
+
+```bash
+funes index /path/to/custom-data --harness cursor
+funes index /path/to/state.vscdb --harness cursor
+```
+
+Explicit paths also accept the `User` or `globalStorage` directory. Auto-detection checks for the
+Cursor `cursorDiskKV` table read-only; it does not require `Cursor` in the path name.
 
 Point it at a **path** to index one place in full — a transcript tree or a single `.parquet` trace
 export — or at a **Hub trace repo** to index its auto-converted parquet:

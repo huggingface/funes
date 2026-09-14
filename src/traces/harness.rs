@@ -91,6 +91,23 @@ impl Harness {
 /// hermes' session store — a single SQLite file under `$HOME`, not a session dir like the others.
 pub const HERMES_DB: &str = ".hermes/state.db";
 
+/// Default Cursor user-data location. Custom installs use an explicit `index PATH`.
+fn cursor_default_db(home: &Path, os: &str, appdata: Option<&Path>, xdg: Option<&Path>) -> Option<PathBuf> {
+    let root = match os {
+        "macos" => home.join("Library/Application Support/Cursor"),
+        "windows" => appdata
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| home.join("AppData/Roaming"))
+            .join("Cursor"),
+        "linux" => xdg
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| home.join(".config"))
+            .join("Cursor"),
+        _ => return None,
+    };
+    Some(root.join("User/globalStorage/state.vscdb"))
+}
+
 fn known_harness_roots_from(home: &Path, pi_agent_dir: Option<&Path>) -> Vec<(PathBuf, Harness)> {
     let mut roots: Vec<(PathBuf, Harness)> = KNOWN_DIRS
         .iter()
@@ -99,9 +116,14 @@ fn known_harness_roots_from(home: &Path, pi_agent_dir: Option<&Path>) -> Vec<(Pa
         .filter(|(dir, _)| dir.is_dir())
         .collect();
 
-    let cursor_db = home.join("Library/Application Support/Cursor/User/globalStorage/state.vscdb");
-    if cursor_db.is_file() {
-        roots.push((cursor_db, Harness::Cursor));
+    let appdata = std::env::var_os("APPDATA").filter(|v| !v.is_empty()).map(PathBuf::from);
+    let xdg = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    if let Some(cursor_db) = cursor_default_db(home, std::env::consts::OS, appdata.as_deref(), xdg.as_deref()) {
+        if cursor_db.is_file() {
+            roots.push((cursor_db, Harness::Cursor));
+        }
     }
 
     let pi_sessions = pi_agent_dir
@@ -122,7 +144,10 @@ fn known_harness_roots_from(home: &Path, pi_agent_dir: Option<&Path>) -> Vec<(Pa
 /// The `(root, harness)` pairs present under `$HOME` — drives a no-arg `funes index`. The JSONL
 /// agents contribute a session dir each; hermes contributes its `state.db` file.
 pub fn known_harness_roots() -> Vec<(PathBuf, Harness)> {
-    let home = match std::env::var_os("HOME") {
+    let home = std::env::var_os("HOME").filter(|v| !v.is_empty());
+    #[cfg(target_os = "windows")]
+    let home = home.or_else(|| std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()));
+    let home = match home {
         Some(h) => PathBuf::from(h),
         None => return Vec::new(),
     };
@@ -197,14 +222,40 @@ mod tests {
         assert!(roots.contains(&(default_pi, Harness::Pi)));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn known_roots_include_cursor_global_store() {
         let home = tempfile::tempdir().unwrap();
-        let db = home
-            .path()
-            .join("Library/Application Support/Cursor/User/globalStorage/state.vscdb");
+        let db = cursor_default_db(home.path(), "macos", None, None).unwrap();
         std::fs::create_dir_all(db.parent().unwrap()).unwrap();
         std::fs::write(&db, b"").unwrap();
         assert!(known_harness_roots_from(home.path(), None).contains(&(db, Harness::Cursor)));
+    }
+
+    #[test]
+    fn cursor_defaults_follow_platform_data_roots() {
+        let home = Path::new("/home/test");
+        let suffix = "Cursor/User/globalStorage/state.vscdb";
+        assert_eq!(
+            cursor_default_db(home, "macos", None, None).unwrap(),
+            home.join("Library/Application Support").join(suffix)
+        );
+        assert_eq!(
+            cursor_default_db(home, "linux", None, None).unwrap(),
+            home.join(".config").join(suffix)
+        );
+        assert_eq!(
+            cursor_default_db(home, "linux", None, Some(Path::new("/config"))).unwrap(),
+            Path::new("/config").join(suffix)
+        );
+        assert_eq!(
+            cursor_default_db(home, "windows", Some(Path::new("/roaming")), None).unwrap(),
+            Path::new("/roaming").join(suffix)
+        );
+        assert_eq!(
+            cursor_default_db(home, "windows", None, None).unwrap(),
+            home.join("AppData/Roaming").join(suffix)
+        );
+        assert!(cursor_default_db(home, "unknown", None, None).is_none());
     }
 }
