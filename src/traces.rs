@@ -7,6 +7,7 @@
 
 pub mod claude;
 pub mod codex;
+pub mod cursor;
 pub mod harness;
 pub mod hermes;
 pub mod jsonl;
@@ -32,6 +33,6 @@ pub struct Turn {
     pub role: String,
     pub blocks: Vec<Block>,
     pub source_path: String,
-    /// Which coding agent produced this session: `claude_code` | `codex` | `pi` | `hermes`.
+    /// Which coding agent produced this session: `claude_code` | `codex` | `cursor` | `pi` | `hermes`.
     pub harness: String,
 }

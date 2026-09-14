@@ -12,6 +12,7 @@ use anyhow::{anyhow, Result};
 pub enum Harness {
     Claude,
     Codex,
+    Cursor,
     Pi,
     Hermes,
 }
@@ -30,6 +31,7 @@ impl Harness {
         match self {
             Harness::Claude => "claude_code",
             Harness::Codex => "codex",
+            Harness::Cursor => "cursor",
             Harness::Pi => "pi",
             Harness::Hermes => "hermes",
         }
@@ -47,15 +49,16 @@ impl Harness {
         }
     }
 
-    /// Parse a `--harness` override: `claude`/`claude_code`, `codex`, `pi`, or `hermes`.
+    /// Parse a `--harness` override: `claude`/`claude_code`, `codex`, `cursor`, `pi`, or `hermes`.
     pub fn parse(s: &str) -> Result<Harness> {
         match s {
             "claude" | "claude_code" => Ok(Harness::Claude),
             "codex" => Ok(Harness::Codex),
+            "cursor" => Ok(Harness::Cursor),
             "pi" => Ok(Harness::Pi),
             "hermes" => Ok(Harness::Hermes),
             other => Err(anyhow!(
-                "unknown harness {other:?} (expected claude, codex, pi, or hermes)"
+                "unknown harness {other:?} (expected claude, codex, cursor, pi, or hermes)"
             )),
         }
     }
@@ -94,6 +97,11 @@ fn known_harness_roots_from(home: &Path, pi_agent_dir: Option<&Path>) -> Vec<(Pa
         .map(|(tail, h)| (home.join(tail), *h))
         .filter(|(dir, _)| dir.is_dir())
         .collect();
+
+    let cursor_db = home.join("Library/Application Support/Cursor/User/globalStorage/state.vscdb");
+    if cursor_db.is_file() {
+        roots.push((cursor_db, Harness::Cursor));
+    }
 
     let pi_sessions = pi_agent_dir
         .map(Path::to_path_buf)
@@ -155,6 +163,7 @@ mod tests {
         assert_eq!(Harness::parse("claude").unwrap(), Harness::Claude);
         assert_eq!(Harness::parse("claude_code").unwrap(), Harness::Claude);
         assert_eq!(Harness::parse("codex").unwrap(), Harness::Codex);
+        assert_eq!(Harness::parse("cursor").unwrap(), Harness::Cursor);
         assert_eq!(Harness::parse("pi").unwrap(), Harness::Pi);
         assert_eq!(Harness::parse("hermes").unwrap(), Harness::Hermes);
         assert!(Harness::parse("gpt").is_err());
@@ -185,5 +194,16 @@ mod tests {
         let roots = known_harness_roots_from(home.path(), None);
 
         assert!(roots.contains(&(default_pi, Harness::Pi)));
+    }
+
+    #[test]
+    fn known_roots_include_cursor_global_store() {
+        let home = tempfile::tempdir().unwrap();
+        let db = home
+            .path()
+            .join("Library/Application Support/Cursor/User/globalStorage/state.vscdb");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        std::fs::write(&db, b"").unwrap();
+        assert!(known_harness_roots_from(home.path(), None).contains(&(db, Harness::Cursor)));
     }
 }

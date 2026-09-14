@@ -10,6 +10,7 @@
 
 use super::claude;
 use super::codex;
+use super::cursor;
 use super::harness::Harness;
 use super::hermes;
 use super::jsonl;
@@ -82,6 +83,11 @@ pub fn open_with_harness(path: &Path, limit: Option<usize>, harness: Option<Harn
             path: path.to_path_buf(),
             limit,
         })
+    } else if harness == Some(Harness::Cursor) || is_cursor_path(path) {
+        Box::new(CursorDb {
+            path: cursor_db_path(path),
+            limit,
+        })
     } else if harness == Some(Harness::Hermes) || is_hermes_path(path) {
         Box::new(HermesDb {
             path: hermes_db_path(path),
@@ -105,6 +111,18 @@ fn is_hermes_path(path: &Path) -> bool {
         path.file_name().and_then(|n| n.to_str()),
         Some("state.db") | Some(".hermes")
     )
+}
+
+fn is_cursor_path(path: &Path) -> bool {
+    path.file_name().and_then(|n| n.to_str()) == Some("state.vscdb") && path.to_string_lossy().contains("Cursor")
+}
+
+fn cursor_db_path(path: &Path) -> PathBuf {
+    if path.file_name().and_then(|n| n.to_str()) == Some("state.vscdb") {
+        path.to_path_buf()
+    } else {
+        path.join("User/globalStorage/state.vscdb")
+    }
 }
 
 /// The `state.db` file for a hermes path: the file itself, or `<dir>/state.db` when handed the
@@ -205,12 +223,63 @@ impl TraceSource for JsonlTree {
         let turns = match self.harness {
             Harness::Claude => claude::turns_from_jsonl_file(p, &jsonl::session_id_of(p), &fallback)?,
             Harness::Codex => codex::turns_from_jsonl_file(p, &fallback)?,
+            Harness::Cursor => anyhow::bail!("cursor sessions are read from state.vscdb, not a JSONL tree"),
             Harness::Pi => pi::turns_from_jsonl_file(p, &jsonl::session_id_of(p), &fallback)?,
             // hermes keeps its sessions in a SQLite state.db, not a JSONL tree, so it's read by a
             // dedicated source and never reaches here.
             Harness::Hermes => anyhow::bail!("hermes sessions are read from state.db, not a JSONL tree"),
         };
         Ok(turns)
+    }
+}
+
+struct CursorDb {
+    path: PathBuf,
+    limit: Option<usize>,
+}
+
+impl TraceSource for CursorDb {
+    fn describe(&self) -> String {
+        format!("scanning cursor sessions in {}", self.path.display())
+    }
+
+    fn units(&self) -> Result<Vec<Unit>> {
+        let mut sessions = cursor::sessions_with_watermark(&self.path)?;
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.watermark));
+        Ok(sessions
+            .into_iter()
+            .take(self.limit.unwrap_or(usize::MAX))
+            .map(|s| Unit {
+                key: self.unit_key(&s.session_id),
+                signature: Some(s.watermark.to_string()),
+                is_subagent: false,
+            })
+            .collect())
+    }
+
+    fn owns(&self, key: &str) -> bool {
+        key.rsplit_once('#').is_some_and(|(db, _)| Path::new(db) == self.path)
+    }
+
+    fn unit_keys(&self) -> Result<Vec<String>> {
+        Ok(cursor::sessions_with_watermark(&self.path)?
+            .into_iter()
+            .map(|s| self.unit_key(&s.session_id))
+            .collect())
+    }
+
+    fn read(&self, unit: &Unit) -> Result<Vec<Turn>> {
+        cursor::turns_from_state_db(&self.path, Self::session_id(&unit.key))
+    }
+}
+
+impl CursorDb {
+    fn unit_key(&self, session_id: &str) -> String {
+        format!("{}#{session_id}", self.path.display())
+    }
+
+    fn session_id(key: &str) -> &str {
+        key.rsplit_once('#').map_or(key, |(_, sid)| sid)
     }
 }
 
@@ -539,6 +608,19 @@ mod tests {
         assert!(open_with_harness(Path::new("/x/whatever"), None, Some(Harness::Hermes))
             .describe()
             .contains("hermes"));
+    }
+
+    #[test]
+    fn open_routes_cursor_state_db_and_dir() {
+        assert!(open(
+            Path::new("/x/Library/Application Support/Cursor/User/globalStorage/state.vscdb"),
+            None
+        )
+        .describe()
+        .contains("cursor"));
+        assert!(open_with_harness(Path::new("/x/Cursor"), None, Some(Harness::Cursor))
+            .describe()
+            .contains("cursor"));
     }
 
     #[test]
