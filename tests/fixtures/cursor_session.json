@@ -1,0 +1,120 @@
+[
+  {
+    "key": "composerData:cursor-fixture",
+    "value": {
+      "_v": 15,
+      "composerId": "cursor-fixture",
+      "createdAt": 1767225600000,
+      "lastUpdatedAt": 1767225607000,
+      "fullConversationHeadersOnly": [
+        {
+          "type": 1,
+          "bubbleId": "bubble-0"
+        },
+        {
+          "type": 2,
+          "bubbleId": "bubble-1"
+        },
+        {
+          "type": 2,
+          "bubbleId": "bubble-2"
+        },
+        {
+          "type": 2,
+          "bubbleId": "bubble-3"
+        },
+        {
+          "type": 2,
+          "bubbleId": "bubble-4"
+        },
+        {
+          "type": 1,
+          "bubbleId": "bubble-5"
+        },
+        {
+          "type": 1,
+          "bubbleId": "bubble-6"
+        }
+      ]
+    }
+  },
+  {
+    "key": "bubbleId:cursor-fixture:bubble-0",
+    "value": {
+      "_v": 3,
+      "type": 1,
+      "bubbleId": "bubble-0",
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "text": "Fixture turn 0: check the session parser and preserve stable message identifiers."
+    }
+  },
+  {
+    "key": "bubbleId:cursor-fixture:bubble-1",
+    "value": {
+      "_v": 3,
+      "type": 2,
+      "bubbleId": "bubble-1",
+      "createdAt": "2026-01-01T00:00:01.000Z",
+      "text": "Fixture turn 1: The session parser uses ordered headers and reads each referenced message.",
+      "thinking": {
+        "text": "Fixture reasoning 1: verify parsing before indexing."
+      }
+    }
+  },
+  {
+    "key": "bubbleId:cursor-fixture:bubble-2",
+    "value": {
+      "_v": 3,
+      "type": 2,
+      "bubbleId": "bubble-2",
+      "createdAt": "2026-01-01T00:00:02.000Z",
+      "text": ""
+    }
+  },
+  {
+    "key": "bubbleId:cursor-fixture:bubble-3",
+    "value": {
+      "_v": 3,
+      "type": 2,
+      "bubbleId": "bubble-3",
+      "createdAt": "2026-01-01T00:00:03.000Z",
+      "text": "Fixture turn 3: The session parser uses ordered headers and reads each referenced message.",
+      "thinking": {
+        "text": "Fixture reasoning 3: verify parsing before indexing."
+      }
+    }
+  },
+  {
+    "key": "bubbleId:cursor-fixture:bubble-4",
+    "value": {
+      "_v": 3,
+      "type": 2,
+      "bubbleId": "bubble-4",
+      "createdAt": "2026-01-01T00:00:04.000Z",
+      "text": "Fixture turn 4: The session parser uses ordered headers and reads each referenced message.",
+      "thinking": {
+        "text": "Fixture reasoning 4: verify parsing before indexing."
+      }
+    }
+  },
+  {
+    "key": "bubbleId:cursor-fixture:bubble-5",
+    "value": {
+      "_v": 3,
+      "type": 1,
+      "bubbleId": "bubble-5",
+      "createdAt": "2026-01-01T00:00:05.000Z",
+      "text": "Fixture turn 5: check the session parser and preserve stable message identifiers."
+    }
+  },
+  {
+    "key": "bubbleId:cursor-fixture:bubble-6",
+    "value": {
+      "_v": 3,
+      "type": 1,
+      "bubbleId": "bubble-6",
+      "createdAt": "2026-01-01T00:00:06.000Z",
+      "text": "Fixture turn 6: check the session parser and preserve stable message identifiers."
+    }
+  }
+]

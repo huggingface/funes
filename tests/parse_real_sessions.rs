@@ -1,5 +1,5 @@
 //! End-to-end parsing over small, real, secret-scanned native sessions committed under
-//! `tests/fixtures/` (trimmed from public Hub trace datasets; one per harness as parsers land).
+//! `tests/fixtures/` (public Hub traces or sanitized native exports; one per harness as parsers land).
 //! Deterministic — no network — so it runs in CI on every commit and guards the parsers against
 //! real-format drift the synthetic unit tests can't see: real skip-line types, real tool chains,
 //! and `turn_uuid` stability across a re-parse (the property incremental "only new turns" dedup
@@ -144,5 +144,68 @@ fn parse_real_claude_session() {
     ids_are_stable(
         &turns,
         &funes::traces::claude::turns_from_jsonl_file(&p, "sess", "proj").unwrap(),
+    );
+}
+
+#[path = "support/cursor_fixture.rs"]
+mod cursor_fixture;
+
+#[test]
+fn parse_sanitized_native_cursor_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("state.vscdb");
+    cursor_fixture::write(&db, cursor_fixture::HEADER_COUNT);
+    let before = std::fs::read(&db).unwrap();
+
+    let units = funes::traces::cursor::sessions_with_watermark(&db).unwrap();
+    assert_eq!(units.len(), 1);
+    assert_eq!(units[0].session_id, cursor_fixture::SESSION_ID);
+    assert_eq!(units[0].watermark, 1_767_225_607_000);
+    let turns = funes::traces::cursor::turns_from_state_db(&db, cursor_fixture::SESSION_ID).unwrap();
+    // The empty assistant bubble is not indexable, but its position remains part of sequence IDs.
+    assert_eq!(turns.iter().map(|t| t.seq).collect::<Vec<_>>(), vec![0, 1, 3, 4, 5, 6]);
+    assert_eq!(roles(&turns), BTreeSet::from(["user", "assistant"]));
+    assert_eq!(block_kinds(&turns), BTreeSet::from(["text", "thinking"]));
+    for t in &turns {
+        assert_eq!(t.session_id, cursor_fixture::SESSION_ID);
+        assert_eq!(t.harness, "cursor");
+        assert_eq!(t.turn_uuid, format!("bubble-{}", t.seq));
+        assert_eq!(t.ts, format!("2026-01-01T00:00:0{}.000Z", t.seq));
+        assert_eq!(t.source_path, db.to_string_lossy());
+        if t.role == "assistant" {
+            assert_eq!(t.blocks.len(), 2);
+            assert_eq!(t.blocks[0].block_type, "thinking");
+            assert_eq!(
+                t.blocks[0].text,
+                format!("Fixture reasoning {}: verify parsing before indexing.", t.seq)
+            );
+            assert_eq!(t.blocks[1].block_type, "text");
+            assert_eq!(
+                t.blocks[1].text,
+                format!(
+                    "Fixture turn {}: The session parser uses ordered headers and reads each referenced message.",
+                    t.seq
+                )
+            );
+        } else {
+            assert_eq!(t.blocks.len(), 1);
+            assert_eq!(t.blocks[0].block_type, "text");
+            assert_eq!(
+                t.blocks[0].text,
+                format!(
+                    "Fixture turn {}: check the session parser and preserve stable message identifiers.",
+                    t.seq
+                )
+            );
+        }
+    }
+    ids_are_stable(
+        &turns,
+        &funes::traces::cursor::turns_from_state_db(&db, cursor_fixture::SESSION_ID).unwrap(),
+    );
+    assert_eq!(
+        std::fs::read(&db).unwrap(),
+        before,
+        "discovery and parsing must not modify the source"
     );
 }
