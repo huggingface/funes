@@ -44,6 +44,7 @@ impl Harness {
         match self {
             Harness::Claude => "claude",
             Harness::Codex => "codex",
+            Harness::Cursor => "cursor",
             Harness::Pi => "pi",
             Harness::Hermes => "hermes",
         }

@@ -6,7 +6,7 @@
 
 use super::{Block, Turn};
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{types::Value as SqlValue, Connection, OpenFlags};
 use serde_json::Value;
 use std::path::Path;
 
@@ -28,10 +28,14 @@ fn text(value: Option<&Value>) -> Option<String> {
 }
 
 fn read_json(conn: &Connection, key: &str) -> Result<Option<Value>> {
-    let raw: Option<Vec<u8>> = conn
+    let raw: Option<SqlValue> = conn
         .query_row("SELECT value FROM cursorDiskKV WHERE key = ?1", [key], |r| r.get(0))
         .optional()?;
-    Ok(raw.and_then(|bytes| serde_json::from_slice(&bytes).ok()))
+    Ok(raw.and_then(|value| match value {
+        SqlValue::Blob(bytes) => serde_json::from_slice(&bytes).ok(),
+        SqlValue::Text(text) => serde_json::from_str(&text).ok(),
+        _ => None,
+    }))
 }
 
 pub fn sessions_with_watermark(path: &Path) -> Result<Vec<SessionUnit>> {
@@ -39,13 +43,18 @@ pub fn sessions_with_watermark(path: &Path) -> Result<Vec<SessionUnit>> {
     let mut stmt = conn.prepare("SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%' ORDER BY key")?;
     let rows = stmt.query_map([], |r| {
         let key: String = r.get(0)?;
-        let value: Vec<u8> = r.get(1)?;
+        let value: SqlValue = r.get(1)?;
         Ok((key, value))
     })?;
     let mut sessions = Vec::new();
     for row in rows {
         let (key, value) = row?;
-        let Some(data) = serde_json::from_slice::<Value>(&value).ok() else {
+        let data = match value {
+            SqlValue::Blob(bytes) => serde_json::from_slice::<Value>(&bytes).ok(),
+            SqlValue::Text(text) => serde_json::from_str::<Value>(&text).ok(),
+            _ => None,
+        };
+        let Some(data) = data else {
             continue;
         };
         let Some(session_id) = key.strip_prefix("composerData:") else {
