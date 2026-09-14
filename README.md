@@ -34,11 +34,11 @@ curl -fsSL https://huggingface.co/buckets/huggingface/funes/resolve/install.sh |
 Then add it to your agent:
 
 ```bash
-funes add claude    # or codex, pi, hermes
+funes add claude    # or codex, cursor, pi, hermes
 ```
 
-One command onboards you: your agent gets `recall` and `get` as tools, and — for Claude, Codex, and
-Hermes — funes builds your first index, installs a hook that keeps it current every turn, and (with a
+One command onboards you: your agent gets `recall` and `get` as tools, and — for Claude, Codex, Cursor,
+pi, and Hermes — funes builds your first index, installs a hook that keeps it current every turn, and (with a
 memory bound) publishes at each session boundary. From here you just work. See
 [docs/add.md](docs/add.md) for the agents, memory binding, and what a run does; `funes status` tells
 you whether recall is reading your own memory yet.

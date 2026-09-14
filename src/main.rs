@@ -4,7 +4,7 @@
 //! harness session stores (Claude Code, Codex, Cursor, pi) or an explicit path/parquet/repo. funes's home is
 //! `$FUNES_HOME` or `~/.funes`.
 
-use funes::agents::{claude, codex, hermes, pi};
+use funes::agents::{claude, codex, cursor, hermes, pi};
 use funes::commands::{ask, index, mcp, push, recall, scrub, sketch, update};
 use funes::hub;
 use funes::memory;
@@ -253,6 +253,10 @@ enum AddAgent {
         #[command(flatten)]
         memory: AddMemory,
     },
+    Cursor {
+        #[command(flatten)]
+        memory: AddMemory,
+    },
     Pi {
         #[command(flatten)]
         memory: AddMemory,
@@ -270,6 +274,7 @@ enum AddAgent {
 enum RemoveAgent {
     Claude,
     Codex,
+    Cursor,
     Pi,
     Hermes,
 }
@@ -544,6 +549,13 @@ async fn main() -> Result<()> {
                 }
                 bootstrap_add(Harness::Codex, resolved, codex::install).await
             }
+            AddAgent::Cursor { memory } => {
+                let resolved = resolve_add_memory(memory).await?;
+                if let Some(remote) = resolved.as_ref().filter(|r| r.is_remote()) {
+                    require_scanner(&remote.memory, Harness::Cursor)?;
+                }
+                bootstrap_add(Harness::Cursor, resolved, cursor::install).await
+            }
             AddAgent::Hermes { memory } => {
                 let resolved = resolve_add_memory(memory).await?;
                 if let Some(remote) = resolved.as_ref().filter(|r| r.is_remote()) {
@@ -562,6 +574,7 @@ async fn main() -> Result<()> {
         Cmd::Remove { agent } => match agent {
             RemoveAgent::Claude => claude::uninstall(),
             RemoveAgent::Codex => codex::uninstall(),
+            RemoveAgent::Cursor => cursor::uninstall(),
             RemoveAgent::Pi => pi::uninstall(),
             RemoveAgent::Hermes => hermes::uninstall(),
         },
@@ -713,7 +726,7 @@ fn parse_confirm(input: &str, default_yes: bool) -> bool {
     }
 }
 
-/// `funes add claude|codex [memory]` for the agents with a full local pipeline: bootstrap the
+/// funes add claude, codex, or cursor [memory] for the agents with a full local pipeline: bootstrap the
 /// one-time steps the hooks can't do unattended, around the per-agent `install` (hooks + MCP).
 ///
 /// 1. ask, then build the first index if the local memory is missing (so recall/push have content);

@@ -13,7 +13,7 @@ funes add claude <user|org>/funes-memory   # …backed by a memory you own (sync
 `funes remove <agent>` reverses that integration:
 
 ```bash
-funes remove claude                       # or codex, pi, hermes
+funes remove claude                       # or codex, cursor, pi, hermes
 ```
 
 It unregisters funes's tools, removes its automation hooks and owned integration files, and
@@ -27,11 +27,17 @@ command is idempotent, so an already-absent integration is a successful no-op.
 | --- | --- | --- | --- |
 | `claude` | ✅ | ✅ (plugin hooks) | ✅ (with a memory bound) |
 | `codex` | ✅ | ✅ (hooks, after a `/hooks` review) | ✅ (with a memory bound — needs Codex 0.151.0) |
+| `cursor` | ✅ | ✅ (user `stop` hook) | ✅ (with a memory bound in the IDE) |
 | `hermes` | ✅ | ✅ **beta** (shell hooks) | ✅ (with a memory bound) |
 | `pi` | ✅ | ✅ (extension events) | ✅ (with a memory bound) |
 
 What exactly gets installed for each agent — and how the automation behaves — is in
 [automation.md](automation.md).
+
+Cursor's global integration uses the documented [hooks](https://cursor.com/docs/hooks) and [MCP](https://cursor.com/docs/mcp) files: `~/.cursor/hooks.json` and `~/.cursor/mcp.json`.
+The `stop` hook indexes each completed agent loop. With a memory bound, `sessionStart` and
+`sessionEnd` publish at IDE session boundaries; Cursor Cloud supports `stop` project hooks but has
+no user-level home configuration or IDE session boundary.
 
 ## Other MCP clients
 
@@ -101,7 +107,7 @@ scan the content for credentials. Local-only setup does not require TruffleHog.
 
 ## What a run does
 
-For Claude, Codex, and Hermes, `funes add` runs the one-time bootstrap the hooks can't do unattended:
+For Claude, Codex, Cursor, and Hermes, `funes add` runs the one-time bootstrap the hooks can't do unattended:
 
 1. **Builds your first index** if you don't have one — a fast, text-first pass over that agent's
    sessions (about a minute, after asking). Declining aborts the add; nothing is installed. Deeper

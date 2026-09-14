@@ -13,7 +13,7 @@ it behaves; you rarely need to touch any of it by hand.
 
 ## What `funes add` sets up
 
-`funes add claude`, `funes add codex`, `funes add pi`, and `funes add hermes` install, beyond the
+`funes add claude`, `funes add codex`, `funes add cursor`, `funes add pi`, and `funes add hermes` install, beyond the
 read tools:
 
 - **Per-turn indexing.** A per-turn hook runs `funes index` after every completed turn, so your
@@ -70,8 +70,14 @@ when they're indexed, and `funes index` re-embeds nothing already written. Keepi
   rewrites the file the same way). Hermes gates shell hooks behind a consent allowlist
   (`~/.hermes/shell-hooks-allowlist.json`); funes pre-writes its own approvals so the hooks run from
   the first turn.
+- **Cursor** keeps user hooks in `~/.cursor/hooks.json` and hook scripts in `~/.cursor/hooks/`.
+  funes writes direct command entries, preserving other events and entries; `stop` indexes each
+  completed agent loop. With a bound memory, `sessionStart` and `sessionEnd` publish at IDE
+  session boundaries. Cursor watches this file and reloads it automatically. Cloud agents run
+  project hooks, so a global user install does not apply there; they support `stop` but have no
+  IDE `sessionStart`/`sessionEnd` boundary.
 
-`funes remove codex` and `funes remove hermes` surgically remove only hook entries whose commands
+`funes remove codex`, `funes remove cursor`, and `funes remove hermes` surgically remove only hook entries whose commands
 invoke funes's scripts, then remove the scripts and their `funes-sync.log`; other hooks, approvals,
 and config keys remain. Removing an integration never deletes the indexed memory or source
 transcripts.
@@ -95,8 +101,9 @@ timeout.
   `SessionStart` (catching up anything a missed `SessionEnd` left behind — a disconnect, a closed
   window). Hermes publishes on `on_session_finalize` (its true session end) and again on
   `on_session_start` (the same catch-up). pi publishes on `session_shutdown`, and on `session_start`
-  only when the process is fresh — its other starts follow a shutdown that just published. Codex
-  publishes on the same pair, `SessionEnd` and `SessionStart`. Binding a memory needs Codex 0.151.0,
+ only when the process is fresh — its other starts follow a shutdown that just published. Codex
+  publishes on the same pair, `SessionEnd` and `SessionStart`; Cursor publishes on `sessionEnd` and
+  catches up on `sessionStart` in the IDE. Binding a memory needs Codex 0.151.0,
   the release this is verified against, and an older one is refused rather than left silently
   unpublished.
 - **Serialized in the binary.** funes holds an advisory lock while it mutates the local memory, so

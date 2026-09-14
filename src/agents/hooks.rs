@@ -74,6 +74,46 @@ pub(crate) fn apply_funes_hooks(mut cfg: Value, desired: &[Hook]) -> Value {
     cfg
 }
 
+/// Merge funes command entries into an agent's direct hook arrays.
+///
+/// Codex and Claude Code wrap commands in hook groups, while Cursor's `hooks.json` uses one
+/// command object per event. Keep the ownership and idempotence rules shared, but preserve the
+/// shape each client expects on disk.
+pub(crate) fn apply_direct_hooks(mut cfg: Value, desired: &[Hook]) -> Value {
+    let obj = cfg.as_object_mut().expect("cfg is a JSON object");
+    if desired.is_empty() {
+        if !obj.get("hooks").map(Value::is_object).unwrap_or(false) {
+            return cfg;
+        }
+    } else {
+        if !obj.get("hooks").map(Value::is_object).unwrap_or(false) {
+            obj.insert("hooks".to_string(), json!({}));
+        }
+        obj.entry("version").or_insert_with(|| json!(1));
+    }
+    let hooks = obj["hooks"].as_object_mut().expect("hooks is an object");
+
+    for entries in hooks.values_mut() {
+        if let Some(list) = entries.as_array_mut() {
+            list.retain(|entry| !is_funes_hook(entry));
+        }
+    }
+    for d in desired {
+        hooks
+            .entry(d.event)
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .expect("event maps to a hook array")
+            .push(json!({
+                "type": "command",
+                "command": d.command,
+                "timeout": TIMEOUT,
+            }));
+    }
+    hooks.retain(|_event, list| !list.as_array().map(|a| a.is_empty()).unwrap_or(false));
+    cfg
+}
+
 /// A hook group is funes's if any of its commands invokes a funes script.
 fn is_funes_group(group: &Value) -> bool {
     group
@@ -267,5 +307,42 @@ mod tests {
 
         let no_hooks = json!({ "theme": "dark" });
         assert_eq!(apply_funes_hooks(no_hooks.clone(), &[]), no_hooks);
+    }
+
+    #[test]
+    fn direct_hooks_use_cursor_shape_and_preserve_other_entries() {
+        let cfg = json!({
+            "hooks": {
+                "stop": [
+                    { "command": "guard.sh" },
+                    { "command": "bash \"/old/funes-index.sh\" \"cursor\"" }
+                ],
+                "sessionEnd": [
+                    { "command": "bash \"/old/funes-push.sh\" \"acme/kb\"" }
+                ]
+            }
+        });
+        let out = apply_direct_hooks(
+            cfg,
+            &[Hook {
+                event: "stop",
+                command: command("/new/funes-index.sh", &["cursor"]),
+                status: "ignored by Cursor",
+            }],
+        );
+
+        assert_eq!(out["version"], 1);
+        let stop = out["hooks"]["stop"].as_array().unwrap();
+        assert_eq!(stop.len(), 2, "user hook plus one funes hook");
+        assert_eq!(stop[0]["command"], "guard.sh");
+        assert_eq!(stop[1]["type"], "command");
+        assert_eq!(stop[1]["timeout"], TIMEOUT);
+        assert_eq!(stop[1]["command"], "bash \"/new/funes-index.sh\" \"cursor\"");
+        assert!(out["hooks"].get("sessionEnd").is_none());
+
+        let local = apply_direct_hooks(out, &[]);
+        assert_eq!(local["hooks"]["stop"].as_array().unwrap().len(), 1);
+        assert_eq!(local["hooks"]["stop"][0]["command"], "guard.sh");
+        assert!(local["hooks"].get("sessionEnd").is_none());
     }
 }
