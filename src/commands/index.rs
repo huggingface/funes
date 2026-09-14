@@ -25,6 +25,56 @@ use std::io::{IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+/// Controls which transcript blocks an indexing run stores.
+///
+/// The default keeps the historical behavior and indexes every tier. Callers that want to keep
+/// large command outputs out of a memory can set [`IndexOptions::include_tool_results`] to false;
+/// this only controls rows added by that run and never deletes existing rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IndexOptions {
+    /// Exclude thinking blocks when true.
+    pub no_thinking: bool,
+    /// Include `tool_result` blocks. Enabled by default for backwards compatibility.
+    pub include_tool_results: bool,
+}
+
+impl Default for IndexOptions {
+    fn default() -> Self {
+        Self {
+            no_thinking: false,
+            include_tool_results: true,
+        }
+    }
+}
+
+impl IndexOptions {
+    /// Build options from the CLI's two exclusion flags.
+    pub fn from_flags(no_thinking: bool, no_tool_results: bool) -> Self {
+        Self {
+            no_thinking,
+            include_tool_results: !no_tool_results,
+        }
+    }
+
+    /// The tiers this run should process, in their incremental order.
+    fn tiers(self) -> Vec<Tier> {
+        if self.include_tool_results {
+            Tier::ALL.to_vec()
+        } else {
+            vec![Tier::Text, Tier::ToolUse]
+        }
+    }
+
+    /// The highest tier this run promises to index.
+    fn target(self) -> Tier {
+        if self.include_tool_results {
+            Tier::ToolResult
+        } else {
+            Tier::ToolUse
+        }
+    }
+}
+
 /// Take the memory lock. An interactive caller (a human at `funes index`/`funes add`) waits out a
 /// brief contention — up to 3 retries, 5s apart — since a memory operation rarely runs long; an
 /// automated run (a hook) bails at once and re-sweeps next turn.
@@ -183,8 +233,8 @@ fn update_index_coverage<'a>(
     mut snapshot: IndexCoverageSnapshot,
     units: impl IntoIterator<Item = &'a source::Unit>,
     state: &HashMap<String, UnitState>,
+    target: Tier,
 ) -> IndexCoverageSnapshot {
-    let target = *Tier::ALL.iter().max().expect("Tier::ALL is non-empty");
     for unit in units {
         // A unit with no signature can never be known up to date.
         let Some(sig) = &unit.signature else {
@@ -216,12 +266,13 @@ fn write_index_coverage(
     sources: &[Box<dyn source::TraceSource>],
     units: &[(usize, source::Unit)],
     state: &HashMap<String, UnitState>,
+    target: Tier,
 ) -> Result<()> {
     let owned = units
         .iter()
         .filter(|(si, unit)| sources[*si].owns(&unit.key))
         .map(|(_, unit)| unit);
-    let snapshot = update_index_coverage(read_index_coverage(path), owned, state);
+    let snapshot = update_index_coverage(read_index_coverage(path), owned, state, target);
     write_snapshot(path, &snapshot)
 }
 
@@ -249,6 +300,8 @@ struct Indexer {
     embedder: Box<dyn Embedder>,
     scanner: Option<scan::Trufflehog>,
     include_thinking: bool,
+    tiers: Vec<Tier>,
+    target: Tier,
     /// cwd → resolved `repo` value, so each distinct checkout runs `git` once across the run.
     repo_cache: HashMap<String, String>,
     state: HashMap<String, UnitState>,
@@ -309,7 +362,9 @@ fn collect_units(sources: &[Box<dyn source::TraceSource>]) -> Result<Vec<(usize,
 impl Indexer {
     /// Acquire the memory lock, open (or plan to create) the dataset, load incremental state, bring
     /// up the embedder and secret scanner, and enumerate `sources`' units.
-    async fn open(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: bool) -> Result<Indexer> {
+    async fn open(sources: Vec<Box<dyn source::TraceSource>>, options: IndexOptions) -> Result<Indexer> {
+        let tiers = options.tiers();
+        let target = options.target();
         let dir = dataset::funes_dir();
         std::fs::create_dir_all(&dir)?;
         let interactive = std::io::stdin().is_terminal();
@@ -367,7 +422,7 @@ impl Indexer {
         let units = collect_units(&sources)?;
         // A unit can be deleted between sweeps.
         retire_vanished_units(&coverage_path, &sources)?;
-        write_index_coverage(&coverage_path, &sources, &units, &state)?;
+        write_index_coverage(&coverage_path, &sources, &units, &state, target)?;
 
         Ok(Indexer {
             uri,
@@ -375,7 +430,9 @@ impl Indexer {
             existing,
             embedder,
             scanner,
-            include_thinking: !no_thinking,
+            include_thinking: !options.no_thinking,
+            tiers,
+            target,
             repo_cache: HashMap::new(),
             state,
             state_path,
@@ -495,7 +552,13 @@ impl Indexer {
                 },
             );
             std::fs::write(&self.state_path, serde_json::to_string_pretty(&self.state)?)?;
-            write_index_coverage(&self.coverage_path, &self.sources, &self.units, &self.state)?;
+            write_index_coverage(
+                &self.coverage_path,
+                &self.sources,
+                &self.units,
+                &self.state,
+                self.target,
+            )?;
         }
         // Count a unit's sessions once per run — later tier passes over it only add chunks.
         if self.counted.insert(i) {
@@ -579,6 +642,7 @@ impl Indexer {
                 self.n_skipped,
                 self.n_chunks,
                 self.units.len(),
+                self.target,
             )
         );
         Ok(())
@@ -588,9 +652,14 @@ impl Indexer {
 /// The run summary line. An interactive rerun that added nothing — and left nothing owed — gets a
 /// friendly "up to date" instead of a zero-count tally; an automated run (no reader) or any run
 /// that indexed or still owes something gets the tally.
-fn run_summary(done: bool, sessions: u64, skipped: u64, chunks: u64, units: usize) -> String {
+fn run_summary(done: bool, sessions: u64, skipped: u64, chunks: u64, units: usize, target: Tier) -> String {
     if done && chunks == 0 {
-        format!("up to date ({units} sessions, all tiers)")
+        let coverage = if target == Tier::ToolResult {
+            "all tiers"
+        } else {
+            "through tool_use"
+        };
+        format!("up to date ({units} sessions, {coverage})")
     } else {
         format!("indexed sessions={sessions} skipped={skipped} chunks={chunks}")
     }
@@ -600,10 +669,30 @@ fn run_summary(done: bool, sessions: u64, skipped: u64, chunks: u64, units: usiz
 /// where `None` auto-detects. All roots share one memory, embedder, and `state.json` (keyed by
 /// absolute file path, so cross-root incremental works). Writes only locally — publishing is the
 /// separate `push`. `max_sessions` caps sessions *per root* to the most recent N (`None` = all).
-/// `yes` skips the first-index confirmation (`--yes`).
+/// `yes` skips the first-index confirmation (`--yes`). The default options preserve the historical
+/// all-tier indexing behavior.
 pub async fn run_index_roots(
     roots: &[(PathBuf, Option<Harness>)],
     no_thinking: bool,
+    max_sessions: Option<usize>,
+    yes: bool,
+) -> Result<()> {
+    run_index_roots_with_options(
+        roots,
+        IndexOptions {
+            no_thinking,
+            ..IndexOptions::default()
+        },
+        max_sessions,
+        yes,
+    )
+    .await
+}
+
+/// Build/update the local index with an explicit block-selection policy.
+pub async fn run_index_roots_with_options(
+    roots: &[(PathBuf, Option<Harness>)],
+    options: IndexOptions,
     max_sessions: Option<usize>,
     yes: bool,
 ) -> Result<()> {
@@ -611,17 +700,30 @@ pub async fn run_index_roots(
         .iter()
         .map(|(path, harness)| source::open_with_harness(path, max_sessions, *harness))
         .collect();
-    index_sources(sources, no_thinking, yes).await
+    index_sources(sources, options, yes).await
 }
 
 /// Index a Hub trace dataset (`funes index <org/repo>`): resolve its `refs/convert/parquet` shards,
 /// download them, and index — through the same pipeline as the local sources. `uri` is the
-/// `hf://datasets/<owner>/<name>` form (the CLI resolves a shorthand to it).
+/// `hf://datasets/<owner>/<name>` form (the CLI resolves a shorthand to it). The default options
+/// preserve the historical all-tier indexing behavior.
 pub async fn run_index_remote(uri: &str, no_thinking: bool) -> Result<()> {
+    run_index_remote_with_options(
+        uri,
+        IndexOptions {
+            no_thinking,
+            ..IndexOptions::default()
+        },
+    )
+    .await
+}
+
+/// Index a Hub trace dataset with an explicit block-selection policy.
+pub async fn run_index_remote_with_options(uri: &str, options: IndexOptions) -> Result<()> {
     let (owner, name, _prefix) = hub::parse_hf(uri)?;
     let src = source::open_remote(&owner, &name, None).await?;
     // A Hub import is an explicit, deliberate command — skip the first-index confirmation.
-    index_sources(vec![src], no_thinking, true).await
+    index_sources(vec![src], options, true).await
 }
 
 /// The wall-clock budget a budgeted run gives itself: it stops at the first whole-session boundary
@@ -639,14 +741,31 @@ enum Finish {
     All,
 }
 
-/// Build/update the local index from harness session roots, budgeted and tier-major: text across
-/// every session first, then tool_use, then tool_result, stopping at the first whole-session
-/// boundary past the budget. The no-path `funes index` — the per-turn hook advances the backfill
-/// one bounded step per run; an interactive run offers to finish the rest; `yes` finishes it
-/// without asking.
+/// Build/update the local index from harness session roots, budgeted and tier-major. The default
+/// options preserve the historical all-tier indexing behavior; callers can exclude bulky
+/// `tool_result` blocks with [`run_index_budgeted_with_options`].
 pub async fn run_index_budgeted(
     roots: &[(PathBuf, Option<Harness>)],
     no_thinking: bool,
+    max_sessions: Option<usize>,
+    yes: bool,
+) -> Result<()> {
+    run_index_budgeted_with_options(
+        roots,
+        IndexOptions {
+            no_thinking,
+            ..IndexOptions::default()
+        },
+        max_sessions,
+        yes,
+    )
+    .await
+}
+
+/// Build/update the local index from harness session roots with an explicit block-selection policy.
+pub async fn run_index_budgeted_with_options(
+    roots: &[(PathBuf, Option<Harness>)],
+    options: IndexOptions,
     max_sessions: Option<usize>,
     yes: bool,
 ) -> Result<()> {
@@ -655,7 +774,7 @@ pub async fn run_index_budgeted(
         .map(|(path, harness)| source::open_with_harness(path, max_sessions, *harness))
         .collect();
     let finish = if yes { Finish::All } else { Finish::Ask };
-    run_budgeted(sources, no_thinking, finish).await
+    run_budgeted(sources, options, finish).await
 }
 
 /// The `funes add` first index: the budgeted drain with no finish prompt — the add flow already
@@ -663,18 +782,24 @@ pub async fn run_index_budgeted(
 /// budget on text (decisions, rationale) first, so recall works in about a minute; a small history
 /// simply finishes whole.
 pub async fn run_index_seed(root: &Path, harness: Harness) -> Result<()> {
-    let sources = vec![source::open_with_harness(root, None, Some(harness))];
-    run_budgeted(sources, false, Finish::Stop).await
+    run_index_seed_with_options(root, harness, IndexOptions::default()).await
 }
 
-/// Drive `sources` tier-major — every owed unit at text, then at tool_use, then at tool_result —
-/// checking the budget after each whole-session pass; `finish` says what to do when it expires
-/// with work left. The owed passes are computed upfront from state alone (no reading), so the plan
-/// and the ETA reflect what this run actually owes.
-async fn run_budgeted(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: bool, finish: Finish) -> Result<()> {
-    let mut idx = Indexer::open(sources, no_thinking).await?;
+/// The `funes add` first index with an explicit block-selection policy.
+pub async fn run_index_seed_with_options(root: &Path, harness: Harness, options: IndexOptions) -> Result<()> {
+    let sources = vec![source::open_with_harness(root, None, Some(harness))];
+    run_budgeted(sources, options, Finish::Stop).await
+}
 
-    let owed: Vec<(Tier, Vec<usize>)> = Tier::ALL
+/// Drive `sources` tier-major — every configured tier in order — checking the budget after each
+/// whole-session pass; `finish` says what to do when it expires with work left. The owed passes are
+/// computed upfront from state alone (no reading), so the plan and the ETA reflect what this run
+/// actually owes.
+async fn run_budgeted(sources: Vec<Box<dyn source::TraceSource>>, options: IndexOptions, finish: Finish) -> Result<()> {
+    let mut idx = Indexer::open(sources, options).await?;
+
+    let owed: Vec<(Tier, Vec<usize>)> = idx
+        .tiers
         .iter()
         .map(|&t| (t, idx.pending(t)))
         .filter(|(_, units)| !units.is_empty())
@@ -722,18 +847,17 @@ async fn run_budgeted(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: b
     idx.finalize().await
 }
 
-/// Index a set of already-opened sources fully — every tier of every unit, one read each — sharing
-/// one embedder, `state.json`, and dataset handle across them (state keyed by absolute path /
-/// `hf://…` shard, so incremental works cross-source). On a first interactive index it estimates
-/// the run after the first session and asks before the long haul.
-async fn index_sources(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: bool, yes: bool) -> Result<()> {
+/// Index a set of already-opened sources fully — every configured tier of every unit, one read
+/// each — sharing one embedder, `state.json`, and dataset handle across them (state keyed by
+/// absolute path / `hf://…` shard, so incremental works cross-source). On a first interactive
+/// index it estimates the run after the first session and asks before the long haul.
+async fn index_sources(sources: Vec<Box<dyn source::TraceSource>>, options: IndexOptions, yes: bool) -> Result<()> {
     let interactive = std::io::stdin().is_terminal();
-    let mut indexer = Indexer::open(sources, no_thinking).await?;
+    let mut indexer = Indexer::open(sources, options).await?;
     let total = indexer.unit_count();
 
-    // Per-source tally. This run indexes every tier, so a unit counts as cached only once it has
-    // reached the highest.
-    let target = *Tier::ALL.iter().max().expect("Tier::ALL is non-empty");
+    // Per-source tally. A unit counts as cached only once it has reached this run's highest tier.
+    let target = indexer.target;
     for (si, src) in indexer.sources.iter().enumerate() {
         let units = indexer.units.iter().filter(|(i, _)| *i == si);
         let (mut n, mut cached) = (0usize, 0usize);
@@ -752,12 +876,13 @@ async fn index_sources(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: 
     // First interactive index: after the first session lands, estimate the whole run from its time
     // and — if it looks long — ask whether to continue or bail and re-run with --limit.
     let mut probe_pending = indexer.first_index && !yes && interactive;
+    let tiers = indexer.tiers.clone();
 
     for i in 0..total {
         // Time from before the read so a first-index estimate covers parse + I/O, not just embedding.
         let t_unit = Instant::now();
         let progress = format!("[{}/{}]", i + 1, total);
-        let added = indexer.index_unit(i, &Tier::ALL, &progress).await?;
+        let added = indexer.index_unit(i, &tiers, &progress).await?;
 
         // Estimate off the first session that actually embedded, and ask before a long haul.
         if probe_pending && added > 0 {
@@ -781,7 +906,20 @@ async fn index_sources(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: 
 /// convenience over [`run_index_roots`] for a single path (tests, benchmarks, one explicit path).
 /// Passes `yes = true`: these callers are non-interactive and must not gate on the first-index prompt.
 pub async fn run_index(path: &Path, no_thinking: bool, max_sessions: Option<usize>) -> Result<()> {
-    run_index_roots(&[(path.to_path_buf(), None)], no_thinking, max_sessions, true).await
+    run_index_with_options(
+        path,
+        IndexOptions {
+            no_thinking,
+            ..IndexOptions::default()
+        },
+        max_sessions,
+    )
+    .await
+}
+
+/// Build/update the local index from one source root with an explicit block-selection policy.
+pub async fn run_index_with_options(path: &Path, options: IndexOptions, max_sessions: Option<usize>) -> Result<()> {
+    run_index_roots_with_options(&[(path.to_path_buf(), None)], options, max_sessions, true).await
 }
 
 /// A first interactive index estimated at ≥ this many seconds prompts before continuing.
@@ -912,6 +1050,22 @@ mod tests {
     }
 
     #[test]
+    fn index_options_keep_tool_results_by_default_and_allow_explicit_exclusion() {
+        let default = IndexOptions::default();
+        assert_eq!(default.tiers(), Tier::ALL);
+        assert_eq!(default.target(), Tier::ToolResult);
+
+        let excluded = IndexOptions::from_flags(false, true);
+        assert_eq!(excluded.tiers(), vec![Tier::Text, Tier::ToolUse]);
+        assert_eq!(excluded.target(), Tier::ToolUse);
+        assert!(!excluded.no_thinking);
+
+        let both_excluded = IndexOptions::from_flags(true, true);
+        assert!(both_excluded.no_thinking);
+        assert_eq!(both_excluded.tiers(), vec![Tier::Text, Tier::ToolUse]);
+    }
+
+    #[test]
     fn collect_units_is_fatal_for_a_lone_failing_source() {
         let srcs: Vec<Box<dyn source::TraceSource>> = vec![Box::new(MockSource {
             name: "only",
@@ -1018,14 +1172,14 @@ mod tests {
                 },
             ),
         ]);
-        let snapshot = update_index_coverage(IndexCoverageSnapshot::default(), &first, &state);
+        let snapshot = update_index_coverage(IndexCoverageSnapshot::default(), &first, &state, Tier::ToolResult);
         assert_eq!(
             snapshot.pending,
             ["partial", "stale", "new"].into_iter().map(str::to_string).collect()
         );
 
         let second = [unit("other-harness", Some("5"))];
-        let snapshot = update_index_coverage(snapshot, &second, &state);
+        let snapshot = update_index_coverage(snapshot, &second, &state, Tier::ToolResult);
         assert!(snapshot.pending.contains("partial"));
         assert!(snapshot.pending.contains("other-harness"));
     }
@@ -1033,7 +1187,7 @@ mod tests {
     fn pending_after_a_sweep(coverage: &Path, sources: &[Box<dyn source::TraceSource>]) -> HashSet<String> {
         let units = collect_units(sources).unwrap();
         retire_vanished_units(coverage, sources).unwrap();
-        write_index_coverage(coverage, sources, &units, &HashMap::new()).unwrap();
+        write_index_coverage(coverage, sources, &units, &HashMap::new(), Tier::ToolResult).unwrap();
         let snapshot: IndexCoverageSnapshot =
             serde_json::from_str(&std::fs::read_to_string(coverage).unwrap()).unwrap();
         snapshot.pending
@@ -1106,15 +1260,22 @@ mod tests {
     #[test]
     fn run_summary_says_up_to_date_only_on_a_done_no_op() {
         // Interactive rerun that added nothing and owes nothing → the friendly no-op.
-        assert_eq!(run_summary(true, 0, 30, 0, 30), "up to date (30 sessions, all tiers)");
+        assert_eq!(
+            run_summary(true, 0, 30, 0, 30, Tier::ToolResult),
+            "up to date (30 sessions, all tiers)"
+        );
+        assert_eq!(
+            run_summary(true, 0, 30, 0, 30, Tier::ToolUse),
+            "up to date (30 sessions, through tool_use)"
+        );
         // A run that indexed something → the tally, not "up to date".
         assert_eq!(
-            run_summary(true, 2, 28, 57, 30),
+            run_summary(true, 2, 28, 57, 30, Tier::ToolResult),
             "indexed sessions=2 skipped=28 chunks=57"
         );
         // Stopped early (or no reader at all) → the tally, even with nothing added: work is owed.
         assert_eq!(
-            run_summary(false, 0, 30, 0, 30),
+            run_summary(false, 0, 30, 0, 30, Tier::ToolResult),
             "indexed sessions=0 skipped=30 chunks=0"
         );
     }

@@ -77,7 +77,10 @@ sweep at the end.
 
 A no-path refresh is **budgeted and text-first**: it does a fast text pass and offers to backfill the
 deeper content, so a large backlog fills in a bounded step at a time rather than one long stall. An
-explicit path or Hub repo is indexed in full.
+explicit path or Hub repo is indexed in full. All tiers remain enabled by default; pass
+`--no-tool-results` when bulky command output is not useful for recall.
+The flag only controls rows added by that run; it does not delete `tool_result` rows already in the
+memory.
 
 ## Tiers and ordering
 
@@ -90,12 +93,13 @@ Blocks are indexed in three tiers, cheapest-and-highest-value first:
 | L3 `tool_result` | tool output | bulky, lowest value per byte |
 
 A budgeted (no-path) run drains these **tier-major**: it indexes *every* owed session at `text`
-first — newest session first, subagents last — then every session at `tool_use`, then at
-`tool_result`, checking a ~60s wall-clock budget at each whole-session boundary and stopping at the
-first one past it. So the whole memory becomes recallable at the decision/rationale level within
-about a minute, and the bulky tool output backfills on later runs (the per-turn hook, or a rerun) a
-bounded step at a time. `--no-thinking` drops thinking blocks from the `text` tier; an explicit path
-or Hub repo skips the budget and indexes all tiers in one pass.
+first — newest session first, subagents last — then every session at `tool_use`, and finally
+`tool_result` when it is enabled. It checks a ~60s wall-clock budget at each whole-session boundary
+and stops at the first one past it. So the whole memory becomes recallable at the decision/rationale
+level within about a minute, while bulky tool output can backfill on later runs (the per-turn hook,
+or a rerun) a bounded step at a time. `--no-thinking` drops thinking blocks from the `text` tier;
+`--no-tool-results` omits the `tool_result` tier. An explicit path or Hub repo skips the budget and
+uses the same tier selection in one pass.
 
 Inline `data:` URI payloads are elided to `data:image/png;base64,[elided]` before a block is
 scanned or stored: a pasted screenshot is megabytes of base64 with nothing recallable in it.
@@ -107,6 +111,7 @@ scanned or stored: a pasted screenshot is megabytes of base64 with nothing recal
 | `--harness <name>` | Override auto-detection for a path, or (with no path) target one harness's dir: `claude \| codex \| pi \| hermes`. |
 | `--limit <N>` | Index only the most recent N sessions per source. Omit to index all. A Hub repo ignores it and indexes every shard. |
 | `--no-thinking` | Exclude thinking blocks. |
+| `--no-tool-results` | Exclude bulky `tool_result` blocks. The flag is off by default, so existing all-tier behavior is preserved. |
 | `--yes` | Don't ask: a budgeted (no-path) run finishes all remaining work; an explicit path skips the first-index size confirmation. |
 
 ## The pipeline

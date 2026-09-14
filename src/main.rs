@@ -93,6 +93,10 @@ enum Cmd {
         /// Exclude thinking blocks.
         #[arg(long)]
         no_thinking: bool,
+        /// Exclude bulky tool output blocks from this run. Existing rows are kept; by default,
+        /// tool results are indexed for compatibility.
+        #[arg(long)]
+        no_tool_results: bool,
         /// Index only the most recent N sessions per source. Omit to index all.
         #[arg(long)]
         limit: Option<usize>,
@@ -421,10 +425,12 @@ async fn main() -> Result<()> {
             path,
             harness,
             no_thinking,
+            no_tool_results,
             limit,
             yes,
         } => {
             let harness = harness.map(|h| Harness::parse(&h)).transpose()?;
+            let index_options = index::IndexOptions::from_flags(no_thinking, no_tool_results);
             // A harness-dirs refresh (no explicit path — the per-turn hook and the terminal "keep
             // me fresh" case) is budgeted and text-first; an explicit path or Hub repo is indexed
             // in full.
@@ -438,7 +444,7 @@ async fn main() -> Result<()> {
                     let memory::Memory::Remote { uri } = memory::Memory::parse(&p) else {
                         return Err(anyhow!("expected a Hub repo, got {p:?}"));
                     };
-                    return index::run_index_remote(&uri, no_thinking).await;
+                    return index::run_index_remote_with_options(&uri, index_options).await;
                 }
                 Some(p) => return Err(anyhow!("no such path: {p}")),
                 // `--harness X` with no path targets that harness's known session dir — the
@@ -478,9 +484,9 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             if budgeted {
-                index::run_index_budgeted(&roots, no_thinking, limit, yes).await
+                index::run_index_budgeted_with_options(&roots, index_options, limit, yes).await
             } else {
-                index::run_index_roots(&roots, no_thinking, limit, yes).await
+                index::run_index_roots_with_options(&roots, index_options, limit, yes).await
             }
         }
         Cmd::Status { memory } => {
