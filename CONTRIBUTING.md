@@ -31,9 +31,6 @@ You need:
   ```bash
   sudo apt-get install -y protobuf-compiler   # Debian/Ubuntu
   brew install protobuf                        # macOS
-  # …or repo-local, no sudo:
-  ./scripts/bootstrap-protoc.sh
-  export PROTOC="$PWD/.tools/protoc/bin/protoc"
   ```
 
 - **[trufflehog](https://github.com/trufflesecurity/trufflehog)** — the pre-publish secret

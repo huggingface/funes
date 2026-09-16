@@ -157,10 +157,6 @@ Needs a Rust toolchain and **`protoc`** — `lance`'s build scripts compile prot
 # System-wide:
 sudo apt-get install -y protobuf-compiler   # Debian/Ubuntu
 brew install protobuf                        # macOS
-
-# …or repo-local, no sudo (downloads a pinned protoc into .tools/):
-./scripts/bootstrap-protoc.sh
-export PROTOC="$PWD/.tools/protoc/bin/protoc"
 ```
 
 Then `cargo build --release` (binary at `target/release/funes`); `cargo test` runs the suite. The

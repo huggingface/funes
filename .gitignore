@@ -6,9 +6,6 @@
 # fastembed model cache (downloaded ONNX weights)
 .fastembed_cache/
 
-# protoc downloaded by scripts/bootstrap-protoc.sh
-/.tools/
-
 # Local-only files — never committed. Give any machine-local file (secrets,
 # scratch, personal config) a `.local` suffix, e.g. hf_funes_release_token.local.
 *.local

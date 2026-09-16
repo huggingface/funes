@@ -38,10 +38,8 @@ that will drift.
 
 ## Working on the repo
 
-Building needs `protoc` (lance compiles protobuf at build time): system package, or
-`./scripts/bootstrap-protoc.sh` then `export PROTOC="$PWD/.tools/protoc/bin/protoc"`. Before
-calling work done: `cargo fmt && cargo clippy && cargo test` (the integration tests download the
-embedder/reranker weights on first run).
+Building needs `protoc` (lance compiles protobuf at build time).
+Before calling work done: `cargo fmt && cargo clippy && cargo test` (the integration tests download the embedder/reranker weights on first run).
 
 `src/` is one layer per directory — traces, hub, memory, commands, ui, agents, inference — and where
 a new function belongs follows from that; the layers and the placement test are in
