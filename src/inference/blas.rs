@@ -146,7 +146,8 @@ mod seam {
     /// In-place vectorized exp: buf[i] = e^{buf[i]}. exp(x) = 2^f·exp(r), f = round(x/ln2), with
     /// exp(r) a degree-6 Taylor on |r| ≤ ln2/2 and 2^f built in the float's exponent bits — all
     /// branch-free so LLVM auto-vectorizes; multiversion picks the widest clone the CPU runs.
-    /// Max relative error 2.5e-7.
+    /// Max relative error 2.5e-7. Underflows to 0, so a masked attention column comes out exactly 0
+    /// and the scores×V GEMM never sees a subnormal.
     #[multiversion::multiversion(targets("x86_64+avx512f+avx512bw+avx512dq", "x86_64+avx2+fma"))]
     pub fn vexp(buf: &mut [f32]) {
         const LOG2E: f32 = std::f32::consts::LOG2_E;
@@ -156,12 +157,20 @@ mod seam {
         const LN2_LO: f32 = -2.121_944_4e-4;
         const MAGIC: f32 = 12582912.0; // 1.5·2^23: add then subtract rounds to nearest integer
         const C: [f32; 5] = [1.0 / 720.0, 1.0 / 120.0, 1.0 / 24.0, 1.0 / 6.0, 0.5];
+        // ln(FLT_MIN): the exponent trick below wraps past it, and e^x is subnormal there anyway.
+        const UNDERFLOW: f32 = -87.336;
         for x in buf.iter_mut() {
-            let c = (*x).clamp(-87.336, 88.722);
+            let v = *x;
+            let c = v.clamp(UNDERFLOW, 88.722);
             let f = (c * LOG2E + MAGIC) - MAGIC;
             let r = c - f * LN2_HI - f * LN2_LO;
             let p = (((((C[0] * r + C[1]) * r + C[2]) * r + C[3]) * r + C[4]) * r + 1.0) * r + 1.0;
-            *x = p * f32::from_bits((((f as i32) + 127) << 23) as u32);
+            // A select, not a branch, so the loop still auto-vectorizes.
+            *x = if v < UNDERFLOW {
+                0.0
+            } else {
+                p * f32::from_bits((((f as i32) + 127) << 23) as u32)
+            };
         }
     }
 
@@ -767,5 +776,49 @@ impl Reranker for BlasReranker {
             &mut scores,
         );
         Ok(scores)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Padding is masked with `-1e30` before the softmax ([`encode`]), and `exp` has to take those
+    /// columns to exactly zero: a nonzero one is scaled by `1/sum` into the subnormal range, and
+    /// the scores×V GEMM that consumes it then stalls on x86.
+    #[test]
+    fn masked_columns_leave_no_subnormal_weight() {
+        let (rows, cols, real) = (4, 512, 384);
+        let mut s: Vec<f32> = (0..rows * cols)
+            .map(|i| {
+                if i % cols < real {
+                    (i % 17) as f32 * 0.31 - 2.0
+                } else {
+                    -1e30
+                }
+            })
+            .collect();
+        softmax_rows(&mut s, rows, cols);
+
+        assert!(
+            !s.iter().any(|w| w.is_subnormal()),
+            "softmax produced a subnormal weight"
+        );
+        assert!(s.iter().skip(real).take(cols - real).all(|w| *w == 0.0));
+        for r in 0..rows {
+            let sum: f32 = s[r * cols..(r + 1) * cols].iter().sum();
+            assert!((sum - 1.0).abs() < 1e-5, "row {r} sums to {sum}");
+        }
+    }
+
+    /// Underflowing must not cost accuracy where `exp` is representable.
+    #[test]
+    fn vexp_is_accurate_in_range() {
+        let mut got: Vec<f32> = (-870..=880).map(|i| i as f32 / 10.0).collect();
+        let want: Vec<f32> = got.iter().map(|x| x.exp()).collect();
+        seam::vexp(&mut got);
+        for (g, w) in got.iter().zip(&want) {
+            assert!((g - w).abs() <= 1e-6 * w, "exp mismatch: {g} vs {w}");
+        }
     }
 }
