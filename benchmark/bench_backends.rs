@@ -116,11 +116,13 @@ fn main() -> Result<()> {
         eprintln!("note: only one backend is compiled — build with `--features onnx` to A/B against the reference\n");
     }
 
-    // (label, docs, warmups, timed iters) — fewer iterations where a single forward runs seconds.
+    // (label, docs, warmups, timed iters) — few iterations where a single forward runs seconds,
+    // except the ragged batch: it carries the padding behavior worth measuring, and one timed
+    // iteration cannot resolve a difference of a few percent.
     let workloads = [
         ("16×short", short_docs(), 2, 5),
         ("30×~500tok", long_docs(), 1, 3),
-        ("16×mixed", mixed_docs(), 1, 1),
+        ("16×mixed", mixed_docs(), 1, 5),
     ];
 
     println!(
