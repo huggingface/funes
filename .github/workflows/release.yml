@@ -131,12 +131,12 @@ jobs:
       # Everything the bare container lacks: compilers and binutils, git for checkout/rust-cache,
       # perl for the version stamp, curl/ca-certificates for the toolchain installs, wget for
       # setup-mold, pkg-config + libssl-dev for the native x86_64 TLS link, cmake for zstd-sys,
-      # unzip for bootstrap-protoc, zstd for rust-cache compression.
+      # zstd for rust-cache compression, protoc used by lance.
       - name: Install build dependencies
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            build-essential git perl curl ca-certificates pkg-config libssl-dev cmake unzip wget zstd
+            build-essential git perl curl ca-certificates pkg-config libssl-dev cmake wget zstd protobuf-compiler
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -155,12 +155,6 @@ jobs:
       # Faster, lower-memory linker — keeps the heavy lance link in budget. The action runs as
       # root inside the container (no sudo) and downloads with wget, installed above.
       - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
-
-      # 22.04's packaged protoc is too old for the lance protos; bootstrap the pinned one.
-      - name: Install protoc
-        run: |
-          ./scripts/bootstrap-protoc.sh
-          echo "PROTOC=$PWD/.tools/protoc/bin/protoc" >> "$GITHUB_ENV"
 
       # aarch64 is cross-compiled inside the same 22.04 container, so its sysroot pins the same
       # glibc 2.35 floor. gcc-aarch64-linux-gnu links the binary and (via the cc crate) builds
