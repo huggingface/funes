@@ -249,7 +249,7 @@ struct Indexer {
     embedder: Box<dyn Embedder>,
     scanner: Option<scan::Trufflehog>,
     include_thinking: bool,
-    /// cwd → resolved `repo` value, so each distinct checkout runs `git` once across the run.
+    /// Recorded cwd → resolved repository identities, including empty results.
     repo_cache: HashMap<String, String>,
     state: HashMap<String, UnitState>,
     state_path: PathBuf,
@@ -455,18 +455,17 @@ impl Indexer {
             }
         };
 
-        let (sessions, label) = unit_summary(&turns, &key);
+        let (session_count, label) = unit_summary(&turns, &key);
         elide_turns(&mut turns);
         if let Some(scanner) = &self.scanner {
             redact_turns(&mut turns, scanner, tiers, self.include_thinking)?;
         }
-        let mut chunks = chunk::chunks_from_turns(&turns, tiers, self.include_thinking);
-        let repo = self.repo_for(&key);
-        if !repo.is_empty() {
-            for c in &mut chunks {
-                c.repo.clone_from(&repo);
+        for turn in &mut turns {
+            if turn.repo.is_none() {
+                turn.repo = self.repo_for(turn.recorded_cwd.as_deref());
             }
         }
+        let chunks = chunk::chunks_from_turns(&turns, tiers, self.include_thinking);
         let total_chunks = chunks.len();
         let added = if total_chunks == 0 {
             eprintln!("{progress} {label} — no indexable content");
@@ -499,23 +498,21 @@ impl Indexer {
         }
         // Count a unit's sessions once per run — later tier passes over it only add chunks.
         if self.counted.insert(i) {
-            self.n_sessions += sessions;
+            self.n_sessions += session_count;
         }
         self.n_chunks += added;
         Ok(added)
     }
 
-    /// The session's repo(s) for the unit at `key`, resolved from its transcript's cwd and cached
-    /// per cwd so each distinct checkout runs `git` once across the run. Empty for a non-transcript
-    /// unit (a parquet shard) or a checkout that can't be resolved (gone, not a git repo).
-    fn repo_for(&mut self, key: &str) -> String {
-        let Some(cwd) = repo::cwd_of_transcript(Path::new(key)) else {
-            return String::new();
-        };
-        self.repo_cache
-            .entry(cwd.clone())
-            .or_insert_with(|| repo::of_cwd(&cwd))
-            .clone()
+    /// Resolve repository identities with at most one Git invocation per distinct cwd string
+    /// during this indexing run. Failed lookups are cached too.
+    fn repo_for(&mut self, cwd: Option<&str>) -> Option<String> {
+        let cwd = cwd?;
+        let repo = self
+            .repo_cache
+            .entry(cwd.to_owned())
+            .or_insert_with(|| repo::of_cwd(cwd));
+        (!repo.is_empty()).then(|| repo.clone())
     }
 
     /// Embed `new_chunks` and add them — appending to the dataset, or creating it at `uri` on the
@@ -1181,6 +1178,8 @@ mod tests {
             }],
             source_path: String::new(),
             harness: "claude_code".into(),
+            recorded_cwd: None,
+            repo: None,
         }];
         redact_turns(&mut turns, &scanner, &chunk::Tier::ALL, true).unwrap();
         assert_eq!(
@@ -1222,6 +1221,8 @@ mod tests {
             ],
             source_path: String::new(),
             harness: "claude_code".into(),
+            recorded_cwd: None,
+            repo: None,
         }];
         // A text-only pass redacts the text block but leaves the tool_result it won't store untouched.
         redact_turns(&mut turns, &Fake, &[chunk::Tier::Text], true).unwrap();
@@ -1260,6 +1261,8 @@ mod tests {
             }],
             source_path: String::new(),
             harness: "codex".into(),
+            recorded_cwd: None,
+            repo: None,
         }];
         let scanner = Recorder(std::cell::RefCell::new(String::new()));
         elide_turns(&mut turns);

@@ -840,6 +840,8 @@ mod tests {
             }],
             source_path: "/x.jsonl".into(),
             harness: "claude_code".into(),
+            recorded_cwd: None,
+            repo: None,
         }
     }
 

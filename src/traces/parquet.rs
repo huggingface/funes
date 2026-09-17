@@ -232,6 +232,8 @@ fn turns_from_messages(
             blocks,
             source_path: source.to_string(),
             harness: harness.to_string(),
+            recorded_cwd: None,
+            repo: None,
         });
         parent = Some(turn_uuid);
         seq += 1;

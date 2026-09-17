@@ -145,6 +145,8 @@ pub fn turns_from_state_db(db: &Path, session_id: &str, fallback_workdir: &str) 
             blocks,
             source_path: source_path.clone(),
             harness: "hermes".into(),
+            recorded_cwd: None,
+            repo: None,
         });
         seq += 1;
     }

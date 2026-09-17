@@ -12,6 +12,7 @@ use anyhow::{anyhow, Result};
 pub enum Harness {
     Claude,
     Codex,
+    Copilot,
     Pi,
     Hermes,
 }
@@ -21,6 +22,7 @@ pub enum Harness {
 const KNOWN_DIRS: &[(&str, Harness)] = &[
     (".claude/projects", Harness::Claude),
     (".codex/sessions", Harness::Codex),
+    (".copilot/session-state", Harness::Copilot),
     (".pi/agent/sessions", Harness::Pi),
 ];
 
@@ -30,32 +32,35 @@ impl Harness {
         match self {
             Harness::Claude => "claude_code",
             Harness::Codex => "codex",
+            Harness::Copilot => "copilot",
             Harness::Pi => "pi",
             Harness::Hermes => "hermes",
         }
     }
 
     /// The `--harness` spelling `index` accepts and shows in `--help`
-    /// (`claude`/`codex`/`pi`/`hermes`). Differs from [`Harness::as_str`], the stored facet, only
+    /// (`claude`/`codex`/`copilot`/`pi`/`hermes`). Differs from [`Harness::as_str`], the stored facet, only
     /// for Claude (facet `claude_code`).
     pub fn cli_name(&self) -> &'static str {
         match self {
             Harness::Claude => "claude",
             Harness::Codex => "codex",
+            Harness::Copilot => "copilot",
             Harness::Pi => "pi",
             Harness::Hermes => "hermes",
         }
     }
 
-    /// Parse a `--harness` override: `claude`/`claude_code`, `codex`, `pi`, or `hermes`.
+    /// Parse a `--harness` override: `claude`/`claude_code`, `codex`, `copilot`, `pi`, or `hermes`.
     pub fn parse(s: &str) -> Result<Harness> {
         match s {
             "claude" | "claude_code" => Ok(Harness::Claude),
             "codex" => Ok(Harness::Codex),
+            "copilot" => Ok(Harness::Copilot),
             "pi" => Ok(Harness::Pi),
             "hermes" => Ok(Harness::Hermes),
             other => Err(anyhow!(
-                "unknown harness {other:?} (expected claude, codex, pi, or hermes)"
+                "unknown harness {other:?} (expected claude, codex, copilot, pi, or hermes)"
             )),
         }
     }
@@ -69,6 +74,7 @@ impl Harness {
         }
         match first_line.and_then(|v| v.get("type")).and_then(Value::as_str) {
             Some("session_meta") => Harness::Codex,
+            Some("session.start") => Harness::Copilot,
             Some("session") => Harness::Pi,
             _ => Harness::Claude,
         }
@@ -87,21 +93,24 @@ impl Harness {
 /// hermes' session store — a single SQLite file under `$HOME`, not a session dir like the others.
 pub const HERMES_DB: &str = ".hermes/state.db";
 
-fn known_harness_roots_from(home: &Path, pi_agent_dir: Option<&Path>) -> Vec<(PathBuf, Harness)> {
+fn known_harness_roots_from(
+    home: &Path,
+    pi_agent_dir: Option<&Path>,
+    copilot_home: Option<&Path>,
+) -> Vec<(PathBuf, Harness)> {
     let mut roots: Vec<(PathBuf, Harness)> = KNOWN_DIRS
         .iter()
-        .filter(|(_, h)| *h != Harness::Pi)
-        .map(|(tail, h)| (home.join(tail), *h))
+        .map(|&(tail, harness)| {
+            let root = match harness {
+                Harness::Copilot => copilot_home.map(|p| p.join("session-state")),
+                Harness::Pi => pi_agent_dir.map(|p| p.join("sessions")),
+                _ => None,
+            }
+            .unwrap_or_else(|| home.join(tail));
+            (root, harness)
+        })
         .filter(|(dir, _)| dir.is_dir())
         .collect();
-
-    let pi_sessions = pi_agent_dir
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| home.join(".pi/agent"))
-        .join("sessions");
-    if pi_sessions.is_dir() {
-        roots.push((pi_sessions, Harness::Pi));
-    }
 
     let hermes_db = home.join(HERMES_DB);
     if hermes_db.is_file() {
@@ -118,7 +127,8 @@ pub fn known_harness_roots() -> Vec<(PathBuf, Harness)> {
         None => return Vec::new(),
     };
     let pi_agent_dir = std::env::var_os("PI_CODING_AGENT_DIR").map(PathBuf::from);
-    known_harness_roots_from(&home, pi_agent_dir.as_deref())
+    let copilot_home = std::env::var_os("COPILOT_HOME").map(PathBuf::from);
+    known_harness_roots_from(&home, pi_agent_dir.as_deref(), copilot_home.as_deref())
 }
 
 #[cfg(test)]
@@ -155,9 +165,25 @@ mod tests {
         assert_eq!(Harness::parse("claude").unwrap(), Harness::Claude);
         assert_eq!(Harness::parse("claude_code").unwrap(), Harness::Claude);
         assert_eq!(Harness::parse("codex").unwrap(), Harness::Codex);
+        assert_eq!(Harness::parse("copilot").unwrap(), Harness::Copilot);
         assert_eq!(Harness::parse("pi").unwrap(), Harness::Pi);
         assert_eq!(Harness::parse("hermes").unwrap(), Harness::Hermes);
         assert!(Harness::parse("gpt").is_err());
+    }
+
+    #[test]
+    fn copilot_home_overrides_default_and_detects_events() {
+        let home = tempfile::tempdir().unwrap();
+        let custom = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".copilot/session-state")).unwrap();
+        std::fs::create_dir(custom.path().join("session-state")).unwrap();
+        let roots = known_harness_roots_from(home.path(), None, Some(custom.path()));
+        assert!(roots.contains(&(custom.path().join("session-state"), Harness::Copilot)));
+        assert!(!roots.contains(&(home.path().join(".copilot/session-state"), Harness::Copilot)));
+        assert_eq!(
+            Harness::detect(home.path(), Some(&json!({"type":"session.start"}))),
+            Harness::Copilot
+        );
     }
 
     #[test]
@@ -170,7 +196,7 @@ mod tests {
         let custom_sessions = custom.path().join("sessions");
         std::fs::create_dir_all(&custom_sessions).unwrap();
 
-        let roots = known_harness_roots_from(home.path(), Some(custom.path()));
+        let roots = known_harness_roots_from(home.path(), Some(custom.path()), None);
 
         assert!(roots.contains(&(custom_sessions, Harness::Pi)));
         assert!(!roots.contains(&(default_pi, Harness::Pi)));
@@ -182,7 +208,7 @@ mod tests {
         let default_pi = home.path().join(".pi/agent/sessions");
         std::fs::create_dir_all(&default_pi).unwrap();
 
-        let roots = known_harness_roots_from(home.path(), None);
+        let roots = known_harness_roots_from(home.path(), None, None);
 
         assert!(roots.contains(&(default_pi, Harness::Pi)));
     }

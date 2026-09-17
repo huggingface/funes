@@ -65,6 +65,8 @@ pub fn turns_from_jsonl_file(p: &Path, session_id: &str, fallback_workdir: &str)
             blocks,
             source_path: p.to_string_lossy().into_owned(),
             harness: "pi".into(),
+            recorded_cwd: None,
+            repo: None,
         });
         seq += 1;
     }

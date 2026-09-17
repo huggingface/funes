@@ -89,6 +89,9 @@ pub fn open_with_harness(path: &Path, limit: Option<usize>, harness: Option<Harn
         })
     } else {
         let harness = harness.unwrap_or_else(|| detect_harness(path));
+        if harness == Harness::Copilot {
+            return Box::new(super::copilot::CopilotSource::new(path.to_path_buf(), limit));
+        }
         Box::new(JsonlTree {
             root: path.to_path_buf(),
             limit,
@@ -120,6 +123,9 @@ fn hermes_db_path(path: &Path) -> PathBuf {
 /// Detect a JSONL tree's harness: a known session dir wins (a cheap tail match), else sniff the
 /// first transcript's first record — only then is the tree walked (see [`Harness::detect`]).
 fn detect_harness(root: &Path) -> Harness {
+    if root.join("events.jsonl").is_file() || root.file_name().is_some_and(|n| n == "events.jsonl") {
+        return Harness::Copilot;
+    }
     if let Some(h) = Harness::from_known_dir(root) {
         return h;
     }
@@ -202,14 +208,19 @@ impl TraceSource for JsonlTree {
         // Each parser derives the workdir facet from the session's recorded cwd; the path-derived
         // value is only the fallback for transcripts that never recorded one.
         let fallback = claude::workdir_of(p);
-        let turns = match self.harness {
+        let mut turns = match self.harness {
             Harness::Claude => claude::turns_from_jsonl_file(p, &jsonl::session_id_of(p), &fallback)?,
             Harness::Codex => codex::turns_from_jsonl_file(p, &fallback)?,
+            Harness::Copilot => anyhow::bail!("copilot sessions are read from events.jsonl by their dedicated source"),
             Harness::Pi => pi::turns_from_jsonl_file(p, &jsonl::session_id_of(p), &fallback)?,
             // hermes keeps its sessions in a SQLite state.db, not a JSONL tree, so it's read by a
             // dedicated source and never reaches here.
             Harness::Hermes => anyhow::bail!("hermes sessions are read from state.db, not a JSONL tree"),
         };
+        let cwd = super::repo::cwd_of_transcript(p);
+        for turn in &mut turns {
+            turn.recorded_cwd.clone_from(&cwd);
+        }
         Ok(turns)
     }
 }

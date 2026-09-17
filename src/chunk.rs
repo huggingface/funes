@@ -349,7 +349,7 @@ pub fn chunks_from_turns(turns: &[Turn], tiers: &[Tier], include_thinking: bool)
                     block_idx: bi as i64,
                     split_idx: si as i64,
                     harness: turn.harness.clone(),
-                    repo: String::new(),
+                    repo: turn.repo.clone().unwrap_or_default(),
                 });
             }
         }
@@ -383,6 +383,8 @@ mod tests {
             blocks,
             source_path: "/x.jsonl".into(),
             harness: "claude_code".into(),
+            recorded_cwd: None,
+            repo: None,
         }
     }
 

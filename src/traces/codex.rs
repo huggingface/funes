@@ -61,6 +61,8 @@ pub fn turns_from_jsonl_file(p: &Path, fallback_workdir: &str) -> std::io::Resul
             blocks,
             source_path: p.to_string_lossy().into_owned(),
             harness: "codex".into(),
+            recorded_cwd: None,
+            repo: None,
         });
         seq += 1;
     }

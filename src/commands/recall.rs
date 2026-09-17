@@ -381,7 +381,7 @@ pub async fn recall_hits(
     harness: Option<String>,
     progress: &(dyn Fn(&str) + Sync),
 ) -> Result<(String, Option<String>, Vec<(Hit, f64)>)> {
-    // `--harness` accepts the same spellings as `index`/`add` (claude|codex|pi); normalize to the
+    // `--harness` accepts the same spellings as `index`; normalize to the
     // stored facet (Claude's is `claude_code`) so `--harness claude` filters instead of silently
     // matching nothing, and an unknown value errors here rather than returning zero hits.
     let harness = harness

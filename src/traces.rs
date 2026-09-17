@@ -7,6 +7,7 @@
 
 pub mod claude;
 pub mod codex;
+pub mod copilot;
 pub mod harness;
 pub mod hermes;
 pub mod jsonl;
@@ -25,6 +26,10 @@ pub struct Block {
 pub struct Turn {
     pub session_id: String,
     pub workdir: String,
+    /// Raw directory recorded for this turn, used when repository attribution needs resolving.
+    pub recorded_cwd: Option<String>,
+    /// Repository identities recorded by the source or resolved locally; absent when unknown.
+    pub repo: Option<String>,
     pub turn_uuid: String,
     pub parent_uuid: Option<String>,
     pub seq: i64,
@@ -32,6 +37,6 @@ pub struct Turn {
     pub role: String,
     pub blocks: Vec<Block>,
     pub source_path: String,
-    /// Which coding agent produced this session: `claude_code` | `codex` | `pi` | `hermes`.
+    /// Which coding agent produced this session: `claude_code` | `codex` | `copilot` | `pi` | `hermes`.
     pub harness: String,
 }

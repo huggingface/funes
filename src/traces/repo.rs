@@ -42,7 +42,12 @@ fn identity(url: &str) -> Option<String> {
     } else {
         return None;
     };
-    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    identity_from_path(path)
+}
+
+/// Recorded repository paths use the same last-two-components facet as resolved Git remotes.
+pub(crate) fn identity_from_path(path: &str) -> Option<String> {
+    let segs: Vec<&str> = path.trim().split('/').filter(|s| !s.is_empty()).collect();
     (segs.len() >= 2).then(|| format!("{}/{}", segs[segs.len() - 2], segs[segs.len() - 1]))
 }
 
@@ -78,6 +83,9 @@ mod tests {
 
     #[test]
     fn identity_normalizes_ssh_https_and_hf() {
+        assert_eq!(identity_from_path("owner/repo").as_deref(), Some("owner/repo"));
+        assert_eq!(identity_from_path("org/project/repo").as_deref(), Some("project/repo"));
+        assert_eq!(identity_from_path("unknown"), None);
         assert_eq!(
             identity("git@github.com:huggingface/funes.git").as_deref(),
             Some("huggingface/funes")
