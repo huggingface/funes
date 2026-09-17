@@ -28,8 +28,6 @@ on:
           - minor
           - major
 
-permissions:
-  contents: write
 
 # On pull requests the build jobs run (to validate the release build) but compute/publish
 # don't; cancel superseded PR runs. Tag/dispatch runs key on run_id, so they never cancel.
@@ -41,12 +39,16 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
 
+permissions: {}
+
 jobs:
   # Dispatch-only: work out the release version (strip +dev, then bump). Nothing is written or
   # pushed here — the version is stamped into each build's working tree, and only the tag and the
   # dev-bump branch are pushed by `publish` after the builds succeed, so a failed build never tags a
   # release or pushes a bump branch.
   compute:
+    permissions:
+      contents: read
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -77,18 +79,23 @@ jobs:
 
       - name: Resolve bump type
         id: bump
+        env:
+          INPUT_BUMP: ${{ inputs.bump }}
+          DETECTED_BUMP: ${{ steps.detect.outputs.detected }}
         run: |
-          BUMP="${{ inputs.bump }}"
-          [ "$BUMP" = "auto" ] && BUMP="${{ steps.detect.outputs.detected }}"
+          BUMP="$INPUT_BUMP"
+          [ "$BUMP" = "auto" ] && BUMP="$DETECTED_BUMP"
           echo "type=$BUMP" >> "$GITHUB_OUTPUT"
 
       - name: Compute new version
         id: version
+        env:
+          BUMP_TYPE: ${{ steps.bump.outputs.type }}
         run: |
           CURRENT=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
           BASE="${CURRENT%%+*}" # drop any +dev build-metadata before bumping
           IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE"
-          case "${{ steps.bump.outputs.type }}" in
+          case "$BUMP_TYPE" in
             major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
             minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
             patch) PATCH=$((PATCH + 1)) ;;
@@ -98,6 +105,8 @@ jobs:
           echo "tag=v${NEW}" >> "$GITHUB_OUTPUT"
 
   build-linux:
+    permissions:
+      contents: read
     name: Build Linux (${{ matrix.arch }})
     needs: [compute]
     if: |
@@ -174,7 +183,9 @@ jobs:
       # it via CARGO_PKG_VERSION. Skipped on tag/PR builds, which use Cargo.toml as-is.
       - name: Set release version
         if: needs.compute.outputs.version != ''
-        run: perl -i -pe 'if (!$d && s/^version = ".*"/version = "${{ needs.compute.outputs.version }}"/) { $d = 1 }' Cargo.toml
+        env:
+          NEW_VERSION: ${{ needs.compute.outputs.version }}
+        run: perl -i -pe 'if (!$d && s/^version = ".*"/version = "$ENV{NEW_VERSION}"/) { $d = 1 }' Cargo.toml
 
       - name: Build
         run: cargo build --profile ${{ env.PROFILE }} --target ${{ matrix.target }} ${{ matrix.features }}
@@ -213,6 +224,8 @@ jobs:
           path: dist/
 
   build-macos:
+    permissions:
+      contents: read
     name: Build macOS (arm64)
     needs: [compute]
     if: |
@@ -240,7 +253,9 @@ jobs:
 
       - name: Set release version
         if: needs.compute.outputs.version != ''
-        run: perl -i -pe 'if (!$d && s/^version = ".*"/version = "${{ needs.compute.outputs.version }}"/) { $d = 1 }' Cargo.toml
+        env:
+          NEW_VERSION: ${{ needs.compute.outputs.version }}
+        run: perl -i -pe 'if (!$d && s/^version = ".*"/version = "$ENV{NEW_VERSION}"/) { $d = 1 }' Cargo.toml
 
       - name: Build
         run: cargo build --profile ${{ env.PROFILE }} --target aarch64-apple-darwin
@@ -291,14 +306,17 @@ jobs:
           merge-multiple: true
 
       - name: Validate release metadata and generate checksums
+        env:
+          TAG_NAME: ${{ needs.compute.outputs.tag || github.ref_name }}
+          COMPUTED_VERSION: ${{ needs.compute.outputs.version }}
         run: |
-          TAG="${{ needs.compute.outputs.tag || github.ref_name }}"
+          TAG="$TAG_NAME"
           VERSION="${TAG#v}"
           if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
             echo "::error::release tag must have the form vMAJOR.MINOR.PATCH: $TAG"
             exit 1
           fi
-          COMPUTED="${{ needs.compute.outputs.version }}"
+          COMPUTED="$COMPUTED_VERSION"
           if [ -n "$COMPUTED" ] && [ "$VERSION" != "$COMPUTED" ]; then
             echo "::error::tag $TAG does not match computed version $COMPUTED"
             exit 1
@@ -331,9 +349,11 @@ jobs:
       - name: Tag and publish the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ needs.compute.outputs.tag || github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          TAG="${{ needs.compute.outputs.tag || github.ref_name }}"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          TAG="$TAG_NAME"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             git tag "$TAG"
             git push origin "$TAG"
           fi
@@ -347,8 +367,9 @@ jobs:
       - name: Publish binaries and installer to the Hugging Face bucket
         env:
           HF_TOKEN: ${{ secrets.HF_FUNES_RELEASE_TOKEN }}
+          TAG_NAME: ${{ needs.compute.outputs.tag || github.ref_name }}
         run: |
-          TAG="${{ needs.compute.outputs.tag || github.ref_name }}"
+          TAG="$TAG_NAME"
           python3 -m venv "$RUNNER_TEMP/hfvenv"
           "$RUNNER_TEMP/hfvenv/bin/pip" install -q -U "huggingface_hub>=1.21"
           HF="$RUNNER_TEMP/hfvenv/bin/hf"
@@ -366,9 +387,11 @@ jobs:
       # "create PR" link in the run summary; a maintainer opens that PR and merges it.
       - name: Push the dev-bump branch
         if: needs.compute.outputs.version != ''
+        env:
+          NEW_VERSION: ${{ needs.compute.outputs.version }}
         run: |
-          DEV="${{ needs.compute.outputs.version }}+dev"
-          BRANCH="chore/bump-dev-${{ needs.compute.outputs.version }}"
+          DEV="${NEW_VERSION}+dev"
+          BRANCH="chore/bump-dev-${NEW_VERSION}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git switch -c "$BRANCH"
