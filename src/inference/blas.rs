@@ -146,8 +146,7 @@ mod seam {
     /// In-place vectorized exp: buf[i] = e^{buf[i]}. exp(x) = 2^f·exp(r), f = round(x/ln2), with
     /// exp(r) a degree-6 Taylor on |r| ≤ ln2/2 and 2^f built in the float's exponent bits — all
     /// branch-free so LLVM auto-vectorizes; multiversion picks the widest clone the CPU runs.
-    /// Max relative error 2.5e-7. Underflows to 0, so a masked attention column comes out exactly 0
-    /// and the scores×V GEMM never sees a subnormal.
+    /// Max relative error 2.5e-7. Returns 0, not a subnormal, wherever e^x falls below FLT_MIN.
     #[multiversion::multiversion(targets("x86_64+avx512f+avx512bw+avx512dq", "x86_64+avx2+fma"))]
     pub fn vexp(buf: &mut [f32]) {
         const LOG2E: f32 = std::f32::consts::LOG2_E;
@@ -157,15 +156,18 @@ mod seam {
         const LN2_LO: f32 = -2.121_944_4e-4;
         const MAGIC: f32 = 12582912.0; // 1.5·2^23: add then subtract rounds to nearest integer
         const C: [f32; 5] = [1.0 / 720.0, 1.0 / 120.0, 1.0 / 24.0, 1.0 / 6.0, 0.5];
-        // ln(FLT_MIN): the exponent trick below wraps past it, and e^x is subnormal there anyway.
-        const UNDERFLOW: f32 = -87.336;
+        // e^x is a normal f32 only down to ln(FLT_MIN) = -126·ln2 = -87.3365448, and a subnormal
+        // result costs a microcode assist per operation on x86. This is the smallest f32 above
+        // that boundary: e^-87.3365402 = 1.1754997e-38, against FLT_MIN = 1.1754944e-38. The next
+        // f32 down, -87.3365479, gives 1.1754907e-38, which is subnormal.
+        const UNDERFLOW: f32 = -87.33654;
         for x in buf.iter_mut() {
             let v = *x;
             let c = v.clamp(UNDERFLOW, 88.722);
             let f = (c * LOG2E + MAGIC) - MAGIC;
             let r = c - f * LN2_HI - f * LN2_LO;
             let p = (((((C[0] * r + C[1]) * r + C[2]) * r + C[3]) * r + C[4]) * r + 1.0) * r + 1.0;
-            // A select, not a branch, so the loop still auto-vectorizes.
+            // A select rather than a branch: a branch here would stop LLVM vectorizing the loop.
             *x = if v < UNDERFLOW {
                 0.0
             } else {
@@ -783,9 +785,9 @@ impl Reranker for BlasReranker {
 mod tests {
     use super::*;
 
-    /// Padding is masked with `-1e30` before the softmax ([`encode`]), and `exp` has to take those
-    /// columns to exactly zero: a nonzero one is scaled by `1/sum` into the subnormal range, and
-    /// the scores×V GEMM that consumes it then stalls on x86.
+    /// Padded columns carry a -1e30 mask into the softmax. Should `exp` return FLT_MIN for them
+    /// instead of 0, the `*= 1/sum` step scales that into the 1e-40 range, leaving every masked
+    /// column of the scores×V GEMM subnormal.
     #[test]
     fn masked_columns_leave_no_subnormal_weight() {
         let (rows, cols, real) = (4, 512, 384);
@@ -811,7 +813,32 @@ mod tests {
         }
     }
 
-    /// Underflowing must not cost accuracy where `exp` is representable.
+    /// `UNDERFLOW` has one correct value and two ways to be wrong: one f32 lower lets a subnormal
+    /// through, one f32 higher flushes e^x values that are representable normals to zero. This
+    /// walks every f32 across the boundary and rejects both. Linux only — the macOS seam calls
+    /// Accelerate's `exp`, which returns the subnormals rather than zeroing them.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn vexp_cutoff_sits_on_the_subnormal_boundary() {
+        let (mut bits, end) = ((-87.5f32).to_bits(), (-87.2f32).to_bits());
+        let (mut flushed_a_normal, mut kept_a_subnormal) = (0, 0);
+        while bits >= end {
+            let v = f32::from_bits(bits);
+            let mut buf = [v];
+            seam::vexp(&mut buf);
+            if buf[0] == 0.0 && (v as f64).exp() >= f32::MIN_POSITIVE as f64 {
+                flushed_a_normal += 1;
+            }
+            if buf[0].is_subnormal() {
+                kept_a_subnormal += 1;
+            }
+            bits -= 1;
+        }
+        assert_eq!(flushed_a_normal, 0, "zeroed an exp that is a normal f32");
+        assert_eq!(kept_a_subnormal, 0, "let a subnormal through");
+    }
+
+    /// Zeroing below the cutoff must leave e^x untouched everywhere above it.
     #[test]
     fn vexp_is_accurate_in_range() {
         let mut got: Vec<f32> = (-870..=880).map(|i| i as f32 / 10.0).collect();
