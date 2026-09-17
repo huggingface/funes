@@ -11,6 +11,16 @@ asset="funes-x86_64-linux"
 version="9.9.9"
 mkdir -p "$fixtures/v$version" "$fakebin" "$install"
 
+cat > "$fakebin/uname" <<'SH'
+#!/bin/sh
+set -eu
+case "${1:-}" in
+    -s) printf '%s\n' Linux ;;
+    -m) printf '%s\n' x86_64 ;;
+    *) exit 2 ;;
+esac
+SH
+
 cat > "$fakebin/curl" <<'SH'
 #!/bin/sh
 set -eu
@@ -26,7 +36,7 @@ done
 relative=${url#*/resolve/}
 cp "$FIXTURE_ROOT/$relative" "$output"
 SH
-chmod +x "$fakebin/curl"
+chmod +x "$fakebin/uname" "$fakebin/curl"
 
 printf '%s\n' "$version" > "$fixtures/VERSION"
 printf '%s\n' "$version" > "$fixtures/v$version/VERSION"
@@ -34,7 +44,14 @@ cat > "$fixtures/v$version/$asset" <<SH
 #!/bin/sh
 echo 'funes $version'
 SH
-digest=$(sha256sum "$fixtures/v$version/$asset" | awk '{ print $1 }')
+if command -v sha256sum >/dev/null 2>&1; then
+    digest=$(sha256sum "$fixtures/v$version/$asset" | awk '{ print $1 }')
+elif command -v shasum >/dev/null 2>&1; then
+    digest=$(shasum -a 256 "$fixtures/v$version/$asset" | awk '{ print $1 }')
+else
+    echo "installer test requires sha256sum or shasum" >&2
+    exit 1
+fi
 printf '%s  %s\n' "$digest" "$asset" > "$fixtures/v$version/SHA256SUMS"
 
 PATH="$fakebin:$PATH" FIXTURE_ROOT="$fixtures" FUNES_INSTALL_DIR="$install" \
