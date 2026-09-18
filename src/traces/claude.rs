@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::path::Path;
 
 use super::jsonl;
-use super::{Block, Turn};
+use super::{Block, Turn, FORMAT_VERSION};
 
 /// Path-derived workdir fallback for a transcript that records no cwd: the segment right after a
 /// `projects` dir, else the parent dir name.
@@ -162,6 +162,7 @@ pub fn turns_from_jsonl_file(p: &Path, session_id: &str, fallback_workdir: &str)
             .map(str::to_string)
             .unwrap_or_else(|| rtype.to_string());
         turns.push(Turn {
+            format: FORMAT_VERSION,
             session_id: session_id.to_string(),
             cwd: cwd.clone(),
             workdir: workdir.to_string(),

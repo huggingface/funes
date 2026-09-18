@@ -9,7 +9,7 @@ use serde_json::{Map, Value};
 use std::path::Path;
 
 use super::jsonl;
-use super::{Block, Turn};
+use super::{Block, Turn, FORMAT_VERSION};
 
 pub fn turns_from_jsonl_file(p: &Path, fallback_workdir: &str) -> std::io::Result<Vec<Turn>> {
     let records = jsonl::read_jsonl_records(p)?;
@@ -52,6 +52,7 @@ pub fn turns_from_jsonl_file(p: &Path, fallback_workdir: &str) -> std::io::Resul
             continue;
         }
         turns.push(Turn {
+            format: FORMAT_VERSION,
             session_id: session_id.clone(),
             cwd: cwd.clone(),
             workdir: workdir.to_string(),

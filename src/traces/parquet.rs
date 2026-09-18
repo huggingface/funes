@@ -11,7 +11,7 @@
 //! parsers.
 
 use super::jsonl;
-use super::{Block, Turn};
+use super::{Block, Turn, FORMAT_VERSION};
 use crate::hub;
 use anyhow::{anyhow, ensure, Context, Result};
 use arrow_array::{Array, LargeStringArray, ListArray, RecordBatch, StringArray};
@@ -221,6 +221,7 @@ fn turns_from_messages(
         let role = m.get("role").and_then(Value::as_str).unwrap_or("").to_string();
         let turn_uuid = format!("{session_id}-{seq}");
         turns.push(Turn {
+            format: FORMAT_VERSION,
             session_id: session_id.to_string(),
             cwd: cwd.map(str::to_string),
             workdir: workdir.to_string(),

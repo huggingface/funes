@@ -8,7 +8,7 @@ use serde_json::{Map, Value};
 use std::path::Path;
 
 use super::jsonl;
-use super::{Block, Turn};
+use super::{Block, Turn, FORMAT_VERSION};
 
 /// The working directory a session's records name: the `session` line's `cwd`. `None` when no
 /// record carries one.
@@ -55,6 +55,7 @@ pub fn turns_from_jsonl_file(p: &Path, session_id: &str, fallback_workdir: &str)
             native_role
         };
         turns.push(Turn {
+            format: FORMAT_VERSION,
             session_id: session_id.to_string(),
             cwd: cwd.clone(),
             workdir: workdir.to_string(),

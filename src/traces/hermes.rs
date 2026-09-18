@@ -21,7 +21,7 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 
 use super::jsonl;
-use super::{Block, Turn};
+use super::{Block, Turn, FORMAT_VERSION};
 
 /// One indexable hermes session: its id, resolved workdir facet, and the high-water `messages.id`
 /// used as the incremental signature (a session is re-read only once a newer message lands).
@@ -136,6 +136,7 @@ pub fn turns_from_state_db(db: &Path, session_id: &str, fallback_workdir: &str) 
             continue;
         }
         turns.push(Turn {
+            format: FORMAT_VERSION,
             session_id: session_id.to_string(),
             cwd: cwd.clone(),
             workdir: workdir.clone(),

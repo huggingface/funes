@@ -1168,6 +1168,7 @@ mod tests {
             },
         ]);
         let mut turns = vec![traces::Turn {
+            format: traces::FORMAT_VERSION,
             session_id: "sess".into(),
             cwd: None,
             workdir: "proj".into(),
@@ -1212,6 +1213,7 @@ mod tests {
             tool_use_id: None,
         };
         let mut turns = vec![traces::Turn {
+            format: traces::FORMAT_VERSION,
             session_id: "sess".into(),
             cwd: None,
             workdir: "proj".into(),
@@ -1249,6 +1251,7 @@ mod tests {
             }
         }
         let mut turns = vec![traces::Turn {
+            format: traces::FORMAT_VERSION,
             session_id: "sess".into(),
             cwd: None,
             workdir: "proj".into(),
