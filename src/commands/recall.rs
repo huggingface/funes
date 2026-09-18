@@ -170,14 +170,19 @@ fn esc(s: &str) -> String {
     s.replace('\'', "''")
 }
 
-/// `block_type = '…' AND harness = '…'` over whichever filters are set, else None.
-fn build_where(block_type: Option<&str>, harness: Option<&str>) -> Option<String> {
+/// `block_type = '…' AND harness IN ('…')` over whichever filters are set, else None.
+fn build_where(block_type: Option<&str>, harness: &[String]) -> Option<String> {
     let mut clauses = Vec::new();
     if let Some(bt) = block_type {
         clauses.push(format!("block_type = '{}'", esc(bt)));
     }
-    if let Some(h) = harness {
-        clauses.push(format!("harness = '{}'", esc(h)));
+    match harness {
+        [] => {}
+        [h] => clauses.push(format!("harness = '{}'", esc(h))),
+        many => {
+            let list: Vec<String> = many.iter().map(|h| format!("'{}'", esc(h))).collect();
+            clauses.push(format!("harness IN ({})", list.join(", ")));
+        }
     }
     if clauses.is_empty() {
         None
@@ -186,12 +191,16 @@ fn build_where(block_type: Option<&str>, harness: Option<&str>) -> Option<String
     }
 }
 
-/// The stored `harness` facet a `--harness` value names: a known agent's CLI spelling maps to its
-/// stored facet (Claude's is `claude_code`), any other value is stored as given.
-fn stored_harness(h: String) -> String {
+/// The stored `harness` facets a `--harness` value names. A known agent's name matches both its
+/// stored facet and its CLI spelling where they differ (`claude_code` and `claude`), since a turns
+/// file may store either; any other value matches as given.
+fn harness_spellings(h: String) -> Vec<String> {
     match Harness::parse(&h) {
-        Ok(known) => known.as_str().to_string(),
-        Err(_) => h,
+        Ok(known) if known.as_str() != known.cli_name() => {
+            vec![known.as_str().to_string(), known.cli_name().to_string()]
+        }
+        Ok(known) => vec![known.as_str().to_string()],
+        Err(_) => vec![h],
     }
 }
 
@@ -390,7 +399,7 @@ pub async fn recall_hits(
     harness: Option<String>,
     progress: &(dyn Fn(&str) + Sync),
 ) -> Result<(String, Option<String>, Vec<(Hit, f64)>)> {
-    let harness = harness.map(stored_harness);
+    let harness = harness.map(harness_spellings).unwrap_or_default();
 
     progress("loading model…");
     let mut guard = models().await?.lock().await;
@@ -408,12 +417,12 @@ pub async fn recall_hits(
     let ds = &read.ds;
     // A `--harness` filter needs the column; on an un-migrated memory it would fail deep inside Lance
     // with an opaque schema error, so refuse with a clear message instead.
-    if harness.is_some() && !has_harness_col(ds) {
+    if !harness.is_empty() && !has_harness_col(ds) {
         return Err(anyhow!(
             "this memory predates the harness facet — reindex it, or drop --harness"
         ));
     }
-    let where_clause = build_where(block_type.as_deref(), harness.as_deref());
+    let where_clause = build_where(block_type.as_deref(), &harness);
 
     // Hybrid retrieval: a vector ANN scan and a BM25 scan, fused by reciprocal rank. The FTS index
     // can be absent (it's best-effort at index time), so the FTS leg is skipped when it errors —
@@ -1475,24 +1484,29 @@ mod tests {
     }
 
     #[test]
-    fn stored_harness_normalizes_known_names_and_passes_others_through() {
-        assert_eq!(stored_harness("claude".into()), "claude_code");
-        assert_eq!(stored_harness("claude_code".into()), "claude_code");
-        assert_eq!(stored_harness("codex".into()), "codex");
-        assert_eq!(stored_harness("opencode".into()), "opencode");
+    fn harness_spellings_cover_both_names_of_a_known_agent_and_pass_others_through() {
+        assert_eq!(harness_spellings("claude".into()), ["claude_code", "claude"]);
+        assert_eq!(harness_spellings("claude_code".into()), ["claude_code", "claude"]);
+        assert_eq!(harness_spellings("codex".into()), ["codex"]);
+        assert_eq!(harness_spellings("opencode".into()), ["opencode"]);
     }
 
     #[test]
     fn build_where_combines_set_filters() {
-        assert_eq!(build_where(None, None), None);
-        assert_eq!(build_where(Some("text"), None).as_deref(), Some("block_type = 'text'"));
-        assert_eq!(build_where(None, Some("codex")).as_deref(), Some("harness = 'codex'"));
+        let one = |h: &str| vec![h.to_string()];
+        assert_eq!(build_where(None, &[]), None);
+        assert_eq!(build_where(Some("text"), &[]).as_deref(), Some("block_type = 'text'"));
+        assert_eq!(build_where(None, &one("codex")).as_deref(), Some("harness = 'codex'"));
         assert_eq!(
-            build_where(Some("tool_use"), Some("pi")).as_deref(),
+            build_where(Some("tool_use"), &one("pi")).as_deref(),
             Some("block_type = 'tool_use' AND harness = 'pi'")
         );
+        assert_eq!(
+            build_where(None, &harness_spellings("claude".into())).as_deref(),
+            Some("harness IN ('claude_code', 'claude')")
+        );
         // values are escaped against filter-string injection.
-        assert_eq!(build_where(None, Some("a'b")).as_deref(), Some("harness = 'a''b'"));
+        assert_eq!(build_where(None, &one("a'b")).as_deref(), Some("harness = 'a''b'"));
     }
 
     #[test]
