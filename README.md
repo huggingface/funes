@@ -1,7 +1,7 @@
 # funes
 
 **Durable memory for your AI coding agents.** `funes` indexes your past sessions across Claude
-Code, Codex, pi, and Hermes and lets any agent recall the past decisions, rationale, and findings.
+Code, Codex, Cursor, pi, and Hermes and lets any agent recall the past decisions, rationale, and findings.
 Your memory is a dataset you can publish to the Hugging Face Hub — then any machine, teammate, or
 agent can recall from it.
 
@@ -12,7 +12,7 @@ agent can recall from it.
 ## Features at a glance
 
 - **Your agent recalls your past work.** The model spontaneously uses `funes` to recall prior decisions, rationale, and findings mid-task.
-- **One memory across your agents.** Index Claude Code, Codex, pi, and Hermes into a single memory;
+- **One memory across your agents.** Index Claude Code, Codex, Cursor, pi, and Hermes into a single memory;
   recall spans all of them, and every hit shows which agent it came from.
 - **Your memory is a Hugging Face dataset.** Publish it to the Hugging Face Hub; a teammate,
   another of your machines — or anyone, if you make it public — recalls from it with one flag.
@@ -34,11 +34,11 @@ curl -fsSL https://huggingface.co/buckets/huggingface/funes/resolve/install.sh |
 Then add it to your agent:
 
 ```bash
-funes add claude    # or codex, pi, hermes
+funes add claude    # or codex, cursor, pi, hermes
 ```
 
-One command onboards you: your agent gets `recall` and `get` as tools, and — for Claude, Codex, and
-Hermes — funes builds your first index, installs a hook that keeps it current every turn, and (with a
+One command onboards you: your agent gets `recall` and `get` as tools, and — for Claude, Codex, Cursor,
+pi, and Hermes — funes builds your first index, installs a hook that keeps it current every turn, and (with a
 memory bound) publishes at each session boundary. From here you just work. See
 [docs/add.md](docs/add.md) for the agents, memory binding, and what a run does; `funes status` tells
 you whether recall is reading your own memory yet.
@@ -61,7 +61,7 @@ out. To build it yourself, see [Building from source](#building-from-source).
 
 ## Works across your agents (and models)
 
-Your memory isn't tied to one tool. Because Claude Code, Codex, pi, and Hermes all index into a single
+Your memory isn't tied to one tool. Because Claude Code, Codex, Cursor, pi, and Hermes all index into a single
 memory, you can **switch agents without losing anything** — start a task in Claude Code, pick it up
 in Codex next week, and each one recalls the *entire* history, not just its own sessions (every hit
 shows which agent it came from). Another agent can join through a compatible `.parquet` trace

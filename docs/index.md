@@ -11,12 +11,26 @@ funes index      # a fast, text-first pass over every known harness dir, into on
 ## What it indexes
 
 With **no argument**, in a terminal, `funes index` sweeps every supported agent's session dir it
-finds — `~/.claude/projects`, `~/.codex/sessions`, `~/.pi/agent/sessions`, `~/.hermes/state.db` — into
+finds — `~/.claude/projects`, `~/.codex/sessions`, Cursor's `state.vscdb`, `~/.pi/agent/sessions`, `~/.hermes/state.db` — into
 one memory, then offers to finish any deeper work left. Scope it to a single agent with `--harness`:
 
 ```bash
 funes index --harness codex        # only ~/.codex/sessions
+funes index --harness cursor      # only Cursor's default global conversation store
 ```
+
+Cursor discovery uses the platform's default user-data root: `~/Library/Application Support/Cursor`
+on macOS, `%APPDATA%/Cursor` on Windows, and `${XDG_CONFIG_HOME:-~/.config}/Cursor` on Linux.
+It reads `User/globalStorage/state.vscdb` beneath that root. For a custom `--user-data-dir`, pass
+that directory or the database file explicitly:
+
+```bash
+funes index /path/to/custom-data --harness cursor
+funes index /path/to/state.vscdb --harness cursor
+```
+
+Explicit paths also accept the `User` or `globalStorage` directory. Auto-detection checks for the
+Cursor `cursorDiskKV` table read-only; it does not require `Cursor` in the path name.
 
 Point it at a **path** to index one place in full — a transcript tree or a single `.parquet` trace
 export — or at a **Hub trace repo** to index its auto-converted parquet:
@@ -104,7 +118,7 @@ scanned or stored: a pasted screenshot is megabytes of base64 with nothing recal
 
 | Flag | Meaning |
 | --- | --- |
-| `--harness <name>` | Override auto-detection for a path, or (with no path) target one harness's dir: `claude \| codex \| pi \| hermes`. |
+| `--harness <name>` | Override auto-detection for a path, or (with no path) target one harness's store: `claude \| codex \| cursor \| pi \| hermes`. |
 | `--limit <N>` | Index only the most recent N sessions per source. Omit to index all. A Hub repo ignores it and indexes every shard. |
 | `--no-thinking` | Exclude thinking blocks. |
 | `--yes` | Don't ask: a budgeted (no-path) run finishes all remaining work; an explicit path skips the first-index size confirmation. |
@@ -114,7 +128,7 @@ scanned or stored: a pasted screenshot is megabytes of base64 with nothing recal
 Indexing and recall are one deterministic pipeline:
 
 ```
-~/.claude/projects, ~/.codex/sessions, ~/.pi/agent/sessions, ~/.hermes/state.db   (or a .parquet trace)
+~/.claude/projects, ~/.codex/sessions, Cursor state.vscdb, ~/.pi/agent/sessions, ~/.hermes/state.db   (or a .parquet trace)
    │  parse        deterministic — turns (text / thinking / tool_use / tool_result), tagged by agent
    │  chunk        one chunk per content block, tight provenance
    │  embed        pinned local model (BAAI/bge-small-en-v1.5)

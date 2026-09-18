@@ -3,6 +3,7 @@
 
 pub mod claude;
 pub mod codex;
+pub mod cursor;
 pub mod hermes;
 pub mod hooks;
 pub mod pi;

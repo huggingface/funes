@@ -38,6 +38,7 @@ registration and funes-owned files/entries:
 | --- | --- |
 | Claude Code | Hooks-only plugin under `~/.funes/integrations/claude-plugin`; registered through Claude's plugin commands. |
 | Codex | `~/.codex/hooks.json` and scripts under `~/.codex/hooks/`. |
+| Cursor | `~/.cursor/hooks.json`, `~/.cursor/mcp.json`, and scripts under `~/.cursor/hooks/`. |
 | Hermes | `~/.hermes/config.yaml`, `~/.hermes/shell-hooks-allowlist.json`, and scripts under `~/.hermes/hooks/`. |
 | pi | Extension and optional memory binding under `~/.funes/integrations/pi/`. |
 

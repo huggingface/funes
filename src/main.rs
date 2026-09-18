@@ -1,10 +1,10 @@
 //! funes — recall over your past AI Agent sessions.
 //!
 //! `recall` reads the index (hybrid → rerank → recency); `index` builds/updates it from the local
-//! harness session dirs (Claude Code, Codex, pi) or an explicit path/parquet/repo. funes's home is
+//! harness session stores (Claude Code, Codex, Cursor, pi) or an explicit path/parquet/repo. funes's home is
 //! `$FUNES_HOME` or `~/.funes`.
 
-use funes::agents::{claude, codex, hermes, pi};
+use funes::agents::{claude, codex, cursor, hermes, pi};
 use funes::commands::{ask, index, mcp, push, recall, scrub, sketch, update};
 use funes::hub;
 use funes::memory;
@@ -48,7 +48,7 @@ enum Cmd {
         /// Restrict to a block type: text | thinking | tool_use | tool_result.
         #[arg(long = "type", value_name = "BLOCK_TYPE")]
         block_type: Option<String>,
-        /// Restrict to a harness: claude | codex | pi | hermes.
+        /// Restrict to a harness: claude | codex | cursor | pi | hermes.
         #[arg(long)]
         harness: Option<String>,
         #[command(flatten)]
@@ -82,12 +82,13 @@ enum Cmd {
     },
     /// Build or update your local memory from session transcripts.
     Index {
-        /// A transcript tree or `.parquet` file, or a Hub trace repo `<org>/<repo>`. Omit — in a
+        /// A transcript tree, SQLite session store, `.parquet` file, or Hub trace repo `<org>/<repo>`.
+        /// Cursor accepts its database file or user-data, User, or globalStorage directory. Omit — in a
         /// terminal — to index every known harness dir (~/.claude/projects, ~/.codex/sessions,
         /// ~/.pi/agent/sessions); `--harness <name>` alone targets one. An automated (non-terminal)
         /// run must name a target.
         path: Option<String>,
-        /// Override harness auto-detection for PATH: claude | codex | pi | hermes.
+        /// Override harness auto-detection for PATH: claude | codex | cursor | pi | hermes.
         #[arg(long)]
         harness: Option<String>,
         /// Exclude thinking blocks.
@@ -252,6 +253,10 @@ enum AddAgent {
         #[command(flatten)]
         memory: AddMemory,
     },
+    Cursor {
+        #[command(flatten)]
+        memory: AddMemory,
+    },
     Pi {
         #[command(flatten)]
         memory: AddMemory,
@@ -269,6 +274,7 @@ enum AddAgent {
 enum RemoveAgent {
     Claude,
     Codex,
+    Cursor,
     Pi,
     Hermes,
 }
@@ -457,7 +463,7 @@ async fn main() -> Result<()> {
                 None => {
                     if !std::io::stdin().is_terminal() {
                         return Err(anyhow!(
-                            "automated `funes index` needs a target — pass a path or `--harness <claude|codex|pi|hermes>`; \
+                            "automated `funes index` needs a target — pass a path or `--harness <claude|codex|cursor|pi|hermes>`; \
                              refusing to index all harness roots unattended"
                         ));
                     }
@@ -469,10 +475,14 @@ async fn main() -> Result<()> {
             };
             if roots.is_empty() {
                 match harness {
+                    Some(Harness::Cursor) => println!(
+                        "no Cursor database found at the default user-data location — \
+                         pass its database file or user-data directory: `funes index PATH --harness cursor`."
+                    ),
                     Some(h) => println!("no {} sessions on this machine yet — nothing to index.", h.cli_name()),
                     None => println!(
                         "no sessions on this machine yet — nothing to index (looked in ~/.claude/projects, \
-                         ~/.codex/sessions, ~/.pi/agent/sessions, ~/.hermes/state.db)."
+                         ~/.codex/sessions, Cursor state.vscdb, ~/.pi/agent/sessions, ~/.hermes/state.db)."
                     ),
                 }
                 return Ok(());
@@ -539,6 +549,13 @@ async fn main() -> Result<()> {
                 }
                 bootstrap_add(Harness::Codex, resolved, codex::install).await
             }
+            AddAgent::Cursor { memory } => {
+                let resolved = resolve_add_memory(memory).await?;
+                if let Some(remote) = resolved.as_ref().filter(|r| r.is_remote()) {
+                    require_scanner(&remote.memory, Harness::Cursor)?;
+                }
+                bootstrap_add(Harness::Cursor, resolved, cursor::install).await
+            }
             AddAgent::Hermes { memory } => {
                 let resolved = resolve_add_memory(memory).await?;
                 if let Some(remote) = resolved.as_ref().filter(|r| r.is_remote()) {
@@ -557,6 +574,7 @@ async fn main() -> Result<()> {
         Cmd::Remove { agent } => match agent {
             RemoveAgent::Claude => claude::uninstall(),
             RemoveAgent::Codex => codex::uninstall(),
+            RemoveAgent::Cursor => cursor::uninstall(),
             RemoveAgent::Pi => pi::uninstall(),
             RemoveAgent::Hermes => hermes::uninstall(),
         },
@@ -708,7 +726,7 @@ fn parse_confirm(input: &str, default_yes: bool) -> bool {
     }
 }
 
-/// `funes add claude|codex [memory]` for the agents with a full local pipeline: bootstrap the
+/// funes add claude, codex, or cursor [memory] for the agents with a full local pipeline: bootstrap the
 /// one-time steps the hooks can't do unattended, around the per-agent `install` (hooks + MCP).
 ///
 /// 1. ask, then build the first index if the local memory is missing (so recall/push have content);
