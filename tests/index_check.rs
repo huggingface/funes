@@ -41,7 +41,8 @@ async fn check_reports_without_writing() {
         "duplicate id",
         "session dup-turn turn t-0001",
         "elided.funes.jsonl — 1 turns, 1 chunks",
-        "checked 5 unit(s): 6 turns, 8 chunks, 2 rejected, 1 duplicate id(s)",
+        "github_issue.funes.jsonl — 3 turns, 3 chunks",
+        "checked 6 unit(s): 9 turns, 11 chunks, 2 rejected, 1 duplicate id(s)",
     ] {
         assert!(report.text.contains(want), "missing {want:?} in:\n{}", report.text);
     }

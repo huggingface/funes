@@ -62,6 +62,11 @@ async fn turns_files_are_indexed_and_invalid_ones_rejected() {
     assert!(err.contains("2 unit(s) rejected"), "{err}");
     assert_eq!(
         stored_sessions().await,
-        BTreeSet::from(["b3f2e0c4".to_string(), "dup-turn".to_string(), "elided".to_string(),])
+        BTreeSet::from([
+            "b3f2e0c4".to_string(),
+            "dup-turn".to_string(),
+            "elided".to_string(),
+            "gh/huggingface/transformers#31234".to_string(),
+        ])
     );
 }
