@@ -19,17 +19,21 @@ async fn index(path: &Path) -> anyhow::Result<()> {
     funes::commands::index::run_index(path, false, None).await
 }
 
-/// The distinct `session_id`s the local memory holds.
-async fn stored_sessions() -> BTreeSet<String> {
+/// The `session_id` of every row the local memory holds.
+async fn stored_rows() -> Vec<String> {
     let ds = dataset::open(&dataset::table_uri(&dataset::local_memory_dir()), Default::default())
         .await
         .expect("the memory exists");
-    let mut out = BTreeSet::new();
+    let mut out = Vec::new();
     for batch in dataset::scan_rows(&ds, &["session_id"], None, None).await.unwrap() {
         let col = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
         out.extend((0..col.len()).map(|i| col.value(i).to_string()));
     }
     out
+}
+
+async fn stored_sessions() -> BTreeSet<String> {
+    stored_rows().await.into_iter().collect()
 }
 
 #[tokio::test]
@@ -54,8 +58,8 @@ async fn turns_files_are_indexed_and_invalid_ones_rejected() {
     .unwrap_err();
     assert!(err.to_string().contains("--harness"), "{err}");
 
-    // The directory: the valid files land (a duplicated turn dedups silently), the two rejected ones
-    // are counted and fail the exit status.
+    // The directory: the valid files land, the two rejected ones are counted and fail the exit
+    // status.
     let home = tempfile::tempdir().unwrap();
     std::env::set_var("FUNES_HOME", home.path());
     let err = index(&fixture("")).await.unwrap_err().to_string();
@@ -69,4 +73,7 @@ async fn turns_files_are_indexed_and_invalid_ones_rejected() {
             "gh/huggingface/transformers#31234".to_string(),
         ])
     );
+    // A turn re-emitted under its `turn_uuid` in the same file is one row, not two.
+    let rows = stored_rows().await;
+    assert_eq!(rows.iter().filter(|s| *s == "dup-turn").count(), 1, "{rows:?}");
 }

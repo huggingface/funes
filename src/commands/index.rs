@@ -496,7 +496,13 @@ impl Indexer {
             eprintln!("{progress} {label} — no indexable content");
             0
         } else {
-            let new_chunks: Vec<chunk::Chunk> = chunks.into_iter().filter(|c| !self.existing.contains(&c.id)).collect();
+            // A unit can carry one id twice (a turn re-emitted under its `turn_uuid`); the first wins,
+            // as it would have had the two arrived in separate runs.
+            let mut in_batch = HashSet::new();
+            let new_chunks: Vec<chunk::Chunk> = chunks
+                .into_iter()
+                .filter(|c| !self.existing.contains(&c.id) && in_batch.insert(c.id.clone()))
+                .collect();
             if new_chunks.is_empty() {
                 eprintln!("{progress} {label} — {total_chunks} chunks, all already indexed");
                 0
