@@ -90,6 +90,10 @@ enum Cmd {
         /// Override harness auto-detection for PATH: claude | codex | pi | hermes.
         #[arg(long)]
         harness: Option<String>,
+        /// Validate PATH without indexing it: parse, count turns and chunks, report rejected files
+        /// and duplicate ids; write nothing. Exits non-zero on any problem.
+        #[arg(long, requires = "path")]
+        check: bool,
         /// Exclude thinking blocks.
         #[arg(long)]
         no_thinking: bool,
@@ -420,11 +424,25 @@ async fn main() -> Result<()> {
         Cmd::Index {
             path,
             harness,
+            check,
             no_thinking,
             limit,
             yes,
         } => {
             let harness = harness.map(|h| Harness::parse(&h)).transpose()?;
+            if check {
+                let path = path.expect("clap requires PATH with --check");
+                let report = index::check(&PathBuf::from(&path), no_thinking, harness)?;
+                print!("{}", report.text);
+                if !report.is_clean() {
+                    return Err(anyhow!(
+                        "{} rejected, {} duplicate id(s)",
+                        report.rejected,
+                        report.duplicate_ids
+                    ));
+                }
+                return Ok(());
+            }
             // A harness-dirs refresh (no explicit path — the per-turn hook and the terminal "keep
             // me fresh" case) is budgeted and text-first; an explicit path or Hub repo is indexed
             // in full.

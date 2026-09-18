@@ -54,10 +54,14 @@ async fn turns_files_are_indexed_and_invalid_ones_rejected() {
     .unwrap_err();
     assert!(err.to_string().contains("--harness"), "{err}");
 
-    // The directory: the valid file lands, the two rejected ones are counted and fail the exit status.
+    // The directory: the valid files land (a duplicated turn dedups silently), the two rejected ones
+    // are counted and fail the exit status.
     let home = tempfile::tempdir().unwrap();
     std::env::set_var("FUNES_HOME", home.path());
     let err = index(&fixture("")).await.unwrap_err().to_string();
     assert!(err.contains("2 unit(s) rejected"), "{err}");
-    assert_eq!(stored_sessions().await, BTreeSet::from(["b3f2e0c4".to_string()]));
+    assert_eq!(
+        stored_sessions().await,
+        BTreeSet::from(["b3f2e0c4".to_string(), "dup-turn".to_string(), "elided".to_string(),])
+    );
 }

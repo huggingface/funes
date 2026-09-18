@@ -1,0 +1,2 @@
+{"session_id":"dup-turn","turn_uuid":"t-0001","seq":0,"ts":"2026-09-18T12:00:00Z","role":"user","harness":"opencode","blocks":[{"block_type":"text","text":"first version of the turn"}]}
+{"session_id":"dup-turn","turn_uuid":"t-0001","seq":1,"ts":"2026-09-18T12:00:05Z","role":"user","harness":"opencode","blocks":[{"block_type":"text","text":"an edit re-emitted under the same turn_uuid"}]}

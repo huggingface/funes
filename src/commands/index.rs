@@ -125,6 +125,33 @@ fn redact_turns(
     Ok(())
 }
 
+/// A unit's turns chunked at `tiers` as the memory stores them — data URIs elided and, with a
+/// `scanner`, secrets redacted first, since both change the text a block splits into.
+fn chunks_of(
+    turns: &mut [traces::Turn],
+    tiers: &[Tier],
+    include_thinking: bool,
+    scanner: Option<&scan::Trufflehog>,
+) -> Result<Vec<chunk::Chunk>> {
+    elide_turns(turns);
+    if let Some(scanner) = scanner {
+        redact_turns(turns, scanner, tiers, include_thinking)?;
+    }
+    Ok(chunk::chunks_from_turns(turns, tiers, include_thinking))
+}
+
+/// The secret scanner, if installed. Best-effort: without one, indexing continues unredacted — the
+/// push gate still scans, fail-closed, before any upload, so a secret can't reach the Hub.
+fn find_scanner() -> Option<scan::Trufflehog> {
+    match scan::Trufflehog::find() {
+        Ok(s) => Some(s),
+        Err(e) => {
+            eprintln!("note: secret redaction disabled — {e}");
+            None
+        }
+    }
+}
+
 /// A unit's distinct-session count and a log label: `"<sid> (<workdir>)"` for a single session (a
 /// JSONL file), `"<n> sessions"` for a bulk unit (many sessions in one artifact), and the unit's `key` (its
 /// path) when it has no turns at all. The borrow of `turns` is confined here so callers keep it mutable.
@@ -349,16 +376,7 @@ impl Indexer {
         };
 
         let embedder: Box<dyn Embedder> = inference::embedder()?;
-        // Best-effort secret redaction: if the scanner isn't installed, indexing continues
-        // unredacted — the push gate still scans, fail-closed, before any upload, so a secret can't
-        // reach the Hub.
-        let scanner = match scan::Trufflehog::find() {
-            Ok(s) => Some(s),
-            Err(e) => {
-                eprintln!("note: secret redaction disabled — {e}");
-                None
-            }
-        };
+        let scanner = find_scanner();
 
         let existing = match &ds {
             Some(d) => stored_ids(d).await?,
@@ -459,11 +477,7 @@ impl Indexer {
         };
 
         let (sessions, label) = unit_summary(&turns, &key);
-        elide_turns(&mut turns);
-        if let Some(scanner) = &self.scanner {
-            redact_turns(&mut turns, scanner, tiers, self.include_thinking)?;
-        }
-        let mut chunks = chunk::chunks_from_turns(&turns, tiers, self.include_thinking);
+        let mut chunks = chunks_of(&mut turns, tiers, self.include_thinking, self.scanner.as_ref())?;
         let mut repo_by_session: HashMap<&str, String> = HashMap::new();
         for t in &turns {
             if let Some(cwd) = &t.cwd {
@@ -786,6 +800,66 @@ async fn index_sources(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: 
     }
 
     indexer.finalize().await
+}
+
+/// What a dry run found.
+pub struct CheckReport {
+    pub text: String,
+    pub rejected: usize,
+    pub duplicate_ids: usize,
+}
+
+impl CheckReport {
+    pub fn is_clean(&self) -> bool {
+        self.rejected == 0 && self.duplicate_ids == 0
+    }
+}
+
+/// Dry-run `path`: read and chunk every unit exactly as an index would, count turns and chunks,
+/// find the ids a unit produces twice (a turn re-emitted under its `turn_uuid` would be deduped
+/// away, never indexed), and write nothing — no lock, no memory, no model.
+pub fn check(path: &Path, no_thinking: bool, harness: Option<Harness>) -> Result<CheckReport> {
+    let src = source::open_with_harness(path, None, harness)?;
+    let units = src.units()?;
+    let scanner = find_scanner();
+    let mut text = format!("checking {}\n", path.display());
+    let (mut turns, mut chunks, mut rejected, mut duplicate_ids) = (0usize, 0usize, 0usize, 0usize);
+    for unit in &units {
+        let mut unit_turns = match src.read(unit) {
+            Ok(t) => t,
+            Err(e) => {
+                rejected += 1;
+                text.push_str(&format!("  {} — rejected: {e}\n", unit.key));
+                continue;
+            }
+        };
+        let unit_chunks = chunks_of(&mut unit_turns, &Tier::ALL, !no_thinking, scanner.as_ref())?;
+        text.push_str(&format!(
+            "  {} — {} turns, {} chunks\n",
+            unit.key,
+            unit_turns.len(),
+            unit_chunks.len()
+        ));
+        let mut seen = HashSet::new();
+        for c in unit_chunks.iter().filter(|c| !seen.insert(c.id.as_str())) {
+            duplicate_ids += 1;
+            text.push_str(&format!(
+                "    duplicate id {}: session {} turn {} block {} split {}\n",
+                c.id, c.session_id, c.turn_uuid, c.block_idx, c.split_idx
+            ));
+        }
+        turns += unit_turns.len();
+        chunks += unit_chunks.len();
+    }
+    text.push_str(&format!(
+        "checked {} unit(s): {turns} turns, {chunks} chunks, {rejected} rejected, {duplicate_ids} duplicate id(s)\n",
+        units.len()
+    ));
+    Ok(CheckReport {
+        text,
+        rejected,
+        duplicate_ids,
+    })
 }
 
 /// Build/update the local index from a single source root, auto-detecting its harness — a thin
