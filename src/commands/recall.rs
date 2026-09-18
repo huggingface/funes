@@ -833,9 +833,9 @@ pub(crate) fn is_scaffolding(block_start: &str) -> bool {
         || t.starts_with("This session is being continued from a previous conversation")
 }
 
-/// The opening real prompt of each session in `ids` — its earliest user text block that isn't
-/// injected scaffolding, collapsed to one line. A session whose user turns are all scaffolding is
-/// absent from the map.
+/// The opening real prompt of each session in `ids` — its earliest `user` text block that isn't
+/// injected scaffolding, or its earliest text block of any role when it has no `user` turn at all.
+/// A session whose `user` turns are all scaffolding is absent from the map.
 async fn first_prompts(ds: &Dataset, ids: &[String]) -> Result<HashMap<String, String>> {
     if ids.is_empty() {
         return Ok(HashMap::new());
@@ -843,33 +843,47 @@ async fn first_prompts(ds: &Dataset, ids: &[String]) -> Result<HashMap<String, S
     let list: Vec<String> = ids.iter().map(|id| format!("'{}'", esc(id))).collect();
     // Split 0 only: `is_scaffolding` reads a block's start, and a later split begins mid-text.
     let filter = format!(
-        "session_id IN ({}) AND role = 'user' AND block_type = 'text' AND split_idx = 0",
+        "session_id IN ({}) AND block_type = 'text' AND split_idx = 0",
         list.join(", ")
     );
-    let cols = ["session_id", "seq", "block_idx", "text"];
+    let cols = ["session_id", "seq", "block_idx", "role", "text"];
     let batches = dataset::scan_rows(ds, &cols, Some(&filter), None).await?;
-    let mut best: HashMap<String, ((i64, i64), String)> = HashMap::new();
+    // `has_user`: a session whose `user` texts are all scaffolding opens on nothing, not on a reply.
+    #[derive(Default)]
+    struct Opening {
+        user: Option<((i64, i64), String)>,
+        has_user: bool,
+        any: Option<((i64, i64), String)>,
+    }
+    fn earliest(slot: &mut Option<((i64, i64), String)>, key: (i64, i64), body: &str) {
+        if slot.as_ref().is_none_or(|(k, _)| key < *k) {
+            *slot = Some((key, body.to_string()));
+        }
+    }
+    let mut best: HashMap<String, Opening> = HashMap::new();
     for batch in &batches {
-        let (sid, text) = (scol(batch, "session_id"), scol(batch, "text"));
+        let (sid, role, text) = (scol(batch, "session_id"), scol(batch, "role"), scol(batch, "text"));
         let (seq, bi) = (icol(batch, "seq"), icol(batch, "block_idx"));
         for i in 0..batch.num_rows() {
             let body = sval(text, i);
-            if is_scaffolding(&body) {
-                continue;
-            }
             let key = (ival(seq, i), ival(bi, i));
-            match best.entry(sval(sid, i)) {
-                std::collections::hash_map::Entry::Occupied(mut e) if key < e.get().0 => {
-                    e.insert((key, body));
+            let opening = best.entry(sval(sid, i)).or_default();
+            if sval(role, i) == "user" {
+                opening.has_user = true;
+                if !is_scaffolding(&body) {
+                    earliest(&mut opening.user, key, &body);
                 }
-                std::collections::hash_map::Entry::Vacant(e) => {
-                    e.insert((key, body));
-                }
-                _ => {}
             }
+            earliest(&mut opening.any, key, &body);
         }
     }
-    Ok(best.into_iter().map(|(id, (_, text))| (id, text)).collect())
+    Ok(best
+        .into_iter()
+        .filter_map(|(id, o)| {
+            let pick = if o.has_user { o.user } else { o.any };
+            pick.map(|(_, text)| (id, text))
+        })
+        .collect())
 }
 
 /// Fold every row into its session: earliest timestamp, provenance, and distinct turn count. Reads
@@ -1345,7 +1359,10 @@ pub async fn status(memory: Memory) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::traces::{Block, Turn, FORMAT_VERSION};
+    use arrow_array::RecordBatchIterator;
     use chrono::TimeZone;
+    use std::path::Path;
 
     #[test]
     fn is_scaffolding_flags_wrappers_and_headings() {
@@ -1385,6 +1402,60 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 7, 9, 12, 0, 0).unwrap();
         let t = Utc.with_ymd_and_hms(2026, 7, 7, 13, 30, 0).unwrap();
         assert_eq!(stamp(t, now), "2026-07-07 13:30 UTC (46 hours ago)");
+    }
+
+    /// A memory holding `turns`, written to a temp dir.
+    async fn memory_of(turns: &[Turn], dir: &Path) -> Dataset {
+        let chunks = chunk::chunks_from_turns(turns, &chunk::Tier::ALL, true);
+        let vectors = vec![vec![0.0f32; dataset::DIM as usize]; chunks.len()];
+        let batch = dataset::build_batch(&chunks, &vectors).unwrap();
+        let reader = RecordBatchIterator::new(vec![Ok(batch)], dataset::schema());
+        Dataset::write(reader, dir.to_str().unwrap(), None).await.unwrap()
+    }
+
+    fn text_turn(session: &str, seq: i64, role: &str, text: &str) -> Turn {
+        Turn {
+            format: FORMAT_VERSION,
+            session_id: session.into(),
+            cwd: None,
+            workdir: String::new(),
+            turn_uuid: format!("{session}-{seq}"),
+            parent_uuid: None,
+            seq,
+            ts: "2026-01-01T00:00:00Z".into(),
+            role: role.into(),
+            blocks: vec![Block {
+                block_type: "text".into(),
+                text: text.into(),
+                tool_name: None,
+                tool_use_id: None,
+            }],
+            source_path: String::new(),
+            harness: "t".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn first_prompts_open_on_user_text_else_the_first_text_of_any_role() {
+        let dir = tempfile::tempdir().unwrap();
+        let turns = [
+            // An agent session: the first non-scaffolding user text, not the earlier scaffolding.
+            text_turn("agent", 0, "user", "<system-reminder>…</system-reminder>"),
+            text_turn("agent", 1, "user", "how do we parse transcripts"),
+            text_turn("agent", 2, "assistant", "with serde"),
+            // A tracker thread: no `user` turn at all — the first text block opens it.
+            text_turn("issue", 0, "contributor", "**@someone** opened: build fails on arm64"),
+            text_turn("issue", 1, "member", "reproduced on main"),
+            // Only scaffolding user text: nothing opens it, a reply is not a prompt.
+            text_turn("scaffold", 0, "user", "# skill preamble"),
+            text_turn("scaffold", 1, "assistant", "ok"),
+        ];
+        let ds = memory_of(&turns, dir.path()).await;
+        let ids: Vec<String> = ["agent", "issue", "scaffold"].map(String::from).to_vec();
+        let prompts = first_prompts(&ds, &ids).await.unwrap();
+        assert_eq!(prompts["agent"], "how do we parse transcripts");
+        assert_eq!(prompts["issue"], "**@someone** opened: build fails on arm64");
+        assert!(!prompts.contains_key("scaffold"), "{prompts:?}");
     }
 
     #[test]

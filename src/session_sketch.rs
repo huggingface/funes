@@ -1095,11 +1095,11 @@ fn centroid(units: &[Unit]) -> Option<Vec<f32>> {
 }
 
 fn add_anchors(units: &[Unit], pool: &mut CandidatePool) {
-    if let Some((i, _)) = units
+    let opening = units
         .iter()
-        .enumerate()
-        .find(|(_, unit)| unit.role == "user" && unit.block_type == "text")
-    {
+        .position(|unit| unit.role == "user" && unit.block_type == "text")
+        .or_else(|| units.iter().position(|unit| unit.block_type == "text"));
+    if let Some(i) = opening {
         pool.add(i, "opening_user", true, 0.0);
     }
     if let Some((i, _)) = units
@@ -1593,6 +1593,18 @@ mod tests {
         let count = add_transitions(&units, &turns, 6, &mut pool);
         assert_eq!(count, 1);
         assert!(pool.by_unit.values().any(|c| c.transition > 1.5));
+    }
+
+    #[test]
+    fn anchors_open_on_the_first_text_without_a_user_turn() {
+        let units = vec![
+            unit(0, "contributor", &[1.0, 0.0], "opened: build fails"),
+            unit(1, "member", &[0.0, 1.0], "reproduced"),
+        ];
+        let mut pool = CandidatePool::new();
+        add_anchors(&units, &mut pool);
+        assert!(pool.by_unit[&0].reasons.contains("opening_user"));
+        assert!(pool.by_unit.values().all(|c| !c.reasons.contains("closing_assistant")));
     }
 
     #[test]
