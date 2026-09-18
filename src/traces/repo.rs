@@ -50,6 +50,9 @@ fn identity(url: &str) -> Option<String> {
 /// deduped, sorted. Any remote counts, so a fork's `upstream` is included alongside its `origin`.
 /// Empty when `cwd` isn't a resolvable git checkout (gone, not a repo, or git unavailable).
 pub fn of_cwd(cwd: &str) -> String {
+    if !Path::new(cwd).is_dir() {
+        return String::new();
+    }
     let Ok(out) = Command::new("git").args(["-C", cwd, "remote", "-v"]).output() else {
         return String::new();
     };
