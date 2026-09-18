@@ -51,6 +51,12 @@ async fn check_reports_without_writing() {
     assert!(report.is_clean(), "{}", report.text);
     assert!(report.text.contains("3 turns, 5 chunks"), "{}", report.text);
 
+    // A path that does not exist is an error, not a clean zero-unit check.
+    let err = funes::commands::index::check(&fixture("missing.funes.jsonl"), false, None, None)
+        .err()
+        .expect("a missing path is refused");
+    assert!(err.to_string().contains("no such path"), "{err}");
+
     // Nothing was written: the home is as empty as it was created.
     assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
 
