@@ -824,8 +824,8 @@ impl CheckReport {
 /// Dry-run `path`: read and chunk every unit exactly as an index would, count turns and chunks,
 /// find the ids a unit produces twice (a turn re-emitted under its `turn_uuid` would be deduped
 /// away, never indexed), and write nothing — no lock, no memory, no model.
-pub fn check(path: &Path, no_thinking: bool, harness: Option<Harness>) -> Result<CheckReport> {
-    let src = source::open_with_harness(path, None, harness)?;
+pub fn check(path: &Path, no_thinking: bool, limit: Option<usize>, harness: Option<Harness>) -> Result<CheckReport> {
+    let src = source::open_with_harness(path, limit, harness)?;
     let units = src.units()?;
     let scanner = find_scanner();
     let mut text = format!("checking {}\n", path.display());

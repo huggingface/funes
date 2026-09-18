@@ -7,6 +7,7 @@ use super::source::{TraceSource, Unit};
 use super::{Turn, BLOCK_TYPES};
 use anyhow::{anyhow, bail, Context, Result};
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 pub const SUFFIX: &str = ".funes.jsonl";
 
@@ -18,17 +19,19 @@ pub fn is_turns_file(path: &Path) -> bool {
 }
 
 /// A turns file, or a directory of them. `listing` is every `.jsonl` under `path` (the file itself
-/// for a file), listed by the caller.
+/// for a file), listed by the caller; `limit` keeps the most recent N files by mtime.
 pub struct FunesJsonl {
     path: PathBuf,
     listing: Vec<PathBuf>,
+    limit: Option<usize>,
 }
 
 impl FunesJsonl {
-    pub fn new(path: &Path, listing: Vec<PathBuf>) -> FunesJsonl {
+    pub fn new(path: &Path, listing: Vec<PathBuf>, limit: Option<usize>) -> FunesJsonl {
         FunesJsonl {
             path: path.to_path_buf(),
             listing,
+            limit,
         }
     }
 
@@ -56,9 +59,15 @@ impl TraceSource for FunesJsonl {
     }
 
     fn units(&self) -> Result<Vec<Unit>> {
-        Ok(self
-            .files()?
-            .iter()
+        let mut files = self.files()?.to_vec();
+        files.sort_by_cached_key(|p| {
+            std::cmp::Reverse(std::fs::metadata(p).and_then(|m| m.modified()).unwrap_or(UNIX_EPOCH))
+        });
+        if let Some(n) = self.limit {
+            files.truncate(n);
+        }
+        Ok(files
+            .into_iter()
             .map(|p| Unit {
                 key: p.to_string_lossy().into_owned(),
                 signature: None,
@@ -81,7 +90,7 @@ impl TraceSource for FunesJsonl {
     }
 
     fn unit_keys(&self) -> Result<Vec<String>> {
-        Ok(self.units()?.into_iter().map(|u| u.key).collect())
+        Ok(self.files()?.iter().map(|p| p.to_string_lossy().into_owned()).collect())
     }
 }
 
@@ -144,7 +153,18 @@ mod tests {
     }
 
     fn source(path: &Path) -> FunesJsonl {
-        FunesJsonl::new(path, jsonl::iter_jsonl_files(path))
+        FunesJsonl::new(path, jsonl::iter_jsonl_files(path), None)
+    }
+
+    #[test]
+    fn limit_keeps_the_most_recent_files_and_leaves_the_listing_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["a.funes.jsonl", "b.funes.jsonl", "c.funes.jsonl"] {
+            write(dir.path(), name, &[LINE]);
+        }
+        let capped = FunesJsonl::new(dir.path(), jsonl::iter_jsonl_files(dir.path()), Some(2));
+        assert_eq!(capped.units().unwrap().len(), 2);
+        assert_eq!(capped.unit_keys().unwrap().len(), 3);
     }
 
     #[test]
@@ -223,8 +243,9 @@ mod tests {
         assert_eq!(units.len(), 2);
         assert!(units.iter().all(|u| u.signature.is_none()));
         assert!(!tree.fatal_on_read_error());
-        assert!(tree.owns(&units[0].key) && !file.owns(&units[1].key));
-        assert_eq!(tree.read(&units[0]).unwrap().len(), 1);
+        let b = units.iter().find(|u| u.key.ends_with("b.funes.jsonl")).unwrap();
+        assert!(tree.owns(&b.key) && !file.owns(&b.key));
+        assert_eq!(tree.read(b).unwrap().len(), 1);
     }
 
     #[test]

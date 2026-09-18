@@ -31,7 +31,7 @@ async fn check_reports_without_writing() {
     let home = tempfile::tempdir().unwrap();
     std::env::set_var("FUNES_HOME", home.path());
 
-    let report = funes::commands::index::check(&fixture(""), false, None).unwrap();
+    let report = funes::commands::index::check(&fixture(""), false, None, None).unwrap();
     assert!(!report.is_clean());
     assert_eq!((report.rejected, report.duplicate_ids), (2, 1));
     for want in [
@@ -47,7 +47,7 @@ async fn check_reports_without_writing() {
         assert!(report.text.contains(want), "missing {want:?} in:\n{}", report.text);
     }
 
-    let report = funes::commands::index::check(&fixture("valid.funes.jsonl"), false, None).unwrap();
+    let report = funes::commands::index::check(&fixture("valid.funes.jsonl"), false, None, None).unwrap();
     assert!(report.is_clean(), "{}", report.text);
     assert!(report.text.contains("3 turns, 5 chunks"), "{}", report.text);
 
@@ -73,7 +73,7 @@ async fn check_reports_without_writing() {
     let home = tempfile::tempdir().unwrap();
     std::env::set_var("FUNES_HOME", home.path());
     let elided = fixture("elided.funes.jsonl");
-    let report = funes::commands::index::check(&elided, false, None).unwrap();
+    let report = funes::commands::index::check(&elided, false, None, None).unwrap();
     assert!(report.is_clean(), "{}", report.text);
     assert!(report.text.contains("1 turns, 1 chunks"), "{}", report.text);
     funes::commands::index::run_index(&elided, false, None).await.unwrap();

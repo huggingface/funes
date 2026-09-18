@@ -433,7 +433,7 @@ async fn main() -> Result<()> {
             let harness = harness.map(|h| Harness::parse(&h)).transpose()?;
             if check {
                 let path = path.expect("clap requires PATH with --check");
-                let report = index::check(&PathBuf::from(&path), no_thinking, harness)?;
+                let report = index::check(&PathBuf::from(&path), no_thinking, limit, harness)?;
                 print!("{}", report.text);
                 if !report.is_clean() {
                     return Err(anyhow!(

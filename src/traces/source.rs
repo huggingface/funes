@@ -103,6 +103,7 @@ pub fn open_with_harness(path: &Path, limit: Option<usize>, harness: Option<Harn
         return Ok(Box::new(funes_jsonl::FunesJsonl::new(
             path,
             listing.unwrap_or_default(),
+            limit,
         )));
     }
     Ok(if harness == Some(Harness::Hermes) || is_hermes_path(path) {
