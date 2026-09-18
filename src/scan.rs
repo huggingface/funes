@@ -39,8 +39,7 @@ pub struct Finding {
     pub decoder: String,
 }
 
-/// A pluggable secret-detection engine. The rest of this module — redaction, the allowlist, the
-/// gate — depends only on this, never on a specific tool.
+/// A pluggable secret-detection engine for scanning in-memory text before redaction.
 pub trait SecretScanner {
     /// What was found in each of `texts`, one entry per text: `out[i]` holds the secrets in
     /// `texts[i]`. Fail-closed: `Err` means "couldn't scan", never "clean".
@@ -52,6 +51,51 @@ pub struct Trufflehog {
     bin: PathBuf,
 }
 
+#[derive(Clone, Copy)]
+enum Source {
+    Filesystem,
+    JsonEnumerator,
+}
+
+impl Source {
+    fn command(self) -> &'static str {
+        match self {
+            Self::Filesystem => "filesystem",
+            Self::JsonEnumerator => "json-enumerator",
+        }
+    }
+
+    fn owner(self, value: &serde_json::Value) -> Result<usize> {
+        match self {
+            Self::Filesystem => {
+                let file = value
+                    .pointer("/SourceMetadata/Data/Filesystem/file")
+                    .and_then(|v| v.as_str())
+                    .context("missing or non-string SourceMetadata.Data.Filesystem.file")?;
+                Path::new(file)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .context("missing staged filename")?
+                    .parse()
+                    .context("non-integer staged filename")
+            }
+            Self::JsonEnumerator => {
+                let metadata = value
+                    .pointer("/SourceMetadata/Data/JsonEnumerator/metadata")
+                    .and_then(|v| v.as_str())
+                    .context("missing or non-string SourceMetadata.Data.JsonEnumerator.metadata")?;
+                let metadata: serde_json::Value =
+                    serde_json::from_str(metadata).context("invalid JSON block metadata")?;
+                let block = metadata
+                    .get("block")
+                    .and_then(|v| v.as_u64())
+                    .context("missing or non-integer block index")?;
+                usize::try_from(block).context("block index exceeds usize")
+            }
+        }
+    }
+}
+
 impl Trufflehog {
     /// Locate the trufflehog binary; fail-closed if none is found.
     pub fn find() -> Result<Self> {
@@ -59,24 +103,19 @@ impl Trufflehog {
             bin: find_in(|k| std::env::var_os(k), |p| p.is_file())?,
         })
     }
-}
 
-impl SecretScanner for Trufflehog {
-    /// One file per text, one run over the directory: trufflehog names the file each secret came
-    /// from. One file for all of them would leave only the reported line to tell them apart, and
-    /// that line is counted in the decoder's output, not in the text funes holds.
-    fn scan(&self, texts: &[&str]) -> Result<Vec<Vec<Finding>>> {
-        if texts.is_empty() {
+    /// Each JSON record carries the index of one complete reconstructed block.
+    pub(crate) fn scan_json(&self, file: &Path, blocks: usize) -> Result<Vec<Vec<Finding>>> {
+        if blocks == 0 {
             return Ok(Vec::new());
         }
-        let dir = tempfile::tempdir().context("creating a temp dir for the secret scan")?;
-        for (i, text) in texts.iter().enumerate() {
-            std::fs::write(dir.path().join(i.to_string()), text)
-                .with_context(|| format!("staging text {i} for the scan"))?;
-        }
+        self.run(Source::JsonEnumerator, file, blocks)
+    }
+
+    fn run(&self, source: Source, path: &Path, blocks: usize) -> Result<Vec<Vec<Finding>>> {
         let out = Command::new(&self.bin)
-            .arg("filesystem")
-            .arg(dir.path())
+            .arg(source.command())
+            .arg(path)
             .args([
                 "--json",
                 "--no-verification",
@@ -88,40 +127,62 @@ impl SecretScanner for Trufflehog {
             .output()
             .with_context(|| format!("running trufflehog at {}", self.bin.display()))?;
 
-        let records = interpret_scan_output(out.status.code(), &out.stdout, &out.stderr)?;
-        group_by_file(records, texts.len())
+        let records = interpret_scan_output(out.status.code(), &out.stdout, &out.stderr, source)?;
+        group_by_owner(records, blocks)
     }
 }
 
-/// Which text each secret came from, read off the file trufflehog reported: each text is staged
-/// under its own index. Fail-closed on a file that is not one of them — a secret no text owns can
-/// be neither redacted nor held back.
-fn group_by_file(records: Vec<(String, Finding)>, texts: usize) -> Result<Vec<Vec<Finding>>> {
+impl SecretScanner for Trufflehog {
+    /// A separate file identifies each text regardless of how a decoder changes its line numbers.
+    fn scan(&self, texts: &[&str]) -> Result<Vec<Vec<Finding>>> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let dir = tempfile::tempdir().context("creating a temp dir for the secret scan")?;
+        for (i, text) in texts.iter().enumerate() {
+            std::fs::write(dir.path().join(i.to_string()), text)
+                .with_context(|| format!("staging text {i} for the scan"))?;
+        }
+        self.run(Source::Filesystem, dir.path(), texts.len())
+    }
+}
+
+/// A finding with no owning text can be neither redacted nor held back, so reject unknown indices.
+fn group_by_owner(records: Vec<(usize, Finding)>, texts: usize) -> Result<Vec<Vec<Finding>>> {
     let mut out: Vec<Vec<Finding>> = (0..texts).map(|_| Vec::new()).collect();
-    for (file, finding) in records {
-        let name = Path::new(&file)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
-        let i = name.parse::<usize>().ok().filter(|&i| i < texts).ok_or_else(|| {
-            anyhow!(
-                "trufflehog reported a {} finding in {name:?}, which is not one of the {texts} \
+    for (owner, finding) in records {
+        let findings = out.get_mut(owner).with_context(|| {
+            format!(
+                "trufflehog reported a {} finding at index {owner}, which is not one of the {texts} \
                      staged text(s); refusing to treat the text as clean",
                 finding.detector
             )
         })?;
-        out[i].push(finding);
+        findings.push(finding);
     }
     Ok(out)
 }
 
-fn interpret_scan_output(status: Option<i32>, stdout: &[u8], stderr: &[u8]) -> Result<Vec<(String, Finding)>> {
+fn interpret_scan_output(
+    status: Option<i32>,
+    stdout: &[u8],
+    stderr: &[u8],
+    source: Source,
+) -> Result<Vec<(usize, Finding)>> {
+    // TruffleHog can log a source/scan error yet exit 0 or 183, even with --fail-on-scan-errors.
+    for line in stderr.split(|&b| b == b'\n') {
+        if let Ok(record) = serde_json::from_slice::<serde_json::Value>(line) {
+            if record.get("level").and_then(|v| v.as_str()) == Some("error") {
+                bail!("trufflehog reported a scan error; refusing to treat the text as clean");
+            }
+        }
+    }
     match status {
         Some(0) if stdout.iter().all(u8::is_ascii_whitespace) => Ok(Vec::new()),
         Some(0) => bail!(
             "trufflehog exited successfully but emitted unexpected result data; refusing to treat the text as clean"
         ),
-        Some(FOUND) => parse_findings(stdout),
+        Some(FOUND) => parse_findings(stdout, source),
         other => bail!(
             "trufflehog exited abnormally ({other:?}); refusing to treat the text as clean:\n{}",
             String::from_utf8_lossy(stderr).trim()
@@ -129,7 +190,7 @@ fn interpret_scan_output(status: Option<i32>, stdout: &[u8], stderr: &[u8]) -> R
     }
 }
 
-fn parse_findings(stdout: &[u8]) -> Result<Vec<(String, Finding)>> {
+fn parse_findings(stdout: &[u8], source: Source) -> Result<Vec<(usize, Finding)>> {
     let text = std::str::from_utf8(stdout).map_err(|e| {
         anyhow!(
             "trufflehog emitted non-UTF-8 result data near byte {}; refusing to treat the text as clean",
@@ -138,7 +199,7 @@ fn parse_findings(stdout: &[u8]) -> Result<Vec<(String, Finding)>> {
     })?;
     let mut findings = Vec::new();
     for (record, line) in text.lines().filter(|line| !line.trim().is_empty()).enumerate() {
-        findings.push(parse_finding(line).with_context(|| {
+        findings.push(parse_finding(line, source).with_context(|| {
             format!(
                 "trufflehog result record {} does not match the supported schema; refusing to treat the text as clean",
                 record + 1
@@ -151,8 +212,8 @@ fn parse_findings(stdout: &[u8]) -> Result<Vec<(String, Finding)>> {
     Ok(findings)
 }
 
-/// Parse one trufflehog JSON result line into the file it was found in and the [`Finding`] itself.
-fn parse_finding(line: &str) -> Result<(String, Finding)> {
+/// Parse one trufflehog JSON result line into its source owner and the [`Finding`] itself.
+fn parse_finding(line: &str, source: Source) -> Result<(usize, Finding)> {
     let v: serde_json::Value = serde_json::from_str(line.trim()).context("invalid JSON result record")?;
     let required_string = |field: &str| -> Result<String> {
         v.get(field)
@@ -164,17 +225,13 @@ fn parse_finding(line: &str) -> Result<(String, Finding)> {
     if detector.is_empty() {
         bail!("empty DetectorName");
     }
-    let file = v
-        .pointer("/SourceMetadata/Data/Filesystem/file")
-        .and_then(|x| x.as_str())
-        .ok_or_else(|| anyhow!("missing or non-string SourceMetadata.Data.Filesystem.file"))?
-        .to_string();
+    let owner = source.owner(&v)?;
     let decoder = required_string("DecoderName")?;
     if decoder.is_empty() {
         bail!("empty DecoderName");
     }
     Ok((
-        file,
+        owner,
         Finding {
             detector,
             raw: required_string("Raw")?,
@@ -218,7 +275,7 @@ fn find_in(env: impl Fn(&str) -> Option<OsString>, exists: impl Fn(&Path) -> boo
     })
 }
 
-/// The one place a scanner is invoked for *block-level* detection: scans `texts` in one pass and
+/// Block-level detection for in-memory callers: scans `texts` in one pass and
 /// returns what it found in each of them. `texts` must each be a contiguous unit (a reconstructed
 /// block), so a secret never straddles two. Redaction ([`excise`]) and the drop/hold-back decisions
 /// come from this result without re-scanning. Fail-closed on the scanner, and on one that answers
@@ -373,24 +430,30 @@ mod tests {
 
     #[test]
     fn scanner_contract_rejects_exit_183_without_records() {
-        let err = interpret_scan_output(Some(FOUND), b"", b"").unwrap_err().to_string();
+        let err = interpret_scan_output(Some(FOUND), b"", b"", Source::Filesystem)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("no valid findings"), "{err}");
     }
 
     #[test]
     fn scanner_contract_rejects_result_data_on_a_clean_exit_without_echoing_it() {
         let secret = b"DO_NOT_ECHO";
-        let err = interpret_scan_output(Some(0), secret, b"").unwrap_err().to_string();
+        let err = interpret_scan_output(Some(0), secret, b"", Source::Filesystem)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("unexpected result data"), "{err}");
         assert!(!err.contains("DO_NOT_ECHO"), "scanner output leaked in error: {err}");
-        assert!(interpret_scan_output(Some(0), b" \n\t", b"").unwrap().is_empty());
+        assert!(interpret_scan_output(Some(0), b" \n\t", b"", Source::Filesystem)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
     fn scanner_contract_rejects_malformed_json_without_echoing_it() {
         let secret = "DO_NOT_ECHO";
         let malformed = format!("{{\"DetectorName\":\"Test\",\"Raw\":\"{secret}\"");
-        let err = interpret_scan_output(Some(FOUND), malformed.as_bytes(), b"")
+        let err = interpret_scan_output(Some(FOUND), malformed.as_bytes(), b"", Source::Filesystem)
             .unwrap_err()
             .to_string();
         assert!(err.contains("record 1"), "{err}");
@@ -400,9 +463,49 @@ mod tests {
     #[test]
     fn scanner_contract_rejects_an_unknown_json_schema() {
         let output = br#"{"DetectorName":"Test","Raw":"DO_NOT_ECHO","DecoderName":"PLAIN"}"#;
-        let err = interpret_scan_output(Some(FOUND), output, b"").unwrap_err().to_string();
+        let err = interpret_scan_output(Some(FOUND), output, b"", Source::Filesystem)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("record 1"), "{err}");
         assert!(!err.contains("DO_NOT_ECHO"), "scanner output leaked in error: {err}");
+    }
+
+    #[test]
+    fn scanner_contract_rejects_error_diagnostics_on_clean_and_found_exits() {
+        let diagnostic = br#"{"level":"error","msg":"scan timed out","data":"DO_NOT_ECHO"}"#;
+        for status in [0, FOUND] {
+            let err = interpret_scan_output(Some(status), b"", diagnostic, Source::JsonEnumerator)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("reported a scan error"), "{err}");
+            assert!(!err.contains("DO_NOT_ECHO"), "{err}");
+        }
+    }
+
+    #[test]
+    fn json_findings_use_block_metadata_and_reject_unknown_owners() {
+        let record = |metadata: &str| {
+            serde_json::json!({
+                "DetectorName": "PrivateKey", "Raw": "DO_NOT_ECHO", "DecoderName": "BASE64",
+                "SourceMetadata": {"Data": {"JsonEnumerator": {"metadata": metadata}}}
+            })
+            .to_string()
+        };
+        let found = interpret_scan_output(
+            Some(FOUND),
+            record(r#"{"block":1}"#).as_bytes(),
+            b"",
+            Source::JsonEnumerator,
+        )
+        .unwrap();
+        let grouped = group_by_owner(found, 3).unwrap();
+        assert!(grouped[0].is_empty() && grouped[2].is_empty());
+        assert_eq!(grouped[1][0].detector, "PrivateKey");
+        for metadata in ["{}", r#"{"block":-1}"#, r#"{"block":"1"}"#, "not json"] {
+            assert!(parse_finding(&record(metadata), Source::JsonEnumerator).is_err());
+        }
+        let found = parse_findings(record(r#"{"block":3}"#).as_bytes(), Source::JsonEnumerator).unwrap();
+        assert!(group_by_owner(found, 3).is_err());
     }
 
     #[test]
@@ -473,24 +576,24 @@ mod tests {
     }
 
     #[test]
-    fn group_by_file_finds_the_text_a_secret_is_in() {
-        let records = vec![
-            ("/tmp/x/2".to_string(), finding("AWS", "SEKRET")),
-            ("/tmp/x/0".to_string(), finding("PrivateKey", "KEY")),
-        ];
-        let out = group_by_file(records, 3).unwrap();
+    fn group_by_owner_finds_the_text_a_secret_is_in() {
+        let records = vec![(2, finding("AWS", "SEKRET")), (0, finding("PrivateKey", "KEY"))];
+        let out = group_by_owner(records, 3).unwrap();
         assert_eq!(detectors(&out[0]), vec!["PrivateKey".to_string()]);
         assert!(out[1].is_empty());
         assert_eq!(detectors(&out[2]), vec!["AWS".to_string()]);
     }
 
     #[test]
-    fn group_by_file_rejects_a_file_that_is_not_one_of_the_staged_texts() {
+    fn filesystem_findings_reject_a_file_that_is_not_one_of_the_staged_texts() {
         for file in ["/tmp/x/blob.txt", "/tmp/x/9", "/tmp/x/1/inner.txt"] {
-            let err = group_by_file(vec![(file.to_string(), finding("AWS", "SEKRET"))], 2)
-                .unwrap_err()
-                .to_string();
-            assert!(err.contains("not one of the 2 staged text(s)"), "{file}: {err}");
+            let record = serde_json::json!({
+                "SourceMetadata": {"Data": {"Filesystem": {"file": file}}}
+            });
+            let result = Source::Filesystem
+                .owner(&record)
+                .and_then(|owner| group_by_owner(vec![(owner, finding("AWS", "SEKRET"))], 2));
+            assert!(result.is_err(), "{file}");
         }
     }
 

@@ -32,6 +32,15 @@ pub const TABLE: &str = "chunks";
 pub const MODEL: &str = "BAAI/bge-small-en-v1.5";
 pub const DIM: i32 = 384;
 
+/// Bulk staging can exceed RAM; Linux's default `/tmp` is commonly backed by tmpfs.
+pub(crate) fn staging_root() -> PathBuf {
+    if cfg!(target_os = "linux") && std::env::var_os("TMPDIR").is_none() {
+        PathBuf::from("/var/tmp")
+    } else {
+        std::env::temp_dir()
+    }
+}
+
 /// funes's home directory: `$FUNES_HOME`, else `~/.funes`. Holds the incremental state and the
 /// local memory.
 pub fn funes_dir() -> PathBuf {
