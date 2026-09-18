@@ -478,16 +478,16 @@ impl Indexer {
 
         let (sessions, label) = unit_summary(&turns, &key);
         let mut chunks = chunks_of(&mut turns, tiers, self.include_thinking, self.scanner.as_ref())?;
-        let mut repo_by_session: HashMap<&str, String> = HashMap::new();
+        let mut repo_by_turn: HashMap<(&str, &str), String> = HashMap::new();
         for t in &turns {
             if let Some(cwd) = &t.cwd {
-                repo_by_session
-                    .entry(t.session_id.as_str())
+                repo_by_turn
+                    .entry((t.session_id.as_str(), t.turn_uuid.as_str()))
                     .or_insert_with(|| self.repo_for(cwd));
             }
         }
         for c in &mut chunks {
-            if let Some(repo) = repo_by_session.get(c.session_id.as_str()) {
+            if let Some(repo) = repo_by_turn.get(&(c.session_id.as_str(), c.turn_uuid.as_str())) {
                 c.repo.clone_from(repo);
             }
         }
