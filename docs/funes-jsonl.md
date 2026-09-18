@@ -1,8 +1,5 @@
 # The funes JSONL format
 
-> Draft — the contract the implementation is built against. Remove this note when `funes index`
-> accepts `.funes.jsonl`.
-
 `.funes.jsonl` is funes's own turn model, serialized: one JSON object per line, one turn per object,
 one or many turns per file, no header. It is how a conversation reaches funes when funes has no parser
 for its source — a coding agent funes does not read natively, an issue tracker, a chat export. A

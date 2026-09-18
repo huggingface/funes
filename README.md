@@ -64,8 +64,9 @@ out. To build it yourself, see [Building from source](#building-from-source).
 Your memory isn't tied to one tool. Because Claude Code, Codex, pi, and Hermes all index into a single
 memory, you can **switch agents without losing anything** — start a task in Claude Code, pick it up
 in Codex next week, and each one recalls the *entire* history, not just its own sessions (every hit
-shows which agent it came from). Another agent can join through a compatible `.parquet` trace
-export; [the import contract](docs/index.md#parquet-trace-format) defines the required schema.
+shows which agent it came from). Another agent can join by writing its sessions as
+[funes JSONL](docs/funes-jsonl.md) turns files, or through a compatible `.parquet` trace export
+([the import contract](docs/index.md#parquet-trace-format)).
 
 Models work the same way. funes runs pinned local embedding and reranking models, but no generative
 model of its own: you reason with whatever your agent uses — through **pi**, any local model or one

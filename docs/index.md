@@ -18,11 +18,13 @@ one memory, then offers to finish any deeper work left. Scope it to a single age
 funes index --harness codex        # only ~/.codex/sessions
 ```
 
-Point it at a **path** to index one place in full — a transcript tree or a single `.parquet` trace
-export — or at a **Hub trace repo** to index its auto-converted parquet:
+Point it at a **path** to index one place in full — a transcript tree, a single `.parquet` trace
+export, or a `.funes.jsonl` turns file (or a directory of them) — or at a **Hub trace repo** to index
+its auto-converted parquet:
 
 ```bash
 funes index ./some/session/tree            # a local transcript tree or .parquet
+funes index thread.funes.jsonl             # turns from a source funes has no parser for
 funes index <org>/<repo>                   # a Hub trace dataset (or a full hf://… URI)
 ```
 
@@ -68,6 +70,26 @@ UUIDs are synthesized as `<session_id>-<sequence>` and sequence counts only reta
 is the compatibility contract behind “another agent can join through a Parquet trace export”; an
 arbitrary Parquet table is not accepted merely because it has a `.parquet` suffix.
 
+### funes JSONL (turns files)
+
+A source funes has no parser for — another coding agent, an issue tracker, a chat export — reaches
+it as `.funes.jsonl`: funes's own turn model, one JSON object per line, written by a *producer*
+outside funes. [The format](funes-jsonl.md) is the contract — field table, identity rule,
+validation. What `funes index` does with one:
+
+- **One file is one unit**, always re-read (chunk-id dedup makes that a no-op) and never recorded in
+  `state.json`. One invalid line rejects the whole file and fails the run; nothing from it is written.
+  **A directory** is one unit per file: a rejected file writes nothing, is reported with its first bad
+  line, the run goes on, and the summary counts it under `rejected` with a non-zero exit. A directory
+  holding any other `.jsonl` is refused as ambiguous.
+- **The facets come from the data.** `harness` is each turn's own, so `--harness` is refused.
+  `workdir` and `repo` derive from the turn's `cwd`, resolved on the indexing machine — the one
+  derivation every native parser goes through too; a turn without `cwd` has neither facet.
+- **`funes index --check <file-or-dir>`** runs the same read and validation, computes the chunk ids,
+  and reports turns, chunks, rejected files and the ids a file produces twice (a turn re-emitted under
+  its `turn_uuid` would be deduped away, never indexed) — writing nothing. Run it before you publish a
+  producer.
+
 ## Incremental by construction
 
 A chunk's id derives from `(session, turn, block, split)`, so a completed turn produces **exactly the
@@ -104,7 +126,8 @@ scanned or stored: a pasted screenshot is megabytes of base64 with nothing recal
 
 | Flag | Meaning |
 | --- | --- |
-| `--harness <name>` | Override auto-detection for a path, or (with no path) target one harness's dir: `claude \| codex \| pi \| hermes`. |
+| `--harness <name>` | Override auto-detection for a path, or (with no path) target one harness's dir: `claude \| codex \| pi \| hermes`. Refused on a turns file, whose turns name their own. |
+| `--check` | Validate PATH without indexing it: turns, chunks, rejected files, duplicate ids; writes nothing, exits non-zero on any problem. |
 | `--limit <N>` | Index only the most recent N sessions per source. Omit to index all. A Hub repo ignores it and indexes every shard. |
 | `--no-thinking` | Exclude thinking blocks. |
 | `--yes` | Don't ask: a budgeted (no-path) run finishes all remaining work; an explicit path skips the first-index size confirmation. |
@@ -114,7 +137,8 @@ scanned or stored: a pasted screenshot is megabytes of base64 with nothing recal
 Indexing and recall are one deterministic pipeline:
 
 ```
-~/.claude/projects, ~/.codex/sessions, ~/.pi/agent/sessions, ~/.hermes/state.db   (or a .parquet trace)
+~/.claude/projects, ~/.codex/sessions, ~/.pi/agent/sessions, ~/.hermes/state.db
+   (or a .parquet trace, or a .funes.jsonl turns file)
    │  parse        deterministic — turns (text / thinking / tool_use / tool_result), tagged by agent
    │  chunk        one chunk per content block, tight provenance
    │  embed        pinned local model (BAAI/bge-small-en-v1.5)

@@ -81,6 +81,15 @@ local index) and `funes-push.sh` (the network publish). Each drains the hook pay
 detached worker, so the hook returns in well under a second and never blocks the turn or trips a
 timeout.
 
+## Other agents
+
+An agent funes has no parser for joins through the same shape: its per-turn hook runs a converter
+that writes the session as a [`.funes.jsonl` turns file](funes-jsonl.md), then `funes index <that
+file>`. Three things to know when writing one: an explicit path is indexed in full, unbudgeted — a
+single session is small, so that is what you want; a run that finds the memory lock busy fails fast,
+and the next turn's run catches up (indexing is idempotent); and `funes index --check <file>`
+validates a producer's output without writing anything, so run it before wiring the hook.
+
 ## How it behaves
 
 - **Local-first, always safe.** The index hook only ever writes your local memory; only the push hook
