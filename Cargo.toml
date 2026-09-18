@@ -25,7 +25,9 @@ bytes = "1"                      # captured write payloads
 chrono = "0.4"                   # recency weighting
 rusqlite = { version = "0.32", features = ["bundled"] }  # read hermes' ~/.hermes/state.db; bundled = SQLite compiled in, no runtime dep
 serde_yaml = "0.9"               # merge funes' hooks into hermes' ~/.hermes/config.yaml
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "sync"] }  # sync: OnceCell/Mutex cache the recall models
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "sync", "net", "signal"] }  # sync: OnceCell/Mutex cache the recall models
+tokio-util = "0.7"              # cancel HTTP requests and the listener together on shutdown
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }  # mount the SDK's MCP HTTP service
 futures = "0.3"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
@@ -36,7 +38,7 @@ sha1 = "0.10"                    # chunk id = sha1(...)[:16]
 sha2 = "0.10"                    # verify release binaries before the installer/updater executes them
 hex = "0.4"
 walkdir = "2"                    # recursive *.jsonl walk
-rmcp = { version = "1", features = ["server", "macros", "transport-io", "schemars"] }  # MCP stdio server
+rmcp = { version = "3.3", default-features = false, features = ["server", "macros", "transport-io", "schemars", "transport-streamable-http-server"] }  # MCP server
 tempfile = "3"                   # temp dir for the pre-publish secret scan; temp files/dirs in tests
 hf-hub = { version = "1.0.0-rc.1", features = ["rustls-tls", "blocking"] }  # native create_commit + parent_commit CAS + Xet upload; blocking: model download in the blas backend
 # Optional handle on the transitively-pulled openssl-sys (native-tls, via lance).
@@ -63,6 +65,11 @@ blas = ["dep:tokenizers", "dep:safetensors", "dep:faer", "dep:multiversion"]
 # ONNX inference backend (fastembed/ort). When both backends are compiled in, `blas` is the one
 # funes runs; the ONNX types are the reference backend for bench_backends.
 onnx = ["dep:fastembed"]
+
+[dev-dependencies]
+rmcp = { version = "3.3", default-features = false, features = ["client", "transport-streamable-http-client-reqwest"] }
+tokio = { version = "1", features = ["process"] }
+reqwest = { version = "0.13", default-features = false, features = ["json"] }  # HTTP policy checks
 
 # Benchmarks live under benchmark/ alongside their README; run via `cargo run --example <name>`.
 [[example]]

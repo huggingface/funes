@@ -1,4 +1,4 @@
-//! `funes mcp`: expose recall over the Model Context Protocol (stdio transport),
+//! `funes mcp`: expose recall over MCP using stdio or Streamable HTTP,
 //! so any MCP client (Claude Code, Cursor, …) can call funes as a first-class tool.
 //! stdout is the JSON-RPC channel — logs must go to stderr.
 
@@ -10,6 +10,9 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{Implementation, ProtocolVersion, ServerCapabilities, ServerInfo};
 use rmcp::transport::stdio;
 use rmcp::{schemars, tool, tool_handler, tool_router, ServerHandler, ServiceExt};
+
+mod http;
+pub use http::run as run_http;
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct RecallRequest {
@@ -314,7 +317,7 @@ impl ServerHandler for Funes {
         server_info.version = env!("CARGO_PKG_VERSION").to_string();
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(server_info)
-            .with_protocol_version(ProtocolVersion::V_2024_11_05)
+            .with_protocol_version(ProtocolVersion::V_2026_07_28)
             .with_instructions(
                 "Persistent memory over the user's past AI coding sessions: their transcripts, \
                  indexed automatically as they work and read-only here — nothing has to be saved. \

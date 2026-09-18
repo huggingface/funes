@@ -323,7 +323,7 @@ pub fn memory_hint(read: Option<&str>) -> String {
 /// The embedder + reranker, loaded once and shared. Loading them (ONNX init) is the costly part of
 /// a recall, so a long-lived process — the MCP server — pays it on the first call and reuses them
 /// after. The `Mutex` serializes recalls (both models run with `&mut`), which is fine: the work is
-/// CPU-bound and the server's calls are serial anyway.
+/// CPU-bound. The same cache and lock are shared across concurrent MCP clients.
 struct Models {
     embedder: Box<dyn Embedder>,
     reranker: Box<dyn Reranker>,
