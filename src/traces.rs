@@ -7,6 +7,7 @@
 
 pub mod claude;
 pub mod codex;
+pub mod funes_jsonl;
 pub mod harness;
 pub mod hermes;
 pub mod jsonl;
@@ -21,6 +22,9 @@ use serde::{Deserialize, Deserializer, Serialize};
 pub const FORMAT_VERSION: u32 = 1;
 
 // serde's `default` takes a function path, not a constant.
+/// The closed block vocabulary.
+pub const BLOCK_TYPES: [&str; 4] = ["text", "thinking", "tool_use", "tool_result"];
+
 fn format_default() -> u32 {
     FORMAT_VERSION
 }
@@ -38,7 +42,7 @@ fn known_format<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Block {
-    pub block_type: String, // "text" | "thinking" | "tool_use" | "tool_result"
+    pub block_type: String, // one of [`BLOCK_TYPES`]
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,

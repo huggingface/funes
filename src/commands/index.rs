@@ -273,6 +273,7 @@ struct Indexer {
     n_sessions: u64,
     n_skipped: u64,
     n_chunks: u64,
+    n_rejected: u64,
 }
 
 /// Enumerate every source's units (each source orders its own — recency-desc, subagents last),
@@ -390,6 +391,7 @@ impl Indexer {
             n_sessions: 0,
             n_skipped: 0,
             n_chunks: 0,
+            n_rejected: 0,
         })
     }
 
@@ -448,7 +450,8 @@ impl Indexer {
             match src.read(&self.units[i].1) {
                 Ok(t) => t,
                 Err(e) if !src.fatal_on_read_error() => {
-                    eprintln!("{progress} {key} — read failed, skipping: {e}");
+                    eprintln!("{progress} {key} — rejected: {e}");
+                    self.n_rejected += 1;
                     return Ok(0);
                 }
                 Err(e) => return Err(e),
@@ -580,21 +583,27 @@ impl Indexer {
                 self.n_sessions,
                 self.n_skipped,
                 self.n_chunks,
+                self.n_rejected,
                 self.units.len(),
             )
         );
+        if self.n_rejected > 0 {
+            anyhow::bail!("{} unit(s) rejected", self.n_rejected);
+        }
         Ok(())
     }
 }
 
-/// The run summary line. An interactive rerun that added nothing — and left nothing owed — gets a
-/// friendly "up to date" instead of a zero-count tally; an automated run (no reader) or any run
-/// that indexed or still owes something gets the tally.
-fn run_summary(done: bool, sessions: u64, skipped: u64, chunks: u64, units: usize) -> String {
-    if done && chunks == 0 {
+/// The run summary line. An interactive rerun that added nothing — and left nothing owed or
+/// rejected — gets a friendly "up to date" instead of a zero-count tally; an automated run (no
+/// reader) or any run that indexed, rejected or still owes something gets the tally.
+fn run_summary(done: bool, sessions: u64, skipped: u64, chunks: u64, rejected: u64, units: usize) -> String {
+    if done && chunks == 0 && rejected == 0 {
         format!("up to date ({units} sessions, all tiers)")
-    } else {
+    } else if rejected == 0 {
         format!("indexed sessions={sessions} skipped={skipped} chunks={chunks}")
+    } else {
+        format!("indexed sessions={sessions} skipped={skipped} chunks={chunks} rejected={rejected}")
     }
 }
 
@@ -612,7 +621,7 @@ pub async fn run_index_roots(
     let sources = roots
         .iter()
         .map(|(path, harness)| source::open_with_harness(path, max_sessions, *harness))
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
     index_sources(sources, no_thinking, yes).await
 }
 
@@ -655,7 +664,7 @@ pub async fn run_index_budgeted(
     let sources = roots
         .iter()
         .map(|(path, harness)| source::open_with_harness(path, max_sessions, *harness))
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
     let finish = if yes { Finish::All } else { Finish::Ask };
     run_budgeted(sources, no_thinking, finish).await
 }
@@ -665,7 +674,7 @@ pub async fn run_index_budgeted(
 /// budget on text (decisions, rationale) first, so recall works in about a minute; a small history
 /// simply finishes whole.
 pub async fn run_index_seed(root: &Path, harness: Harness) -> Result<()> {
-    let sources = vec![source::open_with_harness(root, None, Some(harness))];
+    let sources = vec![source::open_with_harness(root, None, Some(harness))?];
     run_budgeted(sources, false, Finish::Stop).await
 }
 
@@ -1053,7 +1062,7 @@ mod tests {
         let key = |f: &str| root.join(f).to_string_lossy().into_owned();
         let sweep = || -> Vec<Box<dyn source::TraceSource>> {
             vec![
-                source::open_with_harness(&root, None, Some(Harness::Claude)),
+                source::open_with_harness(&root, None, Some(Harness::Claude)).unwrap(),
                 // A store that claims no key contributes none, however its units are signed.
                 Box::new(MockSource {
                     name: "remote",
@@ -1092,7 +1101,7 @@ mod tests {
         .unwrap();
         let key = |sid: &str| format!("{}#{sid}", db.display());
         let sweep = || -> Vec<Box<dyn source::TraceSource>> {
-            vec![source::open_with_harness(&db, None, Some(Harness::Hermes))]
+            vec![source::open_with_harness(&db, None, Some(Harness::Hermes)).unwrap()]
         };
         assert_eq!(
             pending_after_a_sweep(&coverage, &sweep()),
@@ -1108,16 +1117,24 @@ mod tests {
     #[test]
     fn run_summary_says_up_to_date_only_on_a_done_no_op() {
         // Interactive rerun that added nothing and owes nothing → the friendly no-op.
-        assert_eq!(run_summary(true, 0, 30, 0, 30), "up to date (30 sessions, all tiers)");
+        assert_eq!(
+            run_summary(true, 0, 30, 0, 0, 30),
+            "up to date (30 sessions, all tiers)"
+        );
         // A run that indexed something → the tally, not "up to date".
         assert_eq!(
-            run_summary(true, 2, 28, 57, 30),
+            run_summary(true, 2, 28, 57, 0, 30),
             "indexed sessions=2 skipped=28 chunks=57"
         );
         // Stopped early (or no reader at all) → the tally, even with nothing added: work is owed.
         assert_eq!(
-            run_summary(false, 0, 30, 0, 30),
+            run_summary(false, 0, 30, 0, 0, 30),
             "indexed sessions=0 skipped=30 chunks=0"
+        );
+        // A rejected unit is never "up to date", and shows in the tally.
+        assert_eq!(
+            run_summary(true, 0, 29, 0, 1, 30),
+            "indexed sessions=0 skipped=29 chunks=0 rejected=1"
         );
     }
 

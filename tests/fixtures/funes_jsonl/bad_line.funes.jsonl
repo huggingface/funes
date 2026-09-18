@@ -1,0 +1,2 @@
+{"session_id":"rejected","turn_uuid":"t-0001","seq":0,"ts":"2026-09-18T10:00:00Z","role":"user","harness":"opencode","blocks":[{"block_type":"text","text":"this turn is valid, but its file is not"}]}
+{"session_id":"rejected","turn_uuid":"t:0002","seq":1,"ts":"2026-09-18T10:00:01Z","role":"assistant","harness":"opencode","blocks":[{"block_type":"text","text":"a colon in turn_uuid"}]}
