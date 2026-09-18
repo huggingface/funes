@@ -72,7 +72,8 @@ pub struct Turn {
     pub blocks: Vec<Block>,
     #[serde(skip)]
     pub source_path: String,
-    /// Which coding agent produced this session: `claude_code` | `codex` | `pi` | `hermes`.
+    /// Who produced this session — `claude_code` | `codex` | `pi` | `hermes` from the native
+    /// parsers, any `[a-z0-9_-]` id from a turns file.
     pub harness: String,
 }
 

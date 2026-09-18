@@ -83,12 +83,13 @@ enum Cmd {
     },
     /// Build or update your local memory from session transcripts.
     Index {
-        /// A transcript tree or `.parquet` file, or a Hub trace repo `<org>/<repo>`. Omit — in a
-        /// terminal — to index every known harness dir (~/.claude/projects, ~/.codex/sessions,
-        /// ~/.pi/agent/sessions); `--harness <name>` alone targets one. An automated (non-terminal)
-        /// run must name a target.
+        /// A transcript tree, a `.parquet` file, a `.funes.jsonl` turns file (or a directory of
+        /// them), or a Hub trace repo `<org>/<repo>`. Omit — in a terminal — to index every known
+        /// harness dir (~/.claude/projects, ~/.codex/sessions, ~/.pi/agent/sessions); `--harness
+        /// <name>` alone targets one. An automated (non-terminal) run must name a target.
         path: Option<String>,
-        /// Override harness auto-detection for PATH: claude | codex | pi | hermes.
+        /// Override harness auto-detection for a transcript tree: claude | codex | pi | hermes.
+        /// Refused on a turns file, whose turns name their own.
         #[arg(long)]
         harness: Option<String>,
         /// Validate PATH without indexing it: parse, count turns and chunks, report rejected files
