@@ -16,9 +16,10 @@ pub fn turns_from_jsonl_file(p: &Path, fallback_workdir: &str) -> std::io::Resul
     // Rollout filenames (`rollout-<ts>-<uuid>.jsonl`) aren't a clean session id; take it from the
     // `session_meta` line in this same pass, else fall back to the file stem.
     let session_id = session_meta_str(&records, "id").unwrap_or_else(|| jsonl::session_id_of(p));
+    let cwd = cwd_from_records(&records);
     // The workdir facet is the munged recorded cwd — the munge Claude Code uses for its
     // `projects` dir names, shared by every parser; the path-derived fallback covers transcripts without one.
-    let workdir = workdir_from_records(&records).unwrap_or_else(|| fallback_workdir.to_string());
+    let workdir = jsonl::workdir_facet(cwd.as_deref(), fallback_workdir);
 
     let mut turns = Vec::new();
     let mut seq = 0i64; // index among RETAINED turns, file order
@@ -52,6 +53,7 @@ pub fn turns_from_jsonl_file(p: &Path, fallback_workdir: &str) -> std::io::Resul
         }
         turns.push(Turn {
             session_id: session_id.clone(),
+            cwd: cwd.clone(),
             workdir: workdir.to_string(),
             turn_uuid: format!("{session_id}-{seq}"),
             parent_uuid: None,
@@ -69,10 +71,10 @@ pub fn turns_from_jsonl_file(p: &Path, fallback_workdir: &str) -> std::io::Resul
     Ok(turns)
 }
 
-/// The workdir a rollout's records name: the `session_meta` payload's `cwd`, munged.
-/// `None` when no record carries one.
-pub fn workdir_from_records(records: &[Value]) -> Option<String> {
-    session_meta_str(records, "cwd").and_then(|cwd| jsonl::workdir_of_cwd(&cwd))
+/// The working directory a rollout's records name: the `session_meta` payload's `cwd`. `None`
+/// when no record carries one.
+pub fn cwd_from_records(records: &[Value]) -> Option<String> {
+    session_meta_str(records, "cwd")
 }
 
 /// A string field of the first `session_meta` line's payload, if present.

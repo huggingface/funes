@@ -10,12 +10,12 @@ use std::path::Path;
 use super::jsonl;
 use super::{Block, Turn};
 
-/// The workdir a session's records name: the `session` line's `cwd`, munged. `None` when
-/// no record carries one.
-pub fn workdir_from_records(records: &[Value]) -> Option<String> {
+/// The working directory a session's records name: the `session` line's `cwd`. `None` when no
+/// record carries one.
+pub fn cwd_from_records(records: &[Value]) -> Option<String> {
     records.iter().find_map(|r| {
         if r.get("type").and_then(Value::as_str) == Some("session") {
-            r.get("cwd").and_then(Value::as_str).and_then(jsonl::workdir_of_cwd)
+            r.get("cwd").and_then(Value::as_str).map(str::to_string)
         } else {
             None
         }
@@ -24,9 +24,10 @@ pub fn workdir_from_records(records: &[Value]) -> Option<String> {
 
 pub fn turns_from_jsonl_file(p: &Path, session_id: &str, fallback_workdir: &str) -> std::io::Result<Vec<Turn>> {
     let records = jsonl::read_jsonl_records(p)?;
+    let cwd = cwd_from_records(&records);
     // The workdir facet is the munged recorded cwd — the munge Claude Code uses for its
     // `projects` dir names, shared by every parser; the path-derived fallback covers transcripts without one.
-    let workdir = workdir_from_records(&records).unwrap_or_else(|| fallback_workdir.to_string());
+    let workdir = jsonl::workdir_facet(cwd.as_deref(), fallback_workdir);
 
     let mut turns = Vec::new();
     let mut seq = 0i64; // index among RETAINED turns, file order
@@ -55,6 +56,7 @@ pub fn turns_from_jsonl_file(p: &Path, session_id: &str, fallback_workdir: &str)
         };
         turns.push(Turn {
             session_id: session_id.to_string(),
+            cwd: cwd.clone(),
             workdir: workdir.to_string(),
             // The native line `id`/`parentId` — not the inner `toolCall.id` (that is the tool_use_id).
             turn_uuid: obj.get("id").and_then(Value::as_str).unwrap_or("").to_string(),

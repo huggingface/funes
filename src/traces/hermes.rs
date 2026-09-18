@@ -47,9 +47,9 @@ fn sessions_has_cwd(conn: &Connection) -> Result<bool> {
         .exists([])?)
 }
 
-/// The workdir facet for a session: its `sessions.cwd`, munged the way every parser munges a cwd,
-/// or `None` when the session has no recorded cwd.
-fn session_workdir(conn: &Connection, session_id: &str) -> Result<Option<String>> {
+/// The working directory a session recorded: its `sessions.cwd`, or `None` when it has none (no
+/// row, NULL, or a schema without the column).
+fn session_cwd(conn: &Connection, session_id: &str) -> Result<Option<String>> {
     if !sessions_has_cwd(conn)? {
         return Ok(None);
     }
@@ -59,7 +59,7 @@ fn session_workdir(conn: &Connection, session_id: &str) -> Result<Option<String>
             rusqlite::Error::QueryReturnedNoRows => Ok(None),
             other => Err(other),
         })?;
-    Ok(cwd.as_deref().and_then(jsonl::workdir_of_cwd))
+    Ok(cwd)
 }
 
 /// Every session that has at least one message, each signed by its high-water `messages.id`. The
@@ -104,7 +104,8 @@ pub fn sessions_with_watermark(db: &Path) -> Result<Vec<SessionUnit>> {
 /// no recorded cwd (parity with the JSONL parsers).
 pub fn turns_from_state_db(db: &Path, session_id: &str, fallback_workdir: &str) -> Result<Vec<Turn>> {
     let conn = open_ro(db)?;
-    let workdir = session_workdir(&conn, session_id)?.unwrap_or_else(|| fallback_workdir.to_string());
+    let cwd = session_cwd(&conn, session_id)?;
+    let workdir = jsonl::workdir_facet(cwd.as_deref(), fallback_workdir);
     let source_path = db.to_string_lossy().into_owned();
 
     let mut stmt = conn.prepare(
@@ -136,6 +137,7 @@ pub fn turns_from_state_db(db: &Path, session_id: &str, fallback_workdir: &str) 
         }
         turns.push(Turn {
             session_id: session_id.to_string(),
+            cwd: cwd.clone(),
             workdir: workdir.clone(),
             turn_uuid: row.id.to_string(),
             parent_uuid: None,

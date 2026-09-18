@@ -374,6 +374,7 @@ mod tests {
     fn turn(blocks: Vec<Block>) -> Turn {
         Turn {
             session_id: "sess".into(),
+            cwd: None,
             workdir: "proj".into(),
             turn_uuid: "uuid".into(),
             parent_uuid: None,

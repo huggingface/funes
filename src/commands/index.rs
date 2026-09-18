@@ -461,10 +461,17 @@ impl Indexer {
             redact_turns(&mut turns, scanner, tiers, self.include_thinking)?;
         }
         let mut chunks = chunk::chunks_from_turns(&turns, tiers, self.include_thinking);
-        let repo = self.repo_for(&key);
-        if !repo.is_empty() {
-            for c in &mut chunks {
-                c.repo.clone_from(&repo);
+        let mut repo_by_session: HashMap<&str, String> = HashMap::new();
+        for t in &turns {
+            if let Some(cwd) = &t.cwd {
+                repo_by_session
+                    .entry(t.session_id.as_str())
+                    .or_insert_with(|| self.repo_for(cwd));
+            }
+        }
+        for c in &mut chunks {
+            if let Some(repo) = repo_by_session.get(c.session_id.as_str()) {
+                c.repo.clone_from(repo);
             }
         }
         let total_chunks = chunks.len();
@@ -505,16 +512,11 @@ impl Indexer {
         Ok(added)
     }
 
-    /// The session's repo(s) for the unit at `key`, resolved from its transcript's cwd and cached
-    /// per cwd so each distinct checkout runs `git` once across the run. Empty for a non-transcript
-    /// unit (a parquet shard) or a checkout that can't be resolved (gone, not a git repo).
-    fn repo_for(&mut self, key: &str) -> String {
-        let Some(cwd) = repo::cwd_of_transcript(Path::new(key)) else {
-            return String::new();
-        };
+    /// [`repo::of_cwd`], cached so each distinct checkout runs `git` once across the run.
+    fn repo_for(&mut self, cwd: &str) -> String {
         self.repo_cache
-            .entry(cwd.clone())
-            .or_insert_with(|| repo::of_cwd(&cwd))
+            .entry(cwd.to_string())
+            .or_insert_with(|| repo::of_cwd(cwd))
             .clone()
     }
 
@@ -1167,6 +1169,7 @@ mod tests {
         ]);
         let mut turns = vec![traces::Turn {
             session_id: "sess".into(),
+            cwd: None,
             workdir: "proj".into(),
             turn_uuid: "turn".into(),
             parent_uuid: None,
@@ -1210,6 +1213,7 @@ mod tests {
         };
         let mut turns = vec![traces::Turn {
             session_id: "sess".into(),
+            cwd: None,
             workdir: "proj".into(),
             turn_uuid: "turn".into(),
             parent_uuid: None,
@@ -1246,6 +1250,7 @@ mod tests {
         }
         let mut turns = vec![traces::Turn {
             session_id: "sess".into(),
+            cwd: None,
             workdir: "proj".into(),
             turn_uuid: "turn".into(),
             parent_uuid: None,

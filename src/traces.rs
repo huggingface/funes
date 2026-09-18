@@ -24,6 +24,9 @@ pub struct Block {
 
 pub struct Turn {
     pub session_id: String,
+    /// The working directory the session recorded, as its harness wrote it; `None` when the
+    /// source records none.
+    pub cwd: Option<String>,
     pub workdir: String,
     pub turn_uuid: String,
     pub parent_uuid: Option<String>,

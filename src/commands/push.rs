@@ -826,6 +826,7 @@ mod tests {
     fn turn(idx: i64, block_text: &str) -> Turn {
         Turn {
             session_id: "sess".into(),
+            cwd: None,
             workdir: "proj".into(),
             turn_uuid: format!("turn{idx}"),
             parent_uuid: None,

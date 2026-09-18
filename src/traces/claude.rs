@@ -123,19 +123,21 @@ fn normalize_blocks(content: &Value) -> Vec<Block> {
     out
 }
 
-/// The workdir a session's records name: the first usable `cwd`, munged (Claude Code
-/// stamps one on every entry). `None` when no record carries one.
-pub fn workdir_from_records(records: &[Value]) -> Option<String> {
+/// The working directory a session's records name: the first `cwd` (Claude Code stamps one on
+/// every entry). `None` when no record carries one.
+pub fn cwd_from_records(records: &[Value]) -> Option<String> {
     records
         .iter()
-        .find_map(|r| r.get("cwd").and_then(Value::as_str).and_then(jsonl::workdir_of_cwd))
+        .find_map(|r| r.get("cwd").and_then(Value::as_str))
+        .map(str::to_string)
 }
 
 pub fn turns_from_jsonl_file(p: &Path, session_id: &str, fallback_workdir: &str) -> std::io::Result<Vec<Turn>> {
     let records = jsonl::read_jsonl_records(p)?;
+    let cwd = cwd_from_records(&records);
     // The workdir facet is the munged recorded cwd — the same value as the transcript's
     // `projects` dir segment; the path-derived fallback covers transcripts without one.
-    let workdir = workdir_from_records(&records).unwrap_or_else(|| fallback_workdir.to_string());
+    let workdir = jsonl::workdir_facet(cwd.as_deref(), fallback_workdir);
 
     let mut turns = Vec::new();
     let mut seq = 0i64; // index among RETAINED turns, file order
@@ -161,6 +163,7 @@ pub fn turns_from_jsonl_file(p: &Path, session_id: &str, fallback_workdir: &str)
             .unwrap_or_else(|| rtype.to_string());
         turns.push(Turn {
             session_id: session_id.to_string(),
+            cwd: cwd.clone(),
             workdir: workdir.to_string(),
             turn_uuid: obj.get("uuid").and_then(|u| u.as_str()).unwrap_or("").to_string(),
             parent_uuid: obj.get("parentUuid").and_then(|u| u.as_str()).map(str::to_string),

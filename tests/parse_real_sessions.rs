@@ -146,3 +146,34 @@ fn parse_real_claude_session() {
         &funes::traces::claude::turns_from_jsonl_file(&p, "sess", "proj").unwrap(),
     );
 }
+
+/// Every fixture's turns carry the cwd their transcript recorded, and `workdir` is its munge.
+#[test]
+fn turns_carry_the_recorded_cwd_and_its_workdir() {
+    let claude_p = fixture("claude_session.jsonl");
+    let codex_p = fixture("codex_session.jsonl");
+    let pi_p = fixture("pi_session.jsonl");
+    let parsed = [
+        (
+            &claude_p,
+            funes::traces::claude::turns_from_jsonl_file(&claude_p, "s", "fb").unwrap(),
+        ),
+        (
+            &codex_p,
+            funes::traces::codex::turns_from_jsonl_file(&codex_p, "fb").unwrap(),
+        ),
+        (
+            &pi_p,
+            funes::traces::pi::turns_from_jsonl_file(&pi_p, "s", "fb").unwrap(),
+        ),
+    ];
+    for (p, turns) in &parsed {
+        let cwd = funes::traces::repo::cwd_of_transcript(p).expect("fixture records a cwd");
+        let workdir = funes::traces::jsonl::workdir_of_cwd(&cwd).expect("a real cwd munges to a facet");
+        assert!(!turns.is_empty());
+        for t in turns {
+            assert_eq!(t.cwd.as_deref(), Some(cwd.as_str()), "{}", p.display());
+            assert_eq!(t.workdir, workdir, "{}", p.display());
+        }
+    }
+}
