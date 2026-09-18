@@ -27,6 +27,8 @@ This directory contains the user guides and design notes for
 ## Design and reference
 
 - [Why funes](RATIONALE.md) — the rationale behind funes's core design choices.
+- [The funes JSONL format](funes-jsonl.md) — feed funes turns from a source it has no parser for:
+  fields, identity rules, validation, versioning.
 - [Storage growth](storage.md) — measured storage costs and growth estimates.
 - [Memory-tool landscape](landscape.md) — a comparison with other agent-memory tools.
 
