@@ -300,7 +300,9 @@ struct Indexer {
     n_sessions: u64,
     n_skipped: u64,
     n_chunks: u64,
-    n_rejected: u64,
+    /// Units (by index) whose read failed this run — reported once, and not retried by a later
+    /// tier pass; no state is recorded, so the next run retries them.
+    rejected: HashSet<usize>,
 }
 
 /// Enumerate every source's units (each source orders its own — recency-desc, subagents last),
@@ -409,7 +411,7 @@ impl Indexer {
             n_sessions: 0,
             n_skipped: 0,
             n_chunks: 0,
-            n_rejected: 0,
+            rejected: HashSet::new(),
         })
     }
 
@@ -460,6 +462,9 @@ impl Indexer {
                 return Ok(0);
             }
         }
+        if self.rejected.contains(&i) {
+            return Ok(0);
+        }
 
         // Best-effort sources retry a failed read next run (no state recorded); a fatal source
         // aborts rather than silently dropping data.
@@ -469,7 +474,7 @@ impl Indexer {
                 Ok(t) => t,
                 Err(e) if !src.fatal_on_read_error() => {
                     eprintln!("{progress} {key} — rejected: {e}");
-                    self.n_rejected += 1;
+                    self.rejected.insert(i);
                     return Ok(0);
                 }
                 Err(e) => return Err(e),
@@ -603,12 +608,12 @@ impl Indexer {
                 self.n_sessions,
                 self.n_skipped,
                 self.n_chunks,
-                self.n_rejected,
+                self.rejected.len() as u64,
                 self.units.len(),
             )
         );
-        if self.n_rejected > 0 {
-            anyhow::bail!("{} unit(s) rejected", self.n_rejected);
+        if !self.rejected.is_empty() {
+            anyhow::bail!("{} unit(s) rejected", self.rejected.len());
         }
         Ok(())
     }

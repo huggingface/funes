@@ -91,6 +91,16 @@ async fn turns_files_are_indexed_and_invalid_ones_rejected() {
             "gh/huggingface/transformers#31234".to_string(),
         ])
     );
+    // A budgeted, tier-major run visits each unit once per tier; a rejected unit is still counted
+    // once.
+    let home = tempfile::tempdir().unwrap();
+    std::env::set_var("FUNES_HOME", home.path());
+    let err = funes::commands::index::run_index_budgeted(&[(fixture(""), None)], false, None, true)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("2 unit(s) rejected"), "{err}");
+
     // A turn re-emitted under its `turn_uuid` in the same file is one row, not two.
     let rows = stored_rows().await;
     assert_eq!(rows.iter().filter(|s| *s == "dup-turn").count(), 1, "{rows:?}");
