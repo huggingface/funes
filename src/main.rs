@@ -48,7 +48,8 @@ enum Cmd {
         /// Restrict to a block type: text | thinking | tool_use | tool_result.
         #[arg(long = "type", value_name = "BLOCK_TYPE")]
         block_type: Option<String>,
-        /// Restrict to a harness: claude | codex | pi | hermes.
+        /// Restrict to a harness facet: an agent's name (claude | codex | pi | hermes) or any
+        /// harness a turns file carries.
         #[arg(long)]
         harness: Option<String>,
         #[command(flatten)]

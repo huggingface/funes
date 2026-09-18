@@ -29,7 +29,9 @@ pub struct RecallRequest {
     pub candidates: Option<usize>,
     #[schemars(description = "Restrict to a block type: text | thinking | tool_use | tool_result")]
     pub block_type: Option<String>,
-    #[schemars(description = "Restrict to a harness: claude | codex | pi | hermes")]
+    #[schemars(
+        description = "Restrict to a harness facet: an agent's name (claude | codex | pi | hermes) or any harness a turns file carries"
+    )]
     pub harness: Option<String>,
     #[schemars(
         description = "Memory to read for this call — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Defaults to the server's memory."

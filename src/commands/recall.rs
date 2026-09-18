@@ -186,6 +186,15 @@ fn build_where(block_type: Option<&str>, harness: Option<&str>) -> Option<String
     }
 }
 
+/// The stored `harness` facet a `--harness` value names: a known agent's CLI spelling maps to its
+/// stored facet (Claude's is `claude_code`), any other value is stored as given.
+fn stored_harness(h: String) -> String {
+    match Harness::parse(&h) {
+        Ok(known) => known.as_str().to_string(),
+        Err(_) => h,
+    }
+}
+
 /// 0.5^(age/half_life): 1.0 for fresh, decaying with age. half_life <= 0 disables.
 fn recency_weight(ts: &str, now: DateTime<Utc>, half_life: f64) -> f64 {
     if half_life <= 0.0 {
@@ -381,13 +390,7 @@ pub async fn recall_hits(
     harness: Option<String>,
     progress: &(dyn Fn(&str) + Sync),
 ) -> Result<(String, Option<String>, Vec<(Hit, f64)>)> {
-    // `--harness` accepts the same spellings as `index`/`add` (claude|codex|pi); normalize to the
-    // stored facet (Claude's is `claude_code`) so `--harness claude` filters instead of silently
-    // matching nothing, and an unknown value errors here rather than returning zero hits.
-    let harness = harness
-        .map(|h| Harness::parse(&h))
-        .transpose()?
-        .map(|h| h.as_str().to_string());
+    let harness = harness.map(stored_harness);
 
     progress("loading model…");
     let mut guard = models().await?.lock().await;
@@ -1398,6 +1401,14 @@ mod tests {
         );
         // A hit with no memory label yields no suffix.
         assert_eq!(memory_hint(None), "");
+    }
+
+    #[test]
+    fn stored_harness_normalizes_known_names_and_passes_others_through() {
+        assert_eq!(stored_harness("claude".into()), "claude_code");
+        assert_eq!(stored_harness("claude_code".into()), "claude_code");
+        assert_eq!(stored_harness("codex".into()), "codex");
+        assert_eq!(stored_harness("opencode".into()), "opencode");
     }
 
     #[test]
