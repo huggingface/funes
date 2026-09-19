@@ -1,6 +1,9 @@
 //! `funes remove` reverses each supported `add` integration while preserving memories and
 //! unrelated agent configuration.
 
+// Other agent integrations remain Unix-only; windows_codex covers native Codex cleanup.
+#![cfg(unix)]
+
 mod support;
 
 use serde_json::Value;

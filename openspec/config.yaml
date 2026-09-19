@@ -1,0 +1,32 @@
+schema: spec-driven
+
+context: |
+  Project: huggingface/funes
+  Tech stack: Rust 2021, Tokio, clap, Lance/Arrow, rmcp, ratatui/crossterm
+  Product: local-first, append-only, deterministic recall over AI coding-agent transcripts
+  Supported platforms before this change: Linux x86_64/aarch64 and macOS Apple Silicon
+  Build prerequisite: protoc
+  Quality gate: cargo fmt, cargo clippy with warnings denied, cargo test
+
+  Product invariants:
+  - Ingest is deterministic parse -> chunk -> embed; no LLM is used at ingest time
+  - Stored passages retain exact session and turn provenance
+  - Recall is pulled on demand rather than injected proactively
+  - The local memory is derived and rebuildable; transcripts remain the source of truth
+  - Platform ports do not change memory schema, model identity, or ranking semantics
+
+rules:
+  specs:
+    - Describe observable user behavior and compatibility guarantees
+    - Include Windows drive, UNC, spaces, Unicode, and missing-HOME scenarios for path changes
+    - State native Windows, PowerShell, CMD, and WSL boundaries explicitly
+    - Preserve Linux and macOS behavior in every platform-sensitive requirement
+  design:
+    - Put platform mechanisms and rejected alternatives here rather than in user requirements
+    - Centralize OS-specific behavior instead of scattering cfg branches
+    - Prefer additive Windows seams over rewriting working Unix behavior in the minimum-support change
+    - Treat exact native dependency compatibility as a CI-proven gate, not an assumption
+  tasks:
+    - Start with a native windows-latest dependency and inference-backend spike
+    - Pair every platform behavior change with native Windows tests and Unix non-regression checks
+    - Keep release publication all-or-nothing across existing and new supported targets

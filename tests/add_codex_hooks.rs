@@ -5,12 +5,15 @@
 use funes::agents::codex;
 use serde_json::Value;
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
 #[test]
 fn add_codex_installs_hooks_and_preserves_existing() {
     let home = tempfile::tempdir().unwrap();
     std::env::set_var("HOME", home.path());
+    #[cfg(windows)]
+    std::env::set_var("USERPROFILE", home.path());
     std::env::set_var("PATH", "");
     // Codex's home is asked of Codex, and `CODEX_HOME` answers when it can't be run — so a
     // developer's own variable would send this install into their real Codex home. `FUNES_HOME`
@@ -35,10 +38,11 @@ fn add_codex_installs_hooks_and_preserves_existing() {
     codex::install(Some("acme/kb".to_string())).unwrap();
 
     // Scripts written and executable.
-    let hooks_dir = home.path().join(".codex/hooks");
-    for name in ["funes-index.sh", "funes-push.sh"] {
+    let hooks_dir = home.path().join(".codex").join("hooks");
+    for name in [funes::agents::hooks::INDEX_NAME, funes::agents::hooks::PUSH_NAME] {
         let p = hooks_dir.join(name);
         assert!(p.exists(), "{name} written");
+        #[cfg(unix)]
         assert!(
             fs::metadata(&p).unwrap().permissions().mode() & 0o111 != 0,
             "{name} executable"
@@ -48,17 +52,23 @@ fn add_codex_installs_hooks_and_preserves_existing() {
     let cfg: Value = serde_json::from_str(&fs::read_to_string(&config).unwrap()).unwrap();
     // funes's hooks: Stop (index codex) + SessionEnd/SessionStart (push acme/kb).
     let stop = cfg["hooks"]["Stop"][0]["hooks"][0]["command"].as_str().unwrap();
-    assert!(
-        stop.contains("funes-index.sh") && stop.contains("codex"),
-        "stop: {stop}"
+    assert_eq!(
+        stop,
+        funes::agents::hooks::command(
+            &hooks_dir.join(funes::agents::hooks::INDEX_NAME).display().to_string(),
+            &["codex"]
+        )
     );
     let start = cfg["hooks"]["SessionStart"][0]["hooks"][0]["command"].as_str().unwrap();
-    assert!(
-        start.contains("funes-push.sh") && start.contains("acme/kb"),
-        "start: {start}"
+    assert_eq!(
+        start,
+        funes::agents::hooks::command(
+            &hooks_dir.join(funes::agents::hooks::PUSH_NAME).display().to_string(),
+            &["acme/kb", "codex"]
+        )
     );
     let end = cfg["hooks"]["SessionEnd"][0]["hooks"][0]["command"].as_str().unwrap();
-    assert!(end.contains("funes-push.sh") && end.contains("acme/kb"), "end: {end}");
+    assert_eq!(end, start);
     // The skill Codex lists before loading any tool (now in Codex's own tree, not shared).
     let skill = home.path().join(".codex/skills/funes/SKILL.md");
     assert!(skill.exists(), "skill written");

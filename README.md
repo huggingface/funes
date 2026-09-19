@@ -23,6 +23,9 @@ agent can recall from it.
 
 ## Get funes
 
+For native Windows x86-64, see the [Windows instructions](docs/windows.md) (core CLI and Codex
+automation). This port is awaiting its first release; older releases have no Windows asset.
+
 The [installer](scripts/install.sh) detects your platform, downloads the matching prebuilt binary,
 verifies its tagged release checksum and version, and puts it on your PATH (`~/.local/bin` by
 default):
