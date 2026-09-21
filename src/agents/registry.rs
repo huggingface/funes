@@ -7,7 +7,7 @@
 use anyhow::{bail, Context, Result};
 use hf_hub::buckets::BucketDownload;
 use serde::Deserialize;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -106,15 +106,46 @@ pub fn open(root: &Path, id: &str) -> Result<Integration> {
     }
 
     let setup = dir.join(SETUP);
-    let mode = std::fs::metadata(&setup)
-        .with_context(|| format!("{id} has no {SETUP} at {}", setup.display()))?
-        .permissions()
-        .mode();
-    if mode & 0o111 == 0 {
+    let meta = std::fs::metadata(&setup).with_context(|| format!("{id} has no {SETUP} at {}", setup.display()))?;
+    if meta.permissions().mode() & 0o111 == 0 {
         bail!("{} is not executable", setup.display());
     }
+    only_owner_writes(root, &setup)?;
 
     Ok(Integration { dir, manifest })
+}
+
+/// Refuse a `setup` that someone other than its owner could have written, checking every directory
+/// from `root` down as well as the file: funes is about to execute it. The owner is whoever owns
+/// `root`, and `root` itself is under the user's home.
+fn only_owner_writes(root: &Path, setup: &Path) -> Result<()> {
+    let owner = std::fs::metadata(root)
+        .with_context(|| format!("reading {}", root.display()))?
+        .uid();
+    let mut path = setup.to_path_buf();
+    loop {
+        let meta = std::fs::metadata(&path).with_context(|| format!("reading {}", path.display()))?;
+        if meta.permissions().mode() & 0o022 != 0 {
+            bail!(
+                "{} is writable by other users — funes will not run it; `chmod go-w` it or reinstall",
+                path.display()
+            );
+        }
+        if meta.uid() != owner {
+            bail!(
+                "{} is owned by uid {} rather than {owner} — funes will not run it",
+                path.display(),
+                meta.uid()
+            );
+        }
+        if path == root {
+            return Ok(());
+        }
+        match path.parent() {
+            Some(parent) => path = parent.to_path_buf(),
+            None => return Ok(()),
+        }
+    }
 }
 
 impl Integration {
@@ -281,6 +312,24 @@ mod tests {
     }
 
     /// The whole `add` contract in one run: the argv, then the environment.
+    #[test]
+    fn a_setup_others_could_have_written_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = integration(root.path(), "pi", &manifest("pi", CONTRACT_VERSION), "true");
+        assert!(open(root.path(), "pi").is_ok());
+
+        let setup = dir.join(SETUP);
+        std::fs::set_permissions(&setup, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let err = open(root.path(), "pi").unwrap_err().to_string();
+        assert!(err.contains("writable by other users"), "{err}");
+
+        // A directory above it counts too: write access there is write access to the file.
+        std::fs::set_permissions(&setup, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let err = open(root.path(), "pi").unwrap_err().to_string();
+        assert!(err.contains("writable by other users"), "{err}");
+    }
+
     /// Packed here the way the release workflow packs it.
     #[test]
     fn a_published_archive_installs_with_its_modes() {
