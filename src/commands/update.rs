@@ -6,22 +6,15 @@
 //! made executable. Replacement uses a same-filesystem rename, so the live process keeps its old
 //! inode and the next run picks up the new binary.
 
-use crate::hub;
+use crate::hub::{release_bucket, verify_checksum};
 use anyhow::{anyhow, bail, Context, Result};
 use hf_hub::buckets::BucketDownload;
 use hf_hub::HFBucket;
-use sha2::{Digest, Sha256};
-use std::collections::HashSet;
-use std::fs::{File, Permissions};
-use std::io::Read;
+use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
-
-/// The public bucket (`huggingface/funes`) holding the latest binaries and the `VERSION` marker.
-const BUCKET_OWNER: &str = "huggingface";
-const BUCKET_NAME: &str = "funes";
 
 /// Repo, for the build-from-source pointer on platforms with no prebuilt binary.
 const REPO: &str = "https://github.com/huggingface/funes";
@@ -99,7 +92,7 @@ pub async fn run(force: bool) -> Result<()> {
         ])
         .send()
         .await
-        .with_context(|| format!("downloading {tag} from the {BUCKET_OWNER}/{BUCKET_NAME} bucket"))?;
+        .with_context(|| format!("downloading {tag} from the funes release bucket"))?;
 
     let release_version = read_release_version(&tagged_version).with_context(|| format!("validating {tag}/VERSION"))?;
     if release_version != latest {
@@ -147,68 +140,6 @@ fn install_verified(staged: &Path, exe: &Path, manifest: &Path, asset: &str, exp
     Ok(expected_version.to_string())
 }
 
-/// Verify `asset` against its one unambiguous entry in a strict SHA256SUMS manifest.
-fn verify_checksum(path: &Path, manifest: &Path, asset: &str) -> Result<()> {
-    let text = std::fs::read_to_string(manifest).context("reading SHA256SUMS")?;
-    let expected = expected_digest(&text, asset)?;
-    let actual = sha256_file(path)?;
-    if actual != expected {
-        bail!("checksum verification failed for {asset} — nothing changed");
-    }
-    Ok(())
-}
-
-fn expected_digest(manifest: &str, asset: &str) -> Result<[u8; 32]> {
-    let mut names = HashSet::new();
-    let mut expected = None;
-
-    for (index, line) in manifest.lines().enumerate() {
-        let line_number = index + 1;
-        let mut fields = line.split_ascii_whitespace();
-        let digest = fields
-            .next()
-            .ok_or_else(|| anyhow!("SHA256SUMS line {line_number} is empty"))?;
-        let name = fields
-            .next()
-            .ok_or_else(|| anyhow!("SHA256SUMS line {line_number} has no asset name"))?;
-        if fields.next().is_some() || name.contains('/') {
-            bail!("SHA256SUMS line {line_number} is malformed");
-        }
-        if digest.len() != 64
-            || !digest
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            bail!("SHA256SUMS line {line_number} has an invalid digest");
-        }
-        if !names.insert(name) {
-            bail!("SHA256SUMS contains duplicate entries for {name}");
-        }
-        if name == asset {
-            let bytes = hex::decode(digest).context("decoding the release checksum")?;
-            expected = Some(bytes.try_into().expect("a 64-character hex digest is 32 bytes"));
-        }
-    }
-
-    expected.ok_or_else(|| anyhow!("SHA256SUMS does not contain {asset}"))
-}
-
-fn sha256_file(path: &Path) -> Result<[u8; 32]> {
-    let mut file = File::open(path).with_context(|| format!("opening {} for checksum verification", path.display()))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .with_context(|| format!("reading {} for checksum verification", path.display()))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(hasher.finalize().into())
-}
-
 /// Run `<path> --version`, retrying briefly on `ETXTBSY`. A just-written executable can
 /// transiently report "text file busy" if another thread forked while its writable fd was
 /// still open (children inherit the fd until they exec); a short retry rides that window out.
@@ -252,13 +183,6 @@ fn notice_for(latest_raw: &str, current_raw: &str) -> Option<String> {
             latest_raw.trim().trim_start_matches('v'),
         )
     })
-}
-
-/// An [`HFBucket`] handle for the funes release bucket, with the standard HF token if one is
-/// set (the bucket is public, so a token isn't required). `retries` is false for the fail-fast
-/// status check, true for the update's default.
-fn release_bucket(retries: bool) -> Result<HFBucket> {
-    Ok(hub::client(hub::hf_token().as_deref(), retries)?.bucket(BUCKET_OWNER, BUCKET_NAME))
 }
 
 /// Download the bucket's `VERSION` marker (the latest published release) into a scratch dir and
@@ -311,7 +235,8 @@ pub(crate) fn parse_semver(s: &str) -> Option<(u32, u32, u32)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{expected_digest, install_verified, notice_for, parse_semver, read_release_version, sha256_file};
+    use super::{install_verified, notice_for, parse_semver, read_release_version};
+    use crate::hub::sha256_file;
     use std::path::Path;
 
     fn write_manifest(path: &Path, binary: &Path, asset: &str) {
@@ -379,25 +304,6 @@ mod tests {
 
         assert!(install_verified(&staged, &exe, &manifest, "funes-test", "9.9.9").is_err());
         assert_eq!(std::fs::read_to_string(&exe).unwrap(), "old binary");
-    }
-
-    #[test]
-    fn checksum_manifest_is_strict_and_target_bound() {
-        let a = "1".repeat(64);
-        let b = "2".repeat(64);
-        let valid = format!("{a}  funes-a\n{b}  funes-b\n");
-        assert_eq!(expected_digest(&valid, "funes-b").unwrap(), [0x22; 32]);
-
-        for malformed in [
-            format!("{a}  funes-a extra\n"),
-            format!("{}  funes-a\n", "A".repeat(64)),
-            format!("{a}  nested/funes-a\n"),
-            format!("{a}  funes-a\n{b}  funes-a\n"),
-            "\n".to_string(),
-        ] {
-            assert!(expected_digest(&malformed, "funes-a").is_err(), "{malformed:?}");
-        }
-        assert!(expected_digest(&valid, "missing").is_err());
     }
 
     #[test]

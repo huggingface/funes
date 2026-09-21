@@ -1,11 +1,16 @@
 //! Talking to the Hugging Face Hub: the client, credentials, and dataset-repo identity and
 //! lifecycle. It knows nothing about what a memory is — [`crate::memory`] is the domain that
-//! interprets what these calls answer.
+//! interprets what these calls answer. The public release bucket lives here too: the binaries,
+//! the integrations, and the `SHA256SUMS` every download is checked against.
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
-use hf_hub::{HFClient, HFError, RepoTypeDataset};
+use anyhow::{anyhow, bail, Context, Result};
+use hf_hub::{HFBucket, HFClient, HFError, RepoTypeDataset};
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
+use std::fs::File;
+use std::io::Read;
 
 /// `<org>/<repo>[/…]` with no scheme and not a path (`/` `.` `~`) → an HF dataset shorthand.
 pub fn is_remote_shorthand(spec: &str) -> bool {
@@ -116,9 +121,102 @@ fn token_from(env: impl Fn(&str) -> Option<String>, token_file: Option<&Path>) -
     (!t.is_empty()).then(|| t.to_string())
 }
 
+/// The public bucket (`huggingface/funes`) holding the released binaries, the agent integrations,
+/// and the `VERSION` marker.
+const BUCKET_OWNER: &str = "huggingface";
+const BUCKET_NAME: &str = "funes";
+
+/// An [`HFBucket`] handle for the funes release bucket, with the standard HF token if one is
+/// set (the bucket is public, so a token isn't required). `retries` is false for the fail-fast
+/// status check, true for the update's default.
+pub(crate) fn release_bucket(retries: bool) -> Result<HFBucket> {
+    Ok(client(hf_token().as_deref(), retries)?.bucket(BUCKET_OWNER, BUCKET_NAME))
+}
+
+/// Verify `asset` against its one unambiguous entry in a strict SHA256SUMS manifest.
+pub(crate) fn verify_checksum(path: &Path, manifest: &Path, asset: &str) -> Result<()> {
+    let text = std::fs::read_to_string(manifest).context("reading SHA256SUMS")?;
+    let expected = expected_digest(&text, asset)?;
+    let actual = sha256_file(path)?;
+    if actual != expected {
+        bail!("checksum verification failed for {asset} — nothing changed");
+    }
+    Ok(())
+}
+
+pub(crate) fn expected_digest(manifest: &str, asset: &str) -> Result<[u8; 32]> {
+    let mut names = HashSet::new();
+    let mut expected = None;
+
+    for (index, line) in manifest.lines().enumerate() {
+        let line_number = index + 1;
+        let mut fields = line.split_ascii_whitespace();
+        let digest = fields
+            .next()
+            .ok_or_else(|| anyhow!("SHA256SUMS line {line_number} is empty"))?;
+        let name = fields
+            .next()
+            .ok_or_else(|| anyhow!("SHA256SUMS line {line_number} has no asset name"))?;
+        if fields.next().is_some() || name.contains('/') {
+            bail!("SHA256SUMS line {line_number} is malformed");
+        }
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            bail!("SHA256SUMS line {line_number} has an invalid digest");
+        }
+        if !names.insert(name) {
+            bail!("SHA256SUMS contains duplicate entries for {name}");
+        }
+        if name == asset {
+            let bytes = hex::decode(digest).context("decoding the release checksum")?;
+            expected = Some(bytes.try_into().expect("a 64-character hex digest is 32 bytes"));
+        }
+    }
+
+    expected.ok_or_else(|| anyhow!("SHA256SUMS does not contain {asset}"))
+}
+
+pub(crate) fn sha256_file(path: &Path) -> Result<[u8; 32]> {
+    let mut file = File::open(path).with_context(|| format!("opening {} for checksum verification", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("reading {} for checksum verification", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher.finalize().into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checksum_manifest_is_strict_and_target_bound() {
+        let a = "1".repeat(64);
+        let b = "2".repeat(64);
+        let valid = format!("{a}  funes-a\n{b}  funes-b\n");
+        assert_eq!(expected_digest(&valid, "funes-b").unwrap(), [0x22; 32]);
+
+        for malformed in [
+            format!("{a}  funes-a extra\n"),
+            format!("{}  funes-a\n", "A".repeat(64)),
+            format!("{a}  nested/funes-a\n"),
+            format!("{a}  funes-a\n{b}  funes-a\n"),
+            "\n".to_string(),
+        ] {
+            assert!(expected_digest(&malformed, "funes-a").is_err(), "{malformed:?}");
+        }
+        assert!(expected_digest(&valid, "missing").is_err());
+    }
     use std::collections::HashMap;
 
     #[test]
