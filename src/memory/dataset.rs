@@ -3,7 +3,7 @@
 //! it holds the incremental state and the local memory at `…/memory` (the `chunks` Lance dataset).
 
 use crate::chunk;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -16,6 +16,7 @@ use lance::dataset::builder::DatasetBuilder;
 use lance::dataset::Dataset;
 use lance::index::vector::VectorIndexParams;
 use lance::index::DatasetIndexExt;
+use lance_index::optimize::OptimizeOptions;
 use lance_index::scalar::InvertedIndexParams;
 use lance_index::vector::ivf::IvfBuildParams;
 use lance_index::vector::pq::PQBuildParams;
@@ -141,6 +142,40 @@ pub async fn build_indexes(ds: &mut Dataset, on_phase: impl Fn(&str)) {
     }
 }
 
+/// Fold an index's delta sub-indexes back into one once this many pile up. Queries fan out across
+/// every delta (and per-segment BM25 stats drift), so the pile must stay bounded. Only the deltas
+/// are merged — the base is never re-read, which would be the full-index rewrite [`optimize_index`]
+/// exists to avoid.
+pub(crate) const COMPACT_DELTAS: usize = 8;
+
+/// Sub-index count per index name (the base plus its deltas, which share the index's name), from
+/// the index metadata — not `index_statistics`, which can write a stats migration through a remote's
+/// capture wrapper.
+pub(crate) async fn sub_index_counts(ds: &Dataset) -> Result<Vec<(String, usize)>> {
+    let indices = ds.load_indices().await.context("listing the indexes")?;
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for idx in indices.iter() {
+        *counts.entry(idx.name.clone()).or_default() += 1;
+    }
+    Ok(counts.into_iter().collect())
+}
+
+/// Add a delta sub-index over the rows appended since `name` was last built, or at
+/// [`COMPACT_DELTAS`] deltas merge them into one, sparing the base. `subs` is base + deltas.
+/// Returns the deltas folded.
+pub(crate) async fn optimize_index(ds: &mut Dataset, name: &str, subs: usize) -> Result<usize> {
+    let deltas = subs.saturating_sub(1);
+    let (opts, folded) = if deltas >= COMPACT_DELTAS {
+        (OptimizeOptions::merge(deltas), deltas)
+    } else {
+        (OptimizeOptions::append(), 0)
+    };
+    ds.optimize_indices(&opts.index_names(vec![name.to_string()]))
+        .await
+        .with_context(|| format!("optimizing {name}"))?;
+    Ok(folded)
+}
+
 /// IVF_PQ parameters sized from the `vector` column's dimension (matching lancedb's defaults).
 /// `None` if there is no fixed-size `vector` column.
 fn ivf_pq_params(ds: &Dataset) -> Option<VectorIndexParams> {
@@ -236,6 +271,48 @@ pub(crate) fn build_batch(chunks: &[chunk::Chunk], vectors: &[Vec<f32>]) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow_array::RecordBatchIterator;
+
+    /// Pins the Lance behavior [`optimize_index`] relies on: `append()` adds one delta sub-index per
+    /// backlog, and `merge(deltas)` folds the deltas back into one without touching the base.
+    #[tokio::test]
+    async fn append_optimize_stacks_deltas_and_merge_spares_the_base() {
+        let batch = |texts: &[&str]| {
+            let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
+            let rows = RecordBatch::try_new(schema.clone(), vec![Arc::new(StringArray::from(texts.to_vec()))]);
+            RecordBatchIterator::new([rows], schema)
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let uri = dir.path().join("t.lance");
+        let mut ds = Dataset::write(batch(&["alpha bravo"]), uri.to_str().unwrap(), None)
+            .await
+            .unwrap();
+        ds.create_index(
+            &["text"],
+            IndexType::Inverted,
+            None,
+            &InvertedIndexParams::default(),
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(sub_index_counts(&ds).await.unwrap(), vec![("text_idx".to_string(), 1)]);
+        let base_uuid = ds.load_indices().await.unwrap()[0].uuid;
+
+        for i in 0..3 {
+            ds.append(batch(&[&format!("charlie delta {i}")]), None).await.unwrap();
+            ds.optimize_indices(&OptimizeOptions::append()).await.unwrap();
+        }
+        assert_eq!(sub_index_counts(&ds).await.unwrap(), vec![("text_idx".to_string(), 4)]);
+
+        ds.optimize_indices(&OptimizeOptions::merge(3)).await.unwrap();
+        assert_eq!(sub_index_counts(&ds).await.unwrap(), vec![("text_idx".to_string(), 2)]);
+        let after = ds.load_indices().await.unwrap();
+        assert!(
+            after.iter().any(|i| i.uuid == base_uuid),
+            "the base index must survive untouched"
+        );
+    }
 
     #[test]
     fn schema_column_order_is_load_bearing() {

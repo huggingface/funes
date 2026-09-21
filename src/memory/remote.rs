@@ -51,7 +51,6 @@ use hf_hub::{HFError, HFRepository, RepoTypeDataset};
 use lance::dataset::builder::DatasetBuilder;
 use lance::dataset::{Dataset, NewColumnTransform, WriteParams};
 use lance::index::DatasetIndexExt;
-use lance_index::optimize::OptimizeOptions;
 use lance_io::object_store::WrappingObjectStore;
 use object_store::ObjectStore as OSObjectStore;
 
@@ -183,16 +182,10 @@ pub(crate) async fn first_publish(
     Ok(Some(info.commit_oid.unwrap_or_else(|| "?".to_string())))
 }
 
-/// Fold an index's delta sub-indexes back into one once this many pile up. Queries fan out across
-/// every delta (and per-segment BM25 stats drift), so the pile must stay bounded. Only the deltas
-/// are merged — the base is never re-read, which would be the full-index rewrite [`reindex`]
-/// exists to avoid.
-const COMPACT_DELTAS: usize = 8;
-
 /// Refresh the remote dataset's indexes and land the delta in one `create_commit` on branch `rev`,
 /// guarded by the current head. The backlog is appended as a delta sub-index — merging it into the
-/// existing index would re-read the whole index over the network — until [`COMPACT_DELTAS`] pile
-/// up and the deltas are folded back into one. [`Reindexed::AlreadyCurrent`] if there was nothing
+/// existing index would re-read the whole index over the network — until
+/// [`dataset::COMPACT_DELTAS`] pile up and the deltas are folded back into one. [`Reindexed::AlreadyCurrent`] if there was nothing
 /// to optimize, [`Reindexed::Conflict`] if the head moved first (retry against the new head).
 pub(crate) async fn reindex(
     repo: &HFRepository<RepoTypeDataset>,
@@ -204,18 +197,13 @@ pub(crate) async fn reindex(
     let parent = head_oid(repo, rev).await?;
     let (mut ds, wrapper) = open_capturing(dataset_uri, storage_options).await?;
 
-    for (name, subs) in sub_index_counts(&ds).await? {
-        // subs = base + deltas; merge(deltas) folds every delta into one, sparing the base.
-        let deltas = subs - 1;
-        let opts = if deltas >= COMPACT_DELTAS {
-            eprintln!("  compacting {name} ({deltas} delta sub-indexes)…");
-            OptimizeOptions::merge(deltas)
-        } else {
-            OptimizeOptions::append()
-        };
-        ds.optimize_indices(&opts.index_names(vec![name]))
+    for (name, subs) in dataset::sub_index_counts(&ds).await? {
+        let folded = dataset::optimize_index(&mut ds, &name, subs)
             .await
             .context("optimizing the remote index")?;
+        if folded > 0 {
+            eprintln!("  compacted {name} ({folded} delta sub-indexes)");
+        }
     }
 
     let files = captured_files(&wrapper);
@@ -305,18 +293,6 @@ pub(crate) async fn max_unindexed_rows(ds: &Dataset) -> u64 {
         }
     }
     max
-}
-
-/// Sub-index count per index name (the base plus its deltas, which share the index's name), from
-/// the index metadata — not `index_statistics`, which can write a stats migration through the
-/// capture wrapper.
-async fn sub_index_counts(ds: &Dataset) -> Result<Vec<(String, usize)>> {
-    let indices = ds.load_indices().await.context("listing the remote indexes")?;
-    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-    for idx in indices.iter() {
-        *counts.entry(idx.name.clone()).or_default() += 1;
-    }
-    Ok(counts.into_iter().collect())
 }
 
 /// Read the commit at the tip of branch `rev` — the parent-commit guard for the next commit.
@@ -546,51 +522,6 @@ pub(crate) async fn fetch_wrapper(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow_array::StringArray;
-    use arrow_schema::{DataType, Field, Schema};
-    use lance_index::scalar::InvertedIndexParams;
-    use lance_index::IndexType;
-
-    /// Pins the Lance behavior [`reindex`] relies on: `append()` adds one delta sub-index per
-    /// backlog, and `merge(deltas)` folds the deltas back into one without touching the base.
-    #[tokio::test]
-    async fn append_optimize_stacks_deltas_and_merge_spares_the_base() {
-        let batch = |texts: &[&str]| {
-            let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
-            let rows = RecordBatch::try_new(schema.clone(), vec![Arc::new(StringArray::from(texts.to_vec()))]);
-            RecordBatchIterator::new([rows], schema)
-        };
-        let dir = tempfile::tempdir().unwrap();
-        let uri = dir.path().join("t.lance");
-        let mut ds = Dataset::write(batch(&["alpha bravo"]), uri.to_str().unwrap(), None)
-            .await
-            .unwrap();
-        ds.create_index(
-            &["text"],
-            IndexType::Inverted,
-            None,
-            &InvertedIndexParams::default(),
-            true,
-        )
-        .await
-        .unwrap();
-        assert_eq!(sub_index_counts(&ds).await.unwrap(), vec![("text_idx".to_string(), 1)]);
-        let base_uuid = ds.load_indices().await.unwrap()[0].uuid;
-
-        for i in 0..3 {
-            ds.append(batch(&[&format!("charlie delta {i}")]), None).await.unwrap();
-            ds.optimize_indices(&OptimizeOptions::append()).await.unwrap();
-        }
-        assert_eq!(sub_index_counts(&ds).await.unwrap(), vec![("text_idx".to_string(), 4)]);
-
-        ds.optimize_indices(&OptimizeOptions::merge(3)).await.unwrap();
-        assert_eq!(sub_index_counts(&ds).await.unwrap(), vec![("text_idx".to_string(), 2)]);
-        let after = ds.load_indices().await.unwrap();
-        assert!(
-            after.iter().any(|i| i.uuid == base_uuid),
-            "the base index must survive untouched"
-        );
-    }
 
     #[test]
     fn human_bytes_scales_to_binary_units() {
