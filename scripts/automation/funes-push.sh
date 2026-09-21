@@ -87,9 +87,14 @@ if [ "${1:-}" = "--worker" ]; then
     exit 0
 fi
 
-# Foreground: the memory is our first argument, the harness our second. Drain the hook payload on
-# stdin, hand off to a detached worker (carrying both), and return.
+# Foreground: the memory is our first argument, the harness our second. An integration whose hook
+# command has to stay static leaves the memory in a `memory` file beside this script instead; with
+# neither, the worker logs that nothing is bound and stops. Drain the hook payload on stdin, hand
+# off to a detached worker (carrying both), and return.
 REMOTE="${1:-}"
+if [ -z "$REMOTE" ] && [ -r "$(dirname "$0")/memory" ]; then
+    REMOTE="$(head -n 1 "$(dirname "$0")/memory" | tr -d '[:space:]')"
+fi
 HARNESS="${2:-}"
 cat >/dev/null
 nohup bash "$0" --worker "$REMOTE" "$HARNESS" >/dev/null 2>&1 </dev/null &

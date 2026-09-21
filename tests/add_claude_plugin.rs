@@ -63,7 +63,13 @@ async fn add_claude_installs_the_plugin_and_registers_both_surfaces() {
         "claude publishes on SessionStart too"
     );
     let end = cfg["hooks"]["SessionEnd"][0]["hooks"][0]["command"].as_str().unwrap();
-    assert!(end.contains("funes-push.sh") && end.contains("acme/kb"), "end: {end}");
+    assert!(end.contains("funes-push.sh"), "end: {end}");
+    // The memory rides in a file, not the hook command, so the hooks stay static files.
+    assert!(!end.contains("acme/kb"), "end: {end}");
+    assert_eq!(
+        fs::read_to_string(plugin.join("funes/scripts/memory")).unwrap(),
+        "acme/kb\n"
+    );
 
     assert_eq!(
         fs::read_to_string(&log).unwrap(),

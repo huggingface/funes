@@ -24,35 +24,19 @@ have_claude() {
     command -v claude >/dev/null 2>&1
 }
 
-# The plugin's hooks, with the memory baked in. Claude expands ${CLAUDE_PLUGIN_ROOT} itself, so the
-# commands stay valid wherever the plugin is installed.
+# The plugin's hooks: a static file per binding, plus the memory in a file the push hook reads. The
+# hook commands never carry the memory, so nothing has to generate JSON and this script needs no
+# interpreter beyond the shell — the only thing a box running Claude Code is guaranteed to have.
 write_hooks() {
+    memory=${1:-}
     mkdir -p "$PLUGIN_ROOT/funes/hooks"
-    FUNES_MEMORY_BINDING="${1:-}" python3 - "$PLUGIN_ROOT/funes/hooks/hooks.json" <<'PY'
-import json, os, sys
-
-# The hook's own timeout: both scripts hand off to a detached worker and return well inside it.
-TIMEOUT = 15
-memory = os.environ.get("FUNES_MEMORY_BINDING", "")
-
-def command(script, *args):
-    quoted = ['"%s"' % a.replace("\\", "\\\\").replace('"', '\\"') for a in (script,) + args]
-    return "bash " + " ".join(quoted)
-
-def group(command, status):
-    return {"hooks": [{"type": "command", "command": command, "timeout": TIMEOUT, "statusMessage": status}]}
-
-index = command("${CLAUDE_PLUGIN_ROOT}/scripts/funes-index.sh", "claude")
-hooks = {"Stop": [group(index, "Indexing turn into funes memory")]}
-if memory:
-    push = command("${CLAUDE_PLUGIN_ROOT}/scripts/funes-push.sh", memory, "claude")
-    hooks["SessionStart"] = [group(push, "Publishing funes memory")]
-    hooks["SessionEnd"] = [group(push, "Publishing funes memory")]
-
-with open(sys.argv[1], "w") as out:
-    json.dump({"hooks": hooks}, out, indent=2)
-    out.write("\n")
-PY
+    if [ -n "$memory" ]; then
+        cp "$HERE/hooks-remote.json" "$PLUGIN_ROOT/funes/hooks/hooks.json"
+        printf '%s\n' "$memory" >"$PLUGIN_ROOT/funes/scripts/memory"
+    else
+        cp "$HERE/hooks-local.json" "$PLUGIN_ROOT/funes/hooks/hooks.json"
+        rm -f "$PLUGIN_ROOT/funes/scripts/memory"
+    fi
 }
 
 manual_add() {
