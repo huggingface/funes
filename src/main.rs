@@ -600,12 +600,16 @@ async fn install_agent(id: &str, memory: Option<String>, force: bool) -> Result<
     registry::open(&root, id)?.add(memory.as_deref())
 }
 
-/// Run `id`'s `setup remove`, then delete its files. One that was never installed through the
-/// registry is provisioned first, so an upgrade can still uninstall what an older funes left.
+/// Run `id`'s `setup remove`, then delete its files. The files are refreshed first, so the script
+/// funes executes is the one it just wrote rather than whatever was sitting there; an uninstall has
+/// to work with no source to refresh from, so that falls back to what is installed.
 async fn remove_agent(id: &str) -> Result<()> {
     let root = registry::default_root()?;
-    if !root.join(id).is_dir() {
-        registry::provision(&root, id, false).await?;
+    if let Err(e) = registry::provision(&root, id, false).await {
+        if !root.join(id).is_dir() {
+            return Err(e);
+        }
+        eprintln!("note: running the installed {id} integration — {e:#}");
     }
     registry::open(&root, id)?.remove()?;
     registry::discard(&root, id)
