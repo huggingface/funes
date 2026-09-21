@@ -16,7 +16,8 @@ use crate::scan;
 use crate::traces::harness::Harness;
 use crate::traces::{self, repo, source};
 use anyhow::{anyhow, Context, Result};
-use arrow_array::{Array, RecordBatchIterator, StringArray};
+use arrow_array::{Array, BooleanArray, RecordBatchIterator, StringArray};
+use futures::TryStreamExt;
 use lance::dataset::{Dataset, WriteParams};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -47,21 +48,27 @@ async fn acquire_lock(interactive: bool) -> Result<lock::MemoryLock> {
     ))
 }
 
-/// Every chunk id already stored. Re-indexing keeps only the chunks whose id isn't here, so a grown
-/// session (the same memory) contributes just its new turns — nothing is re-embedded or deleted. (A
-/// rewritten turn arrives under new ids, i.e. as another memory.) Chunk ids are global, so one
-/// unfiltered scan dedups any unit, whether it holds one session or thousands.
-async fn stored_ids(ds: &Dataset) -> Result<HashSet<String>> {
-    let batches = dataset::scan_rows(ds, &["id"], None, None).await?;
-    let mut ids = HashSet::new();
-    for batch in batches {
-        if let Some(col) = batch
+/// Every chunk id already stored, and whether its row has a vector. Re-indexing keeps only the
+/// chunks whose id isn't here, so a grown session (the same memory) contributes just its new turns —
+/// nothing is re-embedded or deleted. (A rewritten turn arrives under new ids, i.e. as another
+/// memory.) Chunk ids are global, so one unfiltered scan dedups any unit, whether it holds one
+/// session or thousands. `IS NOT NULL` reads the vector column whole: ~0.25 s at 170k rows.
+async fn stored_ids(ds: &Dataset) -> Result<HashMap<String, bool>> {
+    let mut scan = ds.scan();
+    scan.project_with_transform(&[("id", "id"), ("has_vector", "vector IS NOT NULL")])?;
+    let mut stream = scan.try_into_stream().await?;
+    let mut ids = HashMap::new();
+    while let Some(batch) = stream.try_next().await? {
+        let id = batch
             .column_by_name("id")
             .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-        {
-            for i in 0..batch.num_rows() {
-                ids.insert(col.value(i).to_string());
-            }
+            .context("stored ids: missing or non-string id column")?;
+        let has_vector = batch
+            .column_by_name("has_vector")
+            .and_then(|c| c.as_any().downcast_ref::<BooleanArray>())
+            .context("stored ids: missing has_vector column")?;
+        for i in 0..batch.num_rows() {
+            ids.insert(id.value(i).to_string(), has_vector.value(i));
         }
     }
     Ok(ids)
@@ -271,8 +278,8 @@ pub(crate) fn local_index_coverage() -> Option<IndexCoverage> {
 struct Indexer {
     uri: String,
     ds: Option<Dataset>,
-    /// [`stored_ids`] at open plus everything appended this run — the dedup baseline for new chunks.
-    existing: HashSet<String>,
+    /// [`stored_ids`] at open plus everything written this run — the dedup baseline for new chunks.
+    existing: HashMap<String, bool>,
     embedder: Box<dyn Embedder>,
     scanner: Option<scan::Trufflehog>,
     include_thinking: bool,
@@ -382,7 +389,7 @@ impl Indexer {
 
         let existing = match &ds {
             Some(d) => stored_ids(d).await?,
-            None => HashSet::new(),
+            None => HashMap::new(),
         };
 
         let units = collect_units(&sources)?;
@@ -438,9 +445,9 @@ impl Indexer {
     /// Index unit `i` at `tiers` — the one primitive a caller loops over, choosing the tiers and
     /// when to stop. Skips a unit already indexed to the top of `tiers`; a signature-less (bulk)
     /// unit is never skipped — it is re-read every run, and its chunk-id dedup makes that a no-op.
-    /// Otherwise reads the unit, redacts, chunks those tiers, keeps only chunks whose id isn't
-    /// already stored, embeds them in a single append, and stamps the unit's state. Returns the
-    /// new-chunk count (0 when skipped, unreadable, or already indexed).
+    /// Otherwise reads the unit, redacts, chunks those tiers, writes the chunks the memory lacks in
+    /// a single append, embeds those and any still unembedded, and stamps the unit's state. Returns
+    /// the new-chunk count (0 when skipped, unreadable, or already indexed).
     ///
     /// `progress` is the caller's label for the per-unit output line (e.g. `"text [1/3]"`) — the
     /// caller owns the counter because only it knows the iteration (which tier, how many owed).
@@ -504,17 +511,34 @@ impl Indexer {
             // A unit can carry one id twice (a turn re-emitted under its `turn_uuid`); the first wins,
             // as it would have had the two arrived in separate runs.
             let mut in_batch = HashSet::new();
-            let new_chunks: Vec<chunk::Chunk> = chunks
-                .into_iter()
-                .filter(|c| !self.existing.contains(&c.id) && in_batch.insert(c.id.clone()))
-                .collect();
-            if new_chunks.is_empty() {
+            let mut new_chunks = Vec::new();
+            let mut unembedded = Vec::new();
+            for c in chunks {
+                if !in_batch.insert(c.id.clone()) {
+                    continue;
+                }
+                match self.existing.get(&c.id) {
+                    None => new_chunks.push(c),
+                    Some(false) => unembedded.push(c),
+                    Some(true) => {}
+                }
+            }
+            if new_chunks.is_empty() && unembedded.is_empty() {
                 eprintln!("{progress} {label} — {total_chunks} chunks, all already indexed");
                 0
             } else {
-                eprintln!("{progress} {label} — {} new of {total_chunks} chunks", new_chunks.len());
-                let n = self.embed_and_write(&new_chunks).await?;
-                self.existing.extend(new_chunks.into_iter().map(|c| c.id));
+                let owed = if unembedded.is_empty() {
+                    String::new()
+                } else {
+                    format!(", {} still to embed", unembedded.len())
+                };
+                eprintln!(
+                    "{progress} {label} — {} new of {total_chunks} chunks{owed}",
+                    new_chunks.len()
+                );
+                let n = self.write_rows(&new_chunks).await?;
+                unembedded.extend(new_chunks);
+                self.embed_pending(&unembedded).await?;
                 n
             }
         };
@@ -548,11 +572,33 @@ impl Indexer {
             .clone()
     }
 
-    /// Embed `new_chunks` and add them — appending to the dataset, or creating it at `uri` on the
-    /// first write. Returns the count.
-    async fn embed_and_write(&mut self, new_chunks: &[chunk::Chunk]) -> Result<u64> {
-        let n = new_chunks.len();
-        let texts: Vec<&str> = new_chunks.iter().map(|c| c.text.as_str()).collect();
+    /// Append `chunks` unembedded, creating the dataset on the first write.
+    async fn write_rows(&mut self, chunks: &[chunk::Chunk]) -> Result<u64> {
+        if chunks.is_empty() {
+            return Ok(0);
+        }
+        let batch = build_batch(chunks, None)?;
+        let reader = RecordBatchIterator::new(vec![Ok(batch)], schema());
+        let uri = self.uri.clone();
+        match &mut self.ds {
+            Some(d) => {
+                d.append(reader, None).await?;
+            }
+            None => {
+                self.ds = Some(Dataset::write(reader, &uri, Some(WriteParams::default())).await?);
+            }
+        }
+        self.existing.extend(chunks.iter().map(|c| (c.id.clone(), false)));
+        Ok(chunks.len() as u64)
+    }
+
+    /// Embed `chunks` and fill their vectors in place.
+    async fn embed_pending(&mut self, chunks: &[chunk::Chunk]) -> Result<()> {
+        if chunks.is_empty() {
+            return Ok(());
+        }
+        let n = chunks.len();
+        let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
         let t0 = Instant::now();
         let vectors = embed_batched(self.embedder.as_mut(), &texts, |done| {
             let secs = t0.elapsed().as_secs_f64().max(0.001);
@@ -564,18 +610,16 @@ impl Indexer {
             t0.elapsed().as_secs_f64()
         );
 
-        let batch = build_batch(new_chunks, &vectors)?;
-        let reader = RecordBatchIterator::new(vec![Ok(batch)], schema());
-        let uri = self.uri.clone();
-        match &mut self.ds {
-            Some(d) => {
-                d.append(reader, None).await?;
-            }
-            None => {
-                self.ds = Some(Dataset::write(reader, &uri, Some(WriteParams::default())).await?);
-            }
+        let ids: Vec<&str> = chunks.iter().map(|c| c.id.as_str()).collect();
+        let ds = self
+            .ds
+            .as_ref()
+            .context("embedding chunks before any row was written")?;
+        self.ds = Some(dataset::fill_vectors(ds, &ids, &vectors).await?);
+        for c in chunks {
+            self.existing.insert(c.id.clone(), true);
         }
-        Ok(n as u64)
+        Ok(())
     }
 
     /// Build the FTS + IVF_PQ indexes (best-effort), reap superseded versions, and print the run

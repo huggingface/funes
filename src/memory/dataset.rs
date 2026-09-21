@@ -9,11 +9,11 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use arrow_array::types::Float32Type;
-use arrow_array::{FixedSizeListArray, Int64Array, RecordBatch, StringArray};
+use arrow_array::{FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use futures::TryStreamExt;
 use lance::dataset::builder::DatasetBuilder;
-use lance::dataset::Dataset;
+use lance::dataset::{Dataset, MergeInsertBuilder, MergeInsertWriteMode, WhenMatched, WhenNotMatched};
 use lance::index::vector::VectorIndexParams;
 use lance::index::DatasetIndexExt;
 use lance_index::optimize::OptimizeOptions;
@@ -261,15 +261,17 @@ pub(crate) fn schema() -> Arc<Schema> {
     ))
 }
 
-pub(crate) fn build_batch(chunks: &[chunk::Chunk], vectors: &[Vec<f32>]) -> Result<RecordBatch> {
+/// `None` writes every row with a null `vector`, for [`fill_vectors`] later.
+pub(crate) fn build_batch(chunks: &[chunk::Chunk], vectors: Option<&[Vec<f32>]>) -> Result<RecordBatch> {
     let s = |f: &dyn Fn(&chunk::Chunk) -> Option<String>| -> StringArray { chunks.iter().map(f).collect() };
     let i = |f: &dyn Fn(&chunk::Chunk) -> i64| -> Int64Array { chunks.iter().map(|c| Some(f(c))).collect() };
-    let vector = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
-        vectors
-            .iter()
-            .map(|v| Some(v.iter().map(|&x| Some(x)).collect::<Vec<_>>())),
-        DIM,
-    );
+    let vector = match vectors {
+        Some(vectors) => vector_array(vectors),
+        None => FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
+            chunks.iter().map(|_| None::<Vec<Option<f32>>>),
+            DIM,
+        ),
+    };
     Ok(RecordBatch::try_new(
         schema(),
         vec![
@@ -292,6 +294,49 @@ pub(crate) fn build_batch(chunks: &[chunk::Chunk], vectors: &[Vec<f32>]) -> Resu
             Arc::new(s(&|c| Some(c.repo.clone()))),
         ],
     )?)
+}
+
+fn vector_array(vectors: &[Vec<f32>]) -> FixedSizeListArray {
+    FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
+        vectors
+            .iter()
+            .map(|v| Some(v.iter().map(|&x| Some(x)).collect::<Vec<_>>())),
+        DIM,
+    )
+}
+
+/// Fill the vectors of rows written unembedded, in place: `RewriteColumns` rewrites only the vector
+/// column of the touched fragments, so no row moves. Fail-closed on an id the dataset doesn't hold —
+/// that is a lost row, not a no-op.
+pub(crate) async fn fill_vectors(ds: &Dataset, ids: &[&str], vectors: &[Vec<f32>]) -> Result<Dataset> {
+    let source_schema = Arc::new(Schema::new(vec![
+        schema().field_with_name("id")?.clone(),
+        schema().field_with_name("vector")?.clone(),
+    ]));
+    let source = RecordBatch::try_new(
+        source_schema.clone(),
+        vec![
+            Arc::new(StringArray::from(ids.to_vec())),
+            Arc::new(vector_array(vectors)),
+        ],
+    )?;
+    let reader = RecordBatchIterator::new(vec![Ok(source)], source_schema);
+    let (ds, stats) = MergeInsertBuilder::try_new(Arc::new(ds.clone()), vec!["id".to_string()])?
+        .when_matched(WhenMatched::UpdateAll)
+        .when_not_matched(WhenNotMatched::DoNothing)
+        .write_mode(MergeInsertWriteMode::RewriteColumns)
+        .try_build()?
+        .execute_reader(reader)
+        .await
+        .context("filling vectors")?;
+    if stats.num_updated_rows != ids.len() as u64 {
+        anyhow::bail!(
+            "filled {} vector(s) but {} were given — the memory has lost the other rows",
+            stats.num_updated_rows,
+            ids.len()
+        );
+    }
+    Ok(Arc::try_unwrap(ds).unwrap_or_else(|shared| (*shared).clone()))
 }
 
 #[cfg(test)]
@@ -341,7 +386,7 @@ mod tests {
                     .collect()
             })
             .collect();
-        build_batch(&chunks, &vectors).unwrap()
+        build_batch(&chunks, Some(&vectors)).unwrap()
     }
 
     fn reader(batch: RecordBatch) -> impl arrow_array::RecordBatchReader + Send + 'static {
@@ -419,6 +464,53 @@ mod tests {
             after.iter().any(|i| i.uuid == base_uuid),
             "the base index must survive untouched"
         );
+    }
+
+    #[tokio::test]
+    async fn fill_vectors_lands_the_embeddings_without_moving_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let uri = table_uri(&dir.path().to_string_lossy());
+        let chunks = chunk::chunks_from_turns(&turns(0, 3), &chunk::Tier::ALL, true);
+        let unembedded = build_batch(&chunks, None).unwrap();
+        let ds = Dataset::write(reader(unembedded), &uri, Some(WriteParams::default()))
+            .await
+            .unwrap();
+        assert_eq!(ds.count_rows(Some("vector IS NULL".into())).await.unwrap(), 3);
+
+        let ids: Vec<&str> = chunks.iter().map(|c| c.id.as_str()).collect();
+        let vectors: Vec<Vec<f32>> = (0..3).map(|i| vec![i as f32 + 1.0; DIM as usize]).collect();
+        let ds = fill_vectors(&ds, &ids, &vectors).await.unwrap();
+
+        assert_eq!(ds.count_rows(None).await.unwrap(), 3, "a fill adds no row");
+        assert_eq!(ds.count_rows(Some("vector IS NULL".into())).await.unwrap(), 0);
+        let rows = scan_rows(&ds, &["id", "vector"], None, None).await.unwrap();
+        for batch in rows {
+            let id = batch
+                .column_by_name("id")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let vec = batch
+                .column_by_name("vector")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<FixedSizeListArray>()
+                .unwrap();
+            for row in 0..batch.num_rows() {
+                let i = ids.iter().position(|x| *x == id.value(row)).expect("a stored id");
+                let first = vec
+                    .value(row)
+                    .as_any()
+                    .downcast_ref::<arrow_array::Float32Array>()
+                    .unwrap()
+                    .value(0);
+                assert_eq!(first, i as f32 + 1.0, "row {} got another row's vector", id.value(row));
+            }
+        }
+
+        let err = fill_vectors(&ds, &["not-a-row"], &vectors[..1]).await.unwrap_err();
+        assert!(err.to_string().contains("lost"), "{err}");
     }
 
     #[test]

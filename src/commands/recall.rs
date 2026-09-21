@@ -1422,7 +1422,7 @@ mod tests {
     async fn memory_of(turns: &[Turn], dir: &Path) -> Dataset {
         let chunks = chunk::chunks_from_turns(turns, &chunk::Tier::ALL, true);
         let vectors = vec![vec![0.0f32; dataset::DIM as usize]; chunks.len()];
-        let batch = dataset::build_batch(&chunks, &vectors).unwrap();
+        let batch = dataset::build_batch(&chunks, Some(&vectors)).unwrap();
         let reader = RecordBatchIterator::new(vec![Ok(batch)], dataset::schema());
         Dataset::write(reader, dir.to_str().unwrap(), None).await.unwrap()
     }
