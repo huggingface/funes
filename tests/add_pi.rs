@@ -8,8 +8,8 @@ use funes::agents::registry;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
-#[test]
-fn add_pi_installs_the_integration_and_registers_it() {
+#[tokio::test]
+async fn add_pi_installs_the_integration_and_registers_it() {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("home");
     fs::create_dir_all(&home).unwrap();
@@ -23,7 +23,7 @@ fn add_pi_installs_the_integration_and_registers_it() {
     std::env::remove_var("FUNES_HOME");
 
     let root = registry::default_root().unwrap();
-    registry::provision(&root, "pi", false).unwrap();
+    registry::provision(&root, "pi", false).await.unwrap();
     registry::open(&root, "pi").unwrap().add(Some("acme/kb")).unwrap();
 
     let dir = home.join(".funes/agents/pi");

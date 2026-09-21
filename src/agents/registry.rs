@@ -6,11 +6,13 @@
 //! home it writes to, and its own id — arrives in the environment.
 
 use anyhow::{bail, Context, Result};
+use hf_hub::buckets::BucketDownload;
 use serde::Deserialize;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::hub;
 use crate::memory::dataset;
 
 /// The integration contract this funes speaks. One built for another version is refused before its
@@ -161,29 +163,95 @@ impl Integration {
     }
 }
 
-/// Where an integration's files come from: `$FUNES_INTEGRATIONS`, else the `integrations/`
-/// directory of the checkout this binary was built from, when it is still there. A released
-/// binary's build path does not exist on the machine that runs it, so it falls through — which is
-/// also how a source build is recognised without a flag.
-pub fn integrations_dir() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("FUNES_INTEGRATIONS") {
-        return Some(PathBuf::from(dir));
-    }
-    let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("integrations");
-    checkout.is_dir().then_some(checkout)
+/// Where an integration's files come from.
+enum Source {
+    /// A directory on this machine, copied as it stands.
+    Local(PathBuf),
+    /// The archive published in the funes release bucket.
+    Published,
 }
 
-/// Install `id`'s files into the registry from [`integrations_dir`]. They are copied, never run
-/// where they were found: an agent records the path it is handed, and a checkout can move. Only a
-/// file that differs is rewritten, so editing a checkout's script and re-running `add` picks it
-/// up; `force` rewrites regardless. Nothing is pruned — an integration's `setup` keeps its own
-/// state beside these files.
-pub fn provision(root: &Path, id: &str, force: bool) -> Result<()> {
-    let src = integrations_dir()
-        .map(|dir| dir.join(id))
-        .filter(|dir| dir.is_dir())
-        .with_context(|| format!("no files to install for {id} — funes was not built from a checkout"))?;
-    copy_into(&src, &root.join(id), force)
+/// Resolve `id`'s files: `$FUNES_INTEGRATIONS` if set — authoritative, so a test or a fork can
+/// never silently reach the network — else the `integrations/` directory of the checkout this
+/// binary was built from, else the bucket. A released binary's build path is the builder's and
+/// does not exist on the machine that runs it, so it falls through on its own; that is also how a
+/// source build is recognised, with no flag to pass.
+fn source_for(id: &str) -> Result<Source> {
+    if let Some(dir) = std::env::var_os("FUNES_INTEGRATIONS") {
+        let dir = PathBuf::from(dir).join(id);
+        return dir
+            .is_dir()
+            .then_some(Source::Local(dir))
+            .with_context(|| format!("$FUNES_INTEGRATIONS holds no {id}"));
+    }
+    let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("integrations").join(id);
+    if checkout.is_dir() {
+        return Ok(Source::Local(checkout));
+    }
+    Ok(Source::Published)
+}
+
+/// The bucket prefix holding the integrations written against the contract this funes speaks. One
+/// prefix per contract: a fixed integration reaches installed binaries without a new release, and a
+/// binary only ever reads the layout it understands.
+fn published_prefix() -> String {
+    format!("integrations/v{CONTRACT_VERSION}")
+}
+
+/// Install `id`'s files into the registry. They are copied, never run where they were found: an
+/// agent records the path it is handed, and a checkout can move. Only a file that differs is
+/// rewritten, so editing a checkout's script and re-running `add` picks it up; `force` rewrites
+/// regardless. Nothing is pruned — an integration's `setup` keeps its own state beside these files.
+pub async fn provision(root: &Path, id: &str, force: bool) -> Result<()> {
+    let dst = root.join(id);
+    match source_for(id)? {
+        Source::Local(src) => copy_into(&src, &dst, force),
+        Source::Published => {
+            let staging = tempfile::tempdir().context("creating a staging directory")?;
+            let archive = fetch_published(id, staging.path()).await?;
+            let unpacked = staging.path().join("unpacked");
+            unpack(&archive, &unpacked)?;
+            copy_into(&unpacked, &dst, force)
+        }
+    }
+}
+
+/// Download `id`'s published archive into `dir` and check it against the prefix's `SHA256SUMS`,
+/// which is what stands between the bucket and a script funes is about to run.
+async fn fetch_published(id: &str, dir: &Path) -> Result<PathBuf> {
+    let asset = format!("{id}.tar.gz");
+    let archive = dir.join(&asset);
+    let manifest = dir.join("SHA256SUMS");
+    let prefix = published_prefix();
+    eprintln!("fetching the {id} integration…");
+    hub::release_bucket(true)?
+        .download_files()
+        .files(vec![
+            BucketDownload::new(format!("{prefix}/{asset}"), &archive),
+            BucketDownload::new(format!("{prefix}/SHA256SUMS"), &manifest),
+        ])
+        .send()
+        .await
+        .with_context(|| format!("downloading {prefix}/{asset} from the funes release bucket"))?;
+    hub::verify_checksum(&archive, &manifest, &asset)?;
+    Ok(archive)
+}
+
+/// Unpack a verified integration archive: its files are at the archive's root, and the executable
+/// bits come from the archive.
+fn unpack(archive: &Path, dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let status = Command::new("tar")
+        .arg("-xzf")
+        .arg(archive)
+        .arg("-C")
+        .arg(dir)
+        .status()
+        .context("running tar to unpack the integration")?;
+    if !status.success() {
+        bail!("unpacking {} failed (exit {:?})", archive.display(), status.code());
+    }
+    Ok(())
 }
 
 /// Delete an integration's directory: what [`provision`] installed, and whatever its `setup` wrote
@@ -236,6 +304,48 @@ mod tests {
 
     /// The `add` contract in one run: the argv the script is handed and the environment it can
     /// count on.
+    /// The published shape: an archive whose files sit at its root, unpacked and installed with its
+    /// executable bits intact. Packed here the way the release workflow packs it.
+    #[test]
+    fn a_published_archive_installs_with_its_modes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(src.join("scripts")).unwrap();
+        std::fs::write(src.join("manifest.json"), "{}").unwrap();
+        std::fs::write(src.join("setup"), "#!/bin/sh\ntrue\n").unwrap();
+        std::fs::set_permissions(src.join("setup"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(src.join("scripts/funes-index.sh"), "shared").unwrap();
+
+        let archive = tmp.path().join("pi.tar.gz");
+        let packed = Command::new("tar")
+            .arg("-czhf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&src)
+            .arg(".")
+            .status()
+            .unwrap();
+        assert!(packed.success());
+
+        let unpacked = tmp.path().join("unpacked");
+        unpack(&archive, &unpacked).unwrap();
+        let dst = tmp.path().join("registry/pi");
+        copy_into(&unpacked, &dst, false).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dst.join("scripts/funes-index.sh")).unwrap(),
+            "shared"
+        );
+        assert!(
+            std::fs::metadata(dst.join("setup")).unwrap().permissions().mode() & 0o111 != 0,
+            "setup arrives executable"
+        );
+        assert!(
+            open(&tmp.path().join("registry"), "pi").is_err(),
+            "that manifest declares nothing"
+        );
+    }
+
     /// What [`provision`] does with a checkout: nested directories and symlinked shared files come
     /// across as files, the executable bit survives, a drifted copy is refreshed, and state the
     /// `setup` wrote beside them is left alone.

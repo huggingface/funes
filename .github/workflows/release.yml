@@ -382,6 +382,31 @@ jobs:
           "$HF" buckets cp ./artifacts/VERSION "$ROOT/VERSION"
           "$HF" buckets cp scripts/install.sh "$ROOT/install.sh"
 
+      # Publish the agent integrations `funes add` installs. Keyed by the contract version each one
+      # declares, not by the release tag: a fixed integration reaches binaries that are already
+      # installed, and a binary only ever reads the layout it speaks. `-h` dereferences the
+      # symlinked shared scripts, so each archive is self-contained.
+      - name: Publish the agent integrations to the Hugging Face bucket
+        env:
+          HF_TOKEN: ${{ secrets.HF_FUNES_RELEASE_TOKEN }}
+        run: |
+          HF="$RUNNER_TEMP/hfvenv/bin/hf"
+          ROOT="hf://buckets/huggingface/funes"
+
+          for DIR in integrations/*/; do
+            ID=$(basename "$DIR")
+            MANIFEST="$DIR/manifest.json"
+            [ -f "$MANIFEST" ] || continue
+            CONTRACT=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["contract_version"])' "$MANIFEST")
+            mkdir -p "integrations-dist/v$CONTRACT"
+            tar -czhf "integrations-dist/v$CONTRACT/$ID.tar.gz" -C "$DIR" .
+          done
+
+          for PREFIX in integrations-dist/v*/; do
+            (cd "$PREFIX" && sha256sum *.tar.gz > SHA256SUMS)
+            "$HF" buckets sync "./$PREFIX" "$ROOT/integrations/$(basename "$PREFIX")"
+          done
+
       # Dispatch only: push a branch advancing main's version marker to `<version>+dev`. The org
       # blocks Actions from opening PRs, so the workflow stops at the branch and surfaces a one-click
       # "create PR" link in the run summary; a maintainer opens that PR and merges it.
