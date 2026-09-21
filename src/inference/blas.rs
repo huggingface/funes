@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use safetensors::SafeTensors;
-use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
+use tokenizers::utils::padding::pad_encodings;
+use tokenizers::{Encoding, PaddingParams, Tokenizer, TruncationParams};
 
 use super::{Embedder, Reranker};
 
@@ -229,6 +230,11 @@ struct Cfg {
     ffn: usize,
     layers: usize,
     bert_pos: bool,
+    /// Sequences per forward. A forward pads every sequence to the longest it holds, so
+    /// [`by_length`] runs inputs length-sorted, this many at a time. Measured on real chunk
+    /// lengths: fewer shrinks the GEMMs, more brings the padding back. `Scratch` is sized to one
+    /// forward, so this also bounds its high-water mark.
+    group: usize,
 }
 const RERANK: Cfg = Cfg {
     prefix: "roberta.",
@@ -238,6 +244,7 @@ const RERANK: Cfg = Cfg {
     ffn: 3072,
     layers: 12,
     bert_pos: false,
+    group: 8,
 };
 const EMBED: Cfg = Cfg {
     prefix: "",
@@ -247,6 +254,7 @@ const EMBED: Cfg = Cfg {
     ffn: 1536,
     layers: 12,
     bert_pos: true,
+    group: 16,
 };
 
 fn nthreads() -> usize {
@@ -663,15 +671,13 @@ fn load_tokenizer(dir: &Path) -> Result<Tokenizer> {
         ..Default::default()
     }))
     .map_err(|e| anyhow!("set truncation: {e}"))?;
-    tok.with_padding(Some(PaddingParams {
-        strategy: PaddingStrategy::BatchLongest,
-        ..Default::default()
-    }));
+    // Unpadded: `by_length` pads each forward's group to its own longest.
+    tok.with_padding(None);
     Ok(tok)
 }
 
 /// Tokenized batch → (ids, mask, n, l), both flattened row-major, padded to the batch's longest.
-fn to_batch(encs: &[tokenizers::Encoding]) -> (Vec<i64>, Vec<i64>, usize, usize) {
+fn to_batch(encs: &[Encoding]) -> (Vec<i64>, Vec<i64>, usize, usize) {
     let n = encs.len();
     let l = encs[0].get_ids().len();
     let mut ids = Vec::with_capacity(n * l);
@@ -681,6 +687,30 @@ fn to_batch(encs: &[tokenizers::Encoding]) -> (Vec<i64>, Vec<i64>, usize, usize)
         mask.extend(e.get_attention_mask().iter().map(|&x| x as i64));
     }
     (ids, mask, n, l)
+}
+
+/// Run `forward` over `encs` in length-sorted groups of at most `group`, each padded to its own
+/// longest, and return the per-sequence outputs in input order. Chunks run from a few tokens to the
+/// 512 cap, so one forward over a whole call — indexing hands `embed` 256 texts at a time — would
+/// spend most of its work on padding. `forward` gets one group laid out as [`to_batch`] does and
+/// returns one output per sequence.
+fn by_length<T: Default + Clone>(
+    mut encs: Vec<Encoding>,
+    group: usize,
+    mut forward: impl FnMut(&[i64], &[i64], usize, usize) -> Vec<T>,
+) -> Result<Vec<T>> {
+    let mut order: Vec<usize> = (0..encs.len()).collect();
+    order.sort_by_key(|&i| encs[i].get_ids().len());
+    let mut out = vec![T::default(); encs.len()];
+    for group in order.chunks(group) {
+        let mut batch: Vec<Encoding> = group.iter().map(|&i| std::mem::take(&mut encs[i])).collect();
+        pad_encodings(&mut batch, &PaddingParams::default()).map_err(|e| anyhow!("pad: {e}"))?;
+        let (ids, mask, n, l) = to_batch(&batch);
+        for (&i, y) in group.iter().zip(forward(&ids, &mask, n, l)) {
+            out[i] = y;
+        }
+    }
+    Ok(out)
 }
 
 /// bge-small-en-v1.5 embedder: BERT encoder → CLS → L2-normalize.
@@ -707,17 +737,18 @@ impl Embedder for BlasEmbedder {
             .tok
             .encode_batch(texts.to_vec(), true)
             .map_err(|e| anyhow!("tokenize: {e}"))?;
-        let (ids, mask, n, l) = to_batch(&encs);
-        encode(&self.w, EMBED, &ids, &mask, n, l, &mut self.scratch);
-        let hid = &self.scratch.hid;
+        let (w, scratch) = (&self.w, &mut self.scratch);
         let h = EMBED.h;
-        Ok((0..n)
-            .map(|s| {
-                let mut e = hid[(s * l) * h..(s * l) * h + h].to_vec();
-                l2_normalize(&mut e);
-                e
-            })
-            .collect())
+        by_length(encs, EMBED.group, |ids, mask, n, l| {
+            encode(w, EMBED, ids, mask, n, l, scratch);
+            (0..n)
+                .map(|s| {
+                    let mut e = scratch.hid[(s * l) * h..(s * l) * h + h].to_vec();
+                    l2_normalize(&mut e);
+                    e
+                })
+                .collect()
+        })
     }
 }
 
@@ -746,38 +777,39 @@ impl Reranker for BlasReranker {
             .tok
             .encode_batch(pairs, true)
             .map_err(|e| anyhow!("tokenize: {e}"))?;
-        let (ids, mask, n, l) = to_batch(&encs);
-        encode(&self.w, RERANK, &ids, &mask, n, l, &mut self.scratch);
-        let hid = &self.scratch.hid;
+        let (w, scratch) = (&self.w, &mut self.scratch);
         let h = RERANK.h;
-        let mut cls = vec![0f32; n * h];
-        for s in 0..n {
-            cls[s * h..s * h + h].copy_from_slice(&hid[(s * l) * h..(s * l) * h + h]);
-        }
-        let mut d = vec![0f32; n * h];
-        linear(
-            &cls,
-            n,
-            h,
-            self.w["classifier.dense.weight"].as_slice(),
-            self.w["classifier.dense.bias"].as_slice(),
-            h,
-            &mut d,
-        );
-        for v in d.iter_mut() {
-            *v = v.tanh();
-        }
-        let mut scores = vec![0f32; n];
-        linear(
-            &d,
-            n,
-            h,
-            self.w["classifier.out_proj.weight"].as_slice(),
-            self.w["classifier.out_proj.bias"].as_slice(),
-            1,
-            &mut scores,
-        );
-        Ok(scores)
+        by_length(encs, RERANK.group, |ids, mask, n, l| {
+            encode(w, RERANK, ids, mask, n, l, scratch);
+            let mut cls = vec![0f32; n * h];
+            for s in 0..n {
+                cls[s * h..s * h + h].copy_from_slice(&scratch.hid[(s * l) * h..(s * l) * h + h]);
+            }
+            let mut d = vec![0f32; n * h];
+            linear(
+                &cls,
+                n,
+                h,
+                w["classifier.dense.weight"].as_slice(),
+                w["classifier.dense.bias"].as_slice(),
+                h,
+                &mut d,
+            );
+            for v in d.iter_mut() {
+                *v = v.tanh();
+            }
+            let mut scores = vec![0f32; n];
+            linear(
+                &d,
+                n,
+                h,
+                w["classifier.out_proj.weight"].as_slice(),
+                w["classifier.out_proj.bias"].as_slice(),
+                1,
+                &mut scores,
+            );
+            scores
+        })
     }
 }
 
@@ -836,6 +868,39 @@ mod tests {
         }
         assert_eq!(flushed_a_normal, 0, "zeroed an exp that is a normal f32");
         assert_eq!(kept_a_subnormal, 0, "let a subnormal through");
+    }
+
+    /// `by_length` must hand `forward` length-sorted groups of at most `group`, each padded only
+    /// to its own longest, and put every output back at its input's position.
+    #[test]
+    fn by_length_pads_each_group_to_its_own_longest_in_input_order() {
+        use tokenizers::Token;
+        let group = 8;
+        let lens: Vec<usize> = (0..3 * group + 5).map(|i| 1 + (i * 37) % 200).collect();
+        let encs = lens
+            .iter()
+            .map(|&n| {
+                let toks = (0..n).map(|t| Token::new(2 + t as u32, String::new(), (0, 0)));
+                Encoding::from_tokens(toks.collect(), 0)
+            })
+            .collect();
+        let mut padded = 0;
+        let out = by_length(encs, group, |_, mask, n, l| {
+            let real: Vec<usize> = mask
+                .chunks(l)
+                .map(|row| row.iter().filter(|&&m| m == 1).count())
+                .collect();
+            assert!(n <= group, "a group of {n} exceeds {group}");
+            assert_eq!(real.iter().max(), Some(&l), "a group padded past its longest");
+            padded += n * l;
+            real
+        })
+        .unwrap();
+        assert_eq!(out, lens, "outputs are not in input order");
+        let mut sorted = lens.clone();
+        sorted.sort();
+        let want: usize = sorted.chunks(group).map(|g| g.len() * g[g.len() - 1]).sum();
+        assert_eq!(padded, want, "groups are not length-sorted");
     }
 
     /// Zeroing below the cutoff must leave e^x untouched everywhere above it.
