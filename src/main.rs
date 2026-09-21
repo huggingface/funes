@@ -12,10 +12,10 @@ use funes::scan;
 use funes::traces::harness::Harness;
 use funes::ui::render;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use std::io::{IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -596,8 +596,36 @@ async fn main() -> Result<()> {
 /// Install one agent's integration: refresh its files in the registry, then run its `setup add`.
 async fn install_agent(id: &str, memory: Option<String>, force: bool) -> Result<()> {
     let root = registry::default_root()?;
-    registry::provision(&root, id, force).await?;
-    registry::open(&root, id)?.add(memory.as_deref())
+    let provenance = registry::provision(&root, id, force).await?;
+    let integration = registry::open(&root, id)?;
+    confirm_trust(id, &integration.dir, provenance)?;
+    integration.add(memory.as_deref())
+}
+
+/// Confirm before funes executes an integration it does not vouch for: one `$FUNES_INTEGRATIONS`
+/// redirected it to, or one already on disk that no source refreshed. The default is no, and it is
+/// asked every time rather than recorded — anything able to plant the files could forge a record.
+fn confirm_trust(id: &str, dir: &Path, provenance: registry::Provenance) -> Result<()> {
+    let registry::Provenance::Unvouched(origin) = provenance else {
+        return Ok(());
+    };
+    if !std::io::stdin().is_terminal() {
+        bail!(
+            "the {id} integration at {} comes from {origin}, which funes can't vouch for — \
+             run this in a terminal to confirm it",
+            dir.display()
+        );
+    }
+    if !confirm(
+        &format!(
+            "funes is about to run {}/setup, from {origin}. Trust it? [y/N] ",
+            dir.display()
+        ),
+        false,
+    ) {
+        bail!("{id} not confirmed — its setup was not run");
+    }
+    Ok(())
 }
 
 /// Run `id`'s `setup remove`, then delete its files. The files are refreshed first, so the script
@@ -605,13 +633,17 @@ async fn install_agent(id: &str, memory: Option<String>, force: bool) -> Result<
 /// to work with no source to refresh from, so that falls back to what is installed.
 async fn remove_agent(id: &str) -> Result<()> {
     let root = registry::default_root()?;
-    if let Err(e) = registry::provision(&root, id, false).await {
-        if !root.join(id).is_dir() {
-            return Err(e);
+    let provenance = match registry::provision(&root, id, false).await {
+        Ok(provenance) => provenance,
+        Err(e) if root.join(id).is_dir() => {
+            eprintln!("note: no source to refresh the {id} integration from — {e:#}");
+            registry::Provenance::Unvouched("the installed copy, refreshed by nothing".to_string())
         }
-        eprintln!("note: running the installed {id} integration — {e:#}");
-    }
-    registry::open(&root, id)?.remove()?;
+        Err(e) => return Err(e),
+    };
+    let integration = registry::open(&root, id)?;
+    confirm_trust(id, &integration.dir, provenance)?;
+    integration.remove()?;
     registry::discard(&root, id)
 }
 

@@ -183,10 +183,21 @@ impl Integration {
 
 /// Where an integration's files come from.
 enum Source {
-    /// A directory on this machine.
-    Local(PathBuf),
+    /// The `integrations/` directory of the checkout this binary was built from.
+    Checkout(PathBuf),
+    /// A directory `$FUNES_INTEGRATIONS` points at.
+    Redirected(PathBuf),
     /// The archive published in the release bucket.
     Published,
+}
+
+/// Whether funes vouches for the files it installed: a published archive it verified, or the
+/// checkout it was built from. Anything else is someone's files on this disk, and the caller
+/// confirms before funes executes them.
+pub enum Provenance {
+    Vouched,
+    /// Where they came from, for the confirmation.
+    Unvouched(String),
 }
 
 /// Resolve `id`'s files: `$FUNES_INTEGRATIONS` if set — authoritative, so a test or a fork cannot
@@ -197,12 +208,12 @@ fn source_for(id: &str) -> Result<Source> {
         let dir = PathBuf::from(dir).join(id);
         return dir
             .is_dir()
-            .then_some(Source::Local(dir))
+            .then_some(Source::Redirected(dir))
             .with_context(|| format!("$FUNES_INTEGRATIONS holds no {id}"));
     }
     let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("integrations").join(id);
     if checkout.is_dir() {
-        return Ok(Source::Local(checkout));
+        return Ok(Source::Checkout(checkout));
     }
     Ok(Source::Published)
 }
@@ -215,16 +226,27 @@ fn published_prefix() -> String {
 
 /// Install `id`'s files into the registry. Only a file that differs is rewritten (`force` rewrites
 /// regardless), and nothing is pruned — an integration's `setup` keeps its own state beside them.
-pub async fn provision(root: &Path, id: &str, force: bool) -> Result<()> {
+pub async fn provision(root: &Path, id: &str, force: bool) -> Result<Provenance> {
     let dst = root.join(id);
     match source_for(id)? {
-        Source::Local(src) => copy_into(&src, &dst, force),
+        Source::Checkout(src) => {
+            copy_into(&src, &dst, force)?;
+            Ok(Provenance::Vouched)
+        }
+        Source::Redirected(src) => {
+            copy_into(&src, &dst, force)?;
+            Ok(Provenance::Unvouched(format!(
+                "$FUNES_INTEGRATIONS ({})",
+                src.display()
+            )))
+        }
         Source::Published => {
             let staging = tempfile::tempdir().context("creating a staging directory")?;
             let archive = fetch_published(id, staging.path()).await?;
             let unpacked = staging.path().join("unpacked");
             unpack(&archive, &unpacked)?;
-            copy_into(&unpacked, &dst, force)
+            copy_into(&unpacked, &dst, force)?;
+            Ok(Provenance::Vouched)
         }
     }
 }
