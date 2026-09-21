@@ -142,15 +142,14 @@ fn remove_hermes_preserves_user_hooks_approvals_and_files() {
 }
 
 #[test]
-fn remove_pi_unregisters_the_fixed_source_and_deletes_the_extension() {
+fn remove_pi_unregisters_the_extension_and_deletes_it() {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("home");
     let log = tmp.path().join("cli.log");
     let bin = support::fake_cli(tmp.path(), "pi");
-    let extension = home.join(".funes/integrations/pi");
-    fs::create_dir_all(&extension).unwrap();
-    fs::write(extension.join("index.ts"), "owned").unwrap();
-    fs::write(extension.join("memory"), "acme/kb\n").unwrap();
+    // The integration is installed on demand from the checkout, so `remove` can uninstall what an
+    // older funes left behind.
+    let extension = home.join(".funes/agents/pi");
 
     let first = support::run_remove(&home, &bin, &log, "pi");
     support::assert_success(&first);

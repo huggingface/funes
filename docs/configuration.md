@@ -39,7 +39,7 @@ registration and funes-owned files/entries:
 | Claude Code | Hooks-only plugin under `~/.funes/integrations/claude-plugin`; registered through Claude's plugin commands. |
 | Codex | `~/.codex/hooks.json` and scripts under `~/.codex/hooks/`. |
 | Hermes | `~/.hermes/config.yaml`, `~/.hermes/shell-hooks-allowlist.json`, and scripts under `~/.hermes/hooks/`. |
-| pi | Extension and optional memory binding under `~/.funes/integrations/pi/`. |
+| pi | Extension and optional memory binding under `~/.funes/agents/pi/`. |
 
 See [automation.md](automation.md) for how these files are merged and which events they handle.
 Hook logs sit beside the installed scripts as `funes-sync.log`.

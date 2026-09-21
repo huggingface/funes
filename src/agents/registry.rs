@@ -161,6 +161,60 @@ impl Integration {
     }
 }
 
+/// Where an integration's files come from: `$FUNES_INTEGRATIONS`, else the `integrations/`
+/// directory of the checkout this binary was built from, when it is still there. A released
+/// binary's build path does not exist on the machine that runs it, so it falls through — which is
+/// also how a source build is recognised without a flag.
+pub fn integrations_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("FUNES_INTEGRATIONS") {
+        return Some(PathBuf::from(dir));
+    }
+    let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("integrations");
+    checkout.is_dir().then_some(checkout)
+}
+
+/// Install `id`'s files into the registry from [`integrations_dir`]. They are copied, never run
+/// where they were found: an agent records the path it is handed, and a checkout can move. Only a
+/// file that differs is rewritten, so editing a checkout's script and re-running `add` picks it
+/// up; `force` rewrites regardless. Nothing is pruned — an integration's `setup` keeps its own
+/// state beside these files.
+pub fn provision(root: &Path, id: &str, force: bool) -> Result<()> {
+    let src = integrations_dir()
+        .map(|dir| dir.join(id))
+        .filter(|dir| dir.is_dir())
+        .with_context(|| format!("no files to install for {id} — funes was not built from a checkout"))?;
+    copy_into(&src, &root.join(id), force)
+}
+
+/// Delete an integration's directory: what [`provision`] installed, and whatever its `setup` wrote
+/// beside it.
+pub fn discard(root: &Path, id: &str) -> Result<()> {
+    super::remove_tree(&root.join(id))
+}
+
+fn copy_into(src: &Path, dst: &Path, force: bool) -> Result<()> {
+    std::fs::create_dir_all(dst).with_context(|| format!("creating {}", dst.display()))?;
+    for entry in std::fs::read_dir(src).with_context(|| format!("reading {}", src.display()))? {
+        let from = entry?.path();
+        let to = dst.join(from.file_name().expect("a directory entry has a file name"));
+        // Follows a symlink: a checkout that links one shared script into several integrations
+        // still copies the file itself.
+        let meta = std::fs::metadata(&from).with_context(|| format!("reading {}", from.display()))?;
+        if meta.is_dir() {
+            copy_into(&from, &to, force)?;
+            continue;
+        }
+        let bytes = std::fs::read(&from).with_context(|| format!("reading {}", from.display()))?;
+        if force || std::fs::read(&to).map(|old| old != bytes).unwrap_or(true) {
+            std::fs::write(&to, &bytes).with_context(|| format!("writing {}", to.display()))?;
+        }
+        let mode = meta.permissions().mode() & 0o777;
+        std::fs::set_permissions(&to, std::fs::Permissions::from_mode(mode))
+            .with_context(|| format!("setting the mode of {}", to.display()))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,6 +236,45 @@ mod tests {
 
     /// The `add` contract in one run: the argv the script is handed and the environment it can
     /// count on.
+    /// What [`provision`] does with a checkout: nested directories and symlinked shared files come
+    /// across as files, the executable bit survives, a drifted copy is refreshed, and state the
+    /// `setup` wrote beside them is left alone.
+    #[test]
+    fn copying_a_checkout_follows_links_keeps_modes_and_keeps_local_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let shared = tmp.path().join("shared.sh");
+        std::fs::write(&shared, "shared v1").unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(src.join("scripts")).unwrap();
+        std::fs::write(src.join("manifest.json"), "{}").unwrap();
+        std::os::unix::fs::symlink(&shared, src.join("scripts/shared.sh")).unwrap();
+
+        let dst = tmp.path().join("dst");
+        copy_into(&src, &dst, false).unwrap();
+
+        let copied = dst.join("scripts/shared.sh");
+        assert!(
+            !copied.symlink_metadata().unwrap().file_type().is_symlink(),
+            "copied as a file"
+        );
+        assert_eq!(std::fs::read_to_string(&copied).unwrap(), "shared v1");
+        assert!(std::fs::metadata(&copied).unwrap().permissions().mode() & 0o111 != 0);
+
+        // The integration's own state, and a second run that must not disturb it.
+        std::fs::write(dst.join("memory"), "acme/kb\n").unwrap();
+        std::fs::write(&shared, "shared v2").unwrap();
+        copy_into(&src, &dst, false).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&copied).unwrap(),
+            "shared v2",
+            "drift is refreshed"
+        );
+        assert_eq!(std::fs::read_to_string(dst.join("memory")).unwrap(), "acme/kb\n");
+    }
+
     #[test]
     fn add_hands_setup_the_memory_and_the_contract_environment() {
         let root = tempfile::tempdir().unwrap();

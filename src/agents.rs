@@ -6,7 +6,6 @@ pub mod claude;
 pub mod codex;
 pub mod hermes;
 pub mod hooks;
-pub mod pi;
 pub mod registry;
 
 use anyhow::{bail, Context, Result};

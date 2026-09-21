@@ -52,7 +52,7 @@ when they're indexed, and `funes index` re-embeds nothing already written. Keepi
   the extracted source, and the separate MCP registration.
 - **pi** has no hook system: it exposes its lifecycle to extensions instead, so the automation rides
   in the extension that already gives pi the read tools — the same scripts, run from `turn_end` and
-  the session-boundary events. Nothing outside `~/.funes/integrations/pi` is configured, so
+  the session-boundary events. Nothing outside `~/.funes/agents/pi` is configured, so
   `funes remove pi` takes the whole install with it.
 - **Codex** has no plugin system, so funes writes its hooks into `~/.codex/hooks.json` — a file
   dedicated to hooks, not your `config.toml`. The merge is append-or-replace keyed by funes's own

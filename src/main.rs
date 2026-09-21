@@ -4,7 +4,7 @@
 //! harness session dirs (Claude Code, Codex, pi) or an explicit path/parquet/repo. funes's home is
 //! `$FUNES_HOME` or `~/.funes`.
 
-use funes::agents::{claude, codex, hermes, pi};
+use funes::agents::{claude, codex, hermes, registry};
 use funes::commands::{ask, index, mcp, push, recall, scrub, sketch, update};
 use funes::hub;
 use funes::memory;
@@ -571,16 +571,35 @@ async fn main() -> Result<()> {
                 if let Some(remote) = resolved.as_ref().filter(|r| r.is_remote()) {
                     require_scanner(&remote.memory, Harness::Pi)?;
                 }
-                bootstrap_add(Harness::Pi, resolved, |memory| pi::install(memory, force)).await
+                bootstrap_add(Harness::Pi, resolved, |memory| install_agent("pi", memory, force)).await
             }
         },
         Cmd::Remove { agent } => match agent {
             RemoveAgent::Claude => claude::uninstall(),
             RemoveAgent::Codex => codex::uninstall(),
-            RemoveAgent::Pi => pi::uninstall(),
+            RemoveAgent::Pi => remove_agent("pi"),
             RemoveAgent::Hermes => hermes::uninstall(),
         },
     }
+}
+
+/// Install one agent's integration: refresh its files in the registry, then run its `setup add`.
+fn install_agent(id: &str, memory: Option<String>, force: bool) -> Result<()> {
+    let root = registry::default_root()?;
+    registry::provision(&root, id, force)?;
+    registry::open(&root, id)?.add(memory.as_deref())
+}
+
+/// Remove one agent's integration: run its `setup remove`, then delete its files. An integration
+/// that was never installed through the registry is provisioned first, so an upgrade can still
+/// uninstall what an older funes left behind.
+fn remove_agent(id: &str) -> Result<()> {
+    let root = registry::default_root()?;
+    if !root.join(id).is_dir() {
+        registry::provision(&root, id, false)?;
+    }
+    registry::open(&root, id)?.remove()?;
+    registry::discard(&root, id)
 }
 
 /// A resolved memory binding: the memory spec, and whether funes just created the repo this run — the

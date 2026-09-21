@@ -1,0 +1,120 @@
+#!/bin/sh
+# funes's pi integration: register this directory with pi as an extension, and bind the memory it
+# recalls from and publishes to. Run by `funes add pi` / `funes remove pi`, which supply
+# $FUNES_BIN, $FUNES_HOME and $FUNES_AGENT_ID.
+#
+# pi has no MCP client, so index.ts is one: it spawns `funes mcp` over stdio and registers whatever
+# tools/list returns. pi records an extension's path permanently, which is why funes hands this
+# directory a fixed location instead of running it where it came from.
+set -eu
+
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+# Where funes kept the extension before the integration registry. Unregistered and deleted on
+# sight, so an upgrade can't leave pi loading two copies.
+LEGACY="$HOME/.funes/integrations/pi"
+
+# The tools carry their MCP schemas, whose optional arguments are nullable unions — pi validates
+# those correctly only from this version on. An older pi registers the tools and then rejects every
+# call that omits an optional argument: a broken integration that looks installed.
+MIN_PI=0.84.0
+
+usage() {
+    echo "usage: setup add [MEMORY] | setup remove" >&2
+    exit 2
+}
+
+have_pi() {
+    command -v pi >/dev/null 2>&1
+}
+
+# The version pi reports, or empty when it reports something with no version in it.
+pi_version() {
+    pi --version 2>/dev/null | awk 'match($0, /[0-9]+(\.[0-9]+)+/) { print substr($0, RSTART, RLENGTH); exit }'
+}
+
+# True when version $1 is older than version $2.
+older() {
+    awk -v a="$1" -v b="$2" 'BEGIN {
+        split(a, x, "."); split(b, y, ".")
+        for (i = 1; i <= 3; i++) {
+            if ((x[i] + 0) < (y[i] + 0)) exit 0
+            if ((x[i] + 0) > (y[i] + 0)) exit 1
+        }
+        exit 1
+    }'
+}
+
+drop_legacy() {
+    [ -d "$LEGACY" ] || return 0
+    if have_pi; then
+        pi remove "$LEGACY" >/dev/null 2>&1 || true
+    fi
+    rm -rf "$LEGACY"
+}
+
+add() {
+    # The memory index.ts reads at startup; absent means the local memory.
+    if [ -n "${1:-}" ]; then
+        printf '%s\n' "$1" >"$HERE/memory"
+    else
+        rm -f "$HERE/memory"
+    fi
+    drop_legacy
+
+    if ! have_pi; then
+        echo "the funes pi extension is installed at $HERE"
+        echo "\`pi\` isn't on PATH — once it is, run:  pi install $HERE"
+        return 0
+    fi
+
+    version=$(pi_version)
+    # Refused rather than warned: the tools would register and then reject calls.
+    if [ -n "$version" ] && older "$version" "$MIN_PI"; then
+        echo "pi $version is too old for funes — the tools need pi $MIN_PI or newer to accept their" \
+            "arguments. Run \`pi update\`, then re-run this command. The extension is installed at" \
+            "$HERE either way." >&2
+        exit 1
+    fi
+
+    pi install "$HERE"
+    echo "installed funes into pi${version:+ $version} — recall and per-turn indexing are now active" \
+        "(restart pi if it's running)."
+}
+
+remove() {
+    rm -f "$HERE/memory"
+    drop_legacy
+
+    if ! have_pi; then
+        echo "\`pi\` isn't on PATH — the extension and its automation were removed. Once it is," \
+            "remove the registration manually:  pi remove $HERE"
+        return 0
+    fi
+
+    # Removal is idempotent: a registration pi has already forgotten is a success.
+    if ! out=$(pi remove "$HERE" 2>&1); then
+        case "$out" in
+        *"No matching package found for"*) : ;;
+        *)
+            printf '%s\n' "$out" >&2
+            exit 1
+            ;;
+        esac
+    fi
+    echo "removed funes from pi — extension registration, its automation, and the extracted files."
+}
+
+case "${1:-}" in
+add)
+    shift
+    [ $# -le 1 ] || usage
+    add "${1:-}"
+    ;;
+remove)
+    shift
+    [ $# -eq 0 ] || usage
+    remove
+    ;;
+*) usage ;;
+esac

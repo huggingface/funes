@@ -18,21 +18,18 @@ drives. See [automation.md](../../docs/automation.md).
 ## Install
 
 Once `funes` is on your PATH, one command extracts this extension to a fixed
-`~/.funes/integrations/pi` and registers it with pi, user-wide:
+`~/.funes/agents/pi` and registers it with pi, user-wide:
 
 ```sh
 funes add pi
 ```
 
-funes embeds the extension in its binary, so this always matches the installed
-funes version — no separate package to fetch, and a re-run after an upgrade
-re-extracts the refreshed copy automatically (`--force` rewrites even when the
-on-disk copy is already current).
+funes installs the extension from this directory, and a re-run refreshes a copy
+that has drifted (`--force` rewrites even when it already matches).
 
 For development from a funes checkout you can also install the package directly
 with `pi install ./integrations/pi`, or load it for a single run with
-`pi -e ./integrations/pi`. A checkout has no extracted `scripts/`, so those runs get the tools
-without the automation.
+`pi -e ./integrations/pi`.
 
 > There's no `pi install git:…/funes`: pi has no subdir/monorepo install syntax,
 > and the funes repo root is a Cargo project rather than a pi package.

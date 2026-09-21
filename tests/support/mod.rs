@@ -1,3 +1,6 @@
+// Shared by every `add`/`remove` test binary; each uses the subset it needs.
+#![allow(dead_code)]
+
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -18,7 +21,9 @@ pub fn run_remove(home: &Path, bin: &Path, log: &Path, agent: &str) -> Output {
     Command::new(env!("CARGO_BIN_EXE_funes"))
         .args(["remove", agent])
         .env("HOME", home)
-        .env("PATH", bin)
+        // The fake agent CLI first, then the system utilities an integration's `setup` script
+        // needs (awk, rm, …). No real agent CLI is on either.
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
         // Every variable that would point funes at something real: `CODEX_HOME` answers when funes
         // asks Codex where its home is, and `FUNES_HOME` names the memory. A developer running the
         // suite with either set would otherwise have their own integration removed.
