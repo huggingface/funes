@@ -1,0 +1,6 @@
+{
+  "contract_version": 1,
+  "id": "claude",
+  "label": "Claude Code",
+  "repo": "huggingface/funes"
+}

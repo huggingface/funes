@@ -1,0 +1,152 @@
+#!/bin/sh
+# funes's Claude Code integration: register `funes mcp` as a user-scoped MCP server, and install a
+# hooks-only plugin that indexes each turn and, with a memory bound, publishes at session
+# boundaries. funes never edits the user's settings.json.
+set -eu
+
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PLUGIN_ROOT="$HERE/claude-plugin"
+PLUGIN_ID="funes@huggingface"
+MARKETPLACE="huggingface"
+
+# The pre-registry install location. The marketplace is registered by name against it, so `add`
+# drops that registration before pointing the name at the new path.
+LEGACY="$HOME/.funes/integrations/claude-plugin"
+
+FUNES="${FUNES_BIN:-funes}"
+
+usage() {
+    echo "usage: setup add [MEMORY] | setup remove" >&2
+    exit 2
+}
+
+have_claude() {
+    command -v claude >/dev/null 2>&1
+}
+
+# The plugin's hooks, with the memory baked in. Claude expands ${CLAUDE_PLUGIN_ROOT} itself, so the
+# commands stay valid wherever the plugin is installed.
+write_hooks() {
+    mkdir -p "$PLUGIN_ROOT/funes/hooks"
+    FUNES_MEMORY_BINDING="${1:-}" python3 - "$PLUGIN_ROOT/funes/hooks/hooks.json" <<'PY'
+import json, os, sys
+
+# The hook's own timeout: both scripts hand off to a detached worker and return well inside it.
+TIMEOUT = 15
+memory = os.environ.get("FUNES_MEMORY_BINDING", "")
+
+def command(script, *args):
+    quoted = ['"%s"' % a.replace("\\", "\\\\").replace('"', '\\"') for a in (script,) + args]
+    return "bash " + " ".join(quoted)
+
+def group(command, status):
+    return {"hooks": [{"type": "command", "command": command, "timeout": TIMEOUT, "statusMessage": status}]}
+
+index = command("${CLAUDE_PLUGIN_ROOT}/scripts/funes-index.sh", "claude")
+hooks = {"Stop": [group(index, "Indexing turn into funes memory")]}
+if memory:
+    push = command("${CLAUDE_PLUGIN_ROOT}/scripts/funes-push.sh", memory, "claude")
+    hooks["SessionStart"] = [group(push, "Publishing funes memory")]
+    hooks["SessionEnd"] = [group(push, "Publishing funes memory")]
+
+with open(sys.argv[1], "w") as out:
+    json.dump({"hooks": hooks}, out, indent=2)
+    out.write("\n")
+PY
+}
+
+manual_add() {
+    memory=${1:-}
+    echo "  claude plugin marketplace add $PLUGIN_ROOT"
+    echo "  claude plugin install $PLUGIN_ID"
+    if [ -n "$memory" ]; then
+        echo "  claude mcp add funes -s user -- $FUNES mcp $memory"
+    else
+        echo "  claude mcp add funes -s user -- $FUNES mcp"
+    fi
+}
+
+add() {
+    memory=${1:-}
+    write_hooks "$memory"
+
+    if ! have_claude; then
+        echo "the funes plugin is installed at $PLUGIN_ROOT"
+        echo "\`claude\` isn't on PATH — once it is, run:"
+        manual_add "$memory"
+        return 0
+    fi
+
+    if [ -d "$LEGACY" ]; then
+        claude plugin marketplace remove "$MARKETPLACE" >/dev/null 2>&1 || true
+    fi
+    rm -rf "$LEGACY"
+
+    claude plugin marketplace add "$PLUGIN_ROOT"
+    # A plain install is a no-op for an installed plugin and update is version-gated, so refreshed
+    # content lands by uninstalling first.
+    claude plugin uninstall "$PLUGIN_ID" >/dev/null 2>&1 || true
+    claude plugin install "$PLUGIN_ID"
+
+    # `mcp add` errors when funes is already registered, so a re-run to change the memory would
+    # fail without this.
+    claude mcp remove funes >/dev/null 2>&1 || true
+    if [ -n "$memory" ]; then
+        claude mcp add funes -s user -- "$FUNES" mcp "$memory"
+    else
+        claude mcp add funes -s user -- "$FUNES" mcp
+    fi
+
+    if [ -n "$memory" ]; then
+        echo "installed funes into Claude Code — recall, per-turn indexing, and publishing to $memory (restart Claude Code if it's running)."
+    else
+        echo "installed funes into Claude Code — recall and per-turn indexing, local only (restart Claude Code if it's running)."
+    fi
+}
+
+# Run one `claude` removal. A registration claude has already forgotten is a success; any other
+# failure keeps its diagnostics rather than claiming a partial uninstall worked.
+forget() {
+    absent=$1
+    shift
+    if ! out=$(claude "$@" 2>&1); then
+        case "$out" in
+        *"$absent"*) : ;;
+        *)
+            printf '%s\n' "$out" >&2
+            exit 1
+            ;;
+        esac
+    fi
+}
+
+remove() {
+    rm -rf "$LEGACY"
+
+    if ! have_claude; then
+        echo "\`claude\` isn't on PATH — the plugin files were removed. Once it is, remove the registrations manually:"
+        echo "  claude mcp remove funes -s user"
+        echo "  claude plugin uninstall $PLUGIN_ID"
+        echo "  claude plugin marketplace remove $MARKETPLACE"
+        return 0
+    fi
+
+    forget 'No MCP server named "funes"' mcp remove funes -s user
+    forget "Plugin \"$PLUGIN_ID\" not found" plugin uninstall "$PLUGIN_ID"
+    forget "Marketplace '$MARKETPLACE' not found" plugin marketplace remove "$MARKETPLACE"
+    echo "removed funes from Claude Code — recall registration, hooks plugin, and installed files."
+}
+
+case "${1:-}" in
+add)
+    shift
+    [ $# -le 1 ] || usage
+    add "${1:-}"
+    ;;
+remove)
+    shift
+    [ $# -eq 0 ] || usage
+    remove
+    ;;
+*) usage ;;
+esac

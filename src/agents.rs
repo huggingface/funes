@@ -2,7 +2,6 @@
 //! the small helpers they share for installing and removing themselves, and the registry
 //! ([`registry`]) that resolves an agent id to an installed integration and runs it.
 
-pub mod claude;
 pub mod codex;
 pub mod hermes;
 pub mod hooks;

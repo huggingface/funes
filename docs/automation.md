@@ -46,7 +46,7 @@ when they're indexed, and `funes index` re-embeds nothing already written. Keepi
 (the push) off the per-turn path is what lets indexing run every turn cheaply.
 
 - **Claude Code** has a plugin system, so funes ships a hooks-only plugin (extracted to
-  `~/.funes/integrations/claude-plugin`) and registers it with `claude plugin marketplace add` +
+  `~/.funes/agents/claude/claude-plugin`) and registers it with `claude plugin marketplace add` +
   `claude plugin install`. Claude's loader activates the plugin's hooks — **funes never edits your
   `settings.json`**. `funes remove claude` removes the plugin, its local marketplace registration,
   the extracted source, and the separate MCP registration.

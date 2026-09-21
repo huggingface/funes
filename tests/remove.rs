@@ -7,14 +7,18 @@ use serde_json::Value;
 use std::fs;
 
 #[test]
-fn remove_claude_unregisters_both_surfaces_and_deletes_the_extracted_plugin() {
+fn remove_claude_unregisters_both_surfaces_and_deletes_the_installed_plugin() {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("home");
     let log = tmp.path().join("cli.log");
     let bin = support::fake_cli(tmp.path(), "claude");
-    let plugin = home.join(".funes/integrations/claude-plugin");
-    fs::create_dir_all(plugin.join("funes/scripts")).unwrap();
-    fs::write(plugin.join("funes/scripts/funes-index.sh"), "owned").unwrap();
+    // Installed on demand from the checkout, and taken with the integration.
+    let plugin = home.join(".funes/agents/claude");
+    // A pre-registry install is deleted too, without a second marketplace call: the registration is
+    // by name, and the one below covers it.
+    let legacy = home.join(".funes/integrations/claude-plugin");
+    fs::create_dir_all(&legacy).unwrap();
+    fs::write(legacy.join("marker"), "owned").unwrap();
     let memory = home.join(".funes/memory/chunks.lance");
     fs::create_dir_all(&memory).unwrap();
     fs::write(memory.join("keep"), "memory").unwrap();
@@ -22,6 +26,7 @@ fn remove_claude_unregisters_both_surfaces_and_deletes_the_extracted_plugin() {
     let first = support::run_remove(&home, &bin, &log, "claude");
     support::assert_success(&first);
     assert!(!plugin.exists());
+    assert!(!legacy.exists());
     assert_eq!(fs::read_to_string(memory.join("keep")).unwrap(), "memory");
     assert_eq!(
         fs::read_to_string(&log).unwrap(),
