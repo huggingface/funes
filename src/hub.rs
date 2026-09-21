@@ -1,7 +1,7 @@
 //! Talking to the Hugging Face Hub: the client, credentials, and dataset-repo identity and
 //! lifecycle. It knows nothing about what a memory is — [`crate::memory`] is the domain that
-//! interprets what these calls answer. The public release bucket lives here too: the binaries,
-//! the integrations, and the `SHA256SUMS` every download is checked against.
+//! interprets what these calls answer. The public release bucket lives here too, with the
+//! `SHA256SUMS` every download is checked against.
 
 use std::path::{Path, PathBuf};
 

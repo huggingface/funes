@@ -382,10 +382,9 @@ jobs:
           "$HF" buckets cp ./artifacts/VERSION "$ROOT/VERSION"
           "$HF" buckets cp scripts/install.sh "$ROOT/install.sh"
 
-      # Publish the agent integrations `funes add` installs. Keyed by the contract version each one
-      # declares, not by the release tag: a fixed integration reaches binaries that are already
-      # installed, and a binary only ever reads the layout it speaks. `-h` dereferences the
-      # symlinked shared scripts, so each archive is self-contained.
+      # Publish the agent integrations `funes add` installs, keyed by the contract version each one
+      # declares rather than by the release tag, so a fix reaches binaries already installed. `-h`
+      # dereferences the symlinked shared scripts, leaving each archive self-contained.
       - name: Publish the agent integrations to the Hugging Face bucket
         env:
           HF_TOKEN: ${{ secrets.HF_FUNES_RELEASE_TOKEN }}

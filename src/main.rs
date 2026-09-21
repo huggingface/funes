@@ -600,9 +600,8 @@ async fn install_agent(id: &str, memory: Option<String>, force: bool) -> Result<
     registry::open(&root, id)?.add(memory.as_deref())
 }
 
-/// Remove one agent's integration: run its `setup remove`, then delete its files. An integration
-/// that was never installed through the registry is provisioned first, so an upgrade can still
-/// uninstall what an older funes left behind.
+/// Run `id`'s `setup remove`, then delete its files. One that was never installed through the
+/// registry is provisioned first, so an upgrade can still uninstall what an older funes left.
 async fn remove_agent(id: &str) -> Result<()> {
     let root = registry::default_root()?;
     if !root.join(id).is_dir() {

@@ -1,22 +1,18 @@
 #!/bin/sh
 # funes's pi integration: register this directory with pi as an extension, and bind the memory it
-# recalls from and publishes to. Run by `funes add pi` / `funes remove pi`, which supply
-# $FUNES_BIN, $FUNES_HOME and $FUNES_AGENT_ID.
+# recalls from and publishes to.
 #
 # pi has no MCP client, so index.ts is one: it spawns `funes mcp` over stdio and registers whatever
-# tools/list returns. pi records an extension's path permanently, which is why funes hands this
-# directory a fixed location instead of running it where it came from.
+# tools/list returns.
 set -eu
 
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
-# Where funes kept the extension before the integration registry. Unregistered and deleted on
-# sight, so an upgrade can't leave pi loading two copies.
+# The pre-registry install location, unregistered on sight so pi can't load two copies.
 LEGACY="$HOME/.funes/integrations/pi"
 
-# The tools carry their MCP schemas, whose optional arguments are nullable unions — pi validates
-# those correctly only from this version on. An older pi registers the tools and then rejects every
-# call that omits an optional argument: a broken integration that looks installed.
+# The tools' MCP schemas make optional arguments nullable unions, which pi validates correctly only
+# from this version on. An older pi registers them, then rejects every call that omits one.
 MIN_PI=0.84.0
 
 usage() {
@@ -54,7 +50,7 @@ drop_legacy() {
 }
 
 add() {
-    # The memory index.ts reads at startup; absent means the local memory.
+    # The memory index.ts reads at startup; absent is the local memory.
     if [ -n "${1:-}" ]; then
         printf '%s\n' "$1" >"$HERE/memory"
     else
@@ -69,7 +65,6 @@ add() {
     fi
 
     version=$(pi_version)
-    # Refused rather than warned: the tools would register and then reject calls.
     if [ -n "$version" ] && older "$version" "$MIN_PI"; then
         echo "pi $version is too old for funes — the tools need pi $MIN_PI or newer to accept their" \
             "arguments. Run \`pi update\`, then re-run this command. The extension is installed at" \
@@ -92,7 +87,7 @@ remove() {
         return 0
     fi
 
-    # Removal is idempotent: a registration pi has already forgotten is a success.
+    # A registration pi has already forgotten is a success.
     if ! out=$(pi remove "$HERE" 2>&1); then
         case "$out" in
         *"No matching package found for"*) : ;;

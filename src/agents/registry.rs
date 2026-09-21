@@ -1,9 +1,8 @@
 //! The registry of agent integrations: where one lives, what it declares, and how funes runs it.
 //!
 //! An integration is a directory `<root>/<id>/` holding a `manifest.json` and an executable
-//! `setup`. funes's knowledge of an agent is the lookup: resolve `<id>`, then exec
-//! `setup add [MEMORY]` or `setup remove`. What the script can count on — the funes binary, the
-//! home it writes to, and its own id — arrives in the environment.
+//! `setup`, run as `setup add [MEMORY]` or `setup remove` with `$FUNES_BIN`, `$FUNES_HOME` and
+//! `$FUNES_AGENT_ID` in its environment.
 
 use anyhow::{bail, Context, Result};
 use hf_hub::buckets::BucketDownload;
@@ -15,27 +14,21 @@ use std::process::Command;
 use crate::hub;
 use crate::memory::dataset;
 
-/// The integration contract this funes speaks. One built for another version is refused before its
-/// `setup` runs at all: the manifest fields and the argv it expects are that version's, not this
-/// one's.
+/// The integration contract this funes speaks.
 pub const CONTRACT_VERSION: u32 = 1;
 
 /// The executable every integration provides: `setup add [MEMORY]`, `setup remove`.
 const SETUP: &str = "setup";
 
-/// What an integration declares about itself, in `manifest.json`. An unknown field is rejected
-/// rather than ignored, so a manifest written against a later contract fails here instead of
-/// installing something half-understood.
+/// What an integration declares about itself, in `manifest.json`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
-    /// The contract version it is written against.
     pub contract_version: u32,
-    /// The agent's id.
     pub id: String,
-    /// The agent's name as a human writes it, for listings.
+    /// The agent's name as a human writes it.
     pub label: String,
-    /// Where the integration came from, for listings.
+    /// Where the integration came from.
     pub repo: String,
 }
 
@@ -47,16 +40,13 @@ pub struct Integration {
 }
 
 /// The registry root, `~/.funes/agents` — fixed, not under `$FUNES_HOME`: an agent records the
-/// install path it is handed, so these files must outlive any one home, and every integration
-/// writes to the agent's own user-scoped config regardless. Which home an install binds travels in
-/// the environment instead, per run.
+/// install path it is handed, so these files must outlive any one home.
 pub fn default_root() -> Result<PathBuf> {
     let home = std::env::var_os("HOME").context("resolving $HOME for the agent registry")?;
     Ok(PathBuf::from(home).join(".funes/agents"))
 }
 
-/// The ids in `root`: every directory holding a `manifest.json`, sorted. Cheap and unvalidating —
-/// it answers what could be resolved, not what is well-formed.
+/// The ids in `root`: every directory holding a `manifest.json`, sorted. Unvalidated.
 pub fn registered_ids(root: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
@@ -70,8 +60,8 @@ pub fn registered_ids(root: &Path) -> Vec<String> {
     ids
 }
 
-/// Resolve `id` in `root`, reading and checking everything the contract requires. Every refusal the
-/// registry can make happens here, before `setup` is ever run.
+/// Resolve `id` in `root` and check what it declares. Every refusal happens here, before `setup`
+/// runs.
 pub fn open(root: &Path, id: &str) -> Result<Integration> {
     let dir = root.join(id);
     let manifest_path = dir.join("manifest.json");
@@ -105,8 +95,7 @@ pub fn open(root: &Path, id: &str) -> Result<Integration> {
             manifest.id
         );
     }
-    // The id is the agent's name everywhere funes uses it: the directory, the `add`/`remove`
-    // argument, and the harness facet its turns carry — so it is held to the facet's charset.
+    // The id is also the harness facet the agent's turns carry, so it takes that charset.
     if manifest.id.is_empty()
         || !manifest
             .id
@@ -129,8 +118,7 @@ pub fn open(root: &Path, id: &str) -> Result<Integration> {
 }
 
 impl Integration {
-    /// Install funes into the agent, bound to `memory` — absent being the local memory, which the
-    /// script sees as a missing argument rather than a name it has to special-case.
+    /// Install funes into the agent, bound to `memory`; absent is the local memory.
     pub fn add(&self, memory: Option<&str>) -> Result<()> {
         match memory {
             Some(m) => self.run(&["add", m]),
@@ -143,8 +131,7 @@ impl Integration {
         self.run(&["remove"])
     }
 
-    /// Exec `setup` with the contract's environment, its output passing straight through to the
-    /// user. A non-zero exit is the integration reporting failure, and fails the command.
+    /// Exec `setup` with the contract's environment. A non-zero exit fails the command.
     fn run(&self, args: &[&str]) -> Result<()> {
         let setup = self.dir.join(SETUP);
         let command = super::shell_command(&setup.to_string_lossy(), args);
@@ -165,17 +152,15 @@ impl Integration {
 
 /// Where an integration's files come from.
 enum Source {
-    /// A directory on this machine, copied as it stands.
+    /// A directory on this machine.
     Local(PathBuf),
-    /// The archive published in the funes release bucket.
+    /// The archive published in the release bucket.
     Published,
 }
 
-/// Resolve `id`'s files: `$FUNES_INTEGRATIONS` if set — authoritative, so a test or a fork can
-/// never silently reach the network — else the `integrations/` directory of the checkout this
-/// binary was built from, else the bucket. A released binary's build path is the builder's and
-/// does not exist on the machine that runs it, so it falls through on its own; that is also how a
-/// source build is recognised, with no flag to pass.
+/// Resolve `id`'s files: `$FUNES_INTEGRATIONS` if set — authoritative, so a test or a fork cannot
+/// reach the network by accident — else the checkout this binary was built from, else the bucket.
+/// A released binary's build path does not exist where it runs, so it falls through.
 fn source_for(id: &str) -> Result<Source> {
     if let Some(dir) = std::env::var_os("FUNES_INTEGRATIONS") {
         let dir = PathBuf::from(dir).join(id);
@@ -191,17 +176,14 @@ fn source_for(id: &str) -> Result<Source> {
     Ok(Source::Published)
 }
 
-/// The bucket prefix holding the integrations written against the contract this funes speaks. One
-/// prefix per contract: a fixed integration reaches installed binaries without a new release, and a
-/// binary only ever reads the layout it understands.
+/// The bucket prefix for the contract this funes speaks: an integration fix reaches installed
+/// binaries without a release, and a binary only reads the layout it understands.
 fn published_prefix() -> String {
     format!("integrations/v{CONTRACT_VERSION}")
 }
 
-/// Install `id`'s files into the registry. They are copied, never run where they were found: an
-/// agent records the path it is handed, and a checkout can move. Only a file that differs is
-/// rewritten, so editing a checkout's script and re-running `add` picks it up; `force` rewrites
-/// regardless. Nothing is pruned — an integration's `setup` keeps its own state beside these files.
+/// Install `id`'s files into the registry. Only a file that differs is rewritten (`force` rewrites
+/// regardless), and nothing is pruned — an integration's `setup` keeps its own state beside them.
 pub async fn provision(root: &Path, id: &str, force: bool) -> Result<()> {
     let dst = root.join(id);
     match source_for(id)? {
@@ -216,8 +198,7 @@ pub async fn provision(root: &Path, id: &str, force: bool) -> Result<()> {
     }
 }
 
-/// Download `id`'s published archive into `dir` and check it against the prefix's `SHA256SUMS`,
-/// which is what stands between the bucket and a script funes is about to run.
+/// Download `id`'s published archive into `dir` and check it against the prefix's `SHA256SUMS`.
 async fn fetch_published(id: &str, dir: &Path) -> Result<PathBuf> {
     let asset = format!("{id}.tar.gz");
     let archive = dir.join(&asset);
@@ -237,8 +218,7 @@ async fn fetch_published(id: &str, dir: &Path) -> Result<PathBuf> {
     Ok(archive)
 }
 
-/// Unpack a verified integration archive: its files are at the archive's root, and the executable
-/// bits come from the archive.
+/// Unpack a verified archive: an integration's files sit at its root.
 fn unpack(archive: &Path, dir: &Path) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let status = Command::new("tar")
@@ -254,8 +234,7 @@ fn unpack(archive: &Path, dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Delete an integration's directory: what [`provision`] installed, and whatever its `setup` wrote
-/// beside it.
+/// Delete an integration's directory, including the state its `setup` wrote there.
 pub fn discard(root: &Path, id: &str) -> Result<()> {
     super::remove_tree(&root.join(id))
 }
@@ -265,8 +244,7 @@ fn copy_into(src: &Path, dst: &Path, force: bool) -> Result<()> {
     for entry in std::fs::read_dir(src).with_context(|| format!("reading {}", src.display()))? {
         let from = entry?.path();
         let to = dst.join(from.file_name().expect("a directory entry has a file name"));
-        // Follows a symlink: a checkout that links one shared script into several integrations
-        // still copies the file itself.
+        // Follows a symlink, so a checkout that links a shared script in copies the file.
         let meta = std::fs::metadata(&from).with_context(|| format!("reading {}", from.display()))?;
         if meta.is_dir() {
             copy_into(&from, &to, force)?;
@@ -302,10 +280,8 @@ mod tests {
         dir
     }
 
-    /// The `add` contract in one run: the argv the script is handed and the environment it can
-    /// count on.
-    /// The published shape: an archive whose files sit at its root, unpacked and installed with its
-    /// executable bits intact. Packed here the way the release workflow packs it.
+    /// The whole `add` contract in one run: the argv, then the environment.
+    /// Packed here the way the release workflow packs it.
     #[test]
     fn a_published_archive_installs_with_its_modes() {
         let tmp = tempfile::tempdir().unwrap();
@@ -346,9 +322,6 @@ mod tests {
         );
     }
 
-    /// What [`provision`] does with a checkout: nested directories and symlinked shared files come
-    /// across as files, the executable bit survives, a drifted copy is refreshed, and state the
-    /// `setup` wrote beside them is left alone.
     #[test]
     fn copying_a_checkout_follows_links_keeps_modes_and_keeps_local_state() {
         let tmp = tempfile::tempdir().unwrap();
@@ -404,7 +377,6 @@ mod tests {
         assert_eq!(lines[4], std::env::current_exe().unwrap().to_string_lossy());
     }
 
-    /// A local add and a remove pass the verb alone — no placeholder memory to special-case.
     #[test]
     fn a_local_add_and_a_remove_pass_the_verb_alone() {
         let root = tempfile::tempdir().unwrap();
@@ -466,8 +438,6 @@ mod tests {
         assert!(err.contains("[a-z0-9_-]"), "{err}");
     }
 
-    /// A manifest is understood exactly or not at all: a missing field and an unknown one are both
-    /// refusals, never a default or a shrug.
     #[test]
     fn a_manifest_is_rejected_rather_than_guessed() {
         let root = tempfile::tempdir().unwrap();
