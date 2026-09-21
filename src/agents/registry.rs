@@ -166,7 +166,8 @@ impl Integration {
     fn run(&self, args: &[&str]) -> Result<()> {
         let setup = self.dir.join(SETUP);
         let command = super::shell_command(&setup.to_string_lossy(), args);
-        let funes = std::env::current_exe().context("locating the running funes binary")?;
+        // What the integration records or invokes: the user's pin, else `funes` from PATH.
+        let funes = std::env::var("FUNES_BIN").unwrap_or_else(|_| "funes".to_string());
         let status = Command::new(&setup)
             .args(args)
             .env("FUNES_BIN", &funes)
@@ -445,7 +446,7 @@ mod tests {
         let lines: Vec<&str> = ran.lines().collect();
         assert_eq!(&lines[..3], &["add", "acme/kb", "pi"]);
         assert_eq!(lines[3], dataset::funes_dir().to_string_lossy());
-        assert_eq!(lines[4], std::env::current_exe().unwrap().to_string_lossy());
+        assert_eq!(lines[4], "funes", "the command an integration records");
     }
 
     #[test]
