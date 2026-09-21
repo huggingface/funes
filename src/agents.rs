@@ -1,11 +1,13 @@
 //! `funes add <agent>` / `funes remove <agent>`: the per-agent integrations, one module each, plus
-//! the small helpers they share for installing and removing themselves.
+//! the small helpers they share for installing and removing themselves, and the registry
+//! ([`registry`]) that resolves an agent id to an installed integration and runs it.
 
 pub mod claude;
 pub mod codex;
 pub mod hermes;
 pub mod hooks;
 pub mod pi;
+pub mod registry;
 
 use anyhow::{bail, Context, Result};
 use std::path::Path;
