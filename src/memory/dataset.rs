@@ -117,28 +117,54 @@ pub async fn scan_rows(
     Ok(batches)
 }
 
-/// Best-effort: build the FTS index on `text` and the IVF_PQ index on `vector`. A small corpus
-/// can't train IVF (lance needs ~256 rows) — that's fine, recall falls back to brute force.
+/// lance's default `<column>_idx` names, so an index lance named is refreshed, not rebuilt beside.
+pub(crate) const FTS_INDEX: &str = "text_idx";
+pub(crate) const VECTOR_INDEX: &str = "vector_idx";
+
+/// Best-effort: build the FTS index on `text` and the IVF_PQ index on `vector`, or refresh one the
+/// dataset already has ([`optimize_index`]: milliseconds, against ~30 s for a full rebuild). A small
+/// corpus can't train IVF (lance needs ~256 rows) — that's fine, recall falls back to brute force.
 ///
-/// `on_phase` is called with a human label before each index is built, so a caller can report
+/// `on_phase` is called with a human label before an index is built whole, so a caller can report
 /// progress around these opaque (no incremental hook), potentially slow Lance calls. Pass `|_| {}`
 /// to stay silent.
 pub async fn build_indexes(ds: &mut Dataset, on_phase: impl Fn(&str)) {
-    on_phase("text search index");
-    let _ = ds
-        .create_index(
-            &["text"],
-            IndexType::Inverted,
-            None,
-            &InvertedIndexParams::default(),
-            true,
-        )
-        .await;
+    let existing = sub_index_counts(ds).await.unwrap_or_default();
+    match existing.get(FTS_INDEX) {
+        Some(&subs) => {
+            let _ = optimize_index(ds, FTS_INDEX, subs).await;
+        }
+        None => {
+            on_phase("text search index");
+            let _ = ds
+                .create_index(
+                    &["text"],
+                    IndexType::Inverted,
+                    Some(FTS_INDEX.to_string()),
+                    &InvertedIndexParams::default(),
+                    true,
+                )
+                .await;
+        }
+    }
     if let Some(params) = ivf_pq_params(ds) {
-        on_phase("vector index");
-        let _ = ds
-            .create_index(&["vector"], IndexType::Vector, None, &params, true)
-            .await;
+        match existing.get(VECTOR_INDEX) {
+            Some(&subs) => {
+                let _ = optimize_index(ds, VECTOR_INDEX, subs).await;
+            }
+            None => {
+                on_phase("vector index");
+                let _ = ds
+                    .create_index(
+                        &["vector"],
+                        IndexType::Vector,
+                        Some(VECTOR_INDEX.to_string()),
+                        &params,
+                        true,
+                    )
+                    .await;
+            }
+        }
     }
 }
 
@@ -151,13 +177,13 @@ pub(crate) const COMPACT_DELTAS: usize = 8;
 /// Sub-index count per index name (the base plus its deltas, which share the index's name), from
 /// the index metadata — not `index_statistics`, which can write a stats migration through a remote's
 /// capture wrapper.
-pub(crate) async fn sub_index_counts(ds: &Dataset) -> Result<Vec<(String, usize)>> {
+pub(crate) async fn sub_index_counts(ds: &Dataset) -> Result<BTreeMap<String, usize>> {
     let indices = ds.load_indices().await.context("listing the indexes")?;
-    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut counts = BTreeMap::new();
     for idx in indices.iter() {
         *counts.entry(idx.name.clone()).or_default() += 1;
     }
-    Ok(counts.into_iter().collect())
+    Ok(counts)
 }
 
 /// Add a delta sub-index over the rows appended since `name` was last built, or at
@@ -271,7 +297,88 @@ pub(crate) fn build_batch(chunks: &[chunk::Chunk], vectors: &[Vec<f32>]) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::traces::{Block, Turn, FORMAT_VERSION};
     use arrow_array::RecordBatchIterator;
+    use lance::dataset::WriteParams;
+
+    /// `n` one-block turns with distinct text, so each is its own chunk.
+    fn turns(from: usize, n: usize) -> Vec<Turn> {
+        (from..from + n)
+            .map(|i| Turn {
+                format: FORMAT_VERSION,
+                session_id: "sess".into(),
+                cwd: None,
+                workdir: "proj".into(),
+                turn_uuid: format!("turn{i}"),
+                parent_uuid: None,
+                seq: i as i64,
+                ts: "2026-01-01T00:00:00Z".into(),
+                role: "assistant".into(),
+                blocks: vec![Block {
+                    block_type: "text".into(),
+                    text: format!("turn {i} about parsing transcripts and lance indexing"),
+                    tool_name: None,
+                    tool_use_id: None,
+                }],
+                source_path: "/x.jsonl".into(),
+                harness: "claude_code".into(),
+            })
+            .collect()
+    }
+
+    /// Pseudo-random vectors: IVF_PQ can't train on identical ones.
+    fn embedded(turns: &[Turn]) -> RecordBatch {
+        let chunks = chunk::chunks_from_turns(turns, &chunk::Tier::ALL, true);
+        let mut seed = 0x9e37_79b9u32;
+        let vectors: Vec<Vec<f32>> = chunks
+            .iter()
+            .map(|_| {
+                (0..DIM)
+                    .map(|_| {
+                        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                        (seed >> 8) as f32 / (1u32 << 24) as f32
+                    })
+                    .collect()
+            })
+            .collect();
+        build_batch(&chunks, &vectors).unwrap()
+    }
+
+    fn reader(batch: RecordBatch) -> impl arrow_array::RecordBatchReader + Send + 'static {
+        RecordBatchIterator::new(vec![Ok(batch)], schema())
+    }
+
+    /// Enough rows to train IVF_PQ (lance wants 256 per PQ codebook).
+    const TRAINABLE: usize = 300;
+
+    #[tokio::test]
+    async fn build_indexes_refreshes_an_existing_index_instead_of_rebuilding_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let uri = table_uri(&dir.path().to_string_lossy());
+        let mut ds = Dataset::write(
+            reader(embedded(&turns(0, TRAINABLE))),
+            &uri,
+            Some(WriteParams::default()),
+        )
+        .await
+        .unwrap();
+        build_indexes(&mut ds, |_| {}).await;
+        let built = sub_index_counts(&ds).await.unwrap();
+        assert_eq!(built[FTS_INDEX], 1);
+        assert_eq!(built[VECTOR_INDEX], 1, "300 rows train an IVF_PQ index");
+        let base: Vec<_> = ds.load_indices().await.unwrap().iter().map(|i| i.uuid).collect();
+        assert_eq!(base.len(), 2);
+
+        ds.append(reader(embedded(&turns(TRAINABLE, 5))), None).await.unwrap();
+        build_indexes(&mut ds, |phase| panic!("built {phase} whole instead of refreshing it")).await;
+        let refreshed = sub_index_counts(&ds).await.unwrap();
+        assert_eq!(refreshed[FTS_INDEX], 2, "one delta over the appended rows");
+        assert_eq!(refreshed[VECTOR_INDEX], 2);
+        let after = ds.load_indices().await.unwrap();
+        for uuid in base {
+            assert!(after.iter().any(|i| i.uuid == uuid), "base index {uuid} was rebuilt");
+        }
+    }
 
     /// Pins the Lance behavior [`optimize_index`] relies on: `append()` adds one delta sub-index per
     /// backlog, and `merge(deltas)` folds the deltas back into one without touching the base.
@@ -290,23 +397,23 @@ mod tests {
         ds.create_index(
             &["text"],
             IndexType::Inverted,
-            None,
+            Some(FTS_INDEX.to_string()),
             &InvertedIndexParams::default(),
             true,
         )
         .await
         .unwrap();
-        assert_eq!(sub_index_counts(&ds).await.unwrap(), vec![("text_idx".to_string(), 1)]);
+        assert_eq!(sub_index_counts(&ds).await.unwrap()[FTS_INDEX], 1);
         let base_uuid = ds.load_indices().await.unwrap()[0].uuid;
 
         for i in 0..3 {
             ds.append(batch(&[&format!("charlie delta {i}")]), None).await.unwrap();
             ds.optimize_indices(&OptimizeOptions::append()).await.unwrap();
         }
-        assert_eq!(sub_index_counts(&ds).await.unwrap(), vec![("text_idx".to_string(), 4)]);
+        assert_eq!(sub_index_counts(&ds).await.unwrap()[FTS_INDEX], 4);
 
         ds.optimize_indices(&OptimizeOptions::merge(3)).await.unwrap();
-        assert_eq!(sub_index_counts(&ds).await.unwrap(), vec![("text_idx".to_string(), 2)]);
+        assert_eq!(sub_index_counts(&ds).await.unwrap()[FTS_INDEX], 2);
         let after = ds.load_indices().await.unwrap();
         assert!(
             after.iter().any(|i| i.uuid == base_uuid),
