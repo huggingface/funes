@@ -3,11 +3,13 @@
 //! compares whatever backends are compiled in, with ONNX (fastembed) as the reference when present:
 //!   cargo run --release --features onnx --example bench_backends
 //!
-//! Three workloads, because they stress different things: a batch of short docs is dominated by
+//! Four workloads, because they stress different things: a batch of short docs is dominated by
 //! per-call overheads (tokenization, thread spawns), while 30 docs at the 512-token truncation
 //! cap — recall's rerank worst case — is dominated by GEMM throughput and memory behavior. The
 //! ragged batch is real indexing's shape — batch-longest padding masks most attention columns,
-//! whose softmax weights underflow, and the scores×V GEMM then reads what they leave behind.
+//! whose softmax weights underflow, and the scores×V GEMM then reads what they leave behind. The
+//! real batch spreads its lengths the way measured chunks do, so it shows what a backend spends
+//! on padding a mixed batch.
 //!
 //! Adding a backend = impl Embedder+Reranker, gate it behind a feature, and push it in `backends()`.
 
@@ -41,11 +43,12 @@ fn short_docs() -> Vec<String> {
     .to_vec()
 }
 
+const SENT: &str = "recall fuses vector ann and bm25 hits by reciprocal rank before the cross-encoder \
+                    rescores each candidate against the query using joint attention over the pair. ";
+
 fn capped_docs(n: usize) -> Vec<String> {
-    let sent = "recall fuses vector ann and bm25 hits by reciprocal rank before the cross-encoder \
-                rescores each candidate against the query using joint attention over the pair. ";
     // ~500 tokens after tokenization, truncated at 512 — recall's rerank candidates at the cap.
-    let doc = sent.repeat(18);
+    let doc = SENT.repeat(18);
     vec![doc; n]
 }
 
@@ -60,6 +63,20 @@ fn mixed_docs() -> Vec<String> {
     let mut docs = capped_docs(2);
     docs.extend((0..16 - docs.len()).map(|i| short[i % short.len()].clone()));
     docs
+}
+
+/// Words of `SENT` whose embedder token counts land on the 32 quantiles of real chunk lengths,
+/// measured over 12,971 chunks of 100 Claude Code sessions: 21 up to the 512 cap, median 314.
+const REAL_WORDS: [usize; 32] = [
+    13, 30, 38, 51, 66, 87, 106, 126, 145, 163, 176, 187, 196, 205, 213, 218, 226, 232, 238, 247, 255, 262, 269, 280,
+    288, 296, 306, 314, 327, 340, 362, 363,
+];
+
+/// One doc per quantile of real chunk lengths, in a scrambled order — the length spread indexing
+/// hands `embed`, and about recall's 30 rerank candidates.
+fn real_docs() -> Vec<String> {
+    let words: Vec<&str> = SENT.split_whitespace().cycle().take(400).collect();
+    (0..32).map(|i| words[..REAL_WORDS[i * 13 % 32]].join(" ")).collect()
 }
 
 struct Backend {
@@ -123,6 +140,7 @@ fn main() -> Result<()> {
         ("16×short", short_docs(), 2, 5),
         ("30×~500tok", long_docs(), 1, 3),
         ("16×mixed", mixed_docs(), 1, 5),
+        ("32×real", real_docs(), 1, 3),
     ];
 
     println!(
