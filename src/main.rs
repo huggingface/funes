@@ -550,28 +550,41 @@ async fn main() -> Result<()> {
                 if let Some(remote) = resolved.as_ref().filter(|r| r.is_remote()) {
                     require_scanner(&remote.memory, Harness::Claude)?;
                 }
-                bootstrap_add(Harness::Claude, resolved, claude::install).await
+                bootstrap_add(
+                    Harness::Claude,
+                    resolved,
+                    |memory| async move { claude::install(memory) },
+                )
+                .await
             }
             AddAgent::Codex { memory } => {
                 let resolved = resolve_add_memory(memory).await?;
                 if let Some(remote) = resolved.as_ref().filter(|r| r.is_remote()) {
                     require_scanner(&remote.memory, Harness::Codex)?;
                 }
-                bootstrap_add(Harness::Codex, resolved, codex::install).await
+                bootstrap_add(Harness::Codex, resolved, |memory| async move { codex::install(memory) }).await
             }
             AddAgent::Hermes { memory } => {
                 let resolved = resolve_add_memory(memory).await?;
                 if let Some(remote) = resolved.as_ref().filter(|r| r.is_remote()) {
                     require_scanner(&remote.memory, Harness::Hermes)?;
                 }
-                bootstrap_add(Harness::Hermes, resolved, hermes::install).await
+                bootstrap_add(
+                    Harness::Hermes,
+                    resolved,
+                    |memory| async move { hermes::install(memory) },
+                )
+                .await
             }
             AddAgent::Pi { memory, force } => {
                 let resolved = resolve_add_memory(memory).await?;
                 if let Some(remote) = resolved.as_ref().filter(|r| r.is_remote()) {
                     require_scanner(&remote.memory, Harness::Pi)?;
                 }
-                bootstrap_add(Harness::Pi, resolved, |memory| install_agent("pi", memory, force)).await
+                bootstrap_add(Harness::Pi, resolved, |memory| async move {
+                    install_agent("pi", memory, force)
+                })
+                .await
             }
         },
         Cmd::Remove { agent } => match agent {
@@ -754,11 +767,11 @@ fn parse_confirm(input: &str, default_yes: bool) -> bool {
 ///    declining aborts the add — nothing is installed;
 /// 2. `install` — register hooks + MCP (bakes the memory);
 /// 3. first push if a memory is bound — clears the overlap guard so the push hook works thereafter.
-async fn bootstrap_add(
-    harness: Harness,
-    resolved: Option<Resolved>,
-    install: impl FnOnce(Option<String>) -> Result<()>,
-) -> Result<()> {
+async fn bootstrap_add<F, Fut>(harness: Harness, resolved: Option<Resolved>, install: F) -> Result<()>
+where
+    F: FnOnce(Option<String>) -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
     if !ensure_local_index(harness).await {
         eprintln!(
             "funes: skipped — nothing installed. Run `funes add {}` again when you're ready.",
@@ -766,7 +779,7 @@ async fn bootstrap_add(
         );
         return Ok(());
     }
-    install(resolved.as_ref().map(|r| r.memory.clone()))?;
+    install(resolved.as_ref().map(|r| r.memory.clone())).await?;
     // First push only when there's actually a local index to publish. Without one (a failed first
     // build, or no sessions yet) there's nothing to push, and running it would just error on the
     // absent memory.
