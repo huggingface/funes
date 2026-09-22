@@ -1,0 +1,1 @@
+../../../scripts/automation/funes-index.sh

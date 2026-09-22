@@ -1,0 +1,162 @@
+#!/bin/sh
+# funes's hermes integration: register `funes mcp` as its MCP server, and install a plugin whose
+# lifecycle hooks index each turn and, with a memory bound, publish at session boundaries. hermes
+# edits its own config.yaml — funes drops the plugin and `hermes plugins enable` does the rest.
+set -eu
+
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+SOURCE="$HERE/plugin"
+PLUGIN=funes
+
+FUNES="${FUNES_BIN:-funes}"
+
+usage() {
+    echo "usage: setup add [MEMORY] | setup remove" >&2
+    exit 2
+}
+
+have_hermes() {
+    command -v hermes >/dev/null 2>&1
+}
+
+# hermes's own home: where it discovers user plugins, and where an install before the plugin wrote.
+# Asked of hermes, which honors `HERMES_HOME` and its profile switches; that variable, then hermes's
+# default, is the fallback when hermes can't be run.
+hermes_home() {
+    if have_hermes && path=$(hermes config path 2>/dev/null | tail -n 1) && [ -n "$path" ]; then
+        dirname "$path"
+    else
+        printf '%s\n' "${HERMES_HOME:-$HOME/.hermes}"
+    fi
+}
+
+# hermes discovers plugins under its own home only, so funes's lives there rather than in the
+# registry. The memory rides in a file the push hook reads, so the plugin stays a static file.
+install_plugin() {
+    dest=$1
+    memory=${2:-}
+    mkdir -p "$dest"
+    cp "$SOURCE/plugin.yaml" "$SOURCE/__init__.py" "$SOURCE/funes-index.sh" "$SOURCE/funes-push.sh" "$dest/"
+    chmod +x "$dest/funes-index.sh" "$dest/funes-push.sh"
+    if [ -n "$memory" ]; then
+        printf '%s\n' "$memory" >"$dest/memory"
+    else
+        rm -f "$dest/memory"
+    fi
+}
+
+# The commands of the shell hooks an install before the plugin declared in hermes's own config.yaml.
+pre_plugin_commands() {
+    config=$1/config.yaml
+    [ -f "$config" ] || return 0
+    sed -n 's/^[[:space:]]*-[[:space:]]*command:[[:space:]]*//p' "$config" | grep -E 'funes-(index|push)\.sh' || true
+}
+
+manual_add() {
+    memory=${1:-}
+    echo "  hermes plugins enable $PLUGIN"
+    if [ -n "$memory" ]; then
+        echo "  hermes mcp add funes --command $FUNES --args mcp $memory"
+    else
+        echo "  hermes mcp add funes --command $FUNES --args mcp"
+    fi
+}
+
+add() {
+    memory=${1:-}
+    home=$(hermes_home)
+    dest="$home/plugins/$PLUGIN"
+    install_plugin "$dest" "$memory"
+
+    # Those hooks now do the plugin's work a second time, and only the user can take them out of the
+    # file that holds the rest of their configuration.
+    if [ -n "$(pre_plugin_commands "$home")" ]; then
+        echo "$home/config.yaml still declares funes's own shell hooks, which now duplicate the plugin — delete the entries whose command runs funes-index.sh or funes-push.sh (\`hermes config edit\`)." >&2
+    fi
+
+    if ! have_hermes; then
+        echo "the funes plugin is installed at $dest"
+        echo "\`hermes\` isn't on PATH — once it is, run:"
+        manual_add "$memory"
+        return 0
+    fi
+
+    hermes plugins enable "$PLUGIN"
+    # `mcp add` probes the server and then asks whether to enable its tools, cancelling on EOF.
+    if [ -n "$memory" ]; then
+        printf 'y\ny\n' | hermes mcp add funes --command "$FUNES" --args mcp "$memory"
+        echo "installed funes into hermes — recall, per-turn indexing, and publishing to $memory. Hermes indexing is beta."
+    else
+        printf 'y\ny\n' | hermes mcp add funes --command "$FUNES" --args mcp
+        echo "installed funes into hermes — recall and per-turn indexing, local only. Hermes indexing is beta."
+    fi
+}
+
+# Run one `hermes` removal. A registration hermes has already forgotten is a success; any other
+# failure keeps its diagnostics rather than claiming a partial uninstall worked.
+forget() {
+    absent=$1
+    shift
+    if ! out=$(hermes "$@" 2>&1); then
+        case "$out" in
+        *"$absent"*) : ;;
+        *)
+            printf '%s\n' "$out" >&2
+            exit 1
+            ;;
+        esac
+    fi
+}
+
+# Clear an install from before the plugin: its scripts are funes's, so they go, and hermes is asked
+# to revoke the approvals funes wrote for them. The hook entries themselves are in the user's own
+# config.yaml, so they are named rather than edited.
+drop_pre_plugin_install() {
+    home=$1
+    commands=$(pre_plugin_commands "$home")
+    if [ -n "$commands" ]; then
+        if have_hermes; then
+            printf '%s\n' "$commands" | while IFS= read -r command; do
+                hermes hooks revoke "$command" >/dev/null 2>&1 || true
+            done
+        fi
+        echo "$home/config.yaml still declares funes's own shell hooks — delete the entries whose command runs funes-index.sh or funes-push.sh (\`hermes config edit\`)." >&2
+    fi
+    rm -f "$home/hooks/funes-index.sh" "$home/hooks/funes-push.sh" "$home/hooks/funes-sync.log"
+    rmdir "$home/hooks" 2>/dev/null || true
+}
+
+remove() {
+    home=$(hermes_home)
+    dest="$home/plugins/$PLUGIN"
+
+    if ! have_hermes; then
+        rm -rf "$dest"
+        drop_pre_plugin_install "$home"
+        echo "\`hermes\` isn't on PATH — the plugin files were removed. Once it is, remove the registrations manually:"
+        echo "  hermes plugins disable $PLUGIN"
+        echo "  hermes mcp remove funes"
+        return 0
+    fi
+
+    # Disabled before the files go: hermes refuses to disable a plugin it can no longer see.
+    forget "is not installed or bundled" plugins disable "$PLUGIN"
+    rm -rf "$dest"
+    drop_pre_plugin_install "$home"
+    forget "Server 'funes' not found in config" mcp remove funes
+    echo "removed funes from hermes — recall registration, plugin, and hook scripts."
+}
+
+case "${1:-}" in
+add)
+    shift
+    [ $# -le 1 ] || usage
+    add "${1:-}"
+    ;;
+remove)
+    shift
+    [ $# -eq 0 ] || usage
+    remove
+    ;;
+*) usage ;;
+esac

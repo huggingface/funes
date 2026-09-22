@@ -35,7 +35,7 @@ funes remove codex && funes add codex <user|org>/funes-memory
 | --- | --- | --- | --- |
 | `claude` | ✅ | ✅ (plugin hooks) | ✅ (with a memory bound) |
 | `codex` | ✅ | ✅ (plugin hooks, after a `/hooks` review) | ✅ (with a memory bound) |
-| `hermes` | ✅ | ✅ **beta** (shell hooks) | ✅ (with a memory bound) |
+| `hermes` | ✅ | ✅ **beta** (plugin hooks) | ✅ (with a memory bound) |
 | `pi` | ✅ | ✅ (extension events) | ✅ (with a memory bound) |
 
 What exactly gets installed for each agent — and how the automation behaves — is in

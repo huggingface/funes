@@ -93,60 +93,53 @@ fn remove_codex_unregisters_the_plugin_and_leaves_a_shared_hooks_file() {
 }
 
 #[test]
-fn remove_hermes_preserves_user_hooks_approvals_and_files() {
+fn remove_hermes_disables_the_plugin_and_revokes_a_pre_plugin_installs_consent() {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("home");
     let log = tmp.path().join("cli.log");
     let bin = support::fake_cli(tmp.path(), "hermes");
     let base = home.join(".hermes");
+    let plugin = base.join("plugins/funes");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(plugin.join("__init__.py"), "owned").unwrap();
+    // An install from before the plugin: its scripts are funes's, its hook entries the user's.
     let hooks = base.join("hooks");
     fs::create_dir_all(&hooks).unwrap();
     fs::write(hooks.join("funes-index.sh"), "owned").unwrap();
-    fs::write(hooks.join("funes-push.sh"), "owned").unwrap();
     fs::write(hooks.join("funes-sync.log"), "owned").unwrap();
     fs::write(hooks.join("user-hook.sh"), "keep").unwrap();
     fs::write(
         base.join("config.yaml"),
         "model: hermes-4\n\
          hooks:\n  \
-           post_llm_call:\n    \
-             - command: make lint\n      \
-               timeout: 10\n    \
-             - command: bash \"/old/funes-index.sh\" \"hermes\"\n  \
-           on_session_start:\n    \
-             - command: bash \"/old/funes-push.sh\" \"acme/kb\"\n",
-    )
-    .unwrap();
-    fs::write(
-        base.join("shell-hooks-allowlist.json"),
-        r#"{
-          "trusted": true,
-          "approvals": [
-            { "event": "pre_tool_call", "command": "guard.sh" },
-            { "event": "post_llm_call", "command": "bash \"/old/funes-index.sh\" \"hermes\"" }
-          ]
-        }"#,
+           post_llm_call:\n  \
+           - command: make lint\n  \
+           - command: bash \"/old/funes-index.sh\" \"hermes\"\n",
     )
     .unwrap();
 
     let first = support::run_remove(&home, &bin, &log, "hermes");
     support::assert_success(&first);
-    let config: serde_yaml::Value =
-        serde_yaml::from_str(&fs::read_to_string(base.join("config.yaml")).unwrap()).unwrap();
-    assert_eq!(config["model"].as_str(), Some("hermes-4"));
-    assert_eq!(config["hooks"]["post_llm_call"].as_sequence().unwrap().len(), 1);
-    assert!(config["hooks"].get("on_session_start").is_none());
-    let allowlist: Value =
-        serde_json::from_str(&fs::read_to_string(base.join("shell-hooks-allowlist.json")).unwrap()).unwrap();
-    assert_eq!(allowlist["trusted"], true);
-    assert_eq!(allowlist["approvals"].as_array().unwrap().len(), 1);
-    assert_eq!(allowlist["approvals"][0]["command"], "guard.sh");
+    assert!(!plugin.exists(), "the plugin goes");
+    assert!(!hooks.join("funes-index.sh").exists(), "and funes's own scripts");
+    assert!(!hooks.join("funes-sync.log").exists());
     assert!(hooks.join("user-hook.sh").exists());
-    for owned in ["funes-index.sh", "funes-push.sh", "funes-sync.log"] {
-        assert!(!hooks.join(owned).exists(), "{owned} removed");
-    }
-    assert_eq!(fs::read_to_string(&log).unwrap(), "mcp remove funes\n");
+    // The entries live in the file that holds the user's configuration, so they are named, not cut.
+    let config = fs::read_to_string(base.join("config.yaml")).unwrap();
+    assert!(
+        config.contains("make lint") && config.contains("funes-index.sh"),
+        "{config}"
+    );
+    assert!(String::from_utf8_lossy(&first.stderr).contains("delete the entries"));
+    assert_eq!(
+        fs::read_to_string(&log).unwrap(),
+        "config path\n\
+         plugins disable funes\n\
+         hooks revoke bash \"/old/funes-index.sh\" \"hermes\"\n\
+         mcp remove funes\n"
+    );
 
+    // Already absent remains a successful no-op locally.
     let second = support::run_remove(&home, &bin, &log, "hermes");
     support::assert_success(&second);
 }
@@ -201,18 +194,4 @@ fn missing_agent_cli_still_removes_owned_claude_and_pi_files() {
     support::assert_success(&pi);
     assert!(!extension.exists());
     assert!(String::from_utf8_lossy(&pi.stdout).contains("remove the registration manually"));
-}
-
-#[test]
-fn a_malformed_hermes_config_does_not_block_mcp_unregistration() {
-    let tmp = tempfile::tempdir().unwrap();
-
-    let hermes_home = tmp.path().join("hermes-home");
-    fs::create_dir_all(hermes_home.join(".hermes")).unwrap();
-    fs::write(hermes_home.join(".hermes/config.yaml"), "[not, a, mapping]\n").unwrap();
-    let hermes_log = tmp.path().join("hermes-cli.log");
-    let hermes_bin = support::fake_cli(&tmp.path().join("hermes-fake"), "hermes");
-    let hermes = support::run_remove(&hermes_home, &hermes_bin, &hermes_log, "hermes");
-    assert!(!hermes.status.success(), "malformed config.yaml remains an error");
-    assert_eq!(fs::read_to_string(hermes_log).unwrap(), "mcp remove funes\n");
 }

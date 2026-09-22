@@ -1,0 +1,9 @@
+name: funes
+version: 0.1.0
+description: "funes memory automation: index each completed turn, publish at session boundaries."
+author: Hugging Face
+kind: standalone
+hooks:
+  - post_llm_call
+  - on_session_start
+  - on_session_finalize

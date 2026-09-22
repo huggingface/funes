@@ -65,17 +65,20 @@ when they're indexed, and `funes index` re-embeds nothing already written. Keepi
   ([Codex docs](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks)). An install from before
   the plugin is cleared on sight, its entries in Codex's own `hooks.json` included — unless you keep
   hooks of your own in that file, which funes then leaves untouched for you to edit.
-- **Hermes** (indexing is **beta**) declares shell hooks in `~/.hermes/config.yaml`. funes merges a `post_llm_call` index
-  hook (fired once per completed turn) and, with a memory, `on_session_finalize` + `on_session_start`
-  publish hooks into that file — remove-then-add keyed by funes's own scripts, so your other hooks
-  and config keys are left untouched (comments aren't preserved, as hermes' own `memory setup`
-  rewrites the file the same way). Hermes gates shell hooks behind a consent allowlist
-  (`~/.hermes/shell-hooks-allowlist.json`); funes pre-writes its own approvals so the hooks run from
-  the first turn.
+- **Hermes** (indexing is **beta**) discovers plugins under its own home, so funes installs one at
+  `~/.hermes/plugins/funes/` and has hermes enable it with `hermes plugins enable funes` — hermes
+  edits its own `config.yaml`, funes never does. The plugin's lifecycle hooks (`post_llm_call` per
+  completed turn, `on_session_start` + `on_session_finalize` with a memory bound) drive the same two
+  scripts as every other agent. Plugin hooks aren't shell hooks, so hermes' consent allowlist
+  (`~/.hermes/shell-hooks-allowlist.json`) isn't involved. An install from before the plugin declared
+  those hooks in your `config.yaml`; funes can't take them out of the file that holds the rest of
+  your configuration, so it names them — until you delete them they simply do the plugin's work a
+  second time.
 
-`funes remove hermes` surgically removes only hook entries whose commands invoke funes's scripts,
-then removes the scripts and their `funes-sync.log`; other hooks, approvals, and config keys remain.
-Removing an integration never deletes the indexed memory or source transcripts.
+`funes remove hermes` disables the plugin and deletes it, revokes the approvals a pre-plugin
+install left in the consent allowlist, and removes funes's own hook scripts and their
+`funes-sync.log`; other hooks, approvals, and config keys remain. Removing an integration never
+deletes the indexed memory or source transcripts.
 
 Every agent drives the same two scripts, installed alongside: `funes-index.sh` (the per-turn
 local index) and `funes-push.sh` (the network publish). Each drains the hook payload and re-execs a
