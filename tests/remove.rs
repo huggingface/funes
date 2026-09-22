@@ -195,3 +195,26 @@ fn missing_agent_cli_still_removes_owned_claude_and_pi_files() {
     assert!(!extension.exists());
     assert!(String::from_utf8_lossy(&pi.stdout).contains("remove the registration manually"));
 }
+
+#[test]
+fn an_agent_nothing_knows_is_named_rather_than_fetched() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let bin = support::fake_cli(tmp.path(), "clyde");
+    // `$FUNES_INTEGRATIONS` is authoritative, so the unknown id is settled locally, off the network.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_funes"))
+        .args(["remove", "clyde"])
+        .env("HOME", &home)
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env(
+            "FUNES_INTEGRATIONS",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/integrations"),
+        )
+        .env_remove("FUNES_HOME")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("no clyde integration on this machine"), "{err}");
+    assert!(err.contains("docs/add.md"), "{err}");
+}

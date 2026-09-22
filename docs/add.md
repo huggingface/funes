@@ -38,6 +38,10 @@ funes remove codex && funes add codex <user|org>/funes-memory
 | `hermes` | ✅ | ✅ **beta** (plugin hooks) | ✅ (with a memory bound) |
 | `pi` | ✅ | ✅ (extension events) | ✅ (with a memory bound) |
 
+These four ship with funes, which installs one on demand. The name is an integration id, not a fixed
+list: `funes add <id>` runs any integration installed under `~/.funes/agents/`, and an id nothing on
+this machine knows is refused with what is installed rather than guessed at.
+
 What exactly gets installed for each agent — and how the automation behaves — is in
 [automation.md](automation.md).
 

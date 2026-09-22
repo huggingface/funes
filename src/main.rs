@@ -215,27 +215,24 @@ enum Cmd {
     /// Installs funes's read tools and automatic per-turn indexing. Name a memory the agent recalls
     /// from — and publishes to — an `<org>/<repo>` shorthand or an `hf://…` URI; omit it to stay
     /// local (the default).
-    #[command(
-        subcommand_value_name = "AGENT",
-        subcommand_help_heading = "Agents",
-        override_usage = "funes add <AGENT> [MEMORY]"
-    )]
     Add {
-        #[command(subcommand)]
-        agent: AddAgent,
+        /// Agent to add: `claude`, `codex`, `pi`, `hermes`, or any other registered agent.
+        #[arg(value_name = "AGENT")]
+        agent: String,
+        #[command(flatten)]
+        memory: AddMemory,
+        /// Reinstall the integration even if the installed copy is already up to date.
+        #[arg(long)]
+        force: bool,
     },
     /// Remove funes from a coding agent.
     ///
     /// Unregisters funes's read tools and removes its automation and integration files. Your local
     /// memory, source transcripts, and remote memories are left untouched.
-    #[command(
-        subcommand_value_name = "AGENT",
-        subcommand_help_heading = "Agents",
-        override_usage = "funes remove <AGENT>"
-    )]
     Remove {
-        #[command(subcommand)]
-        agent: RemoveAgent,
+        /// Agent to remove: `claude`, `codex`, `pi`, `hermes`, or any other registered agent.
+        #[arg(value_name = "AGENT")]
+        agent: String,
     },
 }
 
@@ -246,37 +243,6 @@ struct AddMemory {
     /// Memory this agent recalls from — `<org>/<repo>`, an `hf://…` URI, or `local` (default).
     #[arg(value_name = "MEMORY")]
     memory: Option<String>,
-}
-
-#[derive(Subcommand)]
-enum AddAgent {
-    Claude {
-        #[command(flatten)]
-        memory: AddMemory,
-    },
-    Codex {
-        #[command(flatten)]
-        memory: AddMemory,
-    },
-    Pi {
-        #[command(flatten)]
-        memory: AddMemory,
-        /// Reinstall even if the on-disk copy is already up to date.
-        #[arg(long)]
-        force: bool,
-    },
-    Hermes {
-        #[command(flatten)]
-        memory: AddMemory,
-    },
-}
-
-#[derive(Subcommand)]
-enum RemoveAgent {
-    Claude,
-    Codex,
-    Pi,
-    Hermes,
 }
 
 /// The memory to bake into an agent's `funes mcp` registration: `None`/blank/`local` → the local
@@ -542,60 +508,52 @@ async fn main() -> Result<()> {
         Cmd::Scrub => scrub::run().await,
         Cmd::Update { force } => update::run(force).await,
         Cmd::Mcp { memory } => mcp::run(memory).await,
-        Cmd::Add { agent } => match agent {
-            // `add` bootstraps the local pipeline: build the first index and do the first push — the
-            // two one-time steps the automation can't do unattended — so nothing is left to run by hand.
-            AddAgent::Claude { memory } => {
-                let resolved = resolve_add_memory(memory).await?;
-                if let Some(remote) = resolved.as_ref().filter(|r| r.is_remote()) {
-                    require_scanner(&remote.memory, Harness::Claude)?;
-                }
-                bootstrap_add(Harness::Claude, resolved, |memory| {
-                    install_agent("claude", memory, false)
-                })
-                .await
+        // `add` bootstraps the local pipeline: build the first index and do the first push — the
+        // two one-time steps the automation can't do unattended — so nothing is left to run by hand.
+        Cmd::Add { agent, memory, force } => {
+            let integration = prepare_agent(&agent, force).await?;
+            let resolved = resolve_add_memory(memory).await?;
+            if let Some(remote) = resolved.as_ref().filter(|r| r.is_remote()) {
+                require_scanner(&remote.memory, &agent)?;
             }
-            AddAgent::Codex { memory } => {
-                let resolved = resolve_add_memory(memory).await?;
-                if let Some(remote) = resolved.as_ref().filter(|r| r.is_remote()) {
-                    require_scanner(&remote.memory, Harness::Codex)?;
-                }
-                bootstrap_add(Harness::Codex, resolved, |memory| install_agent("codex", memory, false)).await
-            }
-            AddAgent::Hermes { memory } => {
-                let resolved = resolve_add_memory(memory).await?;
-                if let Some(remote) = resolved.as_ref().filter(|r| r.is_remote()) {
-                    require_scanner(&remote.memory, Harness::Hermes)?;
-                }
-                bootstrap_add(Harness::Hermes, resolved, |memory| {
-                    install_agent("hermes", memory, false)
-                })
-                .await
-            }
-            AddAgent::Pi { memory, force } => {
-                let resolved = resolve_add_memory(memory).await?;
-                if let Some(remote) = resolved.as_ref().filter(|r| r.is_remote()) {
-                    require_scanner(&remote.memory, Harness::Pi)?;
-                }
-                bootstrap_add(Harness::Pi, resolved, |memory| install_agent("pi", memory, force)).await
-            }
-        },
-        Cmd::Remove { agent } => match agent {
-            RemoveAgent::Claude => remove_agent("claude").await,
-            RemoveAgent::Codex => remove_agent("codex").await,
-            RemoveAgent::Pi => remove_agent("pi").await,
-            RemoveAgent::Hermes => remove_agent("hermes").await,
-        },
+            bootstrap_add(
+                &agent,
+                resolved,
+                |memory| async move { integration.add(memory.as_deref()) },
+            )
+            .await
+        }
+        Cmd::Remove { agent } => remove_agent(&agent).await,
     }
 }
 
-/// Install one agent's integration: refresh its files in the registry, then run its `setup add`.
-async fn install_agent(id: &str, memory: Option<String>, force: bool) -> Result<()> {
+/// Resolve one agent's integration for an install: refresh its files in the registry, check what it
+/// declares, and confirm it when funes can't vouch for it — all before `add` touches a memory.
+async fn prepare_agent(id: &str, force: bool) -> Result<registry::Integration> {
     let root = registry::default_root()?;
-    let provenance = registry::provision(&root, id, force).await?;
+    let provenance = registry::provision(&root, id, force)
+        .await
+        .map_err(|e| unknown_agent(&root, id, e))?;
     let integration = registry::open(&root, id)?;
     confirm_trust(id, &integration.dir, provenance)?;
-    integration.add(memory.as_deref())
+    Ok(integration)
+}
+
+/// A failed provision for an agent with no files on this machine is usually a typo, so the error
+/// names what is installed and where another integration comes from.
+fn unknown_agent(root: &Path, id: &str, e: anyhow::Error) -> anyhow::Error {
+    if root.join(id).is_dir() {
+        return e;
+    }
+    let installed = registry::registered_ids(root);
+    let listing = if installed.is_empty() {
+        "none are installed yet".to_string()
+    } else {
+        format!("installed: {}", installed.join(", "))
+    };
+    e.context(format!(
+        "no {id} integration on this machine ({listing}) — see docs/add.md for the agents funes ships and how to add your own"
+    ))
 }
 
 /// Confirm before funes executes an integration it does not vouch for: one `$FUNES_INTEGRATIONS`
@@ -635,7 +593,7 @@ async fn remove_agent(id: &str) -> Result<()> {
             eprintln!("note: no source to refresh the {id} integration from — {e:#}");
             registry::Provenance::Unvouched("the installed copy, refreshed by nothing".to_string())
         }
-        Err(e) => return Err(e),
+        Err(e) => return Err(unknown_agent(&root, id, e)),
     };
     let integration = registry::open(&root, id)?;
     confirm_trust(id, &integration.dir, provenance)?;
@@ -670,13 +628,11 @@ async fn resolve_add_memory(raw: AddMemory) -> Result<Option<Resolved>> {
     }
 }
 
-fn require_scanner(memory: &str, harness: Harness) -> Result<()> {
+fn require_scanner(memory: &str, agent: &str) -> Result<()> {
     scan::Trufflehog::find().map(|_| ()).with_context(|| {
         format!(
             "can't publish agent traces to {memory} without TruffleHog. Once it is available, re-run \
-             `funes add {} {memory}`; to keep this setup local, run `funes add {} local` instead.",
-            harness.cli_name(),
-            harness.cli_name(),
+             `funes add {agent} {memory}`; to keep this setup local, run `funes add {agent} local` instead."
         )
     })
 }
@@ -788,23 +744,20 @@ fn parse_confirm(input: &str, default_yes: bool) -> bool {
     }
 }
 
-/// `funes add claude|codex [memory]` for the agents with a full local pipeline: bootstrap the
-/// one-time steps the hooks can't do unattended, around the per-agent `install` (hooks + MCP).
+/// `funes add <agent> [memory]`: bootstrap the one-time steps the hooks can't do unattended,
+/// around the integration's own `setup add` (hooks + MCP).
 ///
 /// 1. ask, then build the first index if the local memory is missing (so recall/push have content);
-///    declining aborts the add — nothing is installed;
+///    declining aborts the add — the integration is never run, so nothing is wired up;
 /// 2. `install` — register hooks + MCP (bakes the memory);
 /// 3. first push if a memory is bound — clears the overlap guard so the push hook works thereafter.
-async fn bootstrap_add<F, Fut>(harness: Harness, resolved: Option<Resolved>, install: F) -> Result<()>
+async fn bootstrap_add<F, Fut>(agent: &str, resolved: Option<Resolved>, install: F) -> Result<()>
 where
     F: FnOnce(Option<String>) -> Fut,
     Fut: std::future::Future<Output = Result<()>>,
 {
-    if !ensure_local_index(harness).await {
-        eprintln!(
-            "funes: skipped — nothing installed. Run `funes add {}` again when you're ready.",
-            harness.cli_name()
-        );
+    if !ensure_local_index(agent).await {
+        eprintln!("funes: skipped — nothing was wired up. Run `funes add {agent}` again when you're ready.");
         return Ok(());
     }
     install(resolved.as_ref().map(|r| r.memory.clone())).await?;
@@ -821,36 +774,33 @@ where
     Ok(())
 }
 
-/// Build the first index from `harness`'s sessions when the local memory is missing — asking first,
+/// Build the first index from `agent`'s sessions when the local memory is missing — asking first,
 /// since it's about a minute of work. Returns whether `add` should proceed: declining (or EOF — a
 /// no-TTY run reads none) returns `false`, so the caller installs nothing. An empty/absent session
 /// dir or a build error is a note, not a decline: the hooks still go in and `funes index` builds
-/// it later.
-async fn ensure_local_index(harness: Harness) -> bool {
+/// it later — as is an agent whose transcripts funes has no parser for.
+async fn ensure_local_index(agent: &str) -> bool {
     if memory::Memory::local().open().await.is_ok() {
         return true; // already have a local index
     }
-    let Some(root) = funes::traces::harness::known_harness_roots()
-        .into_iter()
-        .find(|(_, h)| *h == harness)
-    else {
+    let Some((root, harness)) = Harness::parse(agent).ok().and_then(|harness| {
+        funes::traces::harness::known_harness_roots()
+            .into_iter()
+            .find(|(_, h)| *h == harness)
+    }) else {
         eprintln!(
-            "funes: no {} sessions found yet — the hooks are installed; run `funes index` once you've used it.",
-            harness.cli_name()
+            "funes: no {agent} sessions found yet — the hooks are installed; run `funes index` once you've used it."
         );
         return true;
     };
     if !confirm(
-        &format!(
-            "funes will index your recent {} sessions so recall works (about a minute). Proceed? [Y/n] ",
-            harness.cli_name()
-        ),
+        &format!("funes will index your recent {agent} sessions so recall works (about a minute). Proceed? [Y/n] "),
         true,
     ) {
         return false;
     }
-    eprintln!("funes: indexing your recent {} sessions…", harness.cli_name());
-    if let Err(e) = index::run_index_seed(&root.0, harness).await {
+    eprintln!("funes: indexing your recent {agent} sessions…");
+    if let Err(e) = index::run_index_seed(&root, harness).await {
         eprintln!(
             "funes: initial index didn't complete ({e:#}) — the hooks are installed; run `funes index` to build it."
         );
