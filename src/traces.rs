@@ -10,6 +10,7 @@ pub mod codex;
 pub mod funes_jsonl;
 pub mod harness;
 pub mod hermes;
+pub mod ingest;
 pub mod jsonl;
 pub mod parquet;
 pub mod pi;
@@ -39,7 +40,7 @@ fn known_format<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Block {
     pub block_type: String, // one of [`BLOCK_TYPES`]
@@ -51,7 +52,7 @@ pub struct Block {
 }
 
 /// The serde derives on [`Turn`] and [`Block`] are the serialized turn format, `docs/funes-jsonl.md`.
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Turn {
     #[serde(default = "format_default", deserialize_with = "known_format")]

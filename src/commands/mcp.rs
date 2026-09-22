@@ -30,7 +30,7 @@ pub struct RecallRequest {
     #[schemars(description = "Restrict to a block type: text | thinking | tool_use | tool_result")]
     pub block_type: Option<String>,
     #[schemars(
-        description = "Restrict to a harness facet: an agent's name (claude | codex | pi | hermes) or any harness a turns file carries"
+        description = "Restrict to a harness facet: an agent's name (claude | codex | pi | hermes) or any stored harness"
     )]
     pub harness: Option<String>,
     #[schemars(

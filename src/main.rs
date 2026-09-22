@@ -14,7 +14,7 @@ use funes::ui::render;
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, Parser, Subcommand};
-use std::io::{IsTerminal, Write};
+use std::io::{BufReader, IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -49,7 +49,7 @@ enum Cmd {
         #[arg(long = "type", value_name = "BLOCK_TYPE")]
         block_type: Option<String>,
         /// Restrict to a harness facet: an agent's name (claude | codex | pi | hermes) or any
-        /// harness a turns file carries.
+        /// stored harness.
         #[arg(long)]
         harness: Option<String>,
         #[command(flatten)]
@@ -106,6 +106,14 @@ enum Cmd {
         /// an explicit path skips the first-index size confirmation.
         #[arg(long)]
         yes: bool,
+    },
+    /// Import versioned external-session JSONL from PATH, or stdin when omitted or `-`.
+    Ingest {
+        #[arg(value_name = "PATH|-")]
+        path: Option<PathBuf>,
+        /// Exclude thinking blocks.
+        #[arg(long)]
+        no_thinking: bool,
     },
     /// Find a literal string everywhere in one session — exhaustive, unranked.
     Scan {
@@ -503,6 +511,13 @@ async fn main() -> Result<()> {
                 index::run_index_roots(&roots, no_thinking, limit, yes).await
             }
         }
+        Cmd::Ingest { path, no_thinking } => match path.as_deref() {
+            None => index::run_ingest(std::io::stdin().lock(), no_thinking).await,
+            Some(path) if path == std::path::Path::new("-") => {
+                index::run_ingest(std::io::stdin().lock(), no_thinking).await
+            }
+            Some(path) => index::run_ingest(BufReader::new(std::fs::File::open(path)?), no_thinking).await,
+        },
         Cmd::Status { memory } => {
             print!("{}", recall::status(memory::Memory::resolve(memory)).await?);
             // Show the status body before the (bounded, best-effort) update check, so a slow or

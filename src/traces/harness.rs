@@ -84,6 +84,21 @@ impl Harness {
     }
 }
 
+/// Validate a harness name from external ingestion and normalize native aliases to their stored facet.
+/// External slugs need no native transcript parser.
+pub fn normalize_ingest_harness(value: &str) -> Result<String> {
+    if value == "claude" || value == "claude_code" {
+        return Ok("claude_code".into());
+    }
+    let mut chars = value.chars();
+    if !matches!(chars.next(), Some('a'..='z'))
+        || !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+    {
+        return Err(anyhow!("invalid harness (expected [a-z][a-z0-9_-]*)"));
+    }
+    Ok(value.to_string())
+}
+
 /// hermes' session store — a single SQLite file under `$HOME`, not a session dir like the others.
 pub const HERMES_DB: &str = ".hermes/state.db";
 
@@ -158,6 +173,14 @@ mod tests {
         assert_eq!(Harness::parse("pi").unwrap(), Harness::Pi);
         assert_eq!(Harness::parse("hermes").unwrap(), Harness::Hermes);
         assert!(Harness::parse("gpt").is_err());
+    }
+
+    #[test]
+    fn external_ingest_harnesses_do_not_require_native_parser_support() {
+        assert_eq!(normalize_ingest_harness("claude").unwrap(), "claude_code");
+        assert_eq!(normalize_ingest_harness("opencode").unwrap(), "opencode");
+        assert!(normalize_ingest_harness("OpenCode").is_err());
+        assert!(Harness::parse("opencode").is_err());
     }
 
     #[test]

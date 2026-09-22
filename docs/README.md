@@ -9,6 +9,7 @@ This directory contains the user guides and design notes for
   Codex, pi, or Hermes.
 - [Building the memory](index.md) — index session transcripts and understand the indexing
   pipeline.
+- [Ingesting external sessions](ingest.md) — import versioned JSONL from other coding agents.
 - [Recalling](recall.md) — retrieve passages and drill into their surrounding turns.
 - [Browsing sessions](sessions.md) — list what a memory holds, digest a session, scan one for a
   literal.
