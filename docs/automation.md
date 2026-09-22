@@ -36,7 +36,7 @@ It also performs the one-time bootstrap steps, so nothing is left to run by hand
   so it must be interactive — `funes add` handles it.
 
 Re-run `funes add <agent> <org>/<repo>` any time to change the memory or refresh the setup — it's
-idempotent.
+idempotent. On an install an older funes made, remove first — [add.md](add.md) says why.
 
 ## How it's wired
 
