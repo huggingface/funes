@@ -54,15 +54,17 @@ when they're indexed, and `funes index` re-embeds nothing already written. Keepi
   in the extension that already gives pi the read tools — the same scripts, run from `turn_end` and
   the session-boundary events. Nothing outside `~/.funes/agents/pi` is configured, so
   `funes remove pi` takes the whole install with it.
-- **Codex** has no plugin system, so funes writes its hooks into `~/.codex/hooks.json` — a file
-  dedicated to hooks, not your `config.toml`. The merge is append-or-replace keyed by funes's own
-  scripts, so any hooks you added yourself are left untouched. It also installs a small skill at
-  `~/.codex/skills/funes/` — Codex's own skills root, rather than the `~/.agents/skills` tree other
-  harnesses read — so Codex recognizes funes as memory before it loads any of its tools.
+- **Codex** has a plugin system too, so funes ships one plugin (installed at
+  `~/.funes/agents/codex/codex-plugin`) carrying both its hooks and a small skill, and registers it
+  with `codex plugin marketplace add` + `codex plugin add`. The skill is what lets Codex recognize
+  funes as memory before it loads any of its tools. **funes never edits your `config.toml`** — Codex
+  writes its own — and nothing of funes's goes into Codex's own `hooks.json`.
   **Codex runs a hook only once you have trusted it**, so after installing — and again after any
   change to a funes hook — run `/hooks` in Codex and review them; until then it skips them and
   nothing is indexed or published
-  ([Codex docs](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks)).
+  ([Codex docs](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks)). An install from before
+  the plugin is cleared on sight, its entries in Codex's own `hooks.json` included — unless you keep
+  hooks of your own in that file, which funes then leaves untouched for you to edit.
 - **Hermes** (indexing is **beta**) declares shell hooks in `~/.hermes/config.yaml`. funes merges a `post_llm_call` index
   hook (fired once per completed turn) and, with a memory, `on_session_finalize` + `on_session_start`
   publish hooks into that file — remove-then-add keyed by funes's own scripts, so your other hooks
@@ -71,10 +73,9 @@ when they're indexed, and `funes index` re-embeds nothing already written. Keepi
   (`~/.hermes/shell-hooks-allowlist.json`); funes pre-writes its own approvals so the hooks run from
   the first turn.
 
-`funes remove codex` and `funes remove hermes` surgically remove only hook entries whose commands
-invoke funes's scripts, then remove the scripts and their `funes-sync.log`; other hooks, approvals,
-and config keys remain. Removing an integration never deletes the indexed memory or source
-transcripts.
+`funes remove hermes` surgically removes only hook entries whose commands invoke funes's scripts,
+then removes the scripts and their `funes-sync.log`; other hooks, approvals, and config keys remain.
+Removing an integration never deletes the indexed memory or source transcripts.
 
 Every agent drives the same two scripts, installed alongside: `funes-index.sh` (the per-turn
 local index) and `funes-push.sh` (the network publish). Each drains the hook payload and re-execs a
@@ -105,9 +106,8 @@ validates a producer's output without writing anything, so run it before wiring 
   window). Hermes publishes on `on_session_finalize` (its true session end) and again on
   `on_session_start` (the same catch-up). pi publishes on `session_shutdown`, and on `session_start`
   only when the process is fresh — its other starts follow a shutdown that just published. Codex
-  publishes on the same pair, `SessionEnd` and `SessionStart`. Binding a memory needs Codex 0.151.0,
-  the release this is verified against, and an older one is refused rather than left silently
-  unpublished.
+  publishes on the same pair, `SessionEnd` and `SessionStart`; its hooks ride in a plugin, so a Codex
+  too old to have plugins stops the install rather than leaving it silently unpublished.
 - **Serialized in the binary.** funes holds an advisory lock while it mutates the local memory, so
   only one writer touches it at a time, whatever launched it (a hook, a manual `funes index`, `funes
   scrub`). A run that hits the lock fails loudly and re-sweeps next turn (indexing is idempotent).

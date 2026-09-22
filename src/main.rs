@@ -4,7 +4,7 @@
 //! harness session dirs (Claude Code, Codex, pi) or an explicit path/parquet/repo. funes's home is
 //! `$FUNES_HOME` or `~/.funes`.
 
-use funes::agents::{codex, hermes, registry};
+use funes::agents::{hermes, registry};
 use funes::commands::{ask, index, mcp, push, recall, scrub, sketch, update};
 use funes::hub;
 use funes::memory;
@@ -560,7 +560,7 @@ async fn main() -> Result<()> {
                 if let Some(remote) = resolved.as_ref().filter(|r| r.is_remote()) {
                     require_scanner(&remote.memory, Harness::Codex)?;
                 }
-                bootstrap_add(Harness::Codex, resolved, |memory| async move { codex::install(memory) }).await
+                bootstrap_add(Harness::Codex, resolved, |memory| install_agent("codex", memory, false)).await
             }
             AddAgent::Hermes { memory } => {
                 let resolved = resolve_add_memory(memory).await?;
@@ -584,7 +584,7 @@ async fn main() -> Result<()> {
         },
         Cmd::Remove { agent } => match agent {
             RemoveAgent::Claude => remove_agent("claude").await,
-            RemoveAgent::Codex => codex::uninstall(),
+            RemoveAgent::Codex => remove_agent("codex").await,
             RemoveAgent::Pi => remove_agent("pi").await,
             RemoveAgent::Hermes => hermes::uninstall(),
         },

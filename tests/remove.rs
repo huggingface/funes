@@ -41,48 +41,53 @@ fn remove_claude_unregisters_both_surfaces_and_deletes_the_installed_plugin() {
 }
 
 #[test]
-fn remove_codex_preserves_user_hooks_and_files() {
+fn remove_codex_unregisters_the_plugin_and_leaves_a_shared_hooks_file() {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("home");
     let log = tmp.path().join("cli.log");
     let bin = support::fake_cli(tmp.path(), "codex");
-    let base = home.join(".codex");
-    let hooks = base.join("hooks");
+    // Installed on demand from the checkout, and taken with the integration.
+    let plugin = home.join(".funes/agents/codex");
+    // A pre-plugin install that shares Codex's hooks file with a hook of the user's: taking funes's
+    // entries out of it needs a parser, so the file stays, and so do the scripts it still runs.
+    let codex_dir = home.join(".codex");
+    let hooks = codex_dir.join("hooks");
     fs::create_dir_all(&hooks).unwrap();
     fs::write(hooks.join("funes-index.sh"), "owned").unwrap();
-    fs::write(hooks.join("funes-push.sh"), "owned").unwrap();
-    fs::write(hooks.join("funes-sync.log"), "owned").unwrap();
     fs::write(hooks.join("user-hook.sh"), "keep").unwrap();
     fs::write(
-        base.join("hooks.json"),
+        codex_dir.join("hooks.json"),
         r#"{
-          "theme": "dark",
           "hooks": {
             "Stop": [
               { "hooks": [{ "type": "command", "command": "make lint" }] },
               { "hooks": [{ "type": "command", "command": "bash \"/old/funes-index.sh\" \"codex\"" }] }
-            ],
-            "SessionStart": [
-              { "hooks": [{ "type": "command", "command": "bash \"/old/funes-push.sh\" \"acme/kb\"" }] }
             ]
           }
         }"#,
     )
     .unwrap();
+    let memory = home.join(".funes/memory/chunks.lance");
+    fs::create_dir_all(&memory).unwrap();
+    fs::write(memory.join("keep"), "memory").unwrap();
 
     let first = support::run_remove(&home, &bin, &log, "codex");
     support::assert_success(&first);
-    let config: Value = serde_json::from_str(&fs::read_to_string(base.join("hooks.json")).unwrap()).unwrap();
-    assert_eq!(config["theme"], "dark");
-    assert_eq!(config["hooks"]["Stop"].as_array().unwrap().len(), 1);
-    assert_eq!(config["hooks"]["Stop"][0]["hooks"][0]["command"], "make lint");
-    assert!(config["hooks"].get("SessionStart").is_none());
+    assert!(!plugin.exists());
+    assert_eq!(fs::read_to_string(memory.join("keep")).unwrap(), "memory");
+    let config: Value = serde_json::from_str(&fs::read_to_string(codex_dir.join("hooks.json")).unwrap()).unwrap();
+    assert_eq!(config["hooks"]["Stop"].as_array().unwrap().len(), 2, "left as it is");
+    assert!(hooks.join("funes-index.sh").exists(), "the script its entry runs");
     assert!(hooks.join("user-hook.sh").exists());
-    for owned in ["funes-index.sh", "funes-push.sh", "funes-sync.log"] {
-        assert!(!hooks.join(owned).exists(), "{owned} removed");
-    }
-    assert_eq!(fs::read_to_string(&log).unwrap(), "mcp remove funes\ndoctor --json\n");
+    assert!(String::from_utf8_lossy(&first.stderr).contains("delete the groups"));
+    assert_eq!(
+        fs::read_to_string(&log).unwrap(),
+        "mcp remove funes\n\
+         plugin remove funes@huggingface\n\
+         plugin marketplace remove huggingface\n"
+    );
 
+    // Already absent remains a successful no-op locally.
     let second = support::run_remove(&home, &bin, &log, "codex");
     support::assert_success(&second);
 }
@@ -199,20 +204,8 @@ fn missing_agent_cli_still_removes_owned_claude_and_pi_files() {
 }
 
 #[test]
-fn malformed_hook_configs_do_not_block_mcp_unregistration() {
+fn a_malformed_hermes_config_does_not_block_mcp_unregistration() {
     let tmp = tempfile::tempdir().unwrap();
-
-    let codex_home = tmp.path().join("codex-home");
-    fs::create_dir_all(codex_home.join(".codex")).unwrap();
-    fs::write(codex_home.join(".codex/hooks.json"), "not json").unwrap();
-    let codex_log = tmp.path().join("codex-cli.log");
-    let codex_bin = support::fake_cli(&tmp.path().join("codex-fake"), "codex");
-    let codex = support::run_remove(&codex_home, &codex_bin, &codex_log, "codex");
-    assert!(!codex.status.success(), "malformed hooks.json remains an error");
-    assert_eq!(
-        fs::read_to_string(codex_log).unwrap(),
-        "mcp remove funes\ndoctor --json\n"
-    );
 
     let hermes_home = tmp.path().join("hermes-home");
     fs::create_dir_all(hermes_home.join(".hermes")).unwrap();

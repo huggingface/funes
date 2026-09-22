@@ -3,26 +3,14 @@
 //! Two embedded scripts drive the automation: `funes-index.sh` (per-turn local index) and
 //! `funes-push.sh` (publish at session boundaries). Agent modules choose lifecycle events, paths,
 //! registration mechanisms, and memory bindings; this module only provides the shared scripts,
-//! shell command construction, and JSON hook-group merge used by compatible agents.
+//! shell command construction, and the writing of them.
 
 use anyhow::{Context, Result};
-use serde_json::{json, Value};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 const INDEX_SH: &str = include_str!("../../scripts/automation/funes-index.sh");
 const PUSH_SH: &str = include_str!("../../scripts/automation/funes-push.sh");
-
-/// The hook's per-run timeout (seconds). Short because both scripts hand off to a detached worker
-/// and return in well under a second — the index/push happen off the hook's critical path.
-const TIMEOUT: u32 = 15;
-
-/// One funes-owned JSON hook group. The agent module supplies its lifecycle event and command.
-pub(crate) struct Hook {
-    pub(crate) event: &'static str,
-    pub(crate) command: String,
-    pub(crate) status: &'static str,
-}
 
 /// `bash "<script>" "<arg>"…` — the hook command line. `script` may be a path or an environment
 /// expression expanded by the hook runner; double-quoted so spaces survive. `"`/`\` in every field
@@ -39,55 +27,6 @@ pub fn command(script: &str, args: &[&str]) -> String {
 /// A no-op for ordinary paths and harness/memory names.
 fn dquote_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-/// Remove every funes hook group from `cfg` (across all events), then add `desired`. The
-/// remove-then-add is what makes re-running idempotent — funes's groups are replaced, never
-/// duplicated — while leaving every non-funes hook untouched. Empty event arrays are pruned.
-pub(crate) fn apply_funes_hooks(mut cfg: Value, desired: &[Hook]) -> Value {
-    let obj = cfg.as_object_mut().expect("cfg is a JSON object");
-    if !obj.get("hooks").map(Value::is_object).unwrap_or(false) {
-        if desired.is_empty() {
-            return cfg;
-        }
-        obj.insert("hooks".to_string(), json!({}));
-    }
-    let hooks = obj["hooks"].as_object_mut().expect("hooks is an object");
-
-    for group_list in hooks.values_mut() {
-        if let Some(list) = group_list.as_array_mut() {
-            list.retain(|g| !is_funes_group(g));
-        }
-    }
-    for d in desired {
-        let group = json!({
-            "hooks": [ { "type": "command", "command": d.command, "timeout": TIMEOUT, "statusMessage": d.status } ]
-        });
-        hooks
-            .entry(d.event)
-            .or_insert_with(|| json!([]))
-            .as_array_mut()
-            .expect("event maps to a hook-group array")
-            .push(group);
-    }
-    hooks.retain(|_event, list| !list.as_array().map(|a| a.is_empty()).unwrap_or(false));
-    cfg
-}
-
-/// A hook group is funes's if any of its commands invokes a funes script.
-fn is_funes_group(group: &Value) -> bool {
-    group
-        .get("hooks")
-        .and_then(Value::as_array)
-        .map(|hs| hs.iter().any(is_funes_hook))
-        .unwrap_or(false)
-}
-
-fn is_funes_hook(hook: &Value) -> bool {
-    hook.get("command")
-        .and_then(Value::as_str)
-        .map(|c| c.contains("funes-index.sh") || c.contains("funes-push.sh"))
-        .unwrap_or(false)
 }
 
 /// Write the embedded scripts into an agent-chosen `dir`, executable. Returns whether anything
@@ -127,14 +66,6 @@ fn file_matches(path: &Path, want: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn idx(arg: &str) -> Hook {
-        Hook {
-            event: "TurnComplete",
-            command: command("/h/funes-index.sh", &[arg]),
-            status: "idx",
-        }
-    }
-
     #[test]
     fn command_escapes_quotes_but_keeps_dollar() {
         // Ordinary paths/args are untouched, and every argument is carried.
@@ -150,122 +81,5 @@ mod tests {
             command("${HOOK_ROOT}/x.sh", &["agent"]),
             "bash \"${HOOK_ROOT}/x.sh\" \"agent\""
         );
-    }
-
-    fn push(event: &'static str, memory: &str) -> Hook {
-        Hook {
-            event,
-            command: command("/h/funes-push.sh", &[memory]),
-            status: "push",
-        }
-    }
-
-    /// The command carried by the single hook in event `ev`'s first funes group.
-    fn funes_command<'a>(cfg: &'a Value, ev: &str) -> Option<&'a str> {
-        cfg["hooks"][ev]
-            .as_array()?
-            .iter()
-            .find(|g| is_funes_group(g))?
-            .get("hooks")?
-            .as_array()?
-            .first()?
-            .get("command")?
-            .as_str()
-    }
-
-    #[test]
-    fn appends_when_absent() {
-        let out = apply_funes_hooks(json!({}), &[idx("agent")]);
-        assert_eq!(
-            funes_command(&out, "TurnComplete"),
-            Some("bash \"/h/funes-index.sh\" \"agent\"")
-        );
-    }
-
-    #[test]
-    fn replaces_the_funes_group_and_preserves_others() {
-        // A config with the user's own hook, a stale funes hook, and an unrelated event.
-        let cfg = json!({
-            "hooks": {
-                "TurnComplete": [
-                    { "hooks": [ { "type": "command", "command": "make lint" } ] },
-                    { "hooks": [ { "type": "command", "command": "bash \"/old/funes-index.sh\" \"agent\"" } ] }
-                ],
-                "BeforeTool": [ { "hooks": [ { "type": "command", "command": "guard.sh" } ] } ]
-            }
-        });
-        let out = apply_funes_hooks(cfg, &[idx("agent")]);
-
-        let completed = out["hooks"]["TurnComplete"].as_array().unwrap();
-        assert_eq!(completed.len(), 2, "user group + one refreshed funes group");
-        assert!(completed.iter().any(|g| g["hooks"][0]["command"] == "make lint"));
-        assert_eq!(
-            funes_command(&out, "TurnComplete"),
-            Some("bash \"/h/funes-index.sh\" \"agent\"")
-        );
-        assert_eq!(
-            completed.iter().filter(|g| is_funes_group(g)).count(),
-            1,
-            "no duplicate funes group"
-        );
-        assert_eq!(out["hooks"]["BeforeTool"][0]["hooks"][0]["command"], "guard.sh");
-    }
-
-    #[test]
-    fn push_events_only_with_a_memory() {
-        let local = apply_funes_hooks(json!({}), &[idx("agent")]);
-        assert!(local["hooks"].get("Start").is_none());
-
-        let remote = apply_funes_hooks(
-            json!({}),
-            &[idx("agent"), push("Start", "acme/kb"), push("End", "acme/kb")],
-        );
-        assert_eq!(
-            funes_command(&remote, "Start"),
-            Some("bash \"/h/funes-push.sh\" \"acme/kb\"")
-        );
-        assert_eq!(
-            funes_command(&remote, "End"),
-            Some("bash \"/h/funes-push.sh\" \"acme/kb\"")
-        );
-    }
-
-    #[test]
-    fn re_running_local_after_remote_drops_the_push_hooks() {
-        let remote = apply_funes_hooks(
-            json!({}),
-            &[idx("agent"), push("Start", "acme/kb"), push("End", "acme/kb")],
-        );
-        let local = apply_funes_hooks(remote, &[idx("agent")]);
-        assert!(local["hooks"].get("Start").is_none(), "stale push event pruned");
-        assert!(local["hooks"].get("End").is_none(), "stale push event pruned");
-        assert_eq!(
-            funes_command(&local, "TurnComplete"),
-            Some("bash \"/h/funes-index.sh\" \"agent\"")
-        );
-    }
-
-    #[test]
-    fn empty_desired_removes_only_funes_groups() {
-        let cfg = json!({
-            "theme": "dark",
-            "hooks": {
-                "TurnComplete": [
-                    { "hooks": [ { "type": "command", "command": "make lint" } ] },
-                    { "hooks": [ { "type": "command", "command": "bash \"/h/funes-index.sh\" \"agent\"" } ] }
-                ],
-                "Start": [
-                    { "hooks": [ { "type": "command", "command": "bash \"/h/funes-push.sh\" \"memory\"" } ] }
-                ]
-            }
-        });
-        let out = apply_funes_hooks(cfg, &[]);
-        assert_eq!(out["theme"], "dark");
-        assert_eq!(out["hooks"]["TurnComplete"].as_array().unwrap().len(), 1);
-        assert_eq!(out["hooks"]["TurnComplete"][0]["hooks"][0]["command"], "make lint");
-        assert!(out["hooks"].get("Start").is_none());
-
-        let no_hooks = json!({ "theme": "dark" });
-        assert_eq!(apply_funes_hooks(no_hooks.clone(), &[]), no_hooks);
     }
 }

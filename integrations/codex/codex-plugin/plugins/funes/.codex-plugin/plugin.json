@@ -1,0 +1,17 @@
+{
+  "name": "funes",
+  "version": "0.1.0",
+  "description": "funes memory: the skill that names funes as memory, and the hooks that index each turn and publish at session boundaries",
+  "author": { "name": "funes" },
+  "skills": "./skills/",
+  "hooks": "./hooks.json",
+  "interface": {
+    "displayName": "funes",
+    "shortDescription": "Memory of your past AI coding sessions",
+    "longDescription": "funes indexes every turn of your past sessions and answers from them through its MCP tools.",
+    "developerName": "Hugging Face",
+    "category": "Productivity",
+    "capabilities": ["Read"],
+    "defaultPrompt": ["What did we conclude about this last week?"]
+  }
+}

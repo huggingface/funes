@@ -1,0 +1,40 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${PLUGIN_ROOT}/scripts/funes-index.sh\" \"codex\"",
+            "timeout": 15,
+            "statusMessage": "Indexing turn into funes memory"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${PLUGIN_ROOT}/scripts/funes-push.sh\" \"\" \"codex\"",
+            "timeout": 15,
+            "statusMessage": "Publishing funes memory"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${PLUGIN_ROOT}/scripts/funes-push.sh\" \"\" \"codex\"",
+            "timeout": 15,
+            "statusMessage": "Publishing funes memory"
+          }
+        ]
+      }
+    ]
+  }
+}

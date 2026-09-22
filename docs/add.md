@@ -26,7 +26,7 @@ command is idempotent, so an already-absent integration is a successful no-op.
 | Agent | Read tools | Per-turn indexing | Session-boundary publish |
 | --- | --- | --- | --- |
 | `claude` | ✅ | ✅ (plugin hooks) | ✅ (with a memory bound) |
-| `codex` | ✅ | ✅ (hooks, after a `/hooks` review) | ✅ (with a memory bound — needs Codex 0.151.0) |
+| `codex` | ✅ | ✅ (plugin hooks, after a `/hooks` review) | ✅ (with a memory bound) |
 | `hermes` | ✅ | ✅ **beta** (shell hooks) | ✅ (with a memory bound) |
 | `pi` | ✅ | ✅ (extension events) | ✅ (with a memory bound) |
 

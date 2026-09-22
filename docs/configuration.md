@@ -37,7 +37,7 @@ registration and funes-owned files/entries:
 | Agent | Files or configuration |
 | --- | --- |
 | Claude Code | Hooks-only plugin under `~/.funes/agents/claude/`; registered through Claude's plugin commands. |
-| Codex | `~/.codex/hooks.json` and scripts under `~/.codex/hooks/`. |
+| Codex | Plugin carrying the skill and the hooks under `~/.funes/agents/codex/`; registered through Codex's plugin commands. |
 | Hermes | `~/.hermes/config.yaml`, `~/.hermes/shell-hooks-allowlist.json`, and scripts under `~/.hermes/hooks/`. |
 | pi | Extension and optional memory binding under `~/.funes/agents/pi/`. |
 
