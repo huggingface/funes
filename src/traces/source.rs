@@ -11,7 +11,7 @@
 use super::claude;
 use super::codex;
 use super::funes_jsonl;
-use super::harness::Harness;
+use super::harness::{self, Harness};
 use super::hermes;
 use super::jsonl;
 use super::parquet;
@@ -94,7 +94,9 @@ pub fn open_with_harness(path: &Path, limit: Option<usize>, harness: Option<Harn
         .as_ref()
         .is_some_and(|l| l.iter().any(|p| funes_jsonl::is_turns_file(p)));
     if holds_turns {
-        if harness.is_some() {
+        // A spool is the root funes resolved *from* the harness, so the override it carries is its
+        // own and redundant. Anywhere else the flag is a mistake worth naming.
+        if harness.is_some() && !harness::is_spool(path) {
             bail!(
                 "`--harness` does not apply to {}: a funes JSONL turn names its own harness",
                 path.display()

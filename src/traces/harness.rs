@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
 
+use crate::memory::dataset;
+
 /// Which coding agent produced a transcript. Selects the parser and the recorded `harness` facet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Harness {
@@ -25,6 +27,9 @@ const KNOWN_DIRS: &[(&str, Harness)] = &[
 ];
 
 impl Harness {
+    /// Every harness funes knows, in the order a no-arg sweep visits them.
+    pub const ALL: [Harness; 4] = [Harness::Claude, Harness::Codex, Harness::Pi, Harness::Hermes];
+
     /// The stored facet value — matches the Hub's normalized `harness` column.
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -87,7 +92,8 @@ impl Harness {
 /// hermes' session store — a single SQLite file under `$HOME`, not a session dir like the others.
 pub const HERMES_DB: &str = ".hermes/state.db";
 
-fn known_harness_roots_from(home: &Path, pi_agent_dir: Option<&Path>) -> Vec<(PathBuf, Harness)> {
+/// Where each harness writes its own sessions, for those present on this machine.
+fn native_roots_from(home: &Path, pi_agent_dir: Option<&Path>) -> Vec<(PathBuf, Harness)> {
     let mut roots: Vec<(PathBuf, Harness)> = KNOWN_DIRS
         .iter()
         .filter(|(_, h)| *h != Harness::Pi)
@@ -110,15 +116,47 @@ fn known_harness_roots_from(home: &Path, pi_agent_dir: Option<&Path>) -> Vec<(Pa
     roots
 }
 
-/// The `(root, harness)` pairs present under `$HOME` — drives a no-arg `funes index`. The JSONL
-/// agents contribute a session dir each; hermes contributes its `state.db` file.
+/// Where a bundle writes the turns files funes indexes for it. funes owns the directory: it drains
+/// it and deletes what it has fully indexed, so a bundle writes there and never reads back.
+pub fn spool_dir(spools: &Path, h: Harness) -> PathBuf {
+    spools.join(h.cli_name())
+}
+
+/// The directory holding every bundle's spool, `$FUNES_HOME/spool`.
+pub fn spool_root() -> PathBuf {
+    dataset::funes_dir().join("spool")
+}
+
+/// Whether `root` is a spool funes resolved for itself, rather than a path someone named.
+pub fn is_spool(root: &Path) -> bool {
+    root.starts_with(spool_root())
+}
+
+/// A harness's spool when its bundle converts for it, else the store it writes natively. The two
+/// never both apply: a spool appears when a bundle starts converting, which is when funes stops
+/// parsing that agent itself.
+fn harness_root(h: Harness, native: Option<PathBuf>, spools: &Path) -> Option<PathBuf> {
+    let spool = spool_dir(spools, h);
+    spool.is_dir().then_some(spool).or(native)
+}
+
+/// The `(root, harness)` pairs to index — drives a no-arg `funes index`. Each harness contributes
+/// its spool if it has one, else the store it writes natively.
 pub fn known_harness_roots() -> Vec<(PathBuf, Harness)> {
     let home = match std::env::var_os("HOME") {
         Some(h) => PathBuf::from(h),
         None => return Vec::new(),
     };
     let pi_agent_dir = std::env::var_os("PI_CODING_AGENT_DIR").map(PathBuf::from);
-    known_harness_roots_from(&home, pi_agent_dir.as_deref())
+    let spools = spool_root();
+    let native = native_roots_from(&home, pi_agent_dir.as_deref());
+    Harness::ALL
+        .into_iter()
+        .filter_map(|h| {
+            let own = native.iter().find(|(_, nh)| *nh == h).map(|(p, _)| p.clone());
+            Some((harness_root(h, own, &spools)?, h))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -160,6 +198,37 @@ mod tests {
         assert!(Harness::parse("gpt").is_err());
     }
 
+    /// A bundle's spool replaces the agent's own store as the root funes indexes, and a harness
+    /// funes no longer parses is reachable through its spool alone.
+    #[test]
+    fn a_spool_stands_in_for_the_agents_own_store() {
+        let spools = tempfile::tempdir().unwrap();
+        let native = PathBuf::from("/home/u/.pi/agent/sessions");
+
+        // No spool → the agent's own store, exactly as before.
+        assert_eq!(
+            harness_root(Harness::Pi, Some(native.clone()), spools.path()),
+            Some(native.clone())
+        );
+        assert_eq!(harness_root(Harness::Pi, None, spools.path()), None);
+
+        // Once the bundle converts into one, the spool wins — and stands alone.
+        let pi_spool = spool_dir(spools.path(), Harness::Pi);
+        std::fs::create_dir_all(&pi_spool).unwrap();
+        assert_eq!(
+            harness_root(Harness::Pi, Some(native), spools.path()),
+            Some(pi_spool.clone())
+        );
+        assert_eq!(harness_root(Harness::Pi, None, spools.path()), Some(pi_spool.clone()));
+        // It is named by the id the bundle is registered under, not the stored facet.
+        assert!(spool_dir(spools.path(), Harness::Claude).ends_with("claude"));
+
+        // A spool funes resolved for itself is recognizable as one, so the `--harness` it carries
+        // reads as funes's own rather than as a flag someone typed at a turns file.
+        assert!(is_spool(&spool_dir(&spool_root(), Harness::Pi).join("s.funes.jsonl")));
+        assert!(!is_spool(&pi_spool), "a spool elsewhere is not funes's");
+    }
+
     #[test]
     fn known_roots_honor_pi_coding_agent_dir() {
         let home = tempfile::tempdir().unwrap();
@@ -170,7 +239,7 @@ mod tests {
         let custom_sessions = custom.path().join("sessions");
         std::fs::create_dir_all(&custom_sessions).unwrap();
 
-        let roots = known_harness_roots_from(home.path(), Some(custom.path()));
+        let roots = native_roots_from(home.path(), Some(custom.path()));
 
         assert!(roots.contains(&(custom_sessions, Harness::Pi)));
         assert!(!roots.contains(&(default_pi, Harness::Pi)));
@@ -182,7 +251,7 @@ mod tests {
         let default_pi = home.path().join(".pi/agent/sessions");
         std::fs::create_dir_all(&default_pi).unwrap();
 
-        let roots = known_harness_roots_from(home.path(), None);
+        let roots = native_roots_from(home.path(), None);
 
         assert!(roots.contains(&(default_pi, Harness::Pi)));
     }
