@@ -1,9 +1,10 @@
 //! The `.funes.jsonl` source: turns already in funes's own shape, written by a producer funes has
 //! no parser for (`docs/funes-jsonl.md`). A file is one unit; a directory of them is one unit per
-//! file. A line is read with serde and validated, never coerced: one invalid line rejects its file.
+//! file, each stamped so an unchanged one is skipped. A line is read with serde and validated,
+//! never coerced: one invalid line rejects its file.
 
 use super::jsonl;
-use super::source::{TraceSource, Unit};
+use super::source::{file_sig, TraceSource, Unit};
 use super::{Turn, BLOCK_TYPES};
 use anyhow::{anyhow, bail, Context, Result};
 use std::path::{Path, PathBuf};
@@ -66,11 +67,15 @@ impl TraceSource for FunesJsonl {
         if let Some(n) = self.limit {
             files.truncate(n);
         }
+        // A directory is a store funes revisits, so its files are stamped and an unchanged one is
+        // skipped. A lone file is the caller's explicit target: it is re-read every time it is
+        // named, and chunk-id dedup makes that a no-op.
+        let stamped = self.path.is_dir();
         Ok(files
             .into_iter()
             .map(|p| Unit {
+                signature: stamped.then(|| file_sig(&p)).flatten(),
                 key: p.to_string_lossy().into_owned(),
-                signature: None,
                 is_subagent: false,
             })
             .collect())
@@ -264,6 +269,7 @@ mod tests {
         write(dir.path(), "b.funes.jsonl", &[LINE]);
         write(dir.path(), "notes.txt", &["ignored"]);
 
+        // A named file is re-read whenever it is named, so it carries no stamp.
         let file = source(&a);
         let units = file.units().unwrap();
         assert_eq!(units.len(), 1);
@@ -271,10 +277,11 @@ mod tests {
         assert!(file.fatal_on_read_error());
         assert!(file.owns(&units[0].key));
 
+        // A directory is revisited, so each file in it is stamped and skipped while unchanged.
         let tree = source(dir.path());
         let units = tree.units().unwrap();
         assert_eq!(units.len(), 2);
-        assert!(units.iter().all(|u| u.signature.is_none()));
+        assert!(units.iter().all(|u| u.signature.is_some()));
         assert!(!tree.fatal_on_read_error());
         let b = units.iter().find(|u| u.key.ends_with("b.funes.jsonl")).unwrap();
         assert!(tree.owns(&b.key) && !file.owns(&b.key));

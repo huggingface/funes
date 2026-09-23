@@ -1,6 +1,7 @@
 //! Indexing `.funes.jsonl` turns files end to end: a valid file is written, an invalid one writes
 //! nothing and fails the run, and a directory mixing them writes the valid files, reports the rest,
-//! and exits non-zero. Own test binary: it sets `$FUNES_HOME`.
+//! and exits non-zero. A second run over that directory skips what it already read and what it
+//! already refused. Own test binary: it sets `$FUNES_HOME`.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -131,5 +132,28 @@ async fn turns_files_are_indexed_and_invalid_ones_rejected() {
     assert_eq!(
         stored_repos().await,
         vec![("with".to_string(), own_repo), ("without".to_string(), String::new())]
+    );
+
+    // A directory funes revisits, the shape a producer's spool takes. The first run indexes what it
+    // can and fails on the file it refuses; the second finds the good file unchanged and the bad one
+    // already refused, so it reports nothing and exits zero — a per-turn hook stops failing on one
+    // bad file forever.
+    let spool = tempfile::tempdir().unwrap();
+    let refused = spool.path().join("bad_line.funes.jsonl");
+    std::fs::copy(fixture("valid.funes.jsonl"), spool.path().join("valid.funes.jsonl")).unwrap();
+    std::fs::copy(fixture("bad_line.funes.jsonl"), &refused).unwrap();
+    let home = tempfile::tempdir().unwrap();
+    std::env::set_var("FUNES_HOME", home.path());
+    let err = index(spool.path()).await.unwrap_err().to_string();
+    assert!(err.contains("1 unit(s) rejected"), "{err}");
+    assert_eq!(stored_sessions().await, BTreeSet::from(["b3f2e0c4".to_string()]));
+    index(spool.path()).await.unwrap();
+
+    // The refusal is remembered against the file's content, so re-emitted content is read again.
+    std::fs::copy(fixture("github_issue.funes.jsonl"), &refused).unwrap();
+    index(spool.path()).await.unwrap();
+    assert_eq!(
+        stored_sessions().await,
+        BTreeSet::from(["b3f2e0c4".to_string(), "gh/huggingface/transformers#31234".to_string(),])
     );
 }

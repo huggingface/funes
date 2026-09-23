@@ -167,18 +167,33 @@ fn unit_summary(turns: &[traces::Turn], key: &str) -> (u64, String) {
     (sids.len() as u64, label)
 }
 
-/// What `state.json` records per unit: the change-stamp last seen and the highest [`Tier`] it has
-/// been indexed to.
+/// This build, recorded with a refusal: what funes refuses is a property of its own validation, so
+/// an upgrade must reconsider what an older one turned away.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// What `state.json` records per unit: the change-stamp last seen, and then either the highest
+/// [`Tier`] it has been indexed to or the build that refused to read it.
 #[derive(Serialize, Deserialize, Clone)]
 struct UnitState {
     sig: String,
-    level: Tier,
+    /// The highest tier indexed; `None` when nothing was, which only a refusal leaves behind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    level: Option<Tier>,
+    /// The funes version that refused this content, when one did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    refused: Option<String>,
 }
 
 /// Whether a recorded unit is current for a run targeting `target`: its stamp still matches and it
 /// has already reached at least that tier. A lower recorded tier still needs a pass.
 fn unit_current(entry: Option<&UnitState>, sig: &str, target: Tier) -> bool {
-    entry.is_some_and(|e| e.sig == sig && e.level >= target)
+    entry.is_some_and(|e| e.sig == sig && e.level.is_some_and(|l| l >= target))
+}
+
+/// Whether this build already refused this exact content. Re-reading buys nothing until the unit
+/// changes or funes does, and a hook that keeps re-reading one bad file fails on every turn.
+fn unit_refused(entry: Option<&UnitState>, sig: &str) -> bool {
+    entry.is_some_and(|e| e.sig == sig && e.refused.as_deref() == Some(VERSION))
 }
 
 /// Lightweight coverage snapshot written by indexing runs for `status` to read without walking
@@ -217,7 +232,9 @@ fn update_index_coverage<'a>(
         let Some(sig) = &unit.signature else {
             continue;
         };
-        if unit_current(state.get(&unit.key), sig, target) {
+        // A refused unit owes nothing a run could deliver, so it is not counted as pending.
+        let entry = state.get(&unit.key);
+        if unit_current(entry, sig, target) || unit_refused(entry, sig) {
             snapshot.pending.remove(&unit.key);
         } else {
             snapshot.pending.insert(unit.key.clone());
@@ -428,11 +445,21 @@ impl Indexer {
             .filter(|&i| {
                 let unit = &self.units[i].1;
                 match &unit.signature {
-                    Some(sig) => !unit_current(self.state.get(&unit.key), sig, tier),
+                    Some(sig) => {
+                        let entry = self.state.get(&unit.key);
+                        !unit_current(entry, sig, tier) && !unit_refused(entry, sig)
+                    }
                     None => true,
                 }
             })
             .collect()
+    }
+
+    /// Record a unit's state and persist it, so an interrupted run resumes where it stopped.
+    fn record(&mut self, key: &str, state: UnitState) -> Result<()> {
+        self.state.insert(key.to_string(), state);
+        std::fs::write(&self.state_path, serde_json::to_string_pretty(&self.state)?)?;
+        write_index_coverage(&self.coverage_path, &self.sources, &self.units, &self.state)
     }
 
     /// Index unit `i` at `tiers` — the one primitive a caller loops over, choosing the tiers and
@@ -457,7 +484,8 @@ impl Indexer {
         };
 
         if let Some(sig) = &sig {
-            if unit_current(self.state.get(&key), sig, target) {
+            let entry = self.state.get(&key);
+            if unit_current(entry, sig, target) || unit_refused(entry, sig) {
                 self.n_skipped += 1;
                 return Ok(0);
             }
@@ -466,8 +494,9 @@ impl Indexer {
             return Ok(0);
         }
 
-        // Best-effort sources retry a failed read next run (no state recorded); a fatal source
-        // aborts rather than silently dropping data.
+        // A best-effort source reports the unit and moves on; a signed one records the refusal, so
+        // the next run skips it instead of failing on it again. A fatal source aborts rather than
+        // silently dropping data.
         let mut turns = {
             let src = &self.sources[src_i];
             match src.read(&self.units[i].1) {
@@ -475,6 +504,16 @@ impl Indexer {
                 Err(e) if !src.fatal_on_read_error() => {
                     eprintln!("{progress} {key} — rejected: {e}");
                     self.rejected.insert(i);
+                    if let Some(sig) = &sig {
+                        self.record(
+                            &key,
+                            UnitState {
+                                sig: sig.clone(),
+                                level: None,
+                                refused: Some(VERSION.to_string()),
+                            },
+                        )?;
+                    }
                     return Ok(0);
                 }
                 Err(e) => return Err(e),
@@ -520,17 +559,16 @@ impl Indexer {
         };
 
         // Record state only for signed units, even when they produced no chunks ("remembered when
-        // empty"), and persist after each so an interrupted run is resumable.
+        // empty").
         if let Some(sig) = &sig {
-            self.state.insert(
-                key.clone(),
+            self.record(
+                &key,
                 UnitState {
                     sig: sig.clone(),
-                    level: target,
+                    level: Some(target),
+                    refused: None,
                 },
-            );
-            std::fs::write(&self.state_path, serde_json::to_string_pretty(&self.state)?)?;
-            write_index_coverage(&self.coverage_path, &self.sources, &self.units, &self.state)?;
+            )?;
         }
         // Count a unit's sessions once per run — later tier passes over it only add chunks.
         if self.counted.insert(i) {
@@ -1058,12 +1096,18 @@ mod tests {
         assert!(collect_units(&srcs).unwrap().is_empty());
     }
 
+    /// A unit stamped `sig` and indexed to `level`, which nothing refused.
+    fn indexed(sig: &str, level: Tier) -> UnitState {
+        UnitState {
+            sig: sig.into(),
+            level: Some(level),
+            refused: None,
+        }
+    }
+
     #[test]
     fn unit_current_needs_matching_sig_and_reached_target_tier() {
-        let l1 = UnitState {
-            sig: "10:20".into(),
-            level: Tier::Text,
-        };
+        let l1 = indexed("10:20", Tier::Text);
         // Signature mismatch is never current, whatever the tier.
         assert!(!unit_current(Some(&l1), "99:99", Tier::Text));
         // Sig matches and the recorded tier meets the target → current.
@@ -1072,14 +1116,34 @@ mod tests {
         assert!(!unit_current(Some(&l1), "10:20", Tier::ToolUse));
         assert!(!unit_current(Some(&l1), "10:20", Tier::ToolResult));
         // A fully-indexed unit satisfies every target.
-        let full = UnitState {
-            sig: "10:20".into(),
-            level: Tier::ToolResult,
-        };
+        let full = indexed("10:20", Tier::ToolResult);
         assert!(unit_current(Some(&full), "10:20", Tier::Text));
         assert!(unit_current(Some(&full), "10:20", Tier::ToolResult));
         // No record → not current.
         assert!(!unit_current(None, "10:20", Tier::Text));
+    }
+
+    /// A refusal is remembered against the content that caused it and the build that made it, so a
+    /// hook stops re-reading a file funes will refuse again — and stops skipping it once either
+    /// changes. It is never "current": nothing of it was indexed.
+    #[test]
+    fn a_refusal_is_remembered_until_the_unit_or_funes_changes() {
+        let refused = |sig: &str, by: &str| UnitState {
+            sig: sig.into(),
+            level: None,
+            refused: Some(by.into()),
+        };
+
+        let mine = refused("10:20", VERSION);
+        assert!(unit_refused(Some(&mine), "10:20"));
+        assert!(!unit_current(Some(&mine), "10:20", Tier::Text));
+        // Re-emitted content is read again, however it failed before.
+        assert!(!unit_refused(Some(&mine), "99:99"));
+        // So is content another build refused: validation is funes's, not the file's.
+        assert!(!unit_refused(Some(&refused("10:20", "0.0.1")), "10:20"));
+        // An indexed unit was never refused.
+        assert!(!unit_refused(Some(&indexed("10:20", Tier::Text)), "10:20"));
+        assert!(!unit_refused(None, "10:20"));
     }
 
     #[test]
@@ -1097,27 +1161,9 @@ mod tests {
             unit("unsigned", None),
         ];
         let state = HashMap::from([
-            (
-                "current".to_string(),
-                UnitState {
-                    sig: "1".into(),
-                    level: Tier::ToolResult,
-                },
-            ),
-            (
-                "partial".to_string(),
-                UnitState {
-                    sig: "2".into(),
-                    level: Tier::Text,
-                },
-            ),
-            (
-                "stale".to_string(),
-                UnitState {
-                    sig: "old".into(),
-                    level: Tier::ToolResult,
-                },
-            ),
+            ("current".to_string(), indexed("1", Tier::ToolResult)),
+            ("partial".to_string(), indexed("2", Tier::Text)),
+            ("stale".to_string(), indexed("old", Tier::ToolResult)),
         ]);
         let snapshot = update_index_coverage(IndexCoverageSnapshot::default(), &first, &state);
         assert_eq!(

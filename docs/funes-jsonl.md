@@ -12,10 +12,17 @@ funes index ./exports/                    # a directory of them, recursively
 funes index --check ./exports/            # validate everything, write nothing
 ```
 
-A file is one unit: it is read whole and written in one append. A directory is one unit per file. A
-file is *signature-less* — it is re-read on every `funes index` that names it and never recorded in
-`state.json`; chunk-id dedup makes the re-read a no-op. Keep files bounded and ship updates as new
-files rather than regrowing one. `--harness` is refused on both shapes: the facet is in the data.
+A file is one unit: it is read whole and written in one append. A directory is one unit per file.
+
+A file you name is *signature-less* — it is re-read on every `funes index` that names it and never
+recorded in `state.json`; chunk-id dedup makes the re-read a no-op. A directory is a store funes
+revisits, so each file in it carries a `size:mtime` stamp and a recorded tier: an unchanged one is
+skipped, a changed one is read again. Keep files bounded and ship updates as new files rather than
+regrowing one. `--harness` is refused on both shapes: the facet is in the data.
+
+A file funes refuses is remembered as refused, against both its content and the funes version that
+refused it, so a run that meets only files it has already refused reports nothing and exits zero.
+Re-emit the file, or upgrade funes, and it is read again.
 
 ## The turn
 
@@ -97,8 +104,10 @@ is not a JSON object, an unknown field, a missing required field, a wrong type, 
 
 Indexing a single file, a rejection fails the run. Indexing a directory, each file stands alone: a
 rejected file is reported with its first bad line, the run continues, the summary counts it under
-`rejected`, and the exit status is non-zero. A directory holding any other `.jsonl` file is rejected —
-the source would be ambiguous; files that are not `.jsonl` are ignored.
+`rejected`, and the exit status is non-zero — the first time. It is then remembered as refused, and
+a later run over the same directory skips it rather than failing again. A directory holding any
+other `.jsonl` file is rejected — the source would be ambiguous; files that are not `.jsonl` are
+ignored.
 
 `funes index --check <file-or-dir>` runs the same validation and computes ids without writing:
 turns, chunks, duplicate ids, and the first bad line of every rejected file. Only a rejected file
