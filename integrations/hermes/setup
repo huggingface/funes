@@ -1,7 +1,8 @@
 #!/bin/sh
 # funes's hermes integration: register `funes mcp` as its MCP server, and install a plugin whose
-# lifecycle hooks index each turn and, with a memory bound, publish at session boundaries. hermes
-# edits its own config.yaml — funes drops the plugin and `hermes plugins enable` does the rest.
+# lifecycle hooks convert each finished turn out of hermes's SQLite store and index it, and, with a
+# memory bound, publish at session boundaries. hermes edits its own config.yaml — funes drops the
+# plugin and `hermes plugins enable` does the rest.
 set -eu
 
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -17,6 +18,28 @@ usage() {
 
 have_hermes() {
     command -v hermes >/dev/null 2>&1
+}
+
+# The directory funes drains for this agent. funes hands us its home and our id; the plugin sees
+# neither, so the resolved path is written beside it.
+spool_dir() {
+    printf '%s/spool/%s\n' "${FUNES_HOME:-$HOME/.funes}" "${FUNES_AGENT_ID:-hermes}"
+}
+
+# Convert the sessions hermes has already recorded, so recall reaches them before the next turn.
+# The plugin runs the same module inside hermes, whose runtime is Python; from a shell we need that
+# interpreter, which any box running hermes has for the same reason.
+seed() {
+    dest=$1
+    spool=$2
+    db="$3/state.db"
+    [ -f "$db" ] || return 0
+    if command -v python3 >/dev/null 2>&1; then
+        python3 "$dest/convert.py" "$db" "$spool" >/dev/null
+    else
+        echo "no python3 on PATH to convert your existing hermes sessions — hermes runs on it, so" \
+            "this is unexpected; they will be converted as each session ends." >&2
+    fi
 }
 
 # hermes's own home: where it discovers user plugins, and where an install before the plugin wrote.
@@ -36,7 +59,8 @@ install_plugin() {
     dest=$1
     memory=${2:-}
     mkdir -p "$dest"
-    cp "$SOURCE/plugin.yaml" "$SOURCE/__init__.py" "$SOURCE/funes-index.sh" "$SOURCE/funes-push.sh" "$dest/"
+    cp "$SOURCE/plugin.yaml" "$SOURCE/__init__.py" "$SOURCE/convert.py" \
+        "$SOURCE/funes-index.sh" "$SOURCE/funes-push.sh" "$dest/"
     chmod +x "$dest/funes-index.sh" "$dest/funes-push.sh"
     if [ -n "$memory" ]; then
         printf '%s\n' "$memory" >"$dest/memory"
@@ -67,6 +91,13 @@ add() {
     home=$(hermes_home)
     dest="$home/plugins/$PLUGIN"
     install_plugin "$dest" "$memory"
+
+    spool=$(spool_dir)
+    mkdir -p "$spool"
+    printf '%s\n' "$spool" >"$dest/spool"
+    # The plugin reads the store hermes keeps beside its configuration.
+    printf '%s\n' "$home/state.db" >"$dest/state-db"
+    seed "$dest" "$spool" "$home"
 
     # Those hooks now do the plugin's work a second time, and only the user can take them out of the
     # file that holds the rest of their configuration.
@@ -129,6 +160,10 @@ drop_pre_plugin_install() {
 remove() {
     home=$(hermes_home)
     dest="$home/plugins/$PLUGIN"
+    # The spool holds converted copies of hermes's own sessions, so dropping it loses nothing a
+    # re-add cannot rebuild, and leaving it would have funes keep indexing an agent it no longer
+    # serves.
+    rm -rf "$(spool_dir)"
 
     if ! have_hermes; then
         rm -rf "$dest"
