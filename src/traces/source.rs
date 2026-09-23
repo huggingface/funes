@@ -15,7 +15,6 @@ use super::harness::{self, Harness};
 use super::hermes;
 use super::jsonl;
 use super::parquet;
-use super::pi;
 use super::Turn;
 use crate::hub;
 
@@ -229,7 +228,10 @@ impl TraceSource for JsonlTree {
         let turns = match self.harness {
             Harness::Claude => claude::turns_from_jsonl_file(p, &jsonl::session_id_of(p), &fallback)?,
             Harness::Codex => codex::turns_from_jsonl_file(p, &fallback)?,
-            Harness::Pi => pi::turns_from_jsonl_file(p, &jsonl::session_id_of(p), &fallback)?,
+            // pi's bundle converts its sessions into the spool funes reads; nothing here parses them.
+            Harness::Pi => {
+                anyhow::bail!("pi sessions are converted by its integration — run `funes add pi`, which indexes them")
+            }
             // hermes keeps its sessions in a SQLite state.db, not a JSONL tree, so it's read by a
             // dedicated source and never reaches here.
             Harness::Hermes => anyhow::bail!("hermes sessions are read from state.db, not a JSONL tree"),

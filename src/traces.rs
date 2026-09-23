@@ -12,7 +12,6 @@ pub mod harness;
 pub mod hermes;
 pub mod jsonl;
 pub mod parquet;
-pub mod pi;
 pub mod repo;
 pub mod source;
 
@@ -100,11 +99,9 @@ mod tests {
     fn a_parsed_turn_round_trips_with_identical_chunk_ids() {
         let claude = fixture("claude_session.jsonl");
         let codex = fixture("codex_session.jsonl");
-        let pi = fixture("pi_session.jsonl");
         let parsed = [
             claude::turns_from_jsonl_file(&claude, "s", "fb").unwrap(),
             codex::turns_from_jsonl_file(&codex, "fb").unwrap(),
-            pi::turns_from_jsonl_file(&pi, "s", "fb").unwrap(),
         ];
         for turns in &parsed {
             let ids = |t: &[Turn]| -> Vec<String> {

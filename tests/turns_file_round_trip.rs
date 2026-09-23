@@ -2,7 +2,8 @@
 //! the same transcript serialized to `.funes.jsonl` and indexed as a turns file produce identical
 //! rows (`source_path` aside); a grown turns file adds only its new turns; and a thread no agent
 //! wrote — a tracker's roles, no `assistant`, no `thinking`, no `cwd`, an edit as a new turn —
-//! indexes and lists. hermes has no fixture: its round trip lands with its bundle's converter.
+//! indexes and lists. Only the harnesses funes still parses are here: an agent whose integration
+//! converts for it round-trips against its own fixture, in its bundle.
 //! Own test binary, one test at a time: `$FUNES_HOME` is process-global.
 
 use std::collections::BTreeSet;
@@ -13,7 +14,7 @@ use arrow_array::{Array, ArrayRef, Int64Array, StringArray};
 use funes::commands::index::run_index;
 use funes::commands::recall::{self, SessionFilter};
 use funes::memory::{dataset, Memory};
-use funes::traces::{claude, codex, jsonl, pi, Turn};
+use funes::traces::{claude, codex, jsonl, Turn};
 use tokio::sync::Mutex;
 
 static HOME: Mutex<()> = Mutex::const_new(());
@@ -48,7 +49,6 @@ fn parse(name: &str) -> Vec<Turn> {
     match name {
         "claude_session.jsonl" => claude::turns_from_jsonl_file(&p, &sid, &fallback),
         "codex_session.jsonl" => codex::turns_from_jsonl_file(&p, &fallback),
-        "pi_session.jsonl" => pi::turns_from_jsonl_file(&p, &sid, &fallback),
         other => panic!("no parser for {other}"),
     }
     .unwrap()
@@ -115,7 +115,7 @@ async fn index_fresh(path: &Path) -> (tempfile::TempDir, Vec<String>) {
 async fn a_native_transcript_and_its_turns_file_index_identically() {
     let _one_at_a_time = HOME.lock().await;
     let out = tempfile::tempdir().unwrap();
-    for name in ["claude_session.jsonl", "codex_session.jsonl", "pi_session.jsonl"] {
+    for name in ["claude_session.jsonl", "codex_session.jsonl"] {
         let (_tree_home, native) = index_fresh(&fixture(name)).await;
         assert!(!native.is_empty(), "{name} indexed nothing");
 

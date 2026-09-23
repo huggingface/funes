@@ -10,9 +10,10 @@ funes index      # a fast, text-first pass over every known harness dir, into on
 
 ## What it indexes
 
-With **no argument**, in a terminal, `funes index` sweeps every supported agent's session dir it
-finds — `~/.claude/projects`, `~/.codex/sessions`, `~/.pi/agent/sessions`, `~/.hermes/state.db` — into
-one memory, then offers to finish any deeper work left. Scope it to a single agent with `--harness`:
+With **no argument**, in a terminal, `funes index` sweeps every supported agent's sessions it finds —
+`~/.claude/projects`, `~/.codex/sessions`, `~/.hermes/state.db`, and, for an agent whose integration
+converts its own sessions, `~/.funes/spool/<agent>` — into one memory, then offers to finish any
+deeper work left. Scope it to a single agent with `--harness`:
 
 ```bash
 funes index --harness codex        # only ~/.codex/sessions
@@ -126,7 +127,7 @@ scanned or stored: a pasted screenshot is megabytes of base64 with nothing recal
 
 | Flag | Meaning |
 | --- | --- |
-| `--harness <name>` | Override auto-detection for a path, or (with no path) target one harness's dir: `claude \| codex \| pi \| hermes`. Refused on a turns file, whose turns name their own. |
+| `--harness <name>` | Override auto-detection for a path, or (with no path) target one agent's sessions: `claude \| codex \| pi \| hermes`. Refused on a turns file you name, whose turns name their own harness. |
 | `--check` | Validate PATH without indexing it: turns, chunks, rejected files, duplicate ids; writes nothing, exits non-zero if a unit was rejected. |
 | `--limit <N>` | Index only the most recent N sessions per source. Omit to index all. A Hub repo ignores it and indexes every shard. |
 | `--no-thinking` | Exclude thinking blocks. |
@@ -137,7 +138,7 @@ scanned or stored: a pasted screenshot is megabytes of base64 with nothing recal
 Indexing and recall are one deterministic pipeline:
 
 ```
-~/.claude/projects, ~/.codex/sessions, ~/.pi/agent/sessions, ~/.hermes/state.db
+~/.claude/projects, ~/.codex/sessions, ~/.hermes/state.db, ~/.funes/spool/<agent>
    (or a .parquet trace, or a .funes.jsonl turns file)
    │  parse        deterministic — turns (text / thinking / tool_use / tool_result), tagged by agent
    │  chunk        one chunk per content block, tight provenance

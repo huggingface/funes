@@ -77,6 +77,9 @@ jobs:
       - name: Installer tests
         run: sh scripts/test-install.sh
 
+      - name: Integration converter tests
+        run: sh integrations/pi/test/run.sh
+
   integration-test:
     permissions:
       contents: read

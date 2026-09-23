@@ -30,6 +30,13 @@ impl Harness {
     /// Every harness funes knows, in the order a no-arg sweep visits them.
     pub const ALL: [Harness; 4] = [Harness::Claude, Harness::Codex, Harness::Pi, Harness::Hermes];
 
+    /// Whether funes reads this agent's own transcripts. False once its integration converts them
+    /// instead: the harness stays, as the facet and the name of its spool, but nothing parses it —
+    /// a path pointing at its store is still recognized, so it can be refused rather than misread.
+    pub fn parsed_in_tree(self) -> bool {
+        self != Harness::Pi
+    }
+
     /// The stored facet value — matches the Hub's normalized `harness` column.
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -92,22 +99,15 @@ impl Harness {
 /// hermes' session store — a single SQLite file under `$HOME`, not a session dir like the others.
 pub const HERMES_DB: &str = ".hermes/state.db";
 
-/// Where each harness writes its own sessions, for those present on this machine.
-fn native_roots_from(home: &Path, pi_agent_dir: Option<&Path>) -> Vec<(PathBuf, Harness)> {
+/// Where each harness funes still parses writes its own sessions, for those present on this
+/// machine. An agent whose integration converts for it has only a spool.
+fn native_roots_from(home: &Path) -> Vec<(PathBuf, Harness)> {
     let mut roots: Vec<(PathBuf, Harness)> = KNOWN_DIRS
         .iter()
-        .filter(|(_, h)| *h != Harness::Pi)
+        .filter(|(_, h)| h.parsed_in_tree())
         .map(|(tail, h)| (home.join(tail), *h))
         .filter(|(dir, _)| dir.is_dir())
         .collect();
-
-    let pi_sessions = pi_agent_dir
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| home.join(".pi/agent"))
-        .join("sessions");
-    if pi_sessions.is_dir() {
-        roots.push((pi_sessions, Harness::Pi));
-    }
 
     let hermes_db = home.join(HERMES_DB);
     if hermes_db.is_file() {
@@ -144,9 +144,8 @@ pub fn known_harness_roots() -> Vec<(PathBuf, Harness)> {
         Some(h) => PathBuf::from(h),
         None => return Vec::new(),
     };
-    let pi_agent_dir = std::env::var_os("PI_CODING_AGENT_DIR").map(PathBuf::from);
     let spools = spool_root();
-    let native = native_roots_from(&home, pi_agent_dir.as_deref());
+    let native = native_roots_from(&home);
     Harness::ALL
         .into_iter()
         .filter_map(|h| {
@@ -222,30 +221,17 @@ mod tests {
         assert!(!is_spool(&pi_spool), "a spool elsewhere is not funes's");
     }
 
+    /// An agent whose integration converts for it has no native root: its sessions reach funes
+    /// through its spool or not at all.
     #[test]
-    fn known_roots_honor_pi_coding_agent_dir() {
+    fn a_converted_agent_has_no_native_root() {
         let home = tempfile::tempdir().unwrap();
-        let default_pi = home.path().join(".pi/agent/sessions");
-        std::fs::create_dir_all(&default_pi).unwrap();
+        std::fs::create_dir_all(home.path().join(".pi/agent/sessions")).unwrap();
+        std::fs::create_dir_all(home.path().join(".claude/projects")).unwrap();
 
-        let custom = tempfile::tempdir().unwrap();
-        let custom_sessions = custom.path().join("sessions");
-        std::fs::create_dir_all(&custom_sessions).unwrap();
+        let roots = native_roots_from(home.path());
 
-        let roots = native_roots_from(home.path(), Some(custom.path()));
-
-        assert!(roots.contains(&(custom_sessions, Harness::Pi)));
-        assert!(!roots.contains(&(default_pi, Harness::Pi)));
-    }
-
-    #[test]
-    fn known_roots_fall_back_to_default_pi_dir() {
-        let home = tempfile::tempdir().unwrap();
-        let default_pi = home.path().join(".pi/agent/sessions");
-        std::fs::create_dir_all(&default_pi).unwrap();
-
-        let roots = native_roots_from(home.path(), None);
-
-        assert!(roots.contains(&(default_pi, Harness::Pi)));
+        assert!(roots.iter().all(|(_, h)| *h != Harness::Pi));
+        assert!(roots.iter().any(|(_, h)| *h == Harness::Claude));
     }
 }

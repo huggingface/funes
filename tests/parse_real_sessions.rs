@@ -97,29 +97,6 @@ fn parse_real_codex_session() {
 }
 
 #[test]
-fn parse_real_pi_session() {
-    let p = fixture("pi_session.jsonl");
-    let turns = funes::traces::pi::turns_from_jsonl_file(&p, "sess", "proj").expect("parse pi");
-    assert!(!turns.is_empty());
-    for want in ["text", "thinking", "tool_use", "tool_result"] {
-        assert!(
-            block_kinds(&turns).contains(want),
-            "pi fixture missing {want}: {:?}",
-            block_kinds(&turns)
-        );
-    }
-    assert!(turns.iter().all(|t| t.harness == "pi"), "pi turns are tagged pi");
-    // Control lines (session/model_change/thinking_level_change) produce no turn; a result is `tool`.
-    assert!(roles(&turns).is_subset(&BTreeSet::from(["user", "assistant", "tool"])));
-    matched_results_are_named(&turns);
-    // Pi uses the native line `id` as `turn_uuid`; stable across a re-parse.
-    ids_are_stable(
-        &turns,
-        &funes::traces::pi::turns_from_jsonl_file(&p, "sess", "proj").unwrap(),
-    );
-}
-
-#[test]
 fn parse_real_claude_session() {
     let p = fixture("claude_session.jsonl");
     let turns = funes::traces::claude::turns_from_jsonl_file(&p, "sess", "proj").expect("parse claude");
@@ -152,7 +129,6 @@ fn parse_real_claude_session() {
 fn turns_carry_the_recorded_cwd_and_its_workdir() {
     let claude_p = fixture("claude_session.jsonl");
     let codex_p = fixture("codex_session.jsonl");
-    let pi_p = fixture("pi_session.jsonl");
     let parsed = [
         (
             &claude_p,
@@ -161,10 +137,6 @@ fn turns_carry_the_recorded_cwd_and_its_workdir() {
         (
             &codex_p,
             funes::traces::codex::turns_from_jsonl_file(&codex_p, "fb").unwrap(),
-        ),
-        (
-            &pi_p,
-            funes::traces::pi::turns_from_jsonl_file(&pi_p, "s", "fb").unwrap(),
         ),
     ];
     for (p, turns) in &parsed {
