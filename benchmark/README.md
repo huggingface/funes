@@ -165,10 +165,11 @@ the default BLAS backend and the optional ONNX reference:
 cargo run --release --features onnx --example bench_backends
 ```
 
-It runs four fixed workloads: 16 short documents to expose per-call overhead; 30 documents near
+It runs six fixed workloads: 16 short documents to expose per-call overhead; 30 documents near
 the 512-token truncation limit to approximate recall's rerank worst case; a ragged batch of 2 capped
-documents among 14 short ones; and 32 documents whose token lengths are the quantiles of real
-chunks, which shows what a backend spends padding a mixed batch. For each backend it reports
+documents among 14 short ones; 32 documents whose token lengths are the quantiles of real
+chunks; and 256-document mixed and real batches, the production batch size, which show how
+a backend scales and what it spends on padding. For each backend it reports
 embedding and reranking latency plus agreement with the first backend:
 
 - `embed cos↔ref` is the minimum cosine similarity between corresponding embedding vectors.

@@ -3,13 +3,14 @@
 //! compares whatever backends are compiled in, with ONNX (fastembed) as the reference when present:
 //!   cargo run --release --features onnx --example bench_backends
 //!
-//! Four workloads, because they stress different things: a batch of short docs is dominated by
+//! Six workloads, because they stress different things: a batch of short docs is dominated by
 //! per-call overheads (tokenization, thread spawns), while 30 docs at the 512-token truncation
 //! cap — recall's rerank worst case — is dominated by GEMM throughput and memory behavior. The
 //! ragged batch is real indexing's shape — batch-longest padding masks most attention columns,
 //! whose softmax weights underflow, and the scores×V GEMM then reads what they leave behind. The
 //! real batch spreads its lengths the way measured chunks do, so it shows what a backend spends
-//! on padding a mixed batch.
+//! on padding a mixed batch. The 256-document workloads match the production batch size and show
+//! how grouping by length scales.
 //!
 //! Adding a backend = impl Embedder+Reranker, gate it behind a feature, and push it in `backends()`.
 
