@@ -1,9 +1,9 @@
 #!/bin/sh
-# funes's pi integration: register this directory with pi as an extension, and bind the memory it
-# recalls from and publishes to.
+# funes's pi integration: register this directory with pi as an extension, bind the memory it
+# recalls from and publishes to, and convert the sessions pi has already written.
 #
 # pi has no MCP client, so index.ts is one: it spawns `funes mcp` over stdio and registers whatever
-# tools/list returns.
+# tools/list returns. It also converts each finished turn into the spool funes indexes.
 set -eu
 
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -22,6 +22,40 @@ usage() {
 
 have_pi() {
     command -v pi >/dev/null 2>&1
+}
+
+# The directory funes drains for this agent. funes hands us its home and our id; the extension sees
+# neither, so the resolved path is written beside it.
+spool_dir() {
+    printf '%s/spool/%s\n' "${FUNES_HOME:-$HOME/.funes}" "${FUNES_AGENT_ID:-pi}"
+}
+
+# Where pi keeps its sessions: either override it honours, else the default.
+sessions_dir() {
+    if [ -n "${PI_CODING_AGENT_SESSION_DIR:-}" ]; then
+        printf '%s\n' "$PI_CODING_AGENT_SESSION_DIR"
+    else
+        printf '%s/sessions\n' "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
+    fi
+}
+
+# Convert what pi has already written, so recall reaches it before the next turn. The extension runs
+# the same module inside pi, which needs nothing installed; from a shell it needs a JS runtime, and
+# where there is none the extension does this itself at its next start.
+seed() {
+    spool=$1
+    sessions=$(sessions_dir)
+    [ -d "$sessions" ] || return 0
+    for js in node bun deno; do
+        if command -v "$js" >/dev/null 2>&1; then
+            "$js" "$HERE/convert.mjs" "$sessions" "$spool" >/dev/null
+            rm -f "$HERE/seed-pending"
+            return 0
+        fi
+    done
+    printf '%s\n' "$sessions" >"$HERE/seed-pending"
+    echo "no JS runtime on PATH to convert your existing pi sessions — pi will convert them itself" \
+        "the next time it starts." >&2
 }
 
 # The version pi reports, or empty when it reports something with no version in it.
@@ -56,6 +90,12 @@ add() {
     else
         rm -f "$HERE/memory"
     fi
+
+    spool=$(spool_dir)
+    mkdir -p "$spool"
+    printf '%s\n' "$spool" >"$HERE/spool"
+    seed "$spool"
+
     drop_legacy
 
     if ! have_pi; then
@@ -78,7 +118,10 @@ add() {
 }
 
 remove() {
-    rm -f "$HERE/memory"
+    # The spool holds converted copies of pi's own sessions, so dropping it loses nothing a re-add
+    # cannot rebuild — and leaving it would have funes keep indexing an agent it no longer serves.
+    rm -rf "$(spool_dir)"
+    rm -f "$HERE/memory" "$HERE/spool" "$HERE/seed-pending"
     drop_legacy
 
     if ! have_pi; then

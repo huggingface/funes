@@ -28,23 +28,31 @@
 // The result is forwarded as the `funes mcp <memory>` positional; empty forwards a
 // bare `funes mcp` (the local memory).
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+
+import { convert, convertTree } from "./convert.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FUNES_BIN = process.env.FUNES_BIN || "funes";
 
-// The memory `funes add pi <memory>` wrote beside this extension, or "" if none (local).
-function boundMemory(): string {
+// A file `funes add pi` wrote beside this extension, or "" when there is none.
+function bound(name: string): string {
   try {
-    return readFileSync(join(HERE, "memory"), "utf8").trim();
+    return readFileSync(join(HERE, name), "utf8").trim();
   } catch {
     return "";
   }
 }
 
-const memory = (process.env.FUNES_MEMORY || boundMemory()).trim();
+// The directory funes drains for this bundle, resolved at install: funes hands `setup` its home and
+// this agent's id, neither of which reaches a running extension.
+const SPOOL = bound("spool");
+// The sessions root `setup` could not convert for want of a JS runtime, left for pi's own.
+const SEED_PENDING = join(HERE, "seed-pending");
+
+const memory = (process.env.FUNES_MEMORY || bound("memory")).trim();
 const FUNES_ARGS = memory ? ["mcp", memory] : ["mcp"];
 const PROTOCOL_VERSION = "2024-11-05"; // matches funes' rmcp server
 const CALL_TIMEOUT_MS = 120_000;
@@ -206,6 +214,26 @@ function runScript(script: string, ...args: string[]) {
   } catch {}
 }
 
+// The session pi is writing, as a turns file in the spool. Inline rather than detached: it is a read
+// and an atomic write, and the file has to exist before the indexer is spawned. An ephemeral session
+// (`--no-session`) has no file and nothing to convert.
+function convertSession(ctx: any) {
+  if (!SPOOL) return;
+  try {
+    const file = ctx?.sessionManager?.getSessionFile?.();
+    if (file) convert(file, SPOOL);
+  } catch {}
+}
+
+// Convert the history `setup` left behind, once. Failure keeps the marker, so the next start retries.
+function seedPending() {
+  if (!SPOOL || !existsSync(SEED_PENDING)) return;
+  try {
+    convertTree(readFileSync(SEED_PENDING, "utf8").trim(), SPOOL);
+    rmSync(SEED_PENDING);
+  } catch {}
+}
+
 export default async function (pi: any) {
   let tools: McpTool[] = [];
   let failure = "";
@@ -236,10 +264,14 @@ export default async function (pi: any) {
     // A fresh process is the one start with no shutdown behind it, so it catches up whatever a
     // process that never shut down cleanly left unpublished.
     if (memory && event?.reason === "startup") runScript(PUSH_SH, memory, HARNESS);
+    if (event?.reason === "startup") seedPending();
   });
 
   // Per turn, so a session killed mid-flight is indexed up to its last completed turn.
-  pi.on("turn_end", async () => runScript(INDEX_SH, HARNESS));
+  pi.on("turn_end", async (_event: any, ctx: any) => {
+    convertSession(ctx);
+    runScript(INDEX_SH, HARNESS);
+  });
 
   // A reload replaces the extension instance without ending the session: nothing to publish.
   pi.on("session_shutdown", async (event: any) => {
