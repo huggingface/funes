@@ -17,8 +17,14 @@ A file is one unit: it is read whole and written in one append. A directory is o
 A file you name is *signature-less* — it is re-read on every `funes index` that names it and never
 recorded in `state.json`; chunk-id dedup makes the re-read a no-op. A directory is a store funes
 revisits, so each file in it carries a `size:mtime` stamp and a recorded tier: an unchanged one is
-skipped, a changed one is read again. Keep files bounded and ship updates as new files rather than
-regrowing one. `--harness` is refused on both shapes: the facet is in the data.
+skipped, a changed one is read again. Keep files bounded, and ship an update either as a new file or
+by rewriting the one it belongs to — a rewritten file changes its stamp, so it is read again and
+dedup drops what is already stored. `--harness` is refused on both shapes: the facet is in the data.
+
+**Write into a directory funes indexes by renaming into place**: write a temporary name in that same
+directory, then `mv` it over the final one. funes may index the directory while you are writing, and
+a half-written file is a rejected file. Keep the temporary name off the `.jsonl` extension: funes
+lists every `.jsonl` in the directory, and one that is not a turns file rejects the whole directory.
 
 A file funes refuses is remembered as refused, against both its content and the funes version that
 refused it, so a run that meets only files it has already refused reports nothing and exits zero.
