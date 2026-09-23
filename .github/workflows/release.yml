@@ -188,11 +188,11 @@ jobs:
         run: perl -i -pe 'if (!$d && s/^version = ".*"/version = "$ENV{NEW_VERSION}"/) { $d = 1 }' Cargo.toml
 
       - name: Build
-        run: cargo build --profile ${{ env.PROFILE }} --target ${{ matrix.target }} ${{ matrix.features }}
+        run: cargo build --profile ${PROFILE} --target ${{ matrix.target }} ${{ matrix.features }}
 
       - name: Check binary version
         run: |
-          BIN="target/${{ matrix.target }}/${{ env.PROFILE }}/funes"
+          BIN="target/${{ matrix.target }}/${PROFILE}/funes"
           EXPECTED=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
           if [ "${{ matrix.arch }}" = "aarch64" ]; then
             REPORTED=$(qemu-aarch64 -L /usr/aarch64-linux-gnu "$BIN" --version)
@@ -204,7 +204,7 @@ jobs:
       # The point of the container build: fail loudly if anything drags the floor above 22.04.
       - name: Check the glibc floor
         run: |
-          BIN="target/${{ matrix.target }}/${{ env.PROFILE }}/funes"
+          BIN="target/${{ matrix.target }}/${PROFILE}/funes"
           MAX=$(${{ matrix.objdump }} -T "$BIN" | grep -o 'GLIBC_[0-9.]*' | sort -V | tail -1)
           echo "max glibc symbol version: $MAX"
           if [ "$(printf '%s\n' "${MAX#GLIBC_}" 2.35 | sort -V | tail -1)" != "2.35" ]; then
@@ -215,7 +215,7 @@ jobs:
       - name: Package
         run: |
           mkdir -p dist
-          cp "target/${{ matrix.target }}/${{ env.PROFILE }}/funes" "dist/funes-${{ matrix.arch }}-linux"
+          cp "target/${{ matrix.target }}/${PROFILE}/funes" "dist/funes-${{ matrix.arch }}-linux"
           chmod +x dist/*
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -258,18 +258,18 @@ jobs:
         run: perl -i -pe 'if (!$d && s/^version = ".*"/version = "$ENV{NEW_VERSION}"/) { $d = 1 }' Cargo.toml
 
       - name: Build
-        run: cargo build --profile ${{ env.PROFILE }} --target aarch64-apple-darwin
+        run: cargo build --profile ${PROFILE} --target aarch64-apple-darwin
 
       - name: Check binary version
         run: |
           EXPECTED=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
-          REPORTED=$(target/aarch64-apple-darwin/${{ env.PROFILE }}/funes --version)
+          REPORTED=$(target/aarch64-apple-darwin/${PROFILE}/funes --version)
           test "$REPORTED" = "funes $EXPECTED"
 
       - name: Package
         run: |
           mkdir -p dist
-          cp target/aarch64-apple-darwin/${{ env.PROFILE }}/funes dist/funes-arm64-apple-darwin
+          cp target/aarch64-apple-darwin/${PROFILE}/funes dist/funes-arm64-apple-darwin
           chmod +x dist/*
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
