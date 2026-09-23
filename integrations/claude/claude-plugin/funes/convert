@@ -1,0 +1,111 @@
+#!/bin/sh
+# Convert a Claude Code transcript into a funes turns file (docs/funes-jsonl.md).
+#
+#   convert <transcript.jsonl> [out.funes.jsonl]
+#
+# The transcript is ~/.claude/projects/<workdir>/<uuid>.jsonl, or a sub-agent's
+# <uuid>/subagents/agent-<hash>.jsonl. Without an output path the turns go to stdout; with one
+# they are written through a temporary file and renamed, so a reader never sees a partial file.
+#
+# The session id is the transcript's file stem and the harness facet is the bundle id.
+set -eu
+
+JQ=${FUNES_JQ:-jq}
+HARNESS=${FUNES_AGENT_ID:-claude}
+
+[ $# -ge 1 ] && [ $# -le 2 ] || { echo "usage: convert <transcript.jsonl> [out.funes.jsonl]" >&2; exit 2; }
+src=$1
+[ -f "$src" ] || { echo "convert: no such transcript: $src" >&2; exit 1; }
+
+stem=$(basename -- "$src")
+stem=${stem%.jsonl}
+
+program='
+# A block whose text is only whitespace is dropped; the set is Unicode White_Space.
+def blank: test("[^[:space:]]") | not;
+def str: if type == "string" then . else "" end;
+
+# jq escapes DEL where serde_json, which serialized the rows funes already holds, leaves it
+# literal. The difference reaches a row only through the tojson below, where the serialization is
+# itself the indexed text. The even backslash run leaves text that spells out \u007f alone.
+def undel: gsub("(?<!\\\\)(?<b>(?:\\\\\\\\)*)\\\\u007f"; .b + "\u007f");
+
+def result_text:
+  if type == "string" then .
+  elif type == "array" then
+    [ .[] | if type == "object" then (select(.type == "text") | .text | str)
+            elif type == "string" then .
+            else empty end ] | join("\n")
+  else "" end;
+
+def block:
+  (.type | str) as $t
+  | if $t == "text" then
+      (.text | str) as $x | select($x | blank | not) | {block_type: "text", text: $x}
+  elif $t == "thinking" then
+      (.thinking | str) as $x | select($x | blank | not) | {block_type: "thinking", text: $x}
+  elif $t == "tool_use" then
+      {block_type: "tool_use", text: ((if has("input") then .input else {} end) | tojson | undel)}
+      + (if (.name | type) == "string" then {tool_name: .name} else {} end)
+      + (if (.id | type) == "string" then {tool_use_id: .id} else {} end)
+  elif $t == "tool_result" then
+      ((if has("content") then .content else null end) | result_text) as $x
+      | select($x | blank | not)
+      | {block_type: "tool_result", text: $x}
+        + (if (.tool_use_id | type) == "string" then {tool_use_id: .tool_use_id} else {} end)
+  else empty end;
+
+def blocks_of:
+  if type == "string" then (if blank then [] else [{block_type: "text", text: .}] end)
+  elif type == "array" then [ .[] | select(type == "object") | block ]
+  else [] end;
+
+[ $doc | split("\n")[] | fromjson? | select(type == "object") ] as $recs
+| (first($recs[] | .cwd | select(type == "string")) // null) as $cwd
+| [ $recs[]
+    | (.type | str) as $rt
+    | select($rt == "user" or $rt == "assistant")
+    | (.message | if type == "object" then . else null end) as $msg
+    | ($msg.content | blocks_of) as $blocks
+    | select(($blocks | length) > 0)
+    | {format: 1, session_id: $sid}
+      + (if $cwd != null then {cwd: $cwd} else {} end)
+      + {turn_uuid: (.uuid | str)}
+      + (if (.parentUuid | type) == "string" then {parent_uuid: .parentUuid} else {} end)
+      + {seq: 0,
+         ts: (.timestamp | str),
+         role: (($msg.role | select(type == "string")) // $rt),
+         blocks: $blocks,
+         harness: $harness}
+  ] as $turns
+# tool_result.tool_name comes from the tool_use with the same id, whole file, last write wins, so
+# every emitted turn stands alone.
+| (reduce ($turns[].blocks[] | select(.block_type == "tool_use" and has("tool_use_id"))) as $b
+     ({}; .[$b.tool_use_id] = $b.tool_name)) as $names
+| $turns
+| to_entries[]
+| .value + {seq: .key}
+| .blocks |= map(
+    if .block_type == "tool_result" and has("tool_use_id") and ($names[.tool_use_id] // null) != null
+    then {block_type, text, tool_name: $names[.tool_use_id], tool_use_id}
+    else . end)
+'
+
+# The transcript is read whole, as one string, and split into lines: a line that does not parse is
+# dropped the way a whole-file reader drops a partial trailing write. `--raw-input` would read it
+# line by line without the string copy, but it mangles a multi-byte character that straddles its
+# 4 KiB read buffer (jq 1.7.1), which a transcript hits every few hundred KB.
+run() {
+    "$JQ" -c -n --rawfile doc "$src" --arg sid "$stem" --arg harness "$HARNESS" "$program"
+}
+
+if [ $# -eq 2 ]; then
+    # The suffix must not be `.jsonl`: one stray `.jsonl` file rejects a whole turns directory.
+    tmp=$2.tmp.$$
+    trap 'rm -f "$tmp"' EXIT INT TERM
+    run >"$tmp"
+    mv -f "$tmp" "$2"
+    trap - EXIT INT TERM
+else
+    run
+fi

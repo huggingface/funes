@@ -53,11 +53,16 @@ async fn add_claude_installs_the_plugin_and_registers_both_surfaces() {
     }
 
     let cfg: Value = serde_json::from_str(&fs::read_to_string(plugin.join("funes/hooks/hooks.json")).unwrap()).unwrap();
+    // The plugin carries its own index script, which converts before it indexes, so the command no
+    // longer names the harness for a shared one.
     let stop = cfg["hooks"]["Stop"][0]["hooks"][0]["command"].as_str().unwrap();
     assert!(
-        stop.contains("${CLAUDE_PLUGIN_ROOT}/scripts/funes-index.sh") && stop.contains("claude"),
+        stop.contains("${CLAUDE_PLUGIN_ROOT}/scripts/funes-index.sh"),
         "stop: {stop}"
     );
+    // A sub-agent's transcript is its own session, and its own event names it.
+    let sub = cfg["hooks"]["SubagentStop"][0]["hooks"][0]["command"].as_str().unwrap();
+    assert!(sub.contains("funes-index.sh"), "subagent: {sub}");
     assert!(
         cfg["hooks"].get("SessionStart").is_some(),
         "claude publishes on SessionStart too"

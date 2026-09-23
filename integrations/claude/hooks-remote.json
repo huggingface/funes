@@ -5,9 +5,21 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/funes-index.sh\" \"claude\"",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/funes-index.sh\"",
             "timeout": 15,
             "statusMessage": "Indexing turn into funes memory"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/funes-index.sh\"",
+            "timeout": 15,
+            "statusMessage": "Indexing a sub-agent's turns into funes memory"
           }
         ]
       }

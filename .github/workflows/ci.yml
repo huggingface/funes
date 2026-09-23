@@ -81,6 +81,7 @@ jobs:
         run: |
           sh integrations/pi/test/run.sh
           sh integrations/codex/codex-plugin/plugins/funes/test/run.sh
+          sh integrations/claude/claude-plugin/funes/test/run.sh
 
   integration-test:
     permissions:
