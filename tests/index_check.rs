@@ -32,7 +32,7 @@ async fn check_reports_without_writing() {
     std::env::set_var("FUNES_HOME", home.path());
 
     let report = funes::commands::index::check(&fixture(""), false, None, None).unwrap();
-    assert!(!report.is_clean());
+    assert!(!report.all_accepted());
     assert_eq!((report.rejected, report.duplicate_ids), (2, 1));
     for want in [
         "bad_line.funes.jsonl:2:",
@@ -48,7 +48,7 @@ async fn check_reports_without_writing() {
     }
 
     let report = funes::commands::index::check(&fixture("valid.funes.jsonl"), false, None, None).unwrap();
-    assert!(report.is_clean(), "{}", report.text);
+    assert!(report.all_accepted(), "{}", report.text);
     assert!(report.text.contains("3 turns, 5 chunks"), "{}", report.text);
 
     // A path that does not exist is an error, not a clean zero-unit check.
@@ -70,8 +70,24 @@ async fn check_reports_without_writing() {
     assert!(!out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("2 rejected, 1 duplicate id(s)"), "{stdout}");
-    assert!(String::from_utf8_lossy(&out.stderr).contains("2 rejected, 1 duplicate id(s)"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("2 unit(s) rejected"));
     assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
+
+    // A duplicate id is a finding, not a failure: an append keeps the first occurrence, so the dry
+    // run that predicts one still passes. The file holds a turn re-emitted under its `turn_uuid`.
+    let dup = fixture("dup_turn.funes.jsonl");
+    let report = funes::commands::index::check(&dup, false, None, None).unwrap();
+    assert!(report.all_accepted(), "{}", report.text);
+    assert_eq!((report.rejected, report.duplicate_ids), (0, 1));
+    assert!(report.text.contains("duplicate id"), "{}", report.text);
+    let out = Command::new(env!("CARGO_BIN_EXE_funes"))
+        .args(["index", "--check"])
+        .arg(&dup)
+        .env("FUNES_HOME", home.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("1 duplicate id(s)"));
 
     // A clean check then an index of the same file agree: the check counts the chunks the run
     // writes. The fixture's data URI splits into three chunks raw and one once elided, so the two
@@ -80,7 +96,7 @@ async fn check_reports_without_writing() {
     std::env::set_var("FUNES_HOME", home.path());
     let elided = fixture("elided.funes.jsonl");
     let report = funes::commands::index::check(&elided, false, None, None).unwrap();
-    assert!(report.is_clean(), "{}", report.text);
+    assert!(report.all_accepted(), "{}", report.text);
     assert!(report.text.contains("1 turns, 1 chunks"), "{}", report.text);
     funes::commands::index::run_index(&elided, false, None).await.unwrap();
     assert_eq!(stored_rows().await, 1);

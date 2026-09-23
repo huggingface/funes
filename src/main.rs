@@ -93,7 +93,7 @@ enum Cmd {
         #[arg(long)]
         harness: Option<String>,
         /// Validate PATH without indexing it: parse, count turns and chunks, report rejected files
-        /// and duplicate ids; write nothing. Exits non-zero on any problem.
+        /// and duplicate ids; write nothing. Exits non-zero if a unit was rejected.
         #[arg(long, requires = "path")]
         check: bool,
         /// Exclude thinking blocks.
@@ -402,12 +402,8 @@ async fn main() -> Result<()> {
                 let path = path.expect("clap requires PATH with --check");
                 let report = index::check(&PathBuf::from(&path), no_thinking, limit, harness)?;
                 print!("{}", report.text);
-                if !report.is_clean() {
-                    return Err(anyhow!(
-                        "{} rejected, {} duplicate id(s)",
-                        report.rejected,
-                        report.duplicate_ids
-                    ));
+                if !report.all_accepted() {
+                    return Err(anyhow!("{} unit(s) rejected", report.rejected));
                 }
                 return Ok(());
             }

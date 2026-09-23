@@ -101,8 +101,9 @@ rejected file is reported with its first bad line, the run continues, the summar
 the source would be ambiguous; files that are not `.jsonl` are ignored.
 
 `funes index --check <file-or-dir>` runs the same validation and computes ids without writing:
-turns, chunks, duplicate ids, and the first bad line of every rejected file. Run it before you
-publish a producer.
+turns, chunks, duplicate ids, and the first bad line of every rejected file. Only a rejected file
+fails it — a duplicate id is reported, since indexing keeps the first occurrence and drops the rest.
+Run it before you publish a producer.
 
 ## What funes does with your turns
 

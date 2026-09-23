@@ -821,8 +821,10 @@ pub struct CheckReport {
 }
 
 impl CheckReport {
-    pub fn is_clean(&self) -> bool {
-        self.rejected == 0 && self.duplicate_ids == 0
+    /// Whether every unit parsed. A duplicate id is reported, not a failure: an append keeps the
+    /// first occurrence and drops the rest, the rows two runs would have left.
+    pub fn all_accepted(&self) -> bool {
+        self.rejected == 0
     }
 }
 
