@@ -1,0 +1,143 @@
+#!/bin/sh
+# Convert one Codex rollout transcript into a funes turns file (docs/funes-jsonl.md).
+#
+#   convert <rollout.jsonl> [<out.funes.jsonl>]
+#
+# With no output path the turns go to stdout; with one, they are written through a
+# temporary file in the same directory and renamed, so a reader never sees a partial file.
+set -eu
+
+if [ $# -lt 1 ] || [ $# -gt 2 ]; then
+    echo "usage: convert <rollout.jsonl> [<out.funes.jsonl>]" >&2
+    exit 2
+fi
+src=$1
+out=${2:-}
+[ -r "$src" ] || { echo "convert: cannot read $src" >&2; exit 1; }
+
+command -v jq >/dev/null 2>&1 || { echo "convert: jq is required (see the bundle setup)" >&2; exit 1; }
+
+# The session id when no session_meta line carries one: the file stem, as funes names a
+# session after its transcript.
+base=${src##*/}
+stem=${base%.*}
+
+# The whole file arrives as one string through --rawfile: jq --raw-input reads in 4095-byte
+# chunks and replaces every byte of a multi-byte character that straddles a chunk boundary
+# with U+FFFD, which silently corrupts 9 % of real rollouts.
+run() {
+    jq -n -c --arg stem "$stem" --rawfile doc "$src" '
+# --- helpers ---------------------------------------------------------------
+# A string with at least one character outside Unicode White_Space, i.e. what
+# Rust str::trim leaves behind.
+def nonblank:
+    test("[^ \t\u000b\f\r\n\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]");
+def str_or_null: if type == "string" then . else null end;
+def str_or_empty: if type == "string" then . else "" end;
+# Drop the absent optional fields; funes omits None rather than writing null.
+def clean: with_entries(select(.value != null));
+
+def block(t; x): {block_type: t, text: x, tool_name: null, tool_use_id: null};
+
+# --- payload -> blocks -----------------------------------------------------
+def message_blocks:
+    .content as $c
+    | if ($c | type) == "string" then
+          (if ($c | nonblank) then [block("text"; $c)] else [] end)
+      elif ($c | type) == "array" then
+          [ $c[]
+            | select(type == "object")
+            | select(.type == "input_text" or .type == "output_text")
+            | .text | str_or_null | select(. != null) | select(nonblank)
+            | block("text"; .) ]
+      else [] end;
+
+def reasoning_blocks:
+    if (.summary | type) == "array" then
+        ([ .summary[]
+           | select(type == "object")
+           | select(.type == "summary_text")
+           | .text | str_or_null | select(. != null) ] | join("\n")) as $t
+        | if ($t | nonblank) then [block("thinking"; $t)] else [] end
+    else [] end;
+
+# function_call carries its args as an "arguments" JSON string, custom_tool_call as a raw
+# "input" string; either passes through verbatim. A present but non-string field does not
+# fall through to the other one.
+def tool_use_blocks:
+    (if has("arguments") then .arguments elif has("input") then .input else null end) as $a
+    | [ block("tool_use"; ($a | str_or_null) // "{}")
+        + {tool_name: (.name | str_or_null), tool_use_id: (.call_id | str_or_null)} ];
+
+# A tool output as text: a string verbatim, null or absent as empty, anything else as
+# compact JSON. The name is left to the call_id back-fill.
+def tool_result_blocks:
+    (.output as $o
+     | if ($o | type) == "string" then $o
+       elif ($o | type) == "null" then ""
+       else ($o | tojson) end) as $t
+    | if ($t | nonblank) then
+          [ block("tool_result"; $t) + {tool_use_id: (.call_id | str_or_null)} ]
+      else [] end;
+
+# --- the file --------------------------------------------------------------
+# A line that does not parse is dropped: a transcript may carry a partial trailing write.
+[ $doc | split("\n")[] | rtrimstr("\r") | (try fromjson catch empty)
+  | select(type == "object") ] as $recs
+| [ $recs[] | select(.type == "session_meta") | select(.payload | type == "object")
+    | .payload ] as $metas
+| [ $metas[] | .id | str_or_null | select(. != null) ] as $ids
+| [ $metas[] | .cwd | str_or_null | select(. != null) ] as $cwds
+| (if ($ids | length) > 0 then $ids[0] else $stem end) as $sid
+| (if ($cwds | length) > 0 then $cwds[0] else null end) as $cwd
+| [ $recs[]
+    | select(.type == "response_item")
+    | select(.payload | type == "object")
+    | (.timestamp | str_or_empty) as $ts
+    | .payload
+    | (.type | str_or_empty) as $pt
+    | (if $pt == "message" then {role: (.role | str_or_empty), blocks: message_blocks}
+       elif $pt == "reasoning" then {role: "assistant", blocks: reasoning_blocks}
+       elif $pt == "function_call" or $pt == "custom_tool_call" then
+           {role: "assistant", blocks: tool_use_blocks}
+       elif $pt == "function_call_output" or $pt == "custom_tool_call_output" then
+           {role: "tool", blocks: tool_result_blocks}
+       else {role: "", blocks: []} end)
+    | select((.blocks | length) > 0)
+    | .ts = $ts
+  ] as $items
+# Each tool_result takes the name of the tool_use with the same call_id, anywhere in the
+# file, last write wins: a turn must render from its own fields alone.
+| ( reduce ($items[] | .blocks[]
+            | select(.block_type == "tool_use") | select(.tool_use_id != null)) as $b
+      ({}; .[$b.tool_use_id] = $b.tool_name) ) as $names
+| $items
+| to_entries[]
+| .key as $seq
+| .value
+| .blocks |= map(
+      if .block_type == "tool_result" and .tool_name == null and .tool_use_id != null
+      then .tool_name = $names[.tool_use_id] else . end)
+| {format: 1,
+   session_id: $sid,
+   cwd: $cwd,
+   turn_uuid: ($sid + "-" + ($seq | tostring)),
+   parent_uuid: null,
+   seq: $seq,
+   ts: .ts,
+   role: .role,
+   blocks: (.blocks | map(clean)),
+   harness: "codex"}
+| clean
+'
+}
+
+if [ -z "$out" ]; then
+    run
+else
+    # The suffix must not be `.jsonl`: one stray `.jsonl` file rejects a whole turns directory.
+    tmp=$out.$$.tmp
+    trap 'rm -f "$tmp"' EXIT HUP INT TERM
+    run > "$tmp"
+    mv -f "$tmp" "$out"
+fi

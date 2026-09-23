@@ -81,10 +81,9 @@ async fn add_codex_installs_the_plugin_and_clears_a_pre_plugin_install() {
 
     let cfg: Value = serde_json::from_str(&fs::read_to_string(plugin.join("hooks.json")).unwrap()).unwrap();
     let stop = cfg["hooks"]["Stop"][0]["hooks"][0]["command"].as_str().unwrap();
-    assert!(
-        stop.contains("${PLUGIN_ROOT}/scripts/funes-index.sh") && stop.contains("codex"),
-        "stop: {stop}"
-    );
+    // The plugin carries its own index script, which converts before it indexes, so the command no
+    // longer names the harness for a shared one.
+    assert!(stop.contains("${PLUGIN_ROOT}/scripts/funes-index.sh"), "stop: {stop}");
     assert!(
         cfg["hooks"].get("SessionStart").is_some(),
         "codex publishes on SessionStart too"

@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${PLUGIN_ROOT}/scripts/funes-index.sh\" \"codex\"",
+            "command": "sh \"${PLUGIN_ROOT}/scripts/funes-index.sh\"",
             "timeout": 15,
             "statusMessage": "Indexing turn into funes memory"
           }

@@ -78,7 +78,9 @@ jobs:
         run: sh scripts/test-install.sh
 
       - name: Integration converter tests
-        run: sh integrations/pi/test/run.sh
+        run: |
+          sh integrations/pi/test/run.sh
+          sh integrations/codex/codex-plugin/plugins/funes/test/run.sh
 
   integration-test:
     permissions:

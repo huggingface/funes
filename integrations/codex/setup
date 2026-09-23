@@ -26,6 +26,48 @@ have_codex() {
     command -v codex >/dev/null 2>&1
 }
 
+# The directory funes drains for this agent. funes hands us its home and our id; the hook sees
+# neither, so the resolved path is written beside it.
+spool_dir() {
+    printf '%s/spool/%s\n' "${FUNES_HOME:-$HOME/.funes}" "${FUNES_AGENT_ID:-codex}"
+}
+
+# Codex's sessions are JSONL that has to become funes's own, which needs a JSON parser; POSIX sh has
+# none and Codex ships a single Rust binary, so the converter needs jq and there is nothing to
+# capture without it. Refuse before touching anything rather than install an integration that can
+# never index.
+#
+# The check is a conversion, not a version string: macOS 15 ships an `/usr/bin/jq` that reports 1.6
+# while being a pre-1.7 snapshot, and a jq built without its regex engine would pass a version gate
+# and then mis-split every block.
+require_jq() {
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "funes's Codex integration needs jq to convert Codex's sessions, and it is not on PATH." >&2
+        echo "  macOS    already at /usr/bin/jq on 15 and newer" >&2
+        echo "  Debian   sudo apt install jq" >&2
+        echo "  Fedora   sudo dnf install jq" >&2
+        echo "  Alpine   apk add jq" >&2
+        echo "Install it, then run \`funes add codex\` again." >&2
+        exit 1
+    fi
+    if ! "$PLUGIN_DIR/test/run.sh" >/dev/null 2>&1; then
+        echo "the jq on PATH does not convert Codex's sessions the way funes reads them — run" >&2
+        echo "\`$PLUGIN_DIR/test/run.sh\` to see how it differs. funes needs a stock jq 1.6 or newer." >&2
+        exit 1
+    fi
+}
+
+# Convert the rollouts Codex has already written, so recall reaches them before the next turn.
+seed() {
+    spool=$1
+    sessions="$CODEX_DIR/sessions"
+    [ -d "$sessions" ] || return 0
+    find "$sessions" -name 'rollout-*.jsonl' | while IFS= read -r src; do
+        stem=${src##*/}
+        "$PLUGIN_DIR/convert" "$src" "$spool/${stem%.jsonl}.funes.jsonl" || true
+    done
+}
+
 # The plugin's hooks: a static file per binding, plus the memory in a file the push hook reads. The
 # hook commands never carry the memory, so nothing has to generate JSON and this script needs no
 # interpreter beyond the shell — the only thing a box running Codex is guaranteed to have.
@@ -74,7 +116,14 @@ manual_add() {
 
 add() {
     memory=${1:-}
+    require_jq
     write_hooks "$memory"
+
+    spool=$(spool_dir)
+    mkdir -p "$spool"
+    printf '%s\n' "$spool" >"$PLUGIN_DIR/scripts/spool"
+    seed "$spool"
+
     drop_pre_plugin_install
 
     if ! have_codex; then
@@ -120,6 +169,11 @@ forget() {
 }
 
 remove() {
+    # The spool holds converted copies of Codex's own rollouts, so dropping it loses nothing a
+    # re-add cannot rebuild, and leaving it would have funes keep indexing an agent it no longer
+    # serves.
+    rm -rf "$(spool_dir)"
+    rm -f "$PLUGIN_DIR/scripts/spool"
     drop_pre_plugin_install
 
     if ! have_codex; then
