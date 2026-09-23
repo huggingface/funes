@@ -586,11 +586,7 @@ fn rrf_fuse(vector: Vec<(u64, Hit)>, fts: Vec<(u64, Hit)>, limit: usize) -> Vec<
         }
     }
     let mut ranked: Vec<(u64, f32)> = scores.into_iter().collect();
-    // Ties are the rule here, not the exception: a row in only the vector list at rank r scores
-    // exactly what a row in only the FTS list at rank r does, so the `limit` cut usually falls
-    // inside one. `scores` is a HashMap, whose iteration order is seeded per process, so score
-    // alone leaves the cut to that seed and the same query answers from different passages run to
-    // run. The row id is stable for a dataset, so it settles the tie.
+    // Sorted by fused score, and by row id where scores are equal, so the cut never moves.
     ranked.sort_by(|a, b| {
         b.1.partial_cmp(&a.1)
             .unwrap_or(std::cmp::Ordering::Equal)
