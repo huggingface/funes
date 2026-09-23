@@ -236,9 +236,9 @@ struct Cfg {
     /// forward, so this also bounds its high-water mark.
     group: usize,
 }
-#[cfg(target_os = "macos")]
-const RERANK_GROUP: usize = 16; // AMX saturates at larger groups
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const RERANK_GROUP: usize = 16; // Apple Silicon AMX saturates at larger groups
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 const RERANK_GROUP: usize = 8;
 
 const RERANK: Cfg = Cfg {
