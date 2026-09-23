@@ -586,7 +586,16 @@ fn rrf_fuse(vector: Vec<(u64, Hit)>, fts: Vec<(u64, Hit)>, limit: usize) -> Vec<
         }
     }
     let mut ranked: Vec<(u64, f32)> = scores.into_iter().collect();
-    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    // Ties are the rule here, not the exception: a row in only the vector list at rank r scores
+    // exactly what a row in only the FTS list at rank r does, so the `limit` cut usually falls
+    // inside one. `scores` is a HashMap, whose iteration order is seeded per process, so score
+    // alone leaves the cut to that seed and the same query answers from different passages run to
+    // run. The row id is stable for a dataset, so it settles the tie.
+    ranked.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.cmp(&b.0))
+    });
     ranked.truncate(limit);
     ranked.into_iter().filter_map(|(id, _)| rows.remove(&id)).collect()
 }
@@ -1465,6 +1474,39 @@ mod tests {
         assert_eq!(prompts["agent"], "how do we parse transcripts");
         assert_eq!(prompts["issue"], "**@someone** opened: build fails on arm64");
         assert!(!prompts.contains_key("scaffold"), "{prompts:?}");
+    }
+
+    /// The `limit` cut usually lands inside a tie, and `scores` is a HashMap whose order is seeded
+    /// per process, so fusion has to impose a total order of its own: same lists, same rows, same
+    /// order, every run.
+    #[test]
+    fn rrf_fuse_settles_ties_by_row_id() {
+        let hit = |id: u64| Hit {
+            text: id.to_string(),
+            session_id: String::new(),
+            workdir: String::new(),
+            turn_uuid: String::new(),
+            seq: 0,
+            ts: String::new(),
+            block_type: String::new(),
+            harness: String::new(),
+            neighbors: Vec::new(),
+        };
+        // Disjoint lists: vector row 2i and FTS row 2i+1 both sit at rank i, so every rank ties.
+        let lists = || {
+            let v: Vec<(u64, Hit)> = (0..20).map(|i| (2 * i, hit(2 * i))).collect();
+            let f: Vec<(u64, Hit)> = (0..20).map(|i| (2 * i + 1, hit(2 * i + 1))).collect();
+            (v, f)
+        };
+        let ids = |hits: Vec<Hit>| hits.into_iter().map(|h| h.text).collect::<Vec<_>>();
+
+        let (v, f) = lists();
+        let want: Vec<String> = (0..40).map(|i: u64| i.to_string()).collect();
+        assert_eq!(ids(rrf_fuse(v, f, 40)), want, "fused order is not the tie-broken order");
+
+        // The cut through a tie takes the same rows every run, not an arbitrary half of it.
+        let (v, f) = lists();
+        assert_eq!(ids(rrf_fuse(v, f, 5)), ["0", "1", "2", "3", "4"]);
     }
 
     #[test]
