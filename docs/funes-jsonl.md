@@ -38,7 +38,7 @@ files rather than regrowing one. `--harness` is refused on both shapes: the face
 |---|---|---|---|
 | `block_type` | string | yes | `text` \| `thinking` \| `tool_use` \| `tool_result`. Anything else is rejected. |
 | `text` | string | yes | the content. For `tool_use`, the call — arguments as text; for `tool_result`, the output. Markdown is fine; it is indexed as written. |
-| `tool_name` | string | `tool_use`: yes; `tool_result`: no | the tool. funes never infers it: a result without a name renders without one. |
+| `tool_name` | string | no | the tool. funes never infers it: a block without a name renders without one. |
 | `tool_use_id` | string | no | pairs a `tool_result` with its `tool_use`. Stored as given; funes derives nothing from it. |
 
 Any field not listed above is rejected, on either object — funes expects its producers to be exactly
@@ -93,7 +93,7 @@ follows from that.
 A file is accepted or rejected **whole**; nothing from a rejected file is written. Rejected: a line that
 is not a JSON object, an unknown field, a missing required field, a wrong type, an unknown
 `block_type`, a `ts` that is not RFC 3339 UTC (`Z`), a `format` funes does not know, a `:` in
-`session_id` or `turn_uuid`, a `harness` outside `[a-z0-9_-]`, a `tool_use` without a `tool_name`.
+`session_id` or `turn_uuid`, a `harness` outside `[a-z0-9_-]`.
 
 Indexing a single file, a rejection fails the run. Indexing a directory, each file stands alone: a
 rejected file is reported with its first bad line, the run continues, the summary counts it under
@@ -112,8 +112,8 @@ Behaviour, not contract — it may evolve; the identity rule above will not.
 - **Redacts** secrets before chunking, best-effort; whatever slips through is caught by the fail-closed
   gate on `push`, so a leaked token never reaches a published memory.
 - **Renders** each block to the text that is embedded and full-text indexed: `text` and `thinking`
-  as-is; `tool_use` as `[tool_use <tool_name>] <text>`; `tool_result` as `[tool_result <tool_name>]
-  <text>` (`[tool_result] <text>` without a name).
+  as-is; `tool_use` as `[tool_use <tool_name>] <text>` (`[tool_use None] <text>` without a name);
+  `tool_result` as `[tool_result <tool_name>] <text>` (`[tool_result] <text>` without a name).
 - **Splits** long rendered text into overlapping pieces; `split_idx` numbers them and `get` stitches
   them back.
 - **Indexes by tier**: `text` and `thinking` first, then `tool_use`, then `tool_result`. A budgeted run

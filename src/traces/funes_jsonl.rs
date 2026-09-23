@@ -129,9 +129,6 @@ fn validate(t: &Turn) -> Result<()> {
         if !BLOCK_TYPES.contains(&b.block_type.as_str()) {
             bail!("blocks[{i}].block_type {:?} is unknown", b.block_type);
         }
-        if b.block_type == "tool_use" && b.tool_name.is_none() {
-            bail!("blocks[{i}] is a tool_use without a tool_name");
-        }
     }
     Ok(())
 }
@@ -139,6 +136,8 @@ fn validate(t: &Turn) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chunk::{self, Tier};
+    use crate::traces::Block;
 
     const LINE: &str = r#"{"session_id":"s","turn_uuid":"t-1","seq":0,"ts":"2026-09-18T09:41:07Z","role":"user","harness":"opencode","cwd":"/home/me/x","blocks":[{"block_type":"text","text":"hi"}]}"#;
 
@@ -201,11 +200,6 @@ mod tests {
             ),
             (r#""ts":"2026-09-18T09:41:07Z""#, r#""ts":"yesterdayZ""#, "RFC 3339"),
             (r#""block_type":"text""#, r#""block_type":"image""#, "unknown"),
-            (
-                r#""block_type":"text""#,
-                r#""block_type":"tool_use""#,
-                "without a tool_name",
-            ),
             (r#""seq":0,"#, "", "missing field"),
             (r#""seq":0,"#, r#""seq":0,"extra":1,"#, "unknown field"),
             (r#""seq":0,"#, r#""seq":0,"format":2,"#, "unknown format"),
@@ -222,6 +216,45 @@ mod tests {
         // A blank line is not a turn either.
         let err = read_turns(&write(dir.path(), "t.funes.jsonl", &[LINE, "", LINE])).unwrap_err();
         assert!(err.to_string().contains("t.funes.jsonl:2:"), "{err}");
+    }
+
+    /// A native transcript may record a tool call with no name, and funes renders that block
+    /// `[tool_use None] …`. The format carries it: refusing it would leave a producer unable to
+    /// reproduce a session funes already indexed, and dropping the block would renumber the turn.
+    #[test]
+    fn a_tool_use_without_a_name_keeps_its_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let parsed = Turn {
+            format: crate::traces::FORMAT_VERSION,
+            session_id: "s".into(),
+            cwd: None,
+            workdir: String::new(),
+            turn_uuid: "t-1".into(),
+            parent_uuid: None,
+            seq: 0,
+            ts: "2026-09-18T09:41:07Z".into(),
+            role: "assistant".into(),
+            blocks: vec![Block {
+                block_type: "tool_use".into(),
+                text: "{}".into(),
+                tool_name: None,
+                tool_use_id: Some("call_1".into()),
+            }],
+            source_path: String::new(),
+            harness: "opencode".into(),
+        };
+        let line = serde_json::to_string(&parsed).unwrap();
+        let turns = read_line(dir.path(), &line).unwrap();
+        assert_eq!(turns[0].blocks[0].tool_name, None);
+
+        let chunks = |t: &[Turn]| -> Vec<(String, String)> {
+            chunk::chunks_from_turns(t, &Tier::ALL, true)
+                .into_iter()
+                .map(|c| (c.id, c.text))
+                .collect()
+        };
+        assert_eq!(chunks(&turns), chunks(std::slice::from_ref(&parsed)));
+        assert_eq!(chunks(&turns)[0].1, "[tool_use None] {}");
     }
 
     #[test]
