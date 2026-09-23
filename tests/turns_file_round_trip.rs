@@ -14,7 +14,7 @@ use arrow_array::{Array, ArrayRef, Int64Array, StringArray};
 use funes::commands::index::run_index;
 use funes::commands::recall::{self, SessionFilter};
 use funes::memory::{dataset, Memory};
-use funes::traces::{claude, codex, jsonl, Turn};
+use funes::traces::{claude, jsonl, Turn};
 use tokio::sync::Mutex;
 
 static HOME: Mutex<()> = Mutex::const_new(());
@@ -48,7 +48,6 @@ fn parse(name: &str) -> Vec<Turn> {
     let (sid, fallback) = (jsonl::session_id_of(&p), claude::workdir_of(&p));
     match name {
         "claude_session.jsonl" => claude::turns_from_jsonl_file(&p, &sid, &fallback),
-        "codex_session.jsonl" => codex::turns_from_jsonl_file(&p, &fallback),
         other => panic!("no parser for {other}"),
     }
     .unwrap()
@@ -115,7 +114,7 @@ async fn index_fresh(path: &Path) -> (tempfile::TempDir, Vec<String>) {
 async fn a_native_transcript_and_its_turns_file_index_identically() {
     let _one_at_a_time = HOME.lock().await;
     let out = tempfile::tempdir().unwrap();
-    for name in ["claude_session.jsonl", "codex_session.jsonl"] {
+    for name in ["claude_session.jsonl"] {
         let (_tree_home, native) = index_fresh(&fixture(name)).await;
         assert!(!native.is_empty(), "{name} indexed nothing");
 
@@ -130,7 +129,7 @@ async fn a_native_transcript_and_its_turns_file_index_identically() {
 async fn a_grown_turns_file_adds_only_its_new_turns() {
     let _one_at_a_time = HOME.lock().await;
     let out = tempfile::tempdir().unwrap();
-    let turns = parse("codex_session.jsonl");
+    let turns = parse("claude_session.jsonl");
     let (head, tail) = turns.split_at(turns.len() / 2);
     assert!(!head.is_empty() && !tail.is_empty());
 

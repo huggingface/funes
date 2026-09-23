@@ -11,12 +11,12 @@ funes index      # a fast, text-first pass over every known harness dir, into on
 ## What it indexes
 
 With **no argument**, in a terminal, `funes index` sweeps every supported agent's sessions it finds —
-`~/.claude/projects`, `~/.codex/sessions`, `~/.hermes/state.db`, and, for an agent whose integration
-converts its own sessions, `~/.funes/spool/<agent>` — into one memory, then offers to finish any
-deeper work left. Scope it to a single agent with `--harness`:
+`~/.claude/projects` and `~/.hermes/state.db`, plus `~/.funes/spool/<agent>` for each agent whose
+integration converts its own sessions — into one memory, then offers to finish any deeper work left.
+Scope it to a single agent with `--harness`:
 
 ```bash
-funes index --harness codex        # only ~/.codex/sessions
+funes index --harness codex        # only Codex's sessions
 ```
 
 Point it at a **path** to index one place in full — a transcript tree, a single `.parquet` trace
@@ -138,7 +138,7 @@ scanned or stored: a pasted screenshot is megabytes of base64 with nothing recal
 Indexing and recall are one deterministic pipeline:
 
 ```
-~/.claude/projects, ~/.codex/sessions, ~/.hermes/state.db, ~/.funes/spool/<agent>
+~/.claude/projects, ~/.hermes/state.db, ~/.funes/spool/<agent>
    (or a .parquet trace, or a .funes.jsonl turns file)
    │  parse        deterministic — turns (text / thinking / tool_use / tool_result), tagged by agent
    │  chunk        one chunk per content block, tight provenance

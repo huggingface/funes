@@ -64,39 +64,6 @@ fn ids_are_stable(turns: &[Turn], reparse: &[Turn]) {
 }
 
 #[test]
-fn parse_real_codex_session() {
-    let p = fixture("codex_session.jsonl");
-    let turns = funes::traces::codex::turns_from_jsonl_file(&p, "proj").expect("parse codex");
-    assert!(!turns.is_empty());
-    // The full block vocabulary is exercised on real records.
-    for want in ["text", "thinking", "tool_use", "tool_result"] {
-        assert!(
-            block_kinds(&turns).contains(want),
-            "codex fixture missing {want}: {:?}",
-            block_kinds(&turns)
-        );
-    }
-    assert!(
-        turns.iter().all(|t| t.harness == "codex"),
-        "codex turns are tagged codex"
-    );
-    // Codex tool results carry the `tool` role; the `session_meta` line produced no turn.
-    assert!(roles(&turns).is_subset(&BTreeSet::from(["user", "assistant", "tool", "developer"])));
-    assert!(roles(&turns).contains("tool"));
-    matched_results_are_named(&turns);
-    // Codex synthesizes `<session_id>-<seq>`; the session id (from the session_meta line) is
-    // constant across the file, so every turn_uuid shares one prefix and ends in its seq.
-    let (prefix, _) = turns[0].turn_uuid.rsplit_once('-').expect("turn_uuid is <id>-<seq>");
-    for (i, t) in turns.iter().enumerate() {
-        assert_eq!(t.turn_uuid, format!("{prefix}-{i}"));
-    }
-    ids_are_stable(
-        &turns,
-        &funes::traces::codex::turns_from_jsonl_file(&p, "proj").unwrap(),
-    );
-}
-
-#[test]
 fn parse_real_claude_session() {
     let p = fixture("claude_session.jsonl");
     let turns = funes::traces::claude::turns_from_jsonl_file(&p, "sess", "proj").expect("parse claude");
@@ -128,17 +95,10 @@ fn parse_real_claude_session() {
 #[test]
 fn turns_carry_the_recorded_cwd_and_its_workdir() {
     let claude_p = fixture("claude_session.jsonl");
-    let codex_p = fixture("codex_session.jsonl");
-    let parsed = [
-        (
-            &claude_p,
-            funes::traces::claude::turns_from_jsonl_file(&claude_p, "s", "fb").unwrap(),
-        ),
-        (
-            &codex_p,
-            funes::traces::codex::turns_from_jsonl_file(&codex_p, "fb").unwrap(),
-        ),
-    ];
+    let parsed = [(
+        &claude_p,
+        funes::traces::claude::turns_from_jsonl_file(&claude_p, "s", "fb").unwrap(),
+    )];
     for (p, turns) in &parsed {
         let cwd = funes::traces::repo::cwd_of_transcript(p).expect("fixture records a cwd");
         let workdir = funes::traces::jsonl::workdir_of_cwd(&cwd).expect("a real cwd munges to a facet");

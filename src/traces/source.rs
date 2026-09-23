@@ -9,7 +9,6 @@
 //! sessions in one file.
 
 use super::claude;
-use super::codex;
 use super::funes_jsonl;
 use super::harness::{self, Harness};
 use super::hermes;
@@ -227,11 +226,12 @@ impl TraceSource for JsonlTree {
         let fallback = claude::workdir_of(p);
         let turns = match self.harness {
             Harness::Claude => claude::turns_from_jsonl_file(p, &jsonl::session_id_of(p), &fallback)?,
-            Harness::Codex => codex::turns_from_jsonl_file(p, &fallback)?,
-            // pi's bundle converts its sessions into the spool funes reads; nothing here parses them.
-            Harness::Pi => {
-                anyhow::bail!("pi sessions are converted by its integration — run `funes add pi`, which indexes them")
-            }
+            // These agents' integrations convert their sessions into the spool funes reads; nothing
+            // here parses them, and the path is recognized only so it can say so.
+            h @ (Harness::Codex | Harness::Pi) => anyhow::bail!(
+                "{0} sessions are converted by its integration — run `funes add {0}`, which indexes them",
+                h.cli_name()
+            ),
             // hermes keeps its sessions in a SQLite state.db, not a JSONL tree, so it's read by a
             // dedicated source and never reaches here.
             Harness::Hermes => anyhow::bail!("hermes sessions are read from state.db, not a JSONL tree"),

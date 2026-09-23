@@ -34,7 +34,7 @@ impl Harness {
     /// instead: the harness stays, as the facet and the name of its spool, but nothing parses it —
     /// a path pointing at its store is still recognized, so it can be refused rather than misread.
     pub fn parsed_in_tree(self) -> bool {
-        self != Harness::Pi
+        !matches!(self, Harness::Pi | Harness::Codex)
     }
 
     /// The stored facet value — matches the Hub's normalized `harness` column.

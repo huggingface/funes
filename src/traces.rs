@@ -6,7 +6,6 @@
 //! it, so the model is source-agnostic and lives here, at the root of the parsers that fill it.
 
 pub mod claude;
-pub mod codex;
 pub mod funes_jsonl;
 pub mod harness;
 pub mod hermes;
@@ -98,11 +97,7 @@ mod tests {
     #[test]
     fn a_parsed_turn_round_trips_with_identical_chunk_ids() {
         let claude = fixture("claude_session.jsonl");
-        let codex = fixture("codex_session.jsonl");
-        let parsed = [
-            claude::turns_from_jsonl_file(&claude, "s", "fb").unwrap(),
-            codex::turns_from_jsonl_file(&codex, "fb").unwrap(),
-        ];
+        let parsed = [claude::turns_from_jsonl_file(&claude, "s", "fb").unwrap()];
         for turns in &parsed {
             let ids = |t: &[Turn]| -> Vec<String> {
                 chunk::chunks_from_turns(t, &Tier::ALL, true)
