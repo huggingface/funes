@@ -1,9 +1,7 @@
-//! The turns file's acceptance test: a native transcript indexed through its in-tree parser and
-//! the same transcript serialized to `.funes.jsonl` and indexed as a turns file produce identical
-//! rows (`source_path` aside); a grown turns file adds only its new turns; and a thread no agent
-//! wrote — a tracker's roles, no `assistant`, no `thinking`, no `cwd`, an edit as a new turn —
-//! indexes and lists. Only the harnesses funes still parses are here: an agent whose integration
-//! converts for it round-trips against its own fixture, in its bundle.
+//! What indexing a turns file must hold to: a grown file adds only its new turns, and a thread no
+//! agent wrote — a tracker's roles, no `assistant`, no `thinking`, no `cwd`, an edit as a new turn —
+//! indexes and lists. Each integration round-trips its own converter against its own fixture, in
+//! its bundle, which is where a native transcript is compared with the turns file it becomes.
 //! Own test binary, one test at a time: `$FUNES_HOME` is process-global.
 
 use std::collections::BTreeSet;
@@ -14,7 +12,7 @@ use arrow_array::{Array, ArrayRef, Int64Array, StringArray};
 use funes::commands::index::run_index;
 use funes::commands::recall::{self, SessionFilter};
 use funes::memory::{dataset, Memory};
-use funes::traces::{claude, jsonl, Turn};
+use funes::traces::{funes_jsonl, Turn};
 use tokio::sync::Mutex;
 
 static HOME: Mutex<()> = Mutex::const_new(());
@@ -42,15 +40,9 @@ fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)
 }
 
-/// A fixture through its in-tree parser, called as the transcript-tree source calls it.
-fn parse(name: &str) -> Vec<Turn> {
-    let p = fixture(name);
-    let (sid, fallback) = (jsonl::session_id_of(&p), claude::workdir_of(&p));
-    match name {
-        "claude_session.jsonl" => claude::turns_from_jsonl_file(&p, &sid, &fallback),
-        other => panic!("no parser for {other}"),
-    }
-    .unwrap()
+/// A fixture's turns, read as the turns-file source reads them.
+fn turns_of(name: &str) -> Vec<Turn> {
+    funes_jsonl::read_turns(&fixture(name)).unwrap()
 }
 
 fn write_turns(path: &Path, turns: &[Turn]) {
@@ -111,25 +103,10 @@ async fn index_fresh(path: &Path) -> (tempfile::TempDir, Vec<String>) {
 }
 
 #[tokio::test]
-async fn a_native_transcript_and_its_turns_file_index_identically() {
-    let _one_at_a_time = HOME.lock().await;
-    let out = tempfile::tempdir().unwrap();
-    for name in ["claude_session.jsonl"] {
-        let (_tree_home, native) = index_fresh(&fixture(name)).await;
-        assert!(!native.is_empty(), "{name} indexed nothing");
-
-        let file = out.path().join(format!("{name}.funes.jsonl"));
-        write_turns(&file, &parse(name));
-        let (_file_home, from_file) = index_fresh(&file).await;
-        assert_eq!(native, from_file, "{name}: the two paths differ");
-    }
-}
-
-#[tokio::test]
 async fn a_grown_turns_file_adds_only_its_new_turns() {
     let _one_at_a_time = HOME.lock().await;
     let out = tempfile::tempdir().unwrap();
-    let turns = parse("claude_session.jsonl");
+    let turns = turns_of("funes_jsonl/valid.funes.jsonl");
     let (head, tail) = turns.split_at(turns.len() / 2);
     assert!(!head.is_empty() && !tail.is_empty());
 

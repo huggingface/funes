@@ -7,13 +7,11 @@ use std::io::Write;
 /// A session with a user text turn, an assistant `tool_use`, and a `tool_result` — one block in
 /// each tier.
 fn write_session(source: &std::path::Path) {
-    let dir = source.join("projects").join("-home-u-dev-demo");
-    std::fs::create_dir_all(&dir).unwrap();
-    let mut f = std::fs::File::create(dir.join("sess-0001.jsonl")).unwrap();
+    let mut f = std::fs::File::create(source.join("sess-0001.funes.jsonl")).unwrap();
     for l in [
-        r#"{"type":"user","uuid":"t0","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"decide how to parse transcripts and index them into lancedb"}}"#,
-        r#"{"type":"assistant","uuid":"t1","parentUuid":"t0","timestamp":"2026-01-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"c1","name":"Bash","input":{"command":"ls the project directory tree"}}]}}"#,
-        r#"{"type":"user","uuid":"t2","parentUuid":"t1","timestamp":"2026-01-01T00:00:02Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"c1","content":[{"type":"text","text":"a long directory listing output with many files"}]}]}}"#,
+        r#"{"format":1,"session_id":"sess-0001","cwd":"/home/u/dev/demo","turn_uuid":"t0","seq":0,"ts":"2026-01-01T00:00:00Z","role":"user","blocks":[{"block_type":"text","text":"decide how to parse transcripts and index them into lancedb"}],"harness":"claude"}"#,
+        r#"{"format":1,"session_id":"sess-0001","cwd":"/home/u/dev/demo","turn_uuid":"t1","parent_uuid":"t0","seq":1,"ts":"2026-01-01T00:00:01Z","role":"assistant","blocks":[{"block_type":"tool_use","text":"{\"command\":\"ls the project directory tree\"}","tool_name":"Bash","tool_use_id":"c1"}],"harness":"claude"}"#,
+        r#"{"format":1,"session_id":"sess-0001","cwd":"/home/u/dev/demo","turn_uuid":"t2","parent_uuid":"t1","seq":2,"ts":"2026-01-01T00:00:02Z","role":"user","blocks":[{"block_type":"tool_result","text":"a long directory listing output with many files","tool_name":"Bash","tool_use_id":"c1"}],"harness":"claude"}"#,
     ] {
         writeln!(f, "{l}").unwrap();
     }
@@ -41,14 +39,20 @@ fn state_level(home: &std::path::Path) -> String {
 
 #[tokio::test]
 async fn seed_finishes_a_small_history_and_a_rerun_is_a_noop() {
-    let src = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     std::env::set_var("FUNES_HOME", home.path());
-    write_session(src.path());
+    // Where the agent's integration converts into, which is the root `add` seeds and the hook
+    // drains.
+    let src = funes::traces::harness::spool_dir(
+        &funes::traces::harness::spool_root(),
+        funes::traces::harness::Harness::Claude,
+    );
+    std::fs::create_dir_all(&src).unwrap();
+    write_session(&src);
 
     // The seed `funes add` runs: budgeted, tier-major. This history fits the budget, so every
     // tier lands and the unit is stamped at the top one.
-    funes::commands::index::run_index_seed(src.path(), funes::traces::harness::Harness::Claude)
+    funes::commands::index::run_index_seed(&src, funes::traces::harness::Harness::Claude)
         .await
         .unwrap();
     let full = chunk_count().await;
@@ -60,7 +64,7 @@ async fn seed_finishes_a_small_history_and_a_rerun_is_a_noop() {
     );
 
     // The budgeted no-path run (the per-turn hook): nothing owed, nothing added.
-    let roots = [(src.path().to_path_buf(), Some(funes::traces::harness::Harness::Claude))];
+    let roots = [(src.clone(), Some(funes::traces::harness::Harness::Claude))];
     funes::commands::index::run_index_budgeted(&roots, false, None, false)
         .await
         .unwrap();

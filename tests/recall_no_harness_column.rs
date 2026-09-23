@@ -16,14 +16,12 @@ async fn recall_tolerates_a_memory_without_the_harness_column() {
     let source = tempfile::tempdir().unwrap();
     std::env::set_var("FUNES_HOME", db_dir.path());
 
-    // A minimal Claude transcript so parse → chunk → embed → store produces a real recallable row.
+    // A minimal session so read → chunk → embed → store produces a real recallable row.
     let session = "test-session-0001";
-    let dir = source.path().join("projects").join("-home-u-dev-demo");
-    std::fs::create_dir_all(&dir).unwrap();
-    let mut f = std::fs::File::create(dir.join(format!("{session}.jsonl"))).unwrap();
+    let mut f = std::fs::File::create(source.path().join(format!("{session}.funes.jsonl"))).unwrap();
     for l in [
-        r#"{"type":"user","uuid":"t1","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"how do we parse transcripts into turns"}}"#,
-        r#"{"type":"assistant","uuid":"t2","parentUuid":"t1","timestamp":"2026-01-01T00:00:05Z","message":{"role":"assistant","content":[{"type":"text","text":"We parse each JSONL line into a turn with typed blocks."}]}}"#,
+        r#"{"format":1,"session_id":"test-session-0001","cwd":"/home/u/dev/demo","turn_uuid":"t1","seq":0,"ts":"2026-01-01T00:00:00Z","role":"user","blocks":[{"block_type":"text","text":"how do we parse transcripts into turns"}],"harness":"claude"}"#,
+        r#"{"format":1,"session_id":"test-session-0001","cwd":"/home/u/dev/demo","turn_uuid":"t2","parent_uuid":"t1","seq":1,"ts":"2026-01-01T00:00:05Z","role":"assistant","blocks":[{"block_type":"text","text":"We parse each JSONL line into a turn with typed blocks."}],"harness":"claude"}"#,
     ] {
         writeln!(f, "{l}").unwrap();
     }

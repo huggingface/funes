@@ -41,21 +41,26 @@ async fn scrub_redacts_an_escaped_key_in_place() {
     let escaped = key.replace('\n', "\\n");
     assert!(!escaped.contains('\n') && escaped.contains(&key_body));
 
-    let workdir = "-home-u-dev-demo";
     let session = "scrub-drop-0001";
-    let dir = source.path().join("projects").join(workdir);
-    std::fs::create_dir_all(&dir).unwrap();
     // Two turns: a clean one (must survive) and the escaped-key one (must be dropped).
-    let mut f = std::fs::File::create(dir.join(format!("{session}.jsonl"))).unwrap();
-    for (uuid, content) in [
+    let mut f = std::fs::File::create(source.path().join(format!("{session}.funes.jsonl"))).unwrap();
+    for (seq, (uuid, content)) in [
         ("t1", "just chatting about parsers"),
         ("t2", &format!("deploy key: {escaped}")[..]),
-    ] {
+    ]
+    .iter()
+    .enumerate()
+    {
         let line = serde_json::json!({
-            "type": "user",
-            "uuid": uuid,
-            "timestamp": "2026-01-01T00:00:00Z",
-            "message": {"role": "user", "content": content},
+            "format": 1,
+            "session_id": session,
+            "cwd": "/home/u/dev/demo",
+            "turn_uuid": uuid,
+            "seq": seq,
+            "ts": "2026-01-01T00:00:00Z",
+            "role": "user",
+            "blocks": [{"block_type": "text", "text": content}],
+            "harness": "claude",
         })
         .to_string();
         writeln!(f, "{line}").unwrap();

@@ -5,18 +5,16 @@
 
 use std::io::Write;
 
-/// Write a `<source>/projects/<project>/<session>.jsonl` transcript so `workdir_of` /
-/// `session_id_of` resolve the way they do for real Claude Code projects.
+/// Write a turns file carrying one session, the shape any integration's converter produces. The
+/// `workdir` facet is the munged `cwd` its turns record.
 fn write_transcript(source: &std::path::Path) -> (String, String) {
     let workdir = "-home-u-dev-demo";
     let session = "test-session-0001";
-    let dir = source.join("projects").join(workdir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let mut f = std::fs::File::create(dir.join(format!("{session}.jsonl"))).unwrap();
+    let mut f = std::fs::File::create(source.join(format!("{session}.funes.jsonl"))).unwrap();
     let lines = [
-        r#"{"type":"user","uuid":"t1","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"how do we parse transcripts into turns"}}"#,
-        r#"{"type":"assistant","uuid":"t2","parentUuid":"t1","timestamp":"2026-01-01T00:00:05Z","message":{"role":"assistant","content":[{"type":"text","text":"We parse each JSONL line into a turn with typed blocks."},{"type":"tool_use","id":"c1","name":"Bash","input":{"command":"cargo test"}}]}}"#,
-        r#"{"type":"user","uuid":"t3","parentUuid":"t2","timestamp":"2026-01-01T00:00:10Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"c1","content":[{"type":"text","text":"22 passed"}]}]}}"#,
+        r#"{"format":1,"session_id":"test-session-0001","cwd":"/home/u/dev/demo","turn_uuid":"t1","seq":0,"ts":"2026-01-01T00:00:00Z","role":"user","blocks":[{"block_type":"text","text":"how do we parse transcripts into turns"}],"harness":"claude"}"#,
+        r#"{"format":1,"session_id":"test-session-0001","cwd":"/home/u/dev/demo","turn_uuid":"t2","parent_uuid":"t1","seq":1,"ts":"2026-01-01T00:00:05Z","role":"assistant","blocks":[{"block_type":"text","text":"We parse each JSONL line into a turn with typed blocks."},{"block_type":"tool_use","text":"{\"command\":\"cargo test\"}","tool_name":"Bash","tool_use_id":"c1"}],"harness":"claude"}"#,
+        r#"{"format":1,"session_id":"test-session-0001","cwd":"/home/u/dev/demo","turn_uuid":"t3","parent_uuid":"t2","seq":2,"ts":"2026-01-01T00:00:10Z","role":"user","blocks":[{"block_type":"tool_result","text":"22 passed","tool_name":"Bash","tool_use_id":"c1"}],"harness":"claude"}"#,
     ];
     for l in lines {
         writeln!(f, "{l}").unwrap();

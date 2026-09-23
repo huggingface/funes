@@ -43,18 +43,21 @@ async fn scrub_dropping_every_block_leaves_a_valid_empty_memory() {
     };
 
     // A single session, a single block — the unredactable key and nothing else. Scrub drops it all.
-    let workdir = "-home-u-dev-demo";
     let session = "scrub-all-0001";
-    let dir = source.path().join("projects").join(workdir);
-    std::fs::create_dir_all(&dir).unwrap();
+
     let line = serde_json::json!({
-        "type": "user",
-        "uuid": "t1",
-        "timestamp": "2026-01-01T00:00:00Z",
-        "message": {"role": "user", "content": format!("deploy key: {blob}")},
+        "format": 1,
+        "session_id": session,
+        "cwd": "/home/u/dev/demo",
+        "turn_uuid": "t1",
+        "seq": 0,
+        "ts": "2026-01-01T00:00:00Z",
+        "role": "user",
+        "blocks": [{"block_type": "text", "text": format!("deploy key: {blob}")}],
+        "harness": "claude",
     })
     .to_string();
-    let mut f = std::fs::File::create(dir.join(format!("{session}.jsonl"))).unwrap();
+    let mut f = std::fs::File::create(source.path().join(format!("{session}.funes.jsonl"))).unwrap();
     writeln!(f, "{line}").unwrap();
 
     // Index with a no-op scanner so the escaped key lands in the memory unredacted.

@@ -1,6 +1,6 @@
-//! The coding agent a transcript came from: the [`Harness`] enum, its recorded facet value, the
-//! `--harness` override parse, and detecting it from a session tree (a known session dir, else the
-//! first record's `type`). `source`/`main`/the parsers call in here; nothing here parses JSONL.
+//! The coding agent a session came from: the [`Harness`] enum, its recorded facet value, the
+//! `--harness` override parse, where each agent's sessions are read from, and detecting one from a
+//! tree (a known session dir, else the first record's `type`). Nothing here parses JSONL.
 
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -9,7 +9,7 @@ use anyhow::{anyhow, Result};
 
 use crate::memory::dataset;
 
-/// Which coding agent produced a transcript. Selects the parser and the recorded `harness` facet.
+/// Which coding agent produced a session. Names its spool and its recorded `harness` facet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Harness {
     Claude,
@@ -18,8 +18,8 @@ pub enum Harness {
     Hermes,
 }
 
-/// Session-dir tails funes recognizes, each with its harness. Order also fixes the no-arg scan
-/// order.
+/// Session-dir tails funes recognizes, each with its harness — where an agent funes still reads
+/// keeps its sessions, and, for one it no longer parses, what a path naming that store means.
 const KNOWN_DIRS: &[(&str, Harness)] = &[
     (".claude/projects", Harness::Claude),
     (".codex/sessions", Harness::Codex),
@@ -34,7 +34,7 @@ impl Harness {
     /// instead: the harness stays, as the facet and the name of its spool, but nothing parses it —
     /// a path pointing at its store is still recognized, so it can be refused rather than misread.
     pub fn parsed_in_tree(self) -> bool {
-        !matches!(self, Harness::Pi | Harness::Codex)
+        self == Harness::Hermes
     }
 
     /// The stored facet value — matches the Hub's normalized `harness` column.
@@ -222,16 +222,17 @@ mod tests {
     }
 
     /// An agent whose integration converts for it has no native root: its sessions reach funes
-    /// through its spool or not at all.
+    /// through its spool or not at all. Only hermes, which funes still reads itself, keeps one.
     #[test]
-    fn a_converted_agent_has_no_native_root() {
+    fn only_an_agent_funes_parses_has_a_native_root() {
         let home = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(home.path().join(".pi/agent/sessions")).unwrap();
         std::fs::create_dir_all(home.path().join(".claude/projects")).unwrap();
+        std::fs::create_dir_all(home.path().join(".hermes")).unwrap();
+        std::fs::write(home.path().join(HERMES_DB), b"").unwrap();
 
         let roots = native_roots_from(home.path());
 
-        assert!(roots.iter().all(|(_, h)| *h != Harness::Pi));
-        assert!(roots.iter().any(|(_, h)| *h == Harness::Claude));
+        assert_eq!(roots.iter().map(|(_, h)| *h).collect::<Vec<_>>(), vec![Harness::Hermes]);
     }
 }

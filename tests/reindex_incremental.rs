@@ -4,15 +4,13 @@
 
 use std::io::Write;
 
-/// Write a `<source>/projects/<project>/<session>.jsonl` with `n_turns` user turns, each with
-/// distinct content (so each is its own chunk). Appending turns later grows the same session.
+/// Write a turns file of `n_turns` user turns, each with distinct content (so each is its own
+/// chunk). Appending turns later grows the same session.
 fn write_session(source: &std::path::Path, n_turns: usize) {
-    let dir = source.join("projects").join("-home-u-dev-demo");
-    std::fs::create_dir_all(&dir).unwrap();
-    let mut f = std::fs::File::create(dir.join("grow-session-0001.jsonl")).unwrap();
+    let mut f = std::fs::File::create(source.join("grow-session-0001.funes.jsonl")).unwrap();
     for i in 0..n_turns {
         let line = format!(
-            r#"{{"type":"user","uuid":"turn{i}","timestamp":"2026-01-01T00:00:{i:02}Z","message":{{"role":"user","content":"turn {i} about parsing transcripts and lancedb indexing"}}}}"#
+            r#"{{"format":1,"session_id":"grow-session-0001","cwd":"/home/u/dev/demo","turn_uuid":"turn{i}","seq":{i},"ts":"2026-01-01T00:00:{i:02}Z","role":"user","blocks":[{{"block_type":"text","text":"turn {i} about parsing transcripts and lancedb indexing"}}],"harness":"claude"}}"#
         );
         writeln!(f, "{line}").unwrap();
     }

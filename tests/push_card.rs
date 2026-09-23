@@ -22,15 +22,13 @@ use hf_hub::{HFClient, HFError, HFRepository, RepoTypeDataset};
 
 const OWNER: &str = "optimum-internal-testing";
 
-/// Write `projects/<proj>/sess.jsonl` with the given (uuid, text) user turns.
+/// Write a turns file with the given (uuid, text) user turns.
 fn write_session(source: &std::path::Path, turns: &[(&str, &str)]) {
-    let dir = source.join("projects").join("-cardtest-proj");
-    std::fs::create_dir_all(&dir).unwrap();
-    let mut f = std::fs::File::create(dir.join("sess.jsonl")).unwrap();
+    let mut f = std::fs::File::create(source.join("sess.funes.jsonl")).unwrap();
     for (i, (uuid, text)) in turns.iter().enumerate() {
         writeln!(
             f,
-            r#"{{"type":"user","uuid":"{uuid}","timestamp":"2026-02-01T00:00:{i:02}Z","message":{{"role":"user","content":"{text}"}}}}"#
+            r#"{{"format":1,"session_id":"sess","cwd":"/cardtest/proj","turn_uuid":"{uuid}","seq":{i},"ts":"2026-02-01T00:00:{i:02}Z","role":"user","blocks":[{{"block_type":"text","text":"{text}"}}],"harness":"claude"}}"#
         )
         .unwrap();
     }

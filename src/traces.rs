@@ -1,11 +1,12 @@
-//! Reading agent sessions: where they come from ([`source`]), the per-harness parsers, and the
-//! parsed-trace model they all produce.
+//! Reading agent sessions: where they come from ([`source`]), the readers of the formats funes
+//! accepts, and the trace model they all produce.
 //!
-//! A transcript becomes a sequence of [`Turn`]s, each carrying typed [`Block`]s. Every parser
-//! produces this shape, and everything downstream — chunk → embed → store → recall — operates on
-//! it, so the model is source-agnostic and lives here, at the root of the parsers that fill it.
+//! A session becomes a sequence of [`Turn`]s, each carrying typed [`Block`]s. Everything downstream
+//! — chunk → embed → store → recall — operates on that shape, so the model is source-agnostic and
+//! lives here, at the root of the readers that fill it. An agent's own transcripts are converted
+//! into [`funes_jsonl`] by its integration, outside funes; what remains here reads that, hermes'
+//! SQLite store, and Hub parquet.
 
-pub mod claude;
 pub mod funes_jsonl;
 pub mod harness;
 pub mod hermes;
@@ -70,56 +71,20 @@ pub struct Turn {
     pub blocks: Vec<Block>,
     #[serde(skip)]
     pub source_path: String,
-    /// Who produced this session — `claude_code` | `codex` | `pi` | `hermes` from the native
-    /// parsers, any `[a-z0-9_-]` id from a turns file.
+    /// Who produced this session: `hermes` from its own store, any `[a-z0-9_-]` id from a turns
+    /// file — an integration names itself, and the rows an older funes wrote say `claude_code`.
     pub harness: String,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chunk::{self, Tier};
-    use std::path::Path;
-
-    fn fixture(name: &str) -> std::path::PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)
-    }
 
     /// A line of the spec's own example, minus `format`.
     const LINE: &str = r#"{"session_id":"s","turn_uuid":"t-1","seq":0,"ts":"2026-09-18T09:41:07Z","role":"user","harness":"opencode","blocks":[{"block_type":"text","text":"hi"}]}"#;
 
     fn with(field: &str) -> String {
         format!("{{{field},{}", &LINE[1..])
-    }
-
-    /// Serialize each fixture's turns and read them back: the turns are equal (bar the two funes-stamped
-    /// fields, which the format does not carry) and so are the chunk ids they produce.
-    #[test]
-    fn a_parsed_turn_round_trips_with_identical_chunk_ids() {
-        let claude = fixture("claude_session.jsonl");
-        let parsed = [claude::turns_from_jsonl_file(&claude, "s", "fb").unwrap()];
-        for turns in &parsed {
-            let ids = |t: &[Turn]| -> Vec<String> {
-                chunk::chunks_from_turns(t, &Tier::ALL, true)
-                    .into_iter()
-                    .map(|c| c.id)
-                    .collect()
-            };
-            let back: Vec<Turn> = turns
-                .iter()
-                .map(|t| serde_json::from_str(&serde_json::to_string(t).unwrap()).unwrap())
-                .collect();
-            assert_eq!(ids(&back), ids(turns));
-            for (b, t) in back.into_iter().zip(turns) {
-                assert_eq!((b.workdir.as_str(), b.source_path.as_str()), ("", ""));
-                let b = Turn {
-                    workdir: t.workdir.clone(),
-                    source_path: t.source_path.clone(),
-                    ..b
-                };
-                assert_eq!(&b, t);
-            }
-        }
     }
 
     #[test]

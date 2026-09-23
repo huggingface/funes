@@ -38,19 +38,22 @@ async fn scrub_redacts_an_existing_secret_in_place() {
     std::fs::remove_file(&keyfile).unwrap();
     let key_body = key.lines().nth(1).unwrap().to_string();
 
-    let workdir = "-home-u-dev-demo";
     let session = "scrub-session-0001";
-    let dir = source.path().join("projects").join(workdir);
-    std::fs::create_dir_all(&dir).unwrap();
+
     let content = format!("deploy key:\n{key}");
     let line = serde_json::json!({
-        "type": "user",
-        "uuid": "t1",
-        "timestamp": "2026-01-01T00:00:00Z",
-        "message": {"role": "user", "content": content},
+        "format": 1,
+        "session_id": session,
+        "cwd": "/home/u/dev/demo",
+        "turn_uuid": "t1",
+        "seq": 0,
+        "ts": "2026-01-01T00:00:00Z",
+        "role": "user",
+        "blocks": [{"block_type": "text", "text": content}],
+        "harness": "claude",
     })
     .to_string();
-    let mut f = std::fs::File::create(dir.join(format!("{session}.jsonl"))).unwrap();
+    let mut f = std::fs::File::create(source.path().join(format!("{session}.funes.jsonl"))).unwrap();
     writeln!(f, "{line}").unwrap();
 
     // Index with a no-op scanner so the secret lands in the memory unredacted.

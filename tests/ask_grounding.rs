@@ -5,16 +5,13 @@
 
 use std::io::Write;
 
-/// Write a `<source>/projects/<project>/<session>.jsonl` transcript so the indexer resolves
-/// workdir/session the way it does for real Claude Code projects.
+/// Write a turns file carrying one exchange, the shape any integration's converter produces.
 fn write_transcript(source: &std::path::Path) -> String {
-    let dir = source.join("projects").join("-home-u-dev-demo");
-    std::fs::create_dir_all(&dir).unwrap();
     let session = "ask-session-0001";
-    let mut f = std::fs::File::create(dir.join(format!("{session}.jsonl"))).unwrap();
+    let mut f = std::fs::File::create(source.join(format!("{session}.funes.jsonl"))).unwrap();
     let lines = [
-        r#"{"type":"user","uuid":"t1","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"why did we settle on reciprocal rank fusion"}}"#,
-        r#"{"type":"assistant","uuid":"t2","parentUuid":"t1","timestamp":"2026-01-01T00:00:05Z","message":{"role":"assistant","content":[{"type":"text","text":"We fuse vector and BM25 rankings with reciprocal rank fusion because it needs no score calibration."}]}}"#,
+        r#"{"format":1,"session_id":"ask-session-0001","cwd":"/home/u/dev/demo","turn_uuid":"t1","seq":0,"ts":"2026-01-01T00:00:00Z","role":"user","blocks":[{"block_type":"text","text":"why did we settle on reciprocal rank fusion"}],"harness":"claude"}"#,
+        r#"{"format":1,"session_id":"ask-session-0001","cwd":"/home/u/dev/demo","turn_uuid":"t2","parent_uuid":"t1","seq":1,"ts":"2026-01-01T00:00:05Z","role":"assistant","blocks":[{"block_type":"text","text":"We fuse vector and BM25 rankings with reciprocal rank fusion because it needs no score calibration."}],"harness":"claude"}"#,
     ];
     for l in lines {
         writeln!(f, "{l}").unwrap();
