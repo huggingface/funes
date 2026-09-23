@@ -236,6 +236,11 @@ struct Cfg {
     /// forward, so this also bounds its high-water mark.
     group: usize,
 }
+#[cfg(target_os = "macos")]
+const RERANK_GROUP: usize = 16; // AMX saturates at larger groups
+#[cfg(not(target_os = "macos"))]
+const RERANK_GROUP: usize = 8;
+
 const RERANK: Cfg = Cfg {
     prefix: "roberta.",
     h: 768,
@@ -244,7 +249,7 @@ const RERANK: Cfg = Cfg {
     ffn: 3072,
     layers: 12,
     bert_pos: false,
-    group: 8,
+    group: RERANK_GROUP,
 };
 const EMBED: Cfg = Cfg {
     prefix: "",

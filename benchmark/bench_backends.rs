@@ -79,6 +79,20 @@ fn real_docs() -> Vec<String> {
     (0..32).map(|i| words[..REAL_WORDS[i * 13 % 32]].join(" ")).collect()
 }
 
+/// Like `mixed_docs` but 256 documents — the batch size `embed_batched` uses in production.
+fn big_mixed_docs() -> Vec<String> {
+    let short = short_docs();
+    let mut docs = capped_docs(32);
+    docs.extend((0..256 - docs.len()).map(|i| short[i % short.len()].clone()));
+    docs
+}
+
+/// Like `real_docs` but 256 documents — the production batch size, with the same length spread.
+fn big_real_docs() -> Vec<String> {
+    let words: Vec<&str> = SENT.split_whitespace().cycle().take(400).collect();
+    (0..256).map(|i| words[..REAL_WORDS[i % 32]].join(" ")).collect()
+}
+
 struct Backend {
     name: &'static str,
     emb: Box<dyn Embedder>,
@@ -141,6 +155,8 @@ fn main() -> Result<()> {
         ("30×~500tok", long_docs(), 1, 3),
         ("16×mixed", mixed_docs(), 1, 5),
         ("32×real", real_docs(), 1, 3),
+        ("256×mixed", big_mixed_docs(), 1, 1),
+        ("256×real", big_real_docs(), 1, 1),
     ];
 
     println!(
