@@ -67,9 +67,8 @@ impl TraceSource for FunesJsonl {
         if let Some(n) = self.limit {
             files.truncate(n);
         }
-        // A directory is a store funes revisits, so its files are stamped and an unchanged one is
-        // skipped. A lone file is the caller's explicit target: it is re-read every time it is
-        // named, and chunk-id dedup makes that a no-op.
+        // A directory is a store funes revisits, so its files are stamped; a file named on its own
+        // is re-read every time, and chunk-id dedup makes that a no-op.
         let stamped = self.path.is_dir();
         Ok(files
             .into_iter()
@@ -269,7 +268,6 @@ mod tests {
         write(dir.path(), "b.funes.jsonl", &[LINE]);
         write(dir.path(), "notes.txt", &["ignored"]);
 
-        // A named file is re-read whenever it is named, so it carries no stamp.
         let file = source(&a);
         let units = file.units().unwrap();
         assert_eq!(units.len(), 1);
@@ -277,7 +275,6 @@ mod tests {
         assert!(file.fatal_on_read_error());
         assert!(file.owns(&units[0].key));
 
-        // A directory is revisited, so each file in it is stamped and skipped while unchanged.
         let tree = source(dir.path());
         let units = tree.units().unwrap();
         assert_eq!(units.len(), 2);

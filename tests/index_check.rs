@@ -73,8 +73,8 @@ async fn check_reports_without_writing() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("2 unit(s) rejected"));
     assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
 
-    // A duplicate id is a finding, not a failure: an append keeps the first occurrence, so the dry
-    // run that predicts one still passes. The file holds a turn re-emitted under its `turn_uuid`.
+    // The fixture holds a turn re-emitted under its `turn_uuid`, so the dry run predicts a duplicate
+    // id and still passes.
     let dup = fixture("dup_turn.funes.jsonl");
     let report = funes::commands::index::check(&dup, false, None, None).unwrap();
     assert!(report.all_accepted(), "{}", report.text);

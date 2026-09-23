@@ -190,8 +190,8 @@ fn unit_current(entry: Option<&UnitState>, sig: &str, target: Tier) -> bool {
     entry.is_some_and(|e| e.sig == sig && e.level.is_some_and(|l| l >= target))
 }
 
-/// Whether this build already refused this exact content. Re-reading buys nothing until the unit
-/// changes or funes does, and a hook that keeps re-reading one bad file fails on every turn.
+/// Whether this build already refused this exact content: re-reading buys nothing until the unit
+/// changes or funes does.
 fn unit_refused(entry: Option<&UnitState>, sig: &str) -> bool {
     entry.is_some_and(|e| e.sig == sig && e.refused.as_deref() == Some(VERSION))
 }
@@ -494,9 +494,8 @@ impl Indexer {
             return Ok(0);
         }
 
-        // A best-effort source reports the unit and moves on; a signed one records the refusal, so
-        // the next run skips it instead of failing on it again. A fatal source aborts rather than
-        // silently dropping data.
+        // A best-effort source reports the unit and moves on, recording the refusal when the unit is
+        // signed; a fatal source aborts rather than silently dropping data.
         let mut turns = {
             let src = &self.sources[src_i];
             match src.read(&self.units[i].1) {
@@ -1123,9 +1122,8 @@ mod tests {
         assert!(!unit_current(None, "10:20", Tier::Text));
     }
 
-    /// A refusal is remembered against the content that caused it and the build that made it, so a
-    /// hook stops re-reading a file funes will refuse again — and stops skipping it once either
-    /// changes. It is never "current": nothing of it was indexed.
+    /// A refusal holds against the content that caused it and the build that made it, and lifts
+    /// when either changes. It is never "current": nothing of the unit was indexed.
     #[test]
     fn a_refusal_is_remembered_until_the_unit_or_funes_changes() {
         let refused = |sig: &str, by: &str| UnitState {
@@ -1141,7 +1139,6 @@ mod tests {
         assert!(!unit_refused(Some(&mine), "99:99"));
         // So is content another build refused: validation is funes's, not the file's.
         assert!(!unit_refused(Some(&refused("10:20", "0.0.1")), "10:20"));
-        // An indexed unit was never refused.
         assert!(!unit_refused(Some(&indexed("10:20", Tier::Text)), "10:20"));
         assert!(!unit_refused(None, "10:20"));
     }

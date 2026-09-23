@@ -134,10 +134,9 @@ async fn turns_files_are_indexed_and_invalid_ones_rejected() {
         vec![("with".to_string(), own_repo), ("without".to_string(), String::new())]
     );
 
-    // A directory funes revisits, the shape a producer's spool takes. The first run indexes what it
-    // can and fails on the file it refuses; the second finds the good file unchanged and the bad one
-    // already refused, so it reports nothing and exits zero — a per-turn hook stops failing on one
-    // bad file forever.
+    // A directory funes revisits, the shape a producer's spool takes: the first run indexes what it
+    // can and fails on the file it refuses, and the second, finding the good file unchanged and the
+    // bad one already refused, reports nothing and exits zero.
     let spool = tempfile::tempdir().unwrap();
     let refused = spool.path().join("bad_line.funes.jsonl");
     std::fs::copy(fixture("valid.funes.jsonl"), spool.path().join("valid.funes.jsonl")).unwrap();

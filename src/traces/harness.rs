@@ -116,8 +116,7 @@ fn native_roots_from(home: &Path, pi_agent_dir: Option<&Path>) -> Vec<(PathBuf, 
     roots
 }
 
-/// Where a bundle writes the turns files funes indexes for it. funes owns the directory: it drains
-/// it and deletes what it has fully indexed, so a bundle writes there and never reads back.
+/// Where a bundle writes the turns files funes indexes for it, one directory per registered id.
 pub fn spool_dir(spools: &Path, h: Harness) -> PathBuf {
     spools.join(h.cli_name())
 }
@@ -132,9 +131,7 @@ pub fn is_spool(root: &Path) -> bool {
     root.starts_with(spool_root())
 }
 
-/// A harness's spool when its bundle converts for it, else the store it writes natively. The two
-/// never both apply: a spool appears when a bundle starts converting, which is when funes stops
-/// parsing that agent itself.
+/// A harness's spool when its bundle converts for it, else the store it writes natively.
 fn harness_root(h: Harness, native: Option<PathBuf>, spools: &Path) -> Option<PathBuf> {
     let spool = spool_dir(spools, h);
     spool.is_dir().then_some(spool).or(native)
@@ -205,14 +202,12 @@ mod tests {
         let spools = tempfile::tempdir().unwrap();
         let native = PathBuf::from("/home/u/.pi/agent/sessions");
 
-        // No spool → the agent's own store, exactly as before.
         assert_eq!(
             harness_root(Harness::Pi, Some(native.clone()), spools.path()),
             Some(native.clone())
         );
         assert_eq!(harness_root(Harness::Pi, None, spools.path()), None);
 
-        // Once the bundle converts into one, the spool wins — and stands alone.
         let pi_spool = spool_dir(spools.path(), Harness::Pi);
         std::fs::create_dir_all(&pi_spool).unwrap();
         assert_eq!(
@@ -220,11 +215,9 @@ mod tests {
             Some(pi_spool.clone())
         );
         assert_eq!(harness_root(Harness::Pi, None, spools.path()), Some(pi_spool.clone()));
-        // It is named by the id the bundle is registered under, not the stored facet.
+        // Named by the id the bundle is registered under, not the stored facet.
         assert!(spool_dir(spools.path(), Harness::Claude).ends_with("claude"));
 
-        // A spool funes resolved for itself is recognizable as one, so the `--harness` it carries
-        // reads as funes's own rather than as a flag someone typed at a turns file.
         assert!(is_spool(&spool_dir(&spool_root(), Harness::Pi).join("s.funes.jsonl")));
         assert!(!is_spool(&pi_spool), "a spool elsewhere is not funes's");
     }
