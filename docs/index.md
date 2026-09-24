@@ -5,7 +5,7 @@ runs it for you on every turn; run it by hand to seed a memory, to fold in a new
 sessions from a machine or agent that never ran the automation.
 
 ```bash
-funes index      # a fast, text-first pass over every known harness dir, into one local memory
+funes index      # a fast, text-first pass over every installed agent's spool, into one memory
 ```
 
 ## What it indexes
@@ -18,12 +18,12 @@ memory, then offers to finish any deeper work left. Scope it to a single agent w
 funes index --harness codex        # only Codex's sessions
 ```
 
-Point it at a **path** to index one place in full — a transcript tree, a single `.parquet` trace
-export, or a `.funes.jsonl` turns file (or a directory of them) — or at a **Hub trace repo** to index
-its auto-converted parquet:
+Point it at a **path** to index one place in full — a `.funes.jsonl` turns file (or a directory of
+them), or a single `.parquet` trace export — or at a **Hub trace repo** to index its auto-converted
+parquet:
 
 ```bash
-funes index ./some/session/tree            # a local transcript tree or .parquet
+funes index ./turns                        # a directory of turns files, or a .parquet
 funes index thread.funes.jsonl             # turns from a source funes has no parser for
 funes index <org>/<repo>                   # a Hub trace dataset (or a full hf://… URI)
 ```
@@ -130,7 +130,7 @@ scanned or stored: a pasted screenshot is megabytes of base64 with nothing recal
 
 | Flag | Meaning |
 | --- | --- |
-| `--harness <name>` | Override auto-detection for a path, or (with no path) target one agent's sessions: `claude \| codex \| pi \| hermes`. Refused on a turns file you name, whose turns name their own harness. |
+| `--harness <name>` | Index one agent's spool: `claude \| codex \| pi \| hermes`. Refused with a PATH of turns files, whose turns name their own harness. |
 | `--check` | Validate PATH without indexing it: turns, chunks, rejected files, duplicate ids; writes nothing, exits non-zero if a unit was rejected. |
 | `--limit <N>` | Index only the most recent N sessions per source. Omit to index all. A Hub repo ignores it and indexes every shard. |
 | `--no-thinking` | Exclude thinking blocks. |

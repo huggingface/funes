@@ -1184,18 +1184,18 @@ mod tests {
     }
 
     #[test]
-    fn index_coverage_retires_a_transcript_the_tree_no_longer_lists() {
+    fn index_coverage_retires_a_transcript_the_spool_no_longer_lists() {
         let dir = tempfile::tempdir().unwrap();
         let coverage = dir.path().join("index-coverage.json");
-        let root = dir.path().join("projects");
+        let root = dir.path().join("spool");
         std::fs::create_dir_all(&root).unwrap();
-        for f in ["a.jsonl", "b.jsonl"] {
-            std::fs::write(root.join(f), b"{}\n").unwrap();
+        for f in ["a.funes.jsonl", "b.funes.jsonl"] {
+            std::fs::write(root.join(f), b"").unwrap();
         }
         let key = |f: &str| root.join(f).to_string_lossy().into_owned();
         let sweep = || -> Vec<Box<dyn source::TraceSource>> {
             vec![
-                source::open_with_harness(&root, None, Some(Harness::Claude)).unwrap(),
+                source::open_with_harness(&root, None, None).unwrap(),
                 // A store that claims no key contributes none, however its units are signed.
                 Box::new(MockSource {
                     name: "remote",
@@ -1206,13 +1206,13 @@ mod tests {
         };
         assert_eq!(
             pending_after_a_sweep(&coverage, &sweep()),
-            HashSet::from([key("a.jsonl"), key("b.jsonl")])
+            HashSet::from([key("a.funes.jsonl"), key("b.funes.jsonl")])
         );
 
-        std::fs::remove_file(root.join("b.jsonl")).unwrap();
+        std::fs::remove_file(root.join("b.funes.jsonl")).unwrap();
         assert_eq!(
             pending_after_a_sweep(&coverage, &sweep()),
-            HashSet::from([key("a.jsonl")])
+            HashSet::from([key("a.funes.jsonl")])
         );
     }
 

@@ -16,7 +16,6 @@ use crate::hub;
 
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::time::UNIX_EPOCH;
 
 /// One artifact a source indexes as a unit. `key` identifies and locates it: a transcript path, an
@@ -60,8 +59,8 @@ pub trait TraceSource {
 
 /// Pick the source for `path`: a `*.parquet` file is a parquet trace dataset, a `.funes.jsonl` file
 /// (or a directory holding them) is a turns file, and anything else is an agent's own session tree,
-/// which funes no longer reads — that source exists to name the integration that does. `limit` caps
-/// how many sessions are read (`None` = all) — used to bound a benchmark's build time.
+/// which is refused by naming the integration that converts it. `limit` caps how many sessions are
+/// read (`None` = all) — used to bound a benchmark's build time.
 pub fn open(path: &Path, limit: Option<usize>) -> Result<Box<dyn TraceSource>> {
     open_with_harness(path, limit, None)
 }
@@ -80,14 +79,16 @@ pub fn open_with_harness(path: &Path, limit: Option<usize>, harness: Option<Harn
             limit,
         }));
     }
-    // A path funes doesn't know by name is listed once, here, and the source that wins keeps the
-    // listing; a known harness dir is listed lazily by its own source.
+    // A path named by a known session dir is refused on its name alone; anything else is listed
+    // once, here, and the source that wins keeps the listing.
     let listing = Harness::from_known_dir(path)
         .is_none()
         .then(|| jsonl::iter_jsonl_files(path));
+    // Nothing to read is an empty turns store rather than an agent's: a spool no integration has
+    // written into yet indexes as a no-op instead of being refused.
     let holds_turns = listing
         .as_ref()
-        .is_some_and(|l| l.iter().any(|p| funes_jsonl::is_turns_file(p)));
+        .is_some_and(|l| l.is_empty() || l.iter().any(|p| funes_jsonl::is_turns_file(p)));
     if holds_turns {
         // A spool is the root funes resolved *from* the harness, so the override it carries is its
         // own and redundant. Anywhere else the flag is a mistake worth naming.
@@ -104,12 +105,10 @@ pub fn open_with_harness(path: &Path, limit: Option<usize>, harness: Option<Harn
         )));
     }
     let harness = harness.unwrap_or_else(|| detect_harness(path, listing.as_deref()));
-    Ok(Box::new(JsonlTree {
-        root: path.to_path_buf(),
-        limit,
-        harness,
-        listing: listing.map_or_else(OnceLock::new, OnceLock::from),
-    }))
+    bail!(
+        "{0} sessions are converted by its integration — run `funes add {0}`, which indexes them",
+        harness.cli_name()
+    )
 }
 
 /// Detect a JSONL tree's harness: a known session dir wins (a cheap tail match), else sniff the
@@ -127,77 +126,6 @@ pub(crate) fn file_sig(p: &Path) -> Option<String> {
     let md = std::fs::metadata(p).ok()?;
     let mtime = md.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_secs();
     Some(format!("{}:{}", md.len(), mtime))
-}
-
-/// A directory tree of `*.jsonl` transcripts for one `harness` — one session per file, indexed
-/// incrementally (each file skipped while unchanged). `limit` keeps the most recent N files
-/// (sessions) by mtime.
-struct JsonlTree {
-    root: PathBuf,
-    limit: Option<usize>,
-    harness: Harness,
-    listing: OnceLock<Vec<PathBuf>>,
-}
-
-impl JsonlTree {
-    /// Walked once: a readdir per project dir is the whole cost of it on a network mount.
-    fn listing(&self) -> &[PathBuf] {
-        self.listing.get_or_init(|| jsonl::iter_jsonl_files(&self.root))
-    }
-}
-
-impl TraceSource for JsonlTree {
-    fn describe(&self) -> String {
-        format!(
-            "scanning {} transcripts under {}",
-            self.harness.as_str(),
-            self.root.display()
-        )
-    }
-
-    fn units(&self) -> Result<Vec<Unit>> {
-        let mut files = self.listing().to_vec();
-        // Newest-first by mtime; `--limit` then keeps the recent N. (Default filename order is
-        // ≈ random for UUID-named sessions.)
-        files.sort_by_cached_key(|p| {
-            std::cmp::Reverse(std::fs::metadata(p).and_then(|m| m.modified()).unwrap_or(UNIX_EPOCH))
-        });
-        if let Some(n) = self.limit {
-            files.truncate(n);
-        }
-        let mut units: Vec<Unit> = files
-            .into_iter()
-            .map(|p| Unit {
-                is_subagent: jsonl::is_subagent(&jsonl::session_id_of(&p)),
-                signature: file_sig(&p),
-                key: p.to_string_lossy().into_owned(),
-            })
-            .collect();
-        // Subagents last (stable sort preserves recency within each group).
-        units.sort_by_key(|u| u.is_subagent);
-        Ok(units)
-    }
-
-    fn owns(&self, key: &str) -> bool {
-        Path::new(key).starts_with(&self.root)
-    }
-
-    fn unit_keys(&self) -> Result<Vec<String>> {
-        Ok(self
-            .listing()
-            .iter()
-            .map(|p| p.to_string_lossy().into_owned())
-            .collect())
-    }
-
-    fn read(&self, _unit: &Unit) -> Result<Vec<Turn>> {
-        // An agent's own sessions are converted into the spool funes reads by that agent's
-        // integration. Nothing here reads one; the path is recognized only so it can say so.
-        bail!(
-            "{0} sessions are converted by its integration — run `funes add {0}`, which indexes them",
-            self.harness.cli_name()
-        )
-    }
 }
 
 /// A parquet agent-trace dataset — many sessions in one file, indexed as a single bulk import.
@@ -390,10 +318,8 @@ mod tests {
             .unwrap()
             .describe()
             .contains("parquet"));
-        assert!(open(Path::new("/x/projects"), None)
-            .unwrap()
-            .describe()
-            .contains("transcripts"));
+        let err = open(Path::new("/x/.claude/projects"), None).err().expect("refused");
+        assert!(err.to_string().contains("funes add claude"), "{err}");
     }
 
     #[test]
@@ -411,71 +337,25 @@ mod tests {
             .err()
             .expect("refused");
         assert!(err.to_string().contains("--harness"), "{err}");
-        // A tree without one stays a transcript tree.
-        let tree = tempfile::tempdir().unwrap();
-        std::fs::write(tree.path().join("s.jsonl"), b"{}\n").unwrap();
-        assert!(open(tree.path(), None).unwrap().describe().contains("transcripts"));
     }
 
     #[test]
-    fn jsonl_tree_units_are_files_with_signatures() {
-        // A *.jsonl file under the tree becomes a unit keyed by its path, with a size:mtime stamp;
-        // a parquet dataset is a single signature-less unit (never skipped/recorded).
+    fn a_transcript_names_the_integration_that_converts_it_and_an_empty_root_reads_as_none() {
         let dir = tempfile::tempdir().unwrap();
-        let f = dir.path().join("sess.jsonl");
-        std::fs::write(&f, b"{}\n").unwrap();
+        std::fs::write(dir.path().join("s.jsonl"), b"{\"type\":\"session_meta\"}\n").unwrap();
+        let err = open(dir.path(), None).err().expect("refused");
+        assert!(err.to_string().contains("funes add codex"), "{err}");
+        let empty = tempfile::tempdir().unwrap();
+        assert!(open(empty.path(), None).unwrap().units().unwrap().is_empty());
+    }
 
-        let units = open(dir.path(), None).unwrap().units().unwrap();
+    #[test]
+    fn a_parquet_dataset_is_one_unsigned_unit_owning_nothing() {
+        // Never skipped and never recorded: a re-run re-reads and dedups by chunk id.
+        let pq = open(Path::new("/x/data.parquet"), None).unwrap();
+        let units = pq.units().unwrap();
         assert_eq!(units.len(), 1);
-        assert_eq!(units[0].key, f.to_string_lossy());
-        assert!(units[0].signature.is_some());
-
-        let pq = open(Path::new("/x/data.parquet"), None).unwrap().units().unwrap();
-        assert_eq!(pq.len(), 1);
-        assert!(pq[0].signature.is_none());
-    }
-
-    #[test]
-    fn jsonl_tree_orders_subagents_last() {
-        let dir = tempfile::tempdir().unwrap();
-        for name in ["sess-a.jsonl", "agent-x.jsonl", "sess-b.jsonl", "agent-y.jsonl"] {
-            std::fs::write(dir.path().join(name), b"{}\n").unwrap();
-        }
-        let units = open(dir.path(), None).unwrap().units().unwrap();
-        // Whatever the mtimes, every main precedes every subagent.
-        let first_sub = units.iter().position(|u| u.is_subagent).expect("has a subagent unit");
-        assert!(units[..first_sub].iter().all(|u| !u.is_subagent));
-        assert!(units[first_sub..].iter().all(|u| u.is_subagent));
-        assert_eq!(units.iter().filter(|u| u.is_subagent).count(), 2);
-    }
-
-    #[test]
-    fn jsonl_limit_caps_units() {
-        let dir = tempfile::tempdir().unwrap();
-        for i in 0..5 {
-            std::fs::write(dir.path().join(format!("s{i}.jsonl")), b"{}\n").unwrap();
-        }
-        assert_eq!(open(dir.path(), Some(2)).unwrap().units().unwrap().len(), 2);
-        assert_eq!(open(dir.path(), None).unwrap().units().unwrap().len(), 5);
-        // The listing stays whole under a limit.
-        assert_eq!(open(dir.path(), Some(2)).unwrap().unit_keys().unwrap().len(), 5);
-    }
-
-    #[test]
-    fn a_store_owns_the_keys_it_can_place() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join("projects");
-        let nested = root.join("-a-project");
-        std::fs::create_dir_all(&nested).unwrap();
-
-        let wide = open_with_harness(&root, None, Some(Harness::Claude)).unwrap();
-        let narrow = open_with_harness(&nested, None, Some(Harness::Claude)).unwrap();
-        let inside = nested.join("s.jsonl").to_string_lossy().into_owned();
-        let elsewhere = root.join("-b-project/s.jsonl").to_string_lossy().into_owned();
-        assert!(wide.owns(&inside) && wide.owns(&elsewhere));
-        // A narrower root doesn't speak for the rest of the tree.
-        assert!(narrow.owns(&inside) && !narrow.owns(&elsewhere));
-
-        assert!(!open(&dir.path().join("d.parquet"), None).unwrap().owns(&inside));
+        assert!(units[0].signature.is_none());
+        assert!(!pq.owns("/x/projects/-a-project/s.funes.jsonl"));
     }
 }
