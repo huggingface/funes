@@ -747,12 +747,12 @@ pub async fn run_index_budgeted(
     run_budgeted(sources, no_thinking, finish).await
 }
 
-/// The `funes add` first index: the budgeted drain with no finish prompt — the add flow already
-/// asked, and the per-turn drip owns whatever the budget defers. Tier-major order spends the
-/// budget on text (decisions, rationale) first, so recall works in about a minute; a small history
-/// simply finishes whole.
-pub async fn run_index_seed(root: &Path, harness: Harness) -> Result<()> {
-    let sources = vec![source::open_with_harness(root, None, Some(harness))?];
+/// The `funes add` first index over `spool`: the budgeted drain with no finish prompt — the add
+/// flow already asked, and the per-turn drip owns whatever the budget defers. Tier-major order
+/// spends the budget on text (decisions, rationale) first, so recall works in about a minute; a
+/// small history simply finishes whole.
+pub async fn run_index_seed(spool: &Path) -> Result<()> {
+    let sources = vec![source::open(spool, None)?];
     run_budgeted(sources, false, Finish::Stop).await
 }
 

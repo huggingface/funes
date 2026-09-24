@@ -782,7 +782,7 @@ async fn ensure_local_index(agent: &str) -> bool {
     if memory::Memory::local().open().await.is_ok() {
         return true; // already have a local index
     }
-    let Some((root, harness)) = Harness::parse(agent).ok().and_then(|harness| {
+    let Some((root, _)) = Harness::parse(agent).ok().and_then(|harness| {
         funes::traces::harness::known_harness_roots()
             .into_iter()
             .find(|(_, h)| *h == harness)
@@ -799,7 +799,7 @@ async fn ensure_local_index(agent: &str) -> bool {
         return false;
     }
     eprintln!("funes: indexing your recent {agent} sessions…");
-    if let Err(e) = index::run_index_seed(&root, harness).await {
+    if let Err(e) = index::run_index_seed(&root).await {
         eprintln!(
             "funes: initial index didn't complete ({e:#}) — the hooks are installed; run `funes index` to build it."
         );

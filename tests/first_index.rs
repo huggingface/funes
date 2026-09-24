@@ -52,9 +52,7 @@ async fn seed_finishes_a_small_history_and_a_rerun_is_a_noop() {
 
     // The seed `funes add` runs: budgeted, tier-major. This history fits the budget, so every
     // tier lands and the unit is stamped at the top one.
-    funes::commands::index::run_index_seed(&src, funes::traces::harness::Harness::Claude)
-        .await
-        .unwrap();
+    funes::commands::index::run_index_seed(&src).await.unwrap();
     let full = chunk_count().await;
     assert!(full > 0, "seed indexed the session");
     assert_eq!(
