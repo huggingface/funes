@@ -1,8 +1,11 @@
 # Building the memory
 
-`funes index` builds or updates your local memory from session transcripts. [`funes add`](add.md)
-runs it for you on every turn; run it by hand to seed a memory, to fold in a new source, or to index
-sessions from a machine or agent that never ran the automation.
+`funes index` builds or updates your local memory from what the integrations convert and from the
+turns files you point it at. [`funes add`](add.md) runs it for you on every turn; run it by hand to
+catch a spool up, to finish the deeper passes a budgeted run left, or to fold in a turns file, a
+directory of them, a `.parquet` export, or a Hub trace repo. To index an agent's history from a
+machine that never ran the automation, convert it first —
+[add.md](add.md#converting-by-hand) says how.
 
 ```bash
 funes index      # a fast, text-first pass over every spool, into one memory

@@ -217,6 +217,32 @@ converts nothing goes through the same steps: the index step notes an empty spoo
 memory gets a note that nothing was indexed rather than a push. What a consumer-only install should
 mean is a decision for the distribution work, not made here.
 
+### Converting by hand
+
+funes reads no agent's own transcripts, so indexing an agent's history on a machine that never ran
+the automation — an archive, a colleague's export — is two steps: the bundle's converter into a
+directory of your own, then `funes index` on that directory. A directory you own keeps its files;
+only the spool is drained. The converter is each bundle's own, not part of the contract, so its
+usage is listed here for the maintained four (`<bundle>` is `~/.funes/agents/<id>` once `funes add
+<id>` has run on any machine, or `integrations/<id>` in a checkout):
+
+| Agent | Converter |
+| --- | --- |
+| `claude` | `<bundle>/claude-plugin/funes/convert <transcript.jsonl> [out.funes.jsonl]` — needs jq; one argument prints to stdout |
+| `codex` | `<bundle>/codex-plugin/plugins/funes/convert <rollout.jsonl> [out.funes.jsonl]` — needs jq; one argument prints to stdout |
+| `pi` | `node <bundle>/convert.mjs <session.jsonl \| sessions-root> <out-dir>` — a root converts every session under it |
+| `hermes` | `python3 <bundle>/plugin/convert.py <state.db> <out-dir> [session-id]` — every session in the store unless one is named |
+
+```bash
+for t in /archive/.claude/projects/*/*.jsonl; do
+    ~/.funes/agents/claude/claude-plugin/funes/convert "$t" ~/imports/"$(basename "$t" .jsonl)".funes.jsonl
+done
+funes index ~/imports
+```
+
+A converter emits the same ids the hook does, so a session imported this way and one captured live
+are one session in the memory, deduplicated on re-index.
+
 ## See also
 
 - [recall.md](recall.md) — the `recall`/`get` tools your agent now has.
