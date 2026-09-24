@@ -8,7 +8,7 @@ mod support;
 
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 /// The converter's own fixture, placed where Claude Code keeps its transcripts. The session id is
@@ -25,13 +25,6 @@ fn write_history(home: &Path) {
     .unwrap();
 }
 
-/// The embedder's weights live in the real cache; `$HOME` is fake below.
-fn hf_home() -> PathBuf {
-    std::env::var_os("HF_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").expect("a home")).join(".cache/huggingface"))
-}
-
 fn funes(home: &Path, funes_home: &Path, bin: &Path, log: &Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_funes"));
     cmd.env("HOME", home)
@@ -39,7 +32,7 @@ fn funes(home: &Path, funes_home: &Path, bin: &Path, log: &Path) -> Command {
         // The fake `claude` first, then the system utilities the bundle's scripts need.
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
         .env("FUNES_TEST_CLI_LOG", log)
-        .env("HF_HOME", hf_home())
+        .env("HF_HOME", support::hf_home())
         // Nothing that would offer a memory or record a funes other than the default.
         .env_remove("HF_TOKEN")
         .env_remove("HUGGING_FACE_HUB_TOKEN")
