@@ -526,13 +526,21 @@ async fn main() -> Result<()> {
     }
 }
 
-/// Resolve one agent's integration for an install: refresh its files in the registry, check what it
-/// declares, and confirm it when funes can't vouch for it — all before `add` touches a memory.
+/// Resolve `id`'s integration for a run: refresh its files in the registry, so the script funes
+/// executes is the one it just wrote rather than whatever was sitting there; check what they
+/// declare; and confirm them when funes can't vouch for them — all before `add` touches a memory
+/// or `remove` runs anything. With nothing to refresh from — no source names `id`, or the source
+/// can't be reached — the installed copy is what runs, and funes can't vouch for that either.
 async fn prepare_agent(id: &str, force: bool) -> Result<registry::Integration> {
     let root = registry::default_root()?;
-    let provenance = registry::provision(&root, id, force)
-        .await
-        .map_err(|e| unknown_agent(&root, id, e))?;
+    let provenance = match registry::provision(&root, id, force).await {
+        Ok(provenance) => provenance,
+        Err(e) if root.join(id).is_dir() => {
+            eprintln!("note: the {id} integration could not be refreshed ({e:#}) — running the installed copy.");
+            registry::Provenance::Unvouched("the installed copy, refreshed by nothing".to_string())
+        }
+        Err(e) => return Err(unknown_agent(&root, id, e)),
+    };
     let integration = registry::open(&root, id)?;
     confirm_trust(id, &integration.dir, provenance)?;
     Ok(integration)
@@ -541,9 +549,6 @@ async fn prepare_agent(id: &str, force: bool) -> Result<registry::Integration> {
 /// A failed provision for an agent with no files on this machine is usually a typo, so the error
 /// names what is installed and where another integration comes from.
 fn unknown_agent(root: &Path, id: &str, e: anyhow::Error) -> anyhow::Error {
-    if root.join(id).is_dir() {
-        return e;
-    }
     let installed = registry::registered_ids(root);
     let listing = if installed.is_empty() {
         "none are installed yet".to_string()
@@ -581,23 +586,11 @@ fn confirm_trust(id: &str, dir: &Path, provenance: registry::Provenance) -> Resu
     Ok(())
 }
 
-/// Run `id`'s `setup remove`, then delete its files. The files are refreshed first, so the script
-/// funes executes is the one it just wrote rather than whatever was sitting there; an uninstall has
-/// to work with no source to refresh from, so that falls back to what is installed.
+/// Run `id`'s `setup remove`, then delete its files.
 async fn remove_agent(id: &str) -> Result<()> {
-    let root = registry::default_root()?;
-    let provenance = match registry::provision(&root, id, false).await {
-        Ok(provenance) => provenance,
-        Err(e) if root.join(id).is_dir() => {
-            eprintln!("note: no source to refresh the {id} integration from — {e:#}");
-            registry::Provenance::Unvouched("the installed copy, refreshed by nothing".to_string())
-        }
-        Err(e) => return Err(unknown_agent(&root, id, e)),
-    };
-    let integration = registry::open(&root, id)?;
-    confirm_trust(id, &integration.dir, provenance)?;
+    let integration = prepare_agent(id, false).await?;
     integration.remove()?;
-    registry::discard(&root, id)
+    registry::discard(&registry::default_root()?, id)
 }
 
 /// A resolved memory binding: the memory spec, and whether funes just created the repo this run — the

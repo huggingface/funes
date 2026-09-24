@@ -106,8 +106,10 @@ jobs:
 
       - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
 
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      # expect drives `funes add` at a pty, so the tests can answer the prompts that are only
+      # asked at a terminal.
+      - name: Install protoc and expect
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler expect
 
       # push's pre-publish secret gate shells out to trufflehog (fail-closed), so the
       # round-trip test below needs the binary on PATH. Pinned to the version used locally.

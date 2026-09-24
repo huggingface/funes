@@ -36,6 +36,8 @@ You need:
 - **[trufflehog](https://github.com/trufflesecurity/trufflehog)** — the pre-publish secret
   gate shells out to it (CI pins v3.95.5). Needed on `PATH` (or via `FUNES_TRUFFLEHOG`) to run
   the secret-scan tests and `funes push`.
+- **`expect`** — the `funes add` tests run the binary at a pty to answer the prompts it only asks
+  at a terminal. macOS ships it; `sudo apt-get install -y expect` elsewhere.
 
 ## Building and testing
 
