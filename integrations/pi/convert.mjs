@@ -197,13 +197,16 @@ export function convert(sessionPath, outArg) {
   return out;
 }
 
-/** Every session under a `~/.pi/agent/sessions` tree into the spool. */
-export function convertTree(root, spool) {
+/** Every session under a `~/.pi/agent/sessions` tree into the spool — with `since` (epoch ms), only
+ * those written after it, and never `except`. */
+export function convertTree(root, spool, since = 0, except = "") {
   const written = [];
   for (const entry of readdirSync(root, { withFileTypes: true })) {
     const p = join(root, entry.name);
-    if (entry.isDirectory()) written.push(...convertTree(p, spool));
-    else if (entry.name.endsWith(".jsonl")) written.push(convert(p, spool));
+    if (entry.isDirectory()) written.push(...convertTree(p, spool, since, except));
+    else if (entry.name.endsWith(".jsonl") && p !== except && (!since || statSync(p).mtimeMs > since)) {
+      written.push(convert(p, spool));
+    }
   }
   return written;
 }

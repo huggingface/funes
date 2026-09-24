@@ -28,7 +28,7 @@
 // The result is forwarded as the `funes mcp <memory>` positional; empty forwards a
 // bare `funes mcp` (the local memory).
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -214,14 +214,35 @@ function runScript(script: string, ...args: string[]) {
   } catch {}
 }
 
-// The session pi is writing, as a turns file in the spool. Inline rather than detached: it is a read
-// and an atomic write, and the file has to exist before the indexer is spawned. An ephemeral session
-// (`--no-session`) has no file and nothing to convert.
-function convertSession(ctx: any) {
-  if (!SPOOL) return;
+// The session pi is writing, as a turns file in the spool, returning its path. Inline rather than
+// detached: it is a read and an atomic write, and the file has to exist before the indexer is
+// spawned. An ephemeral session (`--no-session`) has no file and nothing to convert.
+function convertSession(ctx: any): string {
+  if (!SPOOL) return "";
   try {
     const file = ctx?.sessionManager?.getSessionFile?.();
-    if (file) convert(file, SPOOL);
+    if (file) {
+      convert(file, SPOOL);
+      return file;
+    }
+  } catch {}
+  return "";
+}
+
+// The sessions changed since the last sweep: those a pi that died mid-turn never converted. What
+// the spool holds cannot say which those are (funes drains it), so the sweep keeps its own mark: the
+// previous sweep's stamp, or, before there is one, the `spool` record `setup add` wrote just before
+// it converted the history. The session in progress was converted already and is skipped.
+const SWEPT = join(HERE, "swept");
+function convertStale(file: string) {
+  if (!SPOOL || !file) return;
+  try {
+    const since = statSync(existsSync(SWEPT) ? SWEPT : join(HERE, "spool")).mtimeMs;
+    // Stamped before the sweep, so a session written while it runs is swept again next turn.
+    const now = Date.now() / 1000;
+    convertTree(dirname(dirname(file)), SPOOL, since, file);
+    writeFileSync(SWEPT, "");
+    utimesSync(SWEPT, now, now);
   } catch {}
 }
 
@@ -269,7 +290,7 @@ export default async function (pi: any) {
 
   // Per turn, so a session killed mid-flight is indexed up to its last completed turn.
   pi.on("turn_end", async (_event: any, ctx: any) => {
-    convertSession(ctx);
+    convertStale(convertSession(ctx));
     runScript(INDEX_SH, HARNESS);
   });
 

@@ -121,7 +121,7 @@ remove() {
     # The spool holds converted copies of pi's own sessions, so dropping it loses nothing a re-add
     # cannot rebuild — and leaving it would have funes keep indexing an agent it no longer serves.
     rm -rf "$(spool_dir)"
-    rm -f "$HERE/memory" "$HERE/spool" "$HERE/seed-pending"
+    rm -f "$HERE/memory" "$HERE/spool" "$HERE/seed-pending" "$HERE/swept"
     drop_legacy
 
     if ! have_pi; then
