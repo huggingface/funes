@@ -130,6 +130,15 @@ def session_ids(db):
         return [r[0] for r in conn.execute("SELECT DISTINCT session_id FROM messages ORDER BY session_id")]
 
 
+def session_ids_since(db, since):
+    """Every session with a message written after `since` (epoch seconds)."""
+    with _open(db) as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT session_id FROM messages WHERE timestamp > ? ORDER BY session_id", (since,)
+        )
+        return [r[0] for r in rows]
+
+
 def latest_session_id(db):
     """The session whose message landed last, which is the one a turn hook just finished."""
     with _open(db) as conn:
