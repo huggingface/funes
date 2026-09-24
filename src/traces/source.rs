@@ -14,6 +14,7 @@ use super::Turn;
 use crate::hub;
 
 use anyhow::{bail, Context, Result};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -83,11 +84,19 @@ pub fn open(path: &Path, limit: Option<usize>) -> Result<Box<dyn TraceSource>> {
     )
 }
 
-/// "size:mtime_secs" for a file's incremental change-stamp, or `None` if it can't be stat'd.
+/// A file's incremental change-stamp, or `None` if it can't be stat'd.
 pub(crate) fn file_sig(p: &Path) -> Option<String> {
     let md = std::fs::metadata(p).ok()?;
-    let mtime = md.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_secs();
-    Some(format!("{}:{}", md.len(), mtime))
+    let mtime = md.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
+    // Length, mtime to the nanosecond, inode: a file replaced within the second at the same
+    // length still changes one of the last two.
+    Some(format!(
+        "{}:{}.{:09}:{}",
+        md.len(),
+        mtime.as_secs(),
+        mtime.subsec_nanos(),
+        md.ino()
+    ))
 }
 
 /// A parquet agent-trace dataset — many sessions in one file, indexed as a single bulk import.
@@ -253,14 +262,26 @@ mod tests {
     }
 
     #[test]
-    fn file_sig_is_len_colon_mtime() {
+    fn file_sig_is_len_mtime_to_the_nanosecond_and_inode() {
         let mut f = tempfile::NamedTempFile::new().unwrap();
         f.write_all(b"hello").unwrap();
         f.flush().unwrap();
         let sig = file_sig(f.path()).expect("stat-able file has a signature");
-        let (len, mtime) = sig.split_once(':').expect("sig is len:mtime");
-        assert_eq!(len, "5");
-        assert!(mtime.parse::<u64>().is_ok());
+        let parts: Vec<&str> = sig.split(':').collect();
+        assert_eq!(parts.len(), 3, "{sig}");
+        assert_eq!(parts[0], "5");
+        let (secs, nanos) = parts[1].split_once('.').expect("mtime is secs.nanos");
+        assert!(
+            secs.parse::<u64>().is_ok() && nanos.len() == 9 && nanos.parse::<u32>().is_ok(),
+            "{sig}"
+        );
+        assert!(parts[2].parse::<u64>().is_ok(), "{sig}");
+
+        // Replaced in place within the second, at the same length: a new inode tells them apart.
+        let replacement = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(replacement.path(), b"world").unwrap();
+        std::fs::rename(replacement.path(), f.path()).unwrap();
+        assert_ne!(file_sig(f.path()).unwrap(), sig);
     }
 
     #[test]

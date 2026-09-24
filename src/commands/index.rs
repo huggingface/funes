@@ -2,7 +2,7 @@
 //! local Lance dataset. One generic loop drives every source — a JSONL tree today, new formats by
 //! implementing the trait — indexing each of its units in a single append.
 //!
-//! Incremental on two levels: skip a unit whose stamp (size:mtime) is unchanged *and* which
+//! Incremental on two levels: skip a unit whose stamp (length, mtime, inode) is unchanged *and* which
 //! state.json records as already indexed to the run's target tier; and within a re-read unit add
 //! only chunks whose id is new — a grown session (the same memory) contributes just its new turns,
 //! nothing is re-embedded or deleted.
@@ -187,13 +187,22 @@ struct UnitState {
 /// Whether a recorded unit is current for a run targeting `target`: its stamp still matches and it
 /// has already reached at least that tier. A lower recorded tier still needs a pass.
 fn unit_current(entry: Option<&UnitState>, sig: &str, target: Tier) -> bool {
-    entry.is_some_and(|e| e.sig == sig && e.level.is_some_and(|l| l >= target))
+    entry.is_some_and(|e| same_sig(&e.sig, sig) && e.level.is_some_and(|l| l >= target))
+}
+
+/// Whether a recorded stamp is the file's current one. A stamp an older funes recorded carries
+/// the mtime to the second and no inode, and still matches a file it agrees with that far; the
+/// next record of the unit is written in full.
+fn same_sig(recorded: &str, current: &str) -> bool {
+    recorded == current
+        || (recorded.matches(':').count() == 1
+            && current.strip_prefix(recorded).is_some_and(|rest| rest.starts_with('.')))
 }
 
 /// Whether this build already refused this exact content: re-reading buys nothing until the unit
 /// changes or funes does.
 fn unit_refused(entry: Option<&UnitState>, sig: &str) -> bool {
-    entry.is_some_and(|e| e.sig == sig && e.refused.as_deref() == Some(VERSION))
+    entry.is_some_and(|e| same_sig(&e.sig, sig) && e.refused.as_deref() == Some(VERSION))
 }
 
 /// Whether a finished unit is a spool file to drop. funes owns the spool: a bundle writes into it
@@ -396,7 +405,7 @@ impl Indexer {
 
         let first_index = ds.is_none();
 
-        // Incremental state: path -> {size:mtime stamp, tier}; an unreadable or old-schema file →
+        // Incremental state: path -> {change stamp, tier}; an unreadable or old-schema file →
         // empty. A first index (memory missing) owes everything, whatever an old state.json says — a
         // stale one would silently skip every unit against the empty memory.
         let state_path = dir.join("state.json");
@@ -1041,6 +1050,21 @@ mod tests {
         fn read(&self, _: &source::Unit) -> Result<Vec<traces::Turn>> {
             Ok(vec![])
         }
+    }
+
+    /// A stamp from before the nanoseconds and the inode matches what it agrees with, and nothing
+    /// finer; a current stamp matches itself alone.
+    #[test]
+    fn an_older_stamp_still_matches_to_the_second() {
+        assert!(same_sig("5:1700", "5:1700.000000123:42"));
+        assert!(!same_sig("5:1700", "5:1701.000000000:42"));
+        assert!(!same_sig("5:1700", "6:1700.000000123:42"));
+        assert!(
+            !same_sig("5:17", "5:1700.000000123:42"),
+            "a prefix of the seconds is not them"
+        );
+        assert!(same_sig("5:1700.000000123:42", "5:1700.000000123:42"));
+        assert!(!same_sig("5:1700.000000123:42", "5:1700.000000123:43"));
     }
 
     /// A snapshot an older funes wrote names agents' own transcripts, which nothing indexes now.

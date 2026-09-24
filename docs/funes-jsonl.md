@@ -19,7 +19,7 @@ A file is one unit: it is read whole and written in one append. A directory is o
 
 A file you name is *signature-less* — it is re-read on every `funes index` that names it and never
 recorded in `state.json`; chunk-id dedup makes the re-read a no-op. A directory is a store funes
-revisits, so each file in it carries a `size:mtime` stamp and a recorded tier: an unchanged one is
+revisits, so each file in it carries a change stamp (length, mtime, inode) and a recorded tier: an unchanged one is
 skipped, a changed one is read again. Keep files bounded, and ship an update either as a new file or
 by rewriting the one it belongs to — a rewritten file changes its stamp, so it is read again and
 dedup drops what is already stored. `--harness` is refused on both shapes: the facet is in the data.
