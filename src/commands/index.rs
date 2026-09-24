@@ -254,11 +254,18 @@ fn update_index_coverage<'a>(
     snapshot
 }
 
+/// The snapshot at `path`, or an empty one. A pending key that is not a turns file was written by a
+/// funes that read agents' own transcripts; no source of this one owns it, so no run could ever
+/// retire it — it is dropped on read, and the next write leaves it behind.
 fn read_index_coverage(path: &Path) -> IndexCoverageSnapshot {
-    std::fs::read_to_string(path)
+    let mut snapshot: IndexCoverageSnapshot = std::fs::read_to_string(path)
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    snapshot
+        .pending
+        .retain(|key| traces::funes_jsonl::is_turns_file(Path::new(key)));
+    snapshot
 }
 
 fn write_snapshot(path: &Path, snapshot: &IndexCoverageSnapshot) -> Result<()> {
@@ -284,12 +291,10 @@ fn write_index_coverage(
 /// means no sweep has written a readable snapshot yet; status omits the line rather than doing an
 /// unbounded recursive transcript scan.
 pub(crate) fn local_index_coverage() -> Option<IndexCoverage> {
-    std::fs::read_to_string(dataset::funes_dir().join("index-coverage.json"))
-        .ok()
-        .and_then(|text| serde_json::from_str::<IndexCoverageSnapshot>(&text).ok())
-        .map(|snapshot| IndexCoverage {
-            pending: snapshot.pending.len(),
-        })
+    let path = dataset::funes_dir().join("index-coverage.json");
+    path.is_file().then(|| IndexCoverage {
+        pending: read_index_coverage(&path).pending.len(),
+    })
 }
 
 /// A set-up indexer: it holds the memory lock, embedder, dataset, redaction scanner, and incremental
@@ -1036,6 +1041,23 @@ mod tests {
         fn read(&self, _: &source::Unit) -> Result<Vec<traces::Turn>> {
             Ok(vec![])
         }
+    }
+
+    /// A snapshot an older funes wrote names agents' own transcripts, which nothing indexes now.
+    #[test]
+    fn coverage_from_before_the_spool_forgets_the_transcripts_it_pended() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("index-coverage.json");
+        std::fs::write(
+            &path,
+            r#"{"pending":["/home/me/.claude/projects/-p/abc.jsonl","/home/me/.hermes/state.db#s1","/home/me/.funes/spool/codex/rollout-x.funes.jsonl"]}"#,
+        )
+        .unwrap();
+        let pending = read_index_coverage(&path).pending;
+        assert_eq!(
+            pending.into_iter().collect::<Vec<_>>(),
+            vec!["/home/me/.funes/spool/codex/rollout-x.funes.jsonl".to_string()]
+        );
     }
 
     #[test]
