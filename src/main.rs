@@ -434,7 +434,7 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             // A spool refresh (no explicit path — the per-turn hook and the terminal "keep me
-            // fresh" case) is budgeted and text-first; an explicit path or Hub repo is indexed in
+            // fresh" case) is budgeted and rows-first; an explicit path or Hub repo is indexed in
             // full.
             let budgeted = path.is_none();
             let roots: Vec<PathBuf> = match (path, harness) {

@@ -59,19 +59,19 @@ async fn seed_finishes_a_small_history_and_a_rerun_is_a_noop() {
     assert!(err.contains("not an integration id"), "{err}");
     write_session(&src);
 
-    // The seed `funes add` runs: budgeted, tier-major. This history fits the budget, so every
-    // tier lands and the unit is stamped at the top one.
+    // The seed `funes add` runs: budgeted, rows first. This history fits the budget, so every row
+    // lands and is embedded, and the unit is stamped as written.
     funes::commands::index::run_index_seed(&src).await.unwrap();
     let full = chunk_count().await;
     assert!(full > 0, "seed indexed the session");
     assert_eq!(
         state_level(home.path()),
-        "ToolResult",
-        "a finished seed records the top tier"
+        "Shallow",
+        "a finished seed records the unit as written"
     );
     assert!(
         !src.join("sess-0001.funes.jsonl").exists(),
-        "funes drains a spool file it has taken to the top tier"
+        "funes drains a spool file once all its rows are written"
     );
 
     // The budgeted no-path run (the per-turn hook): nothing owed, nothing added.
