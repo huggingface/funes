@@ -19,16 +19,16 @@ pub fn stale_install_notice() -> Option<String> {
         .into_iter()
         .map(|id| {
             format!(
-                "a hook asked funes to index {id}'s spool and nothing writes it — this install predates \
-                 funes's converters; re-run `funes add {id}`"
+                "the {id} integration does not match this version of funes. \
+                 Re-run `funes add {id}` to update it."
             )
         })
         .collect();
     if let Ok(root) = registry::default_root() {
-        lines.extend(registry::mismatched(&root).into_iter().map(|(id, contract)| {
+        lines.extend(registry::mismatched(&root).into_iter().map(|(id, _)| {
             format!(
-                "the {id} integration speaks contract {contract} and this funes speaks {}; re-run `funes add {id}`",
-                registry::CONTRACT_VERSION
+                "the {id} integration does not match this version of funes. \
+                 Re-run `funes add {id}` to update it."
             )
         }));
     }

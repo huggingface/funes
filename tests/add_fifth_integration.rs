@@ -184,7 +184,10 @@ fn a_fifth_integration_seeds_and_drains_its_spool_under_its_own_facet() {
     support::assert_success(&funes(&home, &funes_home, &log, &["index", "--harness", "clyde"]));
     let out = funes(&home, &funes_home, &log, &["index", "--harness", "nope"]);
     assert!(!out.status.success());
-    assert!(stderr(&out).contains("no nope spool"), "{}", stderr(&out));
+    assert_eq!(
+        stderr(&out).lines().next(),
+        Some("Error: the nope integration does not match this version of funes. Re-run `funes add nope` to update it.")
+    );
 }
 
 #[test]

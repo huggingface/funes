@@ -41,8 +41,8 @@ pub fn select(id: &str) -> Result<PathBuf> {
     let dir = spool_dir(id);
     if !dir.is_dir() {
         bail!(
-            "no {id} spool at {} — `funes add {id}` installs the integration that writes it; to index turns files elsewhere, pass their path",
-            dir.display()
+            "the {id} integration does not match this version of funes. \
+             Re-run `funes add {id}` to update it."
         );
     }
     let _ = std::fs::remove_file(missing_stamp(id));

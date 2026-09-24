@@ -91,7 +91,12 @@ fn a_stale_install_is_said_on_every_read_until_funes_add_runs_again() {
     // An old hook: `funes index --harness codex` off a terminal, with no spool to drain.
     let refused = funes(&home, &funes_home, &["index", "--harness", "codex"]);
     assert!(!refused.status.success());
-    assert!(stderr(&refused).contains("no codex spool"), "{}", stderr(&refused));
+    assert_eq!(
+        stderr(&refused).lines().next(),
+        Some(
+            "Error: the codex integration does not match this version of funes. Re-run `funes add codex` to update it."
+        )
+    );
     assert!(stamp.is_file(), "the refusal leaves its stamp");
 
     // An integration another binary installed: its manifest speaks a contract this funes does not.
@@ -107,28 +112,15 @@ fn a_stale_install_is_said_on_every_read_until_funes_add_runs_again() {
     let status = funes(&home, &funes_home, &["status"]);
     support::assert_success(&status);
     let err = stderr(&status);
-    assert!(
-        err.contains("note: a hook asked funes to index codex's spool") && err.contains("re-run `funes add codex`"),
-        "{err}"
-    );
-    assert!(
-        err.contains("note: the clyde integration speaks contract 99") && err.contains("re-run `funes add clyde`"),
-        "{err}"
-    );
+    let notes = "note: the codex integration does not match this version of funes. Re-run `funes add codex` to update it.\n\
+                 note: the clyde integration does not match this version of funes. Re-run `funes add clyde` to update it.\n";
+    assert_eq!(err, notes);
     assert!(!stdout(&status).contains("note:"), "{}", stdout(&status));
 
     // The MCP server says both in its instructions and ahead of every tool's text.
     let (instructions, text) = mcp_status(&home, &funes_home);
-    assert!(instructions.contains("re-run `funes add codex`"), "{instructions}");
-    assert!(instructions.contains("re-run `funes add clyde`"), "{instructions}");
-    assert!(
-        text.starts_with("note: a hook asked funes to index codex's spool"),
-        "{text}"
-    );
-    assert!(
-        text.contains("note: the clyde integration speaks contract 99"),
-        "{text}"
-    );
+    assert!(instructions.contains(notes), "{instructions}");
+    assert!(text.starts_with(notes), "{text}");
     assert!(
         text.contains("\n\nmemory: "),
         "the status text follows the notes: {text}"

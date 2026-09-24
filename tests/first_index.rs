@@ -53,8 +53,10 @@ async fn seed_finishes_a_small_history_and_a_rerun_is_a_noop() {
     assert_eq!(spool::spools(), vec![src.clone()]);
     assert_eq!(spool::select("claude").unwrap(), src);
     let err = spool::select("codex").unwrap_err().to_string();
-    assert!(err.contains("no codex spool"), "{err}");
-    assert!(err.contains("funes add codex"), "{err}");
+    assert_eq!(
+        err,
+        "the codex integration does not match this version of funes. Re-run `funes add codex` to update it."
+    );
     let err = spool::select("Not An Id").unwrap_err().to_string();
     assert!(err.contains("not an integration id"), "{err}");
     write_session(&src);
