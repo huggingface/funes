@@ -116,7 +116,10 @@ add() {
     fi
     rm -rf "$LEGACY"
 
-    claude plugin marketplace add "$PLUGIN_ROOT"
+    if ! claude plugin marketplace add "$PLUGIN_ROOT"; then
+        echo "\`claude plugin\` couldn't take funes's marketplace — upgrade Claude Code (funes's hooks ride in a plugin), then run \`funes add claude\` again." >&2
+        exit 1
+    fi
     # A plain install is a no-op for an installed plugin and update is version-gated, so refreshed
     # content lands by uninstalling first.
     claude plugin uninstall "$PLUGIN_ID" >/dev/null 2>&1 || true
