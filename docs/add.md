@@ -21,12 +21,14 @@ preserves unrelated agent hooks and configuration. It does **not** delete your l
 original session transcripts, model/Hub caches, or any published memory. The
 command is idempotent, so an already-absent integration is a successful no-op.
 
-**Updating an install you already have: remove, then add.** Re-running `funes add` is idempotent and
-changes the memory fine, but `funes remove` is what takes a previous install away in full — including
-what an older funes put where the current one no longer looks. The pair is the reliable path:
+**Updating an install you already have: `funes add` again.** Re-running it is idempotent: it
+rebinds the memory you name, refreshes the setup, and each integration clears what an older funes
+put where the current one no longer looks. `funes remove` first is for a clean slate — it takes the
+install away in full, your memory aside:
 
 ```bash
-funes remove codex && funes add codex <user|org>/funes-memory
+funes add codex <user|org>/funes-memory                          # brought forward in place
+funes remove codex && funes add codex <user|org>/funes-memory    # from a clean slate
 ```
 
 funes tells you when this is due: an install its hooks no longer fit — one from before funes read
