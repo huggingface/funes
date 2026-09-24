@@ -548,6 +548,9 @@ async fn main() -> Result<()> {
 /// or `remove` runs anything. With nothing to refresh from — no source names `id`, or the source
 /// can't be reached — the installed copy is what runs, and funes can't vouch for that either.
 async fn prepare_agent(id: &str, force: bool) -> Result<registry::Integration> {
+    if !spool::is_id(id) {
+        bail!("{id:?} is not an integration id (lowercase [a-z0-9_-])");
+    }
     let root = registry::default_root()?;
     let provenance = match registry::provision(&root, id, force).await {
         Ok(provenance) => provenance,

@@ -204,6 +204,7 @@ enum Source {
 /// Whether funes vouches for the files it installed: a published archive it verified, or the
 /// checkout it was built from. Anything else is someone's files on this disk, and the caller
 /// confirms before funes executes them.
+#[derive(Debug)]
 pub enum Provenance {
     Vouched,
     /// Where they came from, for the confirmation.
@@ -236,7 +237,11 @@ fn published_prefix() -> String {
 
 /// Install `id`'s files into the registry. Only a file that differs is rewritten (`force` rewrites
 /// regardless), and nothing is pruned — an integration's `setup` keeps its own state beside them.
+/// The id names the directory written, so it is checked here, before anything is.
 pub async fn provision(root: &Path, id: &str, force: bool) -> Result<Provenance> {
+    if !spool::is_id(id) {
+        bail!("{id:?} is not an integration id (lowercase [a-z0-9_-])");
+    }
     let dst = root.join(id);
     match source_for(id)? {
         Source::Checkout(src) => {
@@ -489,6 +494,21 @@ mod tests {
         assert!(err.contains(&(CONTRACT_VERSION + 1).to_string()), "{err}");
         assert!(err.contains(&CONTRACT_VERSION.to_string()), "{err}");
         assert!(!dir.join("ran").exists(), "setup must not run");
+    }
+
+    /// The id is a path segment funes writes under the registry, so a bad one is refused before a
+    /// source is even looked for.
+    #[tokio::test]
+    async fn an_id_that_is_not_one_is_refused_before_anything_is_written() {
+        let root = tempfile::tempdir().unwrap();
+        for id in ["../docs", "Pi", "a/b", ""] {
+            let err = provision(root.path(), id, false).await.unwrap_err().to_string();
+            assert!(err.contains("not an integration id"), "{id:?}: {err}");
+        }
+        assert!(
+            std::fs::read_dir(root.path()).unwrap().next().is_none(),
+            "nothing was written"
+        );
     }
 
     #[test]
