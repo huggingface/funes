@@ -105,7 +105,7 @@ def blocks_for(row):
 
 def timestamp(secs):
     """An epoch-seconds `timestamp` as the format wants it: RFC 3339 in UTC with a `Z`. A missing or
-    out-of-range value yields an empty string, which recency treats as fresh."""
+    out-of-range value yields an empty string, which the format refuses, so the caller substitutes."""
     if secs is None:
         return ""
     try:
@@ -162,7 +162,11 @@ def turns_of(db, session_id):
 
     turns = []
     seq = 0
+    # A turns file carries a time for every turn, so a row whose own is missing or out of range
+    # takes the last one seen: the message came after the one before it. Before any, the epoch.
+    ts = "1970-01-01T00:00:00Z"
     for row in rows:
+        ts = timestamp(row["timestamp"]) or ts
         blocks = blocks_for(row)
         if not blocks:
             continue
@@ -171,7 +175,7 @@ def turns_of(db, session_id):
             turn["cwd"] = cwd
         turn["turn_uuid"] = str(row["id"])
         turn["seq"] = seq
-        turn["ts"] = timestamp(row["timestamp"])
+        turn["ts"] = ts
         turn["role"] = row["role"] or ""
         turn["blocks"] = blocks
         turn["harness"] = HARNESS

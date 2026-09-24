@@ -1,7 +1,8 @@
 #!/bin/sh
 # The converter's acceptance test: a synthetic hermes store carrying one of each row the mapping
 # treats differently — a user message, an assistant with reasoning and a tool call, a tool result, a
-# `system` row and a blank one, both of which produce no turn — and the turns file it must produce.
+# `system` row and a blank one, both of which produce no turn, and a message whose time is out of
+# range, which takes the previous one — and the turns file it must produce.
 #
 # `expected.funes.jsonl` is what funes's own hermes reader emitted while it had one, in every field
 # but `ts`: that reader wrote RFC 3339 with a `+00:00` offset, which a turns file may not carry, so
