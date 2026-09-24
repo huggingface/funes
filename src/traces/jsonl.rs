@@ -25,7 +25,8 @@ pub fn session_id_of(p: &Path) -> String {
     p.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string()
 }
 
-/// A Claude Code sub-agent session id: each sub-agent's transcript is named `agent-<hash>.jsonl`.
+/// A Claude Code sub-agent session id: each sub-agent's transcript is named `agent-<hash>`, and
+/// the turns file converted from it keeps that stem.
 pub fn is_subagent(session_id: &str) -> bool {
     session_id.starts_with("agent-")
 }
