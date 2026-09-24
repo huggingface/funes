@@ -122,6 +122,20 @@ For Claude, Codex, and Hermes, `funes add` runs the one-time bootstrap the hooks
 3. **Does the first push** to a freshly-bound memory — the publish the hook refuses to do off a
    terminal (the wrong-memory guard; see [automation.md](automation.md)).
 
+### The spool
+
+funes reads no agent's own transcripts. Each integration converts a session into
+`~/.funes/spool/<agent>/<session id>.funes.jsonl` — at install for the history, then on every turn
+for the session in progress — and funes indexes what it finds there.
+
+The directory is funes's. A bundle only ever writes into it, and funes deletes a file once the whole
+of it is in the memory, so what is left on disk is exactly the backlog still owed: the whole history
+right after the seed, nothing once the per-turn drip has caught up. A file funes could not read
+stays, so a broken converter is visible rather than silent.
+
+That leaves the memory as the only copy of the converted turns. Rebuilding one from scratch is
+`funes add <agent>` again: its seed re-converts the agent's own history.
+
 Re-run `funes add <agent> <memory>` any time to change the memory or refresh the setup — it's
 idempotent. On a new host, re-running it once clears the wrong-memory guard for that machine, as
 soon as that host has an index of its own to push.

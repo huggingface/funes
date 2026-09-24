@@ -1,6 +1,7 @@
 //! The `funes add` seed drives the budgeted drain end to end: a small history finishes whole
-//! within the budget, a rerun is a no-op, and a deleted memory self-heals. Own test binary so its
-//! `$FUNES_HOME` can't race the other integration tests'.
+//! within the budget, its spool copy is dropped, a rerun is a no-op, and a deleted memory rebuilds
+//! from a source that still holds the session. Own test binary so its `$FUNES_HOME` can't race the
+//! other integration tests'.
 
 use std::io::Write;
 
@@ -41,8 +42,7 @@ fn state_level(home: &std::path::Path) -> String {
 async fn seed_finishes_a_small_history_and_a_rerun_is_a_noop() {
     let home = tempfile::tempdir().unwrap();
     std::env::set_var("FUNES_HOME", home.path());
-    // Where the agent's integration converts into, which is the root `add` seeds and the hook
-    // drains.
+    // Where the agent's integration converts into.
     let src = funes::traces::harness::spool_dir(
         &funes::traces::harness::spool_root(),
         funes::traces::harness::Harness::Claude,
@@ -62,6 +62,10 @@ async fn seed_finishes_a_small_history_and_a_rerun_is_a_noop() {
         "ToolResult",
         "a finished seed records the top tier"
     );
+    assert!(
+        !src.join("sess-0001.funes.jsonl").exists(),
+        "funes drains a spool file it has taken to the top tier"
+    );
 
     // The budgeted no-path run (the per-turn hook): nothing owed, nothing added.
     let roots = [(src.clone(), Some(funes::traces::harness::Harness::Claude))];
@@ -71,7 +75,19 @@ async fn seed_finishes_a_small_history_and_a_rerun_is_a_noop() {
     assert_eq!(chunk_count().await, full, "rerun adds nothing");
 
     // A deleted memory self-heals: the memory dir is gone but state.json survived — the next run
-    // must re-index everything, not trust the stale state and skip against an empty memory.
+    // must re-index everything, not trust the stale state and skip against an empty memory. The
+    // drained spool has nothing left to rebuild from, so this runs over a turns directory funes does
+    // not own: the same session, so the same chunks.
+    let kept = home.path().join("elsewhere");
+    std::fs::create_dir_all(&kept).unwrap();
+    write_session(&kept);
+    let roots = [(kept.clone(), None)];
+    funes::commands::index::run_index_budgeted(&roots, false, None, false)
+        .await
+        .unwrap();
+    assert_eq!(chunk_count().await, full, "the same session is the same chunks");
+    assert!(kept.join("sess-0001.funes.jsonl").exists(), "and it is left alone");
+
     std::fs::remove_dir_all(home.path().join("memory")).unwrap();
     funes::commands::index::run_index_budgeted(&roots, false, None, false)
         .await

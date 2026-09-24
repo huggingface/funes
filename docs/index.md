@@ -35,6 +35,8 @@ harness root unattended (a Claude session-end shouldn't pull in Codex or pi sess
 funes reads no agent's own transcripts: each integration converts its sessions into that agent's
 spool, and a path naming a native store is refused with a pointer at `funes add <agent>`. A session
 no integration has converted is not indexed — install it, and its history is converted at install.
+funes owns the spool and drains it as it goes: a file is deleted once the whole of it is in the
+memory (see [add.md](add.md)), which is why a memory is rebuilt by re-running `funes add <agent>`.
 
 ### Parquet trace format
 

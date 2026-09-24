@@ -13,7 +13,7 @@ use crate::inference::{self, embed_batched, Embedder};
 use crate::memory::dataset::{self, build_batch, schema, MODEL};
 use crate::memory::lock;
 use crate::scan;
-use crate::traces::harness::Harness;
+use crate::traces::harness::{self, Harness};
 use crate::traces::{self, repo, source};
 use anyhow::{anyhow, Context, Result};
 use arrow_array::{Array, RecordBatchIterator, StringArray};
@@ -194,6 +194,17 @@ fn unit_current(entry: Option<&UnitState>, sig: &str, target: Tier) -> bool {
 /// changes or funes does.
 fn unit_refused(entry: Option<&UnitState>, sig: &str) -> bool {
     entry.is_some_and(|e| e.sig == sig && e.refused.as_deref() == Some(VERSION))
+}
+
+/// Whether a finished unit is a spool file to drop. funes owns the spool: a bundle writes into it
+/// and never reads back, so what stays there is exactly what is still owed. A turns directory
+/// someone else owns keeps its files. The stamp is re-read because a bundle may have replaced the
+/// file since this run listed it; only the bytes that were indexed are dropped.
+fn drains(key: &str, sig: &str, level: Tier) -> bool {
+    let path = Path::new(key);
+    level >= *Tier::ALL.iter().max().expect("Tier::ALL is non-empty")
+        && harness::is_spool(path)
+        && source::file_sig(path).as_deref() == Some(sig)
 }
 
 /// Lightweight coverage snapshot written by indexing runs for `status` to read without walking
@@ -568,6 +579,11 @@ impl Indexer {
                     refused: None,
                 },
             )?;
+            if drains(&key, sig, target) {
+                if let Err(e) = std::fs::remove_file(&key) {
+                    eprintln!("{progress} {key} — indexed, but the spool copy stayed: {e}");
+                }
+            }
         }
         // Count a unit's sessions once per run — later tier passes over it only add chunks.
         if self.counted.insert(i) {
