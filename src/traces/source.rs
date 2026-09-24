@@ -5,12 +5,10 @@
 //!
 //! A unit is both the incremental-tracking granule (skipped when its [`Unit::signature`] still
 //! matches `state.json`) and the single-append granule (all of a unit's turns are written in one
-//! commit). JSONL is one session per file; a parquet dataset — or a hermes `state.db` — is many
-//! sessions in one file.
+//! commit). A turns file is one session; a parquet dataset is many sessions in one file.
 
 use super::funes_jsonl;
 use super::harness::{self, Harness};
-use super::hermes;
 use super::jsonl;
 use super::parquet;
 use super::Turn;
@@ -61,10 +59,9 @@ pub trait TraceSource {
 }
 
 /// Pick the source for `path`: a `*.parquet` file is a parquet trace dataset, a `.funes.jsonl` file
-/// (or a directory holding them) is a turns file, a hermes `state.db` (or the `~/.hermes` dir
-/// holding it) is its SQLite session store, and anything else is a JSONL transcript tree whose
-/// harness is auto-detected. `limit` caps how many sessions are read (`None` = all) — used to bound
-/// a benchmark's build time.
+/// (or a directory holding them) is a turns file, and anything else is an agent's own session tree,
+/// which funes no longer reads — that source exists to name the integration that does. `limit` caps
+/// how many sessions are read (`None` = all) — used to bound a benchmark's build time.
 pub fn open(path: &Path, limit: Option<usize>) -> Result<Box<dyn TraceSource>> {
     open_with_harness(path, limit, None)
 }
@@ -85,8 +82,9 @@ pub fn open_with_harness(path: &Path, limit: Option<usize>, harness: Option<Harn
     }
     // A path funes doesn't know by name is listed once, here, and the source that wins keeps the
     // listing; a known harness dir is listed lazily by its own source.
-    let listing =
-        (Harness::from_known_dir(path).is_none() && !is_hermes_path(path)).then(|| jsonl::iter_jsonl_files(path));
+    let listing = Harness::from_known_dir(path)
+        .is_none()
+        .then(|| jsonl::iter_jsonl_files(path));
     let holds_turns = listing
         .as_ref()
         .is_some_and(|l| l.iter().any(|p| funes_jsonl::is_turns_file(p)));
@@ -105,39 +103,13 @@ pub fn open_with_harness(path: &Path, limit: Option<usize>, harness: Option<Harn
             limit,
         )));
     }
-    Ok(if harness == Some(Harness::Hermes) || is_hermes_path(path) {
-        Box::new(HermesDb {
-            path: hermes_db_path(path),
-            limit,
-        })
-    } else {
-        let harness = harness.unwrap_or_else(|| detect_harness(path, listing.as_deref()));
-        Box::new(JsonlTree {
-            root: path.to_path_buf(),
-            limit,
-            harness,
-            listing: listing.map_or_else(OnceLock::new, OnceLock::from),
-        })
-    })
-}
-
-/// Whether `path` addresses hermes' SQLite store — the `state.db` file itself, or the `~/.hermes`
-/// dir that holds it. (`--harness hermes` also forces the hermes source regardless of the path.)
-fn is_hermes_path(path: &Path) -> bool {
-    matches!(
-        path.file_name().and_then(|n| n.to_str()),
-        Some("state.db") | Some(".hermes")
-    )
-}
-
-/// The `state.db` file for a hermes path: the file itself, or `<dir>/state.db` when handed the
-/// `~/.hermes` directory.
-fn hermes_db_path(path: &Path) -> PathBuf {
-    if path.file_name().and_then(|n| n.to_str()) == Some("state.db") {
-        path.to_path_buf()
-    } else {
-        path.join("state.db")
-    }
+    let harness = harness.unwrap_or_else(|| detect_harness(path, listing.as_deref()));
+    Ok(Box::new(JsonlTree {
+        root: path.to_path_buf(),
+        limit,
+        harness,
+        listing: listing.map_or_else(OnceLock::new, OnceLock::from),
+    }))
 }
 
 /// Detect a JSONL tree's harness: a known session dir wins (a cheap tail match), else sniff the
@@ -219,77 +191,12 @@ impl TraceSource for JsonlTree {
     }
 
     fn read(&self, _unit: &Unit) -> Result<Vec<Turn>> {
-        match self.harness {
-            // hermes keeps its sessions in a SQLite state.db, not a JSONL tree, so it's read by a
-            // dedicated source and never reaches here.
-            Harness::Hermes => bail!("hermes sessions are read from state.db, not a JSONL tree"),
-            // Every other agent's integration converts its sessions into the spool funes reads.
-            // Nothing here parses a transcript; the path is recognized only so it can say so.
-            h => bail!(
-                "{0} sessions are converted by its integration — run `funes add {0}`, which indexes them",
-                h.cli_name()
-            ),
-        }
-    }
-}
-
-/// hermes' single SQLite `state.db` — many sessions in one file. Each session is a unit signed by
-/// its high-water `messages.id`, so an unchanged session is skipped and a grown one is re-read
-/// (chunk-id dedup keeps already-stored turns a no-op). `limit` keeps the most-recently-active N.
-struct HermesDb {
-    path: PathBuf,
-    limit: Option<usize>,
-}
-
-impl HermesDb {
-    /// A session id alone doesn't say which db to open.
-    fn unit_key(&self, session_id: &str) -> String {
-        format!("{}#{session_id}", self.path.display())
-    }
-
-    /// A path may contain `#`, a session id may not.
-    fn session_id(key: &str) -> &str {
-        key.rsplit_once('#').map_or(key, |(_, sid)| sid)
-    }
-}
-
-impl TraceSource for HermesDb {
-    fn describe(&self) -> String {
-        format!("scanning hermes sessions in {}", self.path.display())
-    }
-
-    fn units(&self) -> Result<Vec<Unit>> {
-        let mut sessions = hermes::sessions_with_watermark(&self.path)?;
-        // Most-recently-active first (highest high-water id); `--limit` then keeps the recent N.
-        sessions.sort_by_key(|s| std::cmp::Reverse(s.watermark));
-        if let Some(n) = self.limit {
-            sessions.truncate(n);
-        }
-        Ok(sessions
-            .into_iter()
-            .map(|s| Unit {
-                key: self.unit_key(&s.session_id),
-                signature: Some(s.watermark.to_string()),
-                is_subagent: false,
-            })
-            .collect())
-    }
-
-    fn owns(&self, key: &str) -> bool {
-        key.rsplit_once('#').is_some_and(|(db, _)| Path::new(db) == self.path)
-    }
-
-    fn unit_keys(&self) -> Result<Vec<String>> {
-        Ok(hermes::sessions_with_watermark(&self.path)?
-            .into_iter()
-            .map(|s| self.unit_key(&s.session_id))
-            .collect())
-    }
-
-    fn read(&self, unit: &Unit) -> Result<Vec<Turn>> {
-        // The workdir is derived from the session's recorded cwd inside the parser; "hermes" is only
-        // the fallback for a session that never recorded one.
-        hermes::turns_from_state_db(&self.path, Self::session_id(&unit.key), "hermes")
+        // An agent's own sessions are converted into the spool funes reads by that agent's
+        // integration. Nothing here reads one; the path is recognized only so it can say so.
+        bail!(
+            "{0} sessions are converted by its integration — run `funes add {0}`, which indexes them",
+            self.harness.cli_name()
+        )
     }
 }
 
@@ -569,66 +476,6 @@ mod tests {
         // A narrower root doesn't speak for the rest of the tree.
         assert!(narrow.owns(&inside) && !narrow.owns(&elsewhere));
 
-        let db = dir.path().join("state.db");
-        let hermes = open_with_harness(&db, None, Some(Harness::Hermes)).unwrap();
-        assert!(hermes.owns(&format!("{}#s1", db.display())));
-        assert!(!hermes.owns(&format!("{}#s1", dir.path().join("other.db").display())));
-        assert!(!hermes.owns("s1"));
         assert!(!open(&dir.path().join("d.parquet"), None).unwrap().owns(&inside));
-    }
-
-    #[test]
-    fn open_routes_hermes_state_db_and_dir() {
-        // The state.db file, and the ~/.hermes dir that holds it, both route to the hermes source.
-        assert!(open(Path::new("/x/.hermes/state.db"), None)
-            .unwrap()
-            .describe()
-            .contains("hermes"));
-        assert!(open(Path::new("/x/.hermes"), None)
-            .unwrap()
-            .describe()
-            .contains("state.db"));
-        // `--harness hermes` forces the hermes source even for an unrelated-looking path.
-        assert!(open_with_harness(Path::new("/x/whatever"), None, Some(Harness::Hermes))
-            .unwrap()
-            .describe()
-            .contains("hermes"));
-    }
-
-    #[test]
-    fn hermes_units_are_sessions_signed_by_watermark() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = dir.path().join("state.db");
-        let conn = rusqlite::Connection::open(&db).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE sessions (id TEXT PRIMARY KEY, cwd TEXT);
-             CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, \
-                content TEXT, tool_call_id TEXT, tool_calls TEXT, tool_name TEXT, timestamp REAL NOT NULL, \
-                reasoning TEXT, reasoning_content TEXT);
-             INSERT INTO sessions (id, cwd) VALUES ('s1','/w'),('s2','/w');
-             INSERT INTO messages (session_id, role, content, timestamp) VALUES
-                ('s1','user','a',1.0),('s2','user','b',2.0),('s1','assistant','c',3.0);",
-        )
-        .unwrap();
-
-        let src = open(&db, None).unwrap();
-        let units = src.units().unwrap();
-        assert_eq!(units.len(), 2);
-        // Keyed by location, most-recent-activity first: s1's high-water id is 3 (ids 1,3) > s2's 2.
-        let key = |sid: &str| format!("{}#{sid}", db.display());
-        assert_eq!(units[0].key, key("s1"));
-        assert_eq!(units[0].signature.as_deref(), Some("3"));
-        assert_eq!(units[1].key, key("s2"));
-        assert_eq!(units[1].signature.as_deref(), Some("2"));
-        // read wires through to the parser (s1 has two turns).
-        let turns = src.read(&units[0]).unwrap();
-        assert_eq!(turns.len(), 2);
-        assert_eq!(turns[0].harness, "hermes");
-        // --limit keeps the recent N sessions, and leaves the listing whole.
-        assert_eq!(open(&db, Some(1)).unwrap().units().unwrap().len(), 1);
-        assert_eq!(
-            open(&db, Some(1)).unwrap().unit_keys().unwrap(),
-            vec![key("s1"), key("s2")]
-        );
     }
 }

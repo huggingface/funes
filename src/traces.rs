@@ -4,12 +4,11 @@
 //! A session becomes a sequence of [`Turn`]s, each carrying typed [`Block`]s. Everything downstream
 //! — chunk → embed → store → recall — operates on that shape, so the model is source-agnostic and
 //! lives here, at the root of the readers that fill it. An agent's own transcripts are converted
-//! into [`funes_jsonl`] by its integration, outside funes; what remains here reads that, hermes'
-//! SQLite store, and Hub parquet.
+//! into [`funes_jsonl`] by its integration, outside funes, so the readers here take that and Hub
+//! parquet.
 
 pub mod funes_jsonl;
 pub mod harness;
-pub mod hermes;
 pub mod jsonl;
 pub mod parquet;
 pub mod repo;
@@ -71,8 +70,8 @@ pub struct Turn {
     pub blocks: Vec<Block>,
     #[serde(skip)]
     pub source_path: String,
-    /// Who produced this session: `hermes` from its own store, any `[a-z0-9_-]` id from a turns
-    /// file — an integration names itself, and the rows an older funes wrote say `claude_code`.
+    /// Who produced this session: any `[a-z0-9_-]` id a turns file carries — an integration names
+    /// itself, and the rows an older funes wrote say `claude_code`.
     pub harness: String,
 }
 

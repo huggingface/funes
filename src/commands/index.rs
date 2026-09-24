@@ -324,9 +324,9 @@ struct Indexer {
 
 /// Enumerate every source's units (each source orders its own — recency-desc, subagents last),
 /// tagged with the source index. When several sources are indexed at once (e.g. every known
-/// harness), one that fails to enumerate — say a hermes state.db this build can't read — is warned
-/// and skipped instead of aborting the rest; a lone source stays fatal, since its failure is then
-/// the whole result. But if the skips left nothing to index and at least one source errored, that's
+/// harness), one that fails to enumerate — say a spool holding a file that is not a turns file — is
+/// warned and skipped instead of aborting the rest; a lone source stays fatal, since its failure is
+/// then the whole result. But if the skips left nothing to index and at least one source errored, that's
 /// a failure, not a silent success — whereas an all-empty run with no errors is a legitimate no-op.
 fn collect_units(sources: &[Box<dyn source::TraceSource>]) -> Result<Vec<(usize, source::Unit)>> {
     let isolate = sources.len() > 1;
@@ -1214,37 +1214,6 @@ mod tests {
             pending_after_a_sweep(&coverage, &sweep()),
             HashSet::from([key("a.jsonl")])
         );
-    }
-
-    #[test]
-    fn index_coverage_retires_a_session_the_hermes_db_no_longer_holds() {
-        let dir = tempfile::tempdir().unwrap();
-        let coverage = dir.path().join("index-coverage.json");
-        let db = dir.path().join("state.db");
-        let conn = rusqlite::Connection::open(&db).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE sessions (id TEXT PRIMARY KEY, cwd TEXT);
-             CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, \
-                content TEXT, tool_call_id TEXT, tool_calls TEXT, tool_name TEXT, timestamp REAL NOT NULL, \
-                reasoning TEXT, reasoning_content TEXT);
-             INSERT INTO sessions (id, cwd) VALUES ('s1','/w'),('s2','/w');
-             INSERT INTO messages (session_id, role, content, timestamp) VALUES
-                ('s1','user','a',1.0),('s2','user','b',2.0);",
-        )
-        .unwrap();
-        let key = |sid: &str| format!("{}#{sid}", db.display());
-        let sweep = || -> Vec<Box<dyn source::TraceSource>> {
-            vec![source::open_with_harness(&db, None, Some(Harness::Hermes)).unwrap()]
-        };
-        assert_eq!(
-            pending_after_a_sweep(&coverage, &sweep()),
-            HashSet::from([key("s1"), key("s2")])
-        );
-
-        // The db outlives the session it dropped, and the key is no path to probe for.
-        conn.execute_batch("DELETE FROM messages WHERE session_id = 's2'")
-            .unwrap();
-        assert_eq!(pending_after_a_sweep(&coverage, &sweep()), HashSet::from([key("s1")]));
     }
 
     #[test]

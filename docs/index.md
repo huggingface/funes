@@ -10,10 +10,9 @@ funes index      # a fast, text-first pass over every known harness dir, into on
 
 ## What it indexes
 
-With **no argument**, in a terminal, `funes index` sweeps every supported agent's sessions it finds —
-`~/.claude/projects` and `~/.hermes/state.db`, plus `~/.funes/spool/<agent>` for each agent whose
-integration converts its own sessions — into one memory, then offers to finish any deeper work left.
-Scope it to a single agent with `--harness`:
+With **no argument**, in a terminal, `funes index` sweeps every agent whose integration is installed
+— each converts its own sessions into `~/.funes/spool/<agent>`, which is what funes reads — into one
+memory, then offers to finish any deeper work left. Scope it to a single agent with `--harness`:
 
 ```bash
 funes index --harness codex        # only Codex's sessions
@@ -32,6 +31,10 @@ funes index <org>/<repo>                   # a Hub trace dataset (or a full hf:/
 An existing local path always wins over reading the same string as a repo ref. An **automated
 (non-terminal) run must name a target** — a path or `--harness <name>`; funes refuses to sweep every
 harness root unattended (a Claude session-end shouldn't pull in Codex or pi sessions).
+
+funes reads no agent's own transcripts: each integration converts its sessions into that agent's
+spool, and a path naming a native store is refused with a pointer at `funes add <agent>`. A session
+no integration has converted is not indexed — install it, and its history is converted at install.
 
 ### Parquet trace format
 
@@ -138,7 +141,7 @@ scanned or stored: a pasted screenshot is megabytes of base64 with nothing recal
 Indexing and recall are one deterministic pipeline:
 
 ```
-~/.claude/projects, ~/.hermes/state.db, ~/.funes/spool/<agent>
+~/.funes/spool/<agent>   (each agent's integration converts its own sessions into it)
    (or a .parquet trace, or a .funes.jsonl turns file)
    │  parse        deterministic — turns (text / thinking / tool_use / tool_result), tagged by agent
    │  chunk        one chunk per content block, tight provenance
