@@ -29,6 +29,11 @@ what an older funes put where the current one no longer looks. The pair is the r
 funes remove codex && funes add codex <user|org>/funes-memory
 ```
 
+funes tells you when this is due: an install its hooks no longer fit — one from before funes read
+its converters' spool, or one another funes made — gets a `note:` line ahead of every read, in your
+agent's tool results and on the CLI's stderr, naming the `funes add` to re-run. It goes away once
+you have.
+
 ## The agents
 
 | Agent | Read tools | Per-turn indexing | Session-boundary publish |

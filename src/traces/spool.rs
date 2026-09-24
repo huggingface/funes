@@ -32,7 +32,8 @@ pub fn is_spool(path: &Path) -> bool {
     path.starts_with(spool_root())
 }
 
-/// The spool `--harness <id>` selects: a valid id whose directory a producer has created.
+/// The spool `--harness <id>` selects: a valid id whose directory a producer has created. Finding
+/// it clears the stamp a refusal left.
 pub fn select(id: &str) -> Result<PathBuf> {
     if !is_id(id) {
         bail!("{id:?} is not an integration id (lowercase [a-z0-9_-])");
@@ -44,7 +45,41 @@ pub fn select(id: &str) -> Result<PathBuf> {
             dir.display()
         );
     }
+    let _ = std::fs::remove_file(missing_stamp(id));
     Ok(dir)
+}
+
+/// The stamp a refused `--harness <id>` leaves, `<root>/<id>.missing`: a file, which the sweep
+/// (listing directories) never sees.
+fn missing_stamp(id: &str) -> PathBuf {
+    spool_root().join(format!("{id}.missing"))
+}
+
+/// Record that `id`'s spool was asked for and does not exist. Only a hook asks unattended, and only
+/// a hook from an install older than the spool asks for one nothing writes, so the stamp is what
+/// the read verbs report until `funes add {id}` creates the spool.
+pub fn note_missing(id: &str) -> Result<()> {
+    if !is_id(id) {
+        bail!("{id:?} is not an integration id (lowercase [a-z0-9_-])");
+    }
+    std::fs::create_dir_all(spool_root())?;
+    std::fs::write(missing_stamp(id), "")?;
+    Ok(())
+}
+
+/// The ids asked for whose spool still does not exist, in id order.
+pub fn missing() -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(spool_root()) else {
+        return Vec::new();
+    };
+    let mut ids: Vec<String> = entries
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter_map(|name| name.strip_suffix(".missing").map(str::to_string))
+        .filter(|id| is_id(id) && !spool_dir(id).is_dir())
+        .collect();
+    ids.sort();
+    ids
 }
 
 /// Every spool a producer has created, in id order — what a no-argument `funes index` sweeps.

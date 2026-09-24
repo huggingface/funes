@@ -4,7 +4,7 @@
 //! harness session dirs (Claude Code, Codex, pi) or an explicit path/parquet/repo. funes's home is
 //! `$FUNES_HOME` or `~/.funes`.
 
-use funes::agents::registry;
+use funes::agents::{self, registry};
 use funes::commands::{ask, index, mcp, push, recall, scrub, sketch, update};
 use funes::hub;
 use funes::memory;
@@ -294,7 +294,23 @@ impl MemoryOpts {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    match Cli::parse().cmd {
+    let cli = Cli::parse();
+    // A read is where a user of an install that stopped capturing lands, so it carries the line
+    // that says so — on stderr, so stdout stays the agent-format text the MCP tools return.
+    if matches!(
+        cli.cmd,
+        Cmd::Recall { .. }
+            | Cmd::Get { .. }
+            | Cmd::Sessions { .. }
+            | Cmd::Scan { .. }
+            | Cmd::Sketch { .. }
+            | Cmd::Status { .. }
+    ) {
+        if let Some(note) = agents::stale_install_notice() {
+            eprint!("{note}");
+        }
+    }
+    match cli.cmd {
         Cmd::Recall {
             query,
             k,
@@ -428,7 +444,19 @@ async fn main() -> Result<()> {
                     return index::run_index_remote(&uri, no_thinking).await;
                 }
                 (Some(p), _) => return Err(anyhow!("no such path: {p}")),
-                (None, Some(id)) => vec![spool::select(&id)?],
+                (None, Some(id)) => match spool::select(&id) {
+                    Ok(dir) => vec![dir],
+                    Err(e) => {
+                        // Off a terminal this is a hook, and a hook asking for a spool nothing
+                        // writes is an install older than the spool: leave the stamp the read
+                        // verbs report. At a terminal the error itself is read, and a typo must
+                        // not leave one.
+                        if !std::io::stdin().is_terminal() && spool::is_id(&id) {
+                            spool::note_missing(&id)?;
+                        }
+                        return Err(e);
+                    }
+                },
                 // No target at all: index every spool — but only in a terminal. An automated run
                 // (no TTY) must name a target, so a session-end hook indexes just its own spool — a
                 // Claude session-end shouldn't pull in Codex or pi sessions.

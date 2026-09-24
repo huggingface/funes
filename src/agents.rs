@@ -7,6 +7,34 @@ pub mod registry;
 use anyhow::{Context, Result};
 use std::path::Path;
 
+use crate::traces::spool;
+
+/// What a read says when this funes and an install on this machine disagree, one `note:` line per
+/// case, or `None`: a hook asked for a spool nothing writes (an install from before the spool), or a
+/// registered integration speaks another contract (an install by another binary). The cure is the
+/// same, `funes add <id>` again — and funes knows no agent here, only what asked and what is
+/// registered.
+pub fn stale_install_notice() -> Option<String> {
+    let mut lines: Vec<String> = spool::missing()
+        .into_iter()
+        .map(|id| {
+            format!(
+                "a hook asked funes to index {id}'s spool and nothing writes it — this install predates \
+                 funes's converters; re-run `funes add {id}`"
+            )
+        })
+        .collect();
+    if let Ok(root) = registry::default_root() {
+        lines.extend(registry::mismatched(&root).into_iter().map(|(id, contract)| {
+            format!(
+                "the {id} integration speaks contract {contract} and this funes speaks {}; re-run `funes add {id}`",
+                registry::CONTRACT_VERSION
+            )
+        }));
+    }
+    (!lines.is_empty()).then(|| lines.iter().map(|line| format!("note: {line}\n")).collect())
+}
+
 /// Render an argv as a copy/paste-safe POSIX shell command.
 pub(crate) fn shell_command<S: AsRef<str>>(program: &str, args: &[S]) -> String {
     std::iter::once(program)

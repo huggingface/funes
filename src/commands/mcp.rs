@@ -3,6 +3,7 @@
 //! stdout is the JSON-RPC channel — logs must go to stderr.
 
 use super::recall;
+use crate::agents;
 use crate::memory::Memory;
 use anyhow::Result;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -135,6 +136,16 @@ pub struct StatusRequest {
     pub memory: Option<String>,
 }
 
+/// A tool's text, led by the stale-install note when there is one. A tool result is the one channel
+/// every client hands to the model, so this is where an install that stopped capturing gets said;
+/// the CLI prints the same line on stderr and keeps stdout byte-identical to this text.
+fn noted(text: String) -> String {
+    match agents::stale_install_notice() {
+        Some(note) => format!("{note}\n{text}"),
+        None => text,
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct Funes {
     /// Explicit memory spec (`funes mcp <memory>`), pinned for the server's lifetime. `None` reads
@@ -175,22 +186,24 @@ impl Funes {
             memory,
         }): Parameters<RecallRequest>,
     ) -> String {
-        match recall::recall(
-            self.memory(memory),
-            query,
-            k.unwrap_or(recall::DEFAULT_K),
-            candidates.unwrap_or(recall::DEFAULT_CANDIDATES),
-            half_life.unwrap_or(recall::DEFAULT_HALF_LIFE),
-            neighbors.unwrap_or(recall::DEFAULT_NEIGHBORS),
-            block_type,
-            harness,
+        noted(
+            match recall::recall(
+                self.memory(memory),
+                query,
+                k.unwrap_or(recall::DEFAULT_K),
+                candidates.unwrap_or(recall::DEFAULT_CANDIDATES),
+                half_life.unwrap_or(recall::DEFAULT_HALF_LIFE),
+                neighbors.unwrap_or(recall::DEFAULT_NEIGHBORS),
+                block_type,
+                harness,
+            )
+            .await
+            {
+                Ok(s) if !s.is_empty() => s,
+                Ok(_) => "no results".to_string(),
+                Err(e) => format!("recall error: {e}"),
+            },
         )
-        .await
-        {
-            Ok(s) if !s.is_empty() => s,
-            Ok(_) => "no results".to_string(),
-            Err(e) => format!("recall error: {e}"),
-        }
     }
 
     #[tool(
@@ -206,11 +219,11 @@ impl Funes {
         }): Parameters<GetRequest>,
     ) -> String {
         let range = recall::TurnRange { from, to };
-        match recall::get(self.memory(memory), session_id, range).await {
+        noted(match recall::get(self.memory(memory), session_id, range).await {
             Ok(s) if !s.is_empty() => s,
             Ok(_) => "no results".to_string(),
             Err(e) => format!("get error: {e}"),
-        }
+        })
     }
 
     #[tool(
@@ -234,11 +247,11 @@ impl Funes {
             limit,
             offset: offset.unwrap_or(0),
         };
-        match recall::sessions(self.memory(memory), filter).await {
+        noted(match recall::sessions(self.memory(memory), filter).await {
             Ok(s) if !s.is_empty() => s,
             Ok(_) => "no results".to_string(),
             Err(e) => format!("sessions error: {e}"),
-        }
+        })
     }
 
     #[tool(
@@ -256,21 +269,23 @@ impl Funes {
             memory,
         }): Parameters<ScanRequest>,
     ) -> String {
-        match recall::scan(
-            self.memory(memory),
-            needle,
-            session_id,
-            from,
-            to,
-            ignore_case.unwrap_or(false),
-            context.unwrap_or(recall::DEFAULT_CONTEXT),
+        noted(
+            match recall::scan(
+                self.memory(memory),
+                needle,
+                session_id,
+                from,
+                to,
+                ignore_case.unwrap_or(false),
+                context.unwrap_or(recall::DEFAULT_CONTEXT),
+            )
+            .await
+            {
+                Ok(s) if !s.is_empty() => s,
+                Ok(_) => "no results".to_string(),
+                Err(e) => format!("scan error: {e}"),
+            },
         )
-        .await
-        {
-            Ok(s) if !s.is_empty() => s,
-            Ok(_) => "no results".to_string(),
-            Err(e) => format!("scan error: {e}"),
-        }
     }
 
     #[tool(
@@ -287,11 +302,13 @@ impl Funes {
             memory,
         }): Parameters<SketchRequest>,
     ) -> String {
-        match super::sketch::run(self.memory(memory), session_id, from, to, units, max_chars).await {
-            Ok(s) if !s.is_empty() => s,
-            Ok(_) => "no results".to_string(),
-            Err(e) => format!("sketch error: {e}"),
-        }
+        noted(
+            match super::sketch::run(self.memory(memory), session_id, from, to, units, max_chars).await {
+                Ok(s) if !s.is_empty() => s,
+                Ok(_) => "no results".to_string(),
+                Err(e) => format!("sketch error: {e}"),
+            },
+        )
     }
 
     #[tool(
@@ -300,9 +317,11 @@ impl Funes {
     async fn status(&self, Parameters(StatusRequest { memory }): Parameters<StatusRequest>) -> String {
         // No update check here: it needs the network, and the "update available" notice belongs
         // on the human-facing CLI `funes status`, not on this hot, otherwise-local tool path.
-        recall::status(self.memory(memory))
-            .await
-            .unwrap_or_else(|e| format!("status error: {e}"))
+        noted(
+            recall::status(self.memory(memory))
+                .await
+                .unwrap_or_else(|e| format!("status error: {e}")),
+        )
     }
 }
 
@@ -312,15 +331,18 @@ impl ServerHandler for Funes {
         let mut server_info = Implementation::default();
         server_info.name = "funes".to_string();
         server_info.version = env!("CARGO_PKG_VERSION").to_string();
+        let mut instructions = "Persistent memory over the user's past AI coding sessions: their transcripts, \
+                                indexed automatically as they work and read-only here — nothing has to be saved. \
+                                When earlier work matters, this is the memory to consult."
+            .to_string();
+        if let Some(note) = agents::stale_install_notice() {
+            instructions.push_str("\n\n");
+            instructions.push_str(&note);
+        }
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(server_info)
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
-            .with_instructions(
-                "Persistent memory over the user's past AI coding sessions: their transcripts, \
-                 indexed automatically as they work and read-only here — nothing has to be saved. \
-                 When earlier work matters, this is the memory to consult."
-                    .to_string(),
-            )
+            .with_instructions(instructions)
     }
 }
 

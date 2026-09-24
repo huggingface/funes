@@ -61,6 +61,20 @@ pub fn registered_ids(root: &Path) -> Vec<String> {
     ids
 }
 
+/// The registered integrations whose manifest speaks another contract than this funes, with the
+/// contract each speaks: every one was installed by another binary, and what its hooks do may not
+/// be what this one expects. A manifest that does not parse is not counted; `open` reports it.
+pub fn mismatched(root: &Path) -> Vec<(String, u32)> {
+    registered_ids(root)
+        .into_iter()
+        .filter_map(|id| {
+            let text = std::fs::read_to_string(root.join(&id).join("manifest.json")).ok()?;
+            let manifest: Manifest = serde_json::from_str(&text).ok()?;
+            (manifest.contract_version != CONTRACT_VERSION).then_some((id, manifest.contract_version))
+        })
+        .collect()
+}
+
 /// Resolve `id` in `root` and check what it declares. Every refusal happens here, before `setup`
 /// runs.
 pub fn open(root: &Path, id: &str) -> Result<Integration> {
@@ -475,6 +489,18 @@ mod tests {
         assert!(err.contains(&(CONTRACT_VERSION + 1).to_string()), "{err}");
         assert!(err.contains(&CONTRACT_VERSION.to_string()), "{err}");
         assert!(!dir.join("ran").exists(), "setup must not run");
+    }
+
+    #[test]
+    fn the_mismatched_integrations_are_listed_with_their_contract() {
+        let root = tempfile::tempdir().unwrap();
+        integration(root.path(), "pi", &manifest("pi", CONTRACT_VERSION), "true");
+        integration(root.path(), "codex", &manifest("codex", CONTRACT_VERSION + 1), "true");
+        integration(root.path(), "hermes", "not json", "true");
+        assert_eq!(
+            mismatched(root.path()),
+            vec![("codex".to_string(), CONTRACT_VERSION + 1)]
+        );
     }
 
     #[test]
