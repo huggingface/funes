@@ -118,6 +118,11 @@ fn a_stale_install_is_said_on_every_read_until_funes_add_runs_again() {
     assert_eq!(err, notes);
     assert!(!stdout(&status).contains("note:"), "{}", stdout(&status));
 
+    // `ask` reads the memory in-process before it borrows an agent, so it gets the same line — and
+    // with no index it stops there, agent unasked.
+    let asked = funes(&home, &funes_home, &["ask", "claude", "anything"]);
+    assert!(stderr(&asked).starts_with(notes), "{}", stderr(&asked));
+
     // The MCP server says both in its instructions and ahead of every tool's text — and it was
     // launched with the binding, so its cure carries the memory.
     let team = tmp.path().join("team-memory");
