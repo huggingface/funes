@@ -91,8 +91,7 @@ async fn turns_files_are_indexed_and_invalid_ones_rejected() {
             "gh/huggingface/transformers#31234".to_string(),
         ])
     );
-    // A budgeted, tier-major run visits each unit once per tier; a rejected unit is still counted
-    // once.
+    // A budgeted run reads each unit once for its rows; a rejected unit is counted once.
     let home = tempfile::tempdir().unwrap();
     std::env::set_var("FUNES_HOME", home.path());
     let err = funes::commands::index::run_index_budgeted(&[(fixture(""), None)], false, None, true)

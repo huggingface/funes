@@ -46,8 +46,8 @@ async fn seed_finishes_a_small_history_and_a_rerun_is_a_noop() {
     std::env::set_var("FUNES_HOME", home.path());
     write_session(src.path());
 
-    // The seed `funes add` runs: budgeted, tier-major. This history fits the budget, so every
-    // tier lands and the unit is stamped at the top one.
+    // The seed `funes add` runs: budgeted, rows first. This history fits the budget, so every row
+    // lands and is embedded, and the unit is stamped as written.
     funes::commands::index::run_index_seed(src.path(), funes::traces::harness::Harness::Claude)
         .await
         .unwrap();
@@ -55,8 +55,8 @@ async fn seed_finishes_a_small_history_and_a_rerun_is_a_noop() {
     assert!(full > 0, "seed indexed the session");
     assert_eq!(
         state_level(home.path()),
-        "ToolResult",
-        "a finished seed records the top tier"
+        "Shallow",
+        "a finished seed records the unit as written"
     );
 
     // The budgeted no-path run (the per-turn hook): nothing owed, nothing added.

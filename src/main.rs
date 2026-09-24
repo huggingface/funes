@@ -446,7 +446,7 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             // A harness-dirs refresh (no explicit path — the per-turn hook and the terminal "keep
-            // me fresh" case) is budgeted and text-first; an explicit path or Hub repo is indexed
+            // me fresh" case) is budgeted and rows-first; an explicit path or Hub repo is indexed
             // in full.
             let budgeted = path.is_none();
             let roots: Vec<(PathBuf, Option<Harness>)> = match path {
