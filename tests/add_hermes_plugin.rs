@@ -25,9 +25,13 @@ async fn add_hermes_installs_the_plugin_and_leaves_a_pre_plugin_config_alone() {
     std::env::remove_var("FUNES_HOME");
     std::env::remove_var("FUNES_BIN");
 
-    // An install from before the plugin, in the file that also holds the user's configuration.
+    // An install from before the plugin: its hook entries in the file that also holds the user's
+    // configuration, and its scripts beside a script of the user's.
     let hermes_dir = home.join(".hermes");
-    fs::create_dir_all(&hermes_dir).unwrap();
+    let hooks = hermes_dir.join("hooks");
+    fs::create_dir_all(&hooks).unwrap();
+    fs::write(hooks.join("funes-index.sh"), "owned").unwrap();
+    fs::write(hooks.join("user-hook.sh"), "keep").unwrap();
     let config = hermes_dir.join("config.yaml");
     fs::write(
         &config,
@@ -66,15 +70,19 @@ async fn add_hermes_installs_the_plugin_and_leaves_a_pre_plugin_config_alone() {
     // The memory rides in a file the push hook reads, so the plugin stays a static file.
     assert_eq!(fs::read_to_string(plugin.join("memory")).unwrap(), "acme/kb\n");
 
-    // The pre-plugin hooks are in the user's own file, so funes names them rather than editing it.
+    // The pre-plugin hooks are in the user's own file, so funes names them rather than editing it —
+    // but their approvals are revoked and their scripts gone, so they do nothing beside the plugin.
     assert_eq!(
         fs::read_to_string(&config).unwrap(),
         "model: hermes-4\nhooks:\n  post_llm_call:\n  - command: bash \"/old/funes-index.sh\" \"hermes\"\n"
     );
+    assert!(!hooks.join("funes-index.sh").exists(), "funes's own script goes");
+    assert!(hooks.join("user-hook.sh").exists(), "the user's stays");
 
     assert_eq!(
         fs::read_to_string(&log).unwrap(),
         "config path\n\
+         hooks revoke bash \"/old/funes-index.sh\" \"hermes\"\n\
          plugins enable funes\n\
          mcp add funes --command funes --args mcp acme/kb\n"
     );

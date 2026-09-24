@@ -99,11 +99,9 @@ add() {
     printf '%s\n' "$home/state.db" >"$dest/state-db"
     seed "$dest" "$spool" "$home"
 
-    # Those hooks now do the plugin's work a second time, and only the user can take them out of the
-    # file that holds the rest of their configuration.
-    if [ -n "$(pre_plugin_commands "$home")" ]; then
-        echo "$home/config.yaml still declares funes's own shell hooks, which now duplicate the plugin — delete the entries whose command runs funes-index.sh or funes-push.sh (\`hermes config edit\`)." >&2
-    fi
+    # The plugin does the shell hooks' work now, so they go the way `remove` takes them: approvals
+    # revoked and scripts deleted, which leaves their entries inert until the user drops them.
+    drop_pre_plugin_install "$home"
 
     if ! have_hermes; then
         echo "the funes plugin is installed at $dest"
