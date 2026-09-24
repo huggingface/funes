@@ -187,7 +187,7 @@ fn a_fifth_integration_seeds_and_drains_its_spool_under_its_own_facet() {
     assert!(!out.status.success());
     assert_eq!(
         stderr(&out).lines().next(),
-        Some("Error: the nope integration does not match this version of funes. Re-run `funes add nope` to update it.")
+        Some("Error: the nope integration does not match this version of funes. Re-run `funes add nope`, naming the memory it is bound to, to update it.")
     );
 }
 
@@ -199,11 +199,19 @@ fn an_installed_only_integration_adds_and_removes_once_trusted_at_a_terminal() {
     let log = tmp.path().join("setup.log");
     let dir = install(&home, "clyde", 1);
     let memory = tmp.path().join("team-memory");
+    // What a hook from before this install left when it asked for a spool nothing wrote.
+    let stamp = funes_home.join("spool/clyde.missing");
+    let refused = || {
+        fs::create_dir_all(stamp.parent().unwrap()).unwrap();
+        fs::write(&stamp, "").unwrap();
+    };
+    refused();
 
     let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde", memory.to_str().unwrap()]);
     let transcript = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{transcript}");
     assert!(transcript.contains("Trust it? [y/N]"), "{transcript}");
+    assert!(!stamp.exists(), "add forgets the refusals");
     // Setup ran with the verb, the memory, and the contract environment.
     assert_eq!(
         fs::read_to_string(&log).unwrap(),
@@ -218,19 +226,26 @@ fn an_installed_only_integration_adds_and_removes_once_trusted_at_a_terminal() {
     assert!(transcript.contains("nothing indexed yet"), "{transcript}");
 
     fs::remove_file(&log).unwrap();
+    refused();
     let out = funes_at_a_terminal(&home, &funes_home, &log, &["remove", "clyde"]);
     let transcript = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{transcript}");
     assert!(transcript.contains("Trust it? [y/N]"), "{transcript}");
     assert!(fs::read_to_string(&log).unwrap().starts_with("remove\n"));
     assert!(!dir.exists(), "the installed copy is taken with the integration");
+    assert!(
+        !stamp.exists(),
+        "remove forgets the refusals with the hooks that left them"
+    );
 
     // Gone, with no source to refresh it from: a second remove has nothing to do and says so.
     fs::remove_file(&log).unwrap();
+    refused();
     let out = funes(&home, &funes_home, &log, &["remove", "clyde"]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(stderr(&out).starts_with("nothing to remove"), "{}", stderr(&out));
     assert!(!log.exists(), "no setup ran");
+    assert!(!stamp.exists(), "and forgets the refusals all the same");
 }
 
 #[test]

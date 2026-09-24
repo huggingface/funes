@@ -76,6 +76,16 @@ pub fn note_missing(id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Drop the stamp `id`'s refusals left, if any: `funes add` has made the spool, or `funes remove`
+/// has taken the hooks that asked for it, and neither leaves a spool to find it by.
+pub fn forget_missing(id: &str) -> Result<()> {
+    match std::fs::remove_file(missing_stamp(id)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// The ids asked for whose spool still does not exist, in id order.
 pub fn missing() -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(spool_root()) else {

@@ -536,7 +536,9 @@ async fn main() -> Result<()> {
                 resolved,
                 |memory| async move { integration.add(memory.as_deref()) },
             )
-            .await
+            .await?;
+            // Whatever an older hook asked for, this install's hooks are the ones that ask now.
+            spool::forget_missing(&agent)
         }
         Cmd::Remove { agent } => remove_agent(&agent).await,
     }
@@ -615,12 +617,15 @@ async fn remove_agent(id: &str) -> Result<()> {
         Ok(integration) => integration,
         Err(e) if spool::is_id(id) && !root.join(id).is_dir() && !registry::has_source(id) => {
             eprintln!("nothing to remove — {e:#}");
-            return Ok(());
+            return spool::forget_missing(id);
         }
         Err(e) => return Err(e),
     };
     integration.remove()?;
-    registry::discard(&root, id)
+    registry::discard(&root, id)?;
+    // The hooks that asked for the spool are gone with the integration, so the refusals they left
+    // must not outlive it: `remove` takes the spool too, which would show them again.
+    spool::forget_missing(id)
 }
 
 /// A resolved memory binding: the memory spec, and whether funes just created the repo this run — the
