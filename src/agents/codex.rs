@@ -21,7 +21,6 @@ use crate::commands::update::parse_semver;
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 const SKILL_MD: &str = include_str!("../../integrations/codex/SKILL.md");
 
@@ -67,7 +66,7 @@ pub fn install(memory: Option<String>) -> Result<()> {
     let funes = std::env::var("FUNES_BIN").unwrap_or_else(|_| "funes".to_string());
     let args = mcp_add_args(&funes, memory.as_deref());
     let manual = shell_command("codex", &args);
-    let status = match Command::new("codex").args(&args).status() {
+    let status = match crate::platform::command("codex").args(&args).status() {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             println!("`codex` isn't on PATH — once it is, run:  {manual}");
@@ -133,15 +132,18 @@ fn codex_home() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os("CODEX_HOME").filter(|d| !d.is_empty()) {
         return Ok(PathBuf::from(dir));
     }
-    let home = std::env::var_os("HOME").context("resolving $HOME for the Codex home")?;
-    Ok(PathBuf::from(home).join(".codex"))
+    let home = crate::platform::user_home().context("resolving the user profile for the Codex home")?;
+    Ok(home.join(".codex"))
 }
 
 /// The home `codex doctor --json` reports. Its exit status is the health verdict, not whether it
 /// answered, so the report is read whatever it says; anything unreadable yields `None` and leaves
 /// the caller its fallback.
 fn doctor_codex_home() -> Option<PathBuf> {
-    let report = Command::new("codex").args(["doctor", "--json"]).output().ok()?;
+    let report = crate::platform::command("codex")
+        .args(["doctor", "--json"])
+        .output()
+        .ok()?;
     codex_home_from_report(&report.stdout)
 }
 
@@ -169,7 +171,7 @@ fn skill_dir(codex_home: &Path) -> PathBuf {
 /// stops reaching the agents that read that tree. Best-effort: it is gone on every host but the ones
 /// that ran that install.
 fn remove_shared_skill() -> Result<()> {
-    let home = PathBuf::from(std::env::var_os("HOME").context("resolving $HOME for the skills dir")?);
+    let home = crate::platform::user_home().context("resolving the user profile for the skills dir")?;
     let dir = home.join(".agents/skills/funes");
     remove_file(&dir.join("SKILL.md"))?;
     remove_empty_dir(&dir)?;
@@ -201,7 +203,7 @@ fn uninstall_skill(codex_home: &Path) -> Result<()> {
 /// What Codex prints for `--version`. `None` when Codex is absent, which leaves the install to
 /// proceed as the registration does.
 fn codex_version() -> Result<Option<String>> {
-    let out = match Command::new("codex").arg("--version").output() {
+    let out = match crate::platform::command("codex").arg("--version").output() {
         Ok(o) if o.status.success() => o,
         Ok(_) => return Ok(None),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -218,12 +220,12 @@ fn parse_version_line(printed: &str) -> Option<(u32, u32, u32)> {
 fn desired_hooks(hooks_dir: &Path, memory: Option<&str>) -> Vec<hooks::Hook> {
     let mut hooks = vec![hooks::Hook {
         event: "Stop",
-        command: hooks::command(&hooks_dir.join("funes-index.sh").display().to_string(), &["codex"]),
+        command: hooks::command(&hooks_dir.join(hooks::INDEX_NAME).display().to_string(), &["codex"]),
         status: INDEX_STATUS,
     }];
     if let Some(memory) = memory {
         let command = hooks::command(
-            &hooks_dir.join("funes-push.sh").display().to_string(),
+            &hooks_dir.join(hooks::PUSH_NAME).display().to_string(),
             &[memory, "codex"],
         );
         hooks.push(hooks::Hook {
@@ -245,13 +247,18 @@ fn desired_hooks(hooks_dir: &Path, memory: Option<&str>) -> Vec<hooks::Hook> {
 fn install_hooks(codex_home: &Path, memory: Option<&str>) -> Result<()> {
     let base = codex_home.to_path_buf();
     let hooks_dir = base.join("hooks");
-    hooks::write_scripts(&hooks_dir)?;
     let desired = desired_hooks(&hooks_dir, memory);
 
     let config = base.join("hooks.json");
-    let cfg = match std::fs::read_to_string(&config).ok().as_deref().map(str::trim) {
+    let contents = match std::fs::read_to_string(&config) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).with_context(|| format!("reading {}", config.display())),
+    };
+    hooks::write_scripts(&hooks_dir)?;
+    let cfg = match contents.as_deref().map(str::trim) {
         Some(s) if !s.is_empty() => match serde_json::from_str::<Value>(s) {
-            Ok(v) if v.is_object() => v,
+            Ok(v) if hooks::config_is_mergeable(&v) => v,
             _ => return manual_hook_instructions(&config, &desired),
         },
         _ => json!({}),
@@ -283,7 +290,7 @@ fn install_hooks(codex_home: &Path, memory: Option<&str>) -> Result<()> {
 fn manual_hook_instructions(path: &Path, desired: &[hooks::Hook]) -> Result<()> {
     let block = serde_json::to_string_pretty(&hooks::apply_funes_hooks(json!({}), desired))?;
     println!(
-        "{} isn't plain JSON — leaving it untouched. Merge this in to enable funes hooks:\n{block}",
+        "{} isn't a supported hooks JSON object — leaving it untouched. Merge this in to enable funes hooks:\n{block}",
         path.display()
     );
     Ok(())
@@ -299,9 +306,9 @@ fn uninstall_hooks(codex_home: &Path) -> Result<()> {
         Ok(s) if !s.trim().is_empty() => {
             let value = serde_json::from_str::<Value>(&s)
                 .with_context(|| format!("parsing {} to remove funes hooks", config.display()))?;
-            if !value.is_object() {
+            if !hooks::config_is_mergeable(&value) {
                 bail!(
-                    "{} isn't a JSON object — leaving it and the hook scripts untouched; remove hook groups whose command contains `funes-index.sh` or `funes-push.sh`, then re-run `funes remove codex`",
+                    "{} isn't a supported hooks JSON object — leaving it and the hook scripts untouched; repair its hooks/event structure, then re-run `funes remove codex`",
                     config.display()
                 );
             }
@@ -320,7 +327,13 @@ fn uninstall_hooks(codex_home: &Path) -> Result<()> {
     }
 
     let hooks_dir = base.join("hooks");
-    for name in ["funes-index.sh", "funes-push.sh", "funes-sync.log"] {
+    for name in [
+        "funes-index.sh",
+        "funes-push.sh",
+        "funes-index.ps1",
+        "funes-push.ps1",
+        "funes-sync.log",
+    ] {
         remove_file(&hooks_dir.join(name))?;
     }
     remove_empty_dir(&hooks_dir)?;
@@ -332,6 +345,29 @@ mod tests {
     use super::{codex_home_from_report, desired_hooks, mcp_add_args, parse_version_line, MIN_CODEX, SKILL_MD};
     use std::path::Path;
     use std::path::PathBuf;
+
+    #[test]
+    fn malformed_hook_structure_is_preserved_on_install_and_remove() {
+        for text in [r#"{"hooks":{"Stop":{}}}"#, r#"{"hooks":null}"#, r#"{"hooks":[]}"#] {
+            let home = tempfile::tempdir().unwrap();
+            let config = home.path().join("hooks.json");
+            std::fs::write(&config, text).unwrap();
+            super::install_hooks(home.path(), None).unwrap();
+            assert_eq!(std::fs::read_to_string(&config).unwrap(), text);
+            assert!(super::uninstall_hooks(home.path()).is_err());
+            assert_eq!(std::fs::read_to_string(&config).unwrap(), text);
+            assert!(home.path().join("hooks").join(super::hooks::INDEX_NAME).is_file());
+        }
+    }
+
+    #[test]
+    fn unreadable_hooks_are_not_treated_as_missing() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join("hooks.json")).unwrap();
+        let error = super::install_hooks(home.path(), None).unwrap_err();
+        assert!(error.to_string().contains("reading"), "{error:#}");
+        assert!(!home.path().join("hooks").exists());
+    }
 
     #[test]
     fn bakes_the_memory_only_when_present() {
@@ -382,7 +418,16 @@ mod tests {
         let local = desired_hooks(Path::new("/h/hooks"), None);
         assert_eq!(local.len(), 1);
         assert_eq!(local[0].event, "Stop");
-        assert!(local[0].command.contains("/h/hooks/funes-index.sh"));
+        assert_eq!(
+            local[0].command,
+            super::hooks::command(
+                &Path::new("/h/hooks")
+                    .join(super::hooks::INDEX_NAME)
+                    .display()
+                    .to_string(),
+                &["codex"]
+            )
+        );
 
         let remote = desired_hooks(Path::new("/h/hooks"), Some("acme/kb"));
         assert_eq!(remote.len(), 3);
@@ -391,6 +436,13 @@ mod tests {
         assert!(remote
             .iter()
             .filter(|hook| hook.event != "Stop")
-            .all(|hook| hook.command.contains("acme/kb")));
+            .all(|hook| hook.command
+                == super::hooks::command(
+                    &Path::new("/h/hooks")
+                        .join(super::hooks::PUSH_NAME)
+                        .display()
+                        .to_string(),
+                    &["acme/kb", "codex"]
+                )));
     }
 }

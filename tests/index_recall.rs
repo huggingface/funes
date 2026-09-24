@@ -26,8 +26,13 @@ fn write_transcript(source: &std::path::Path) -> (String, String) {
 
 #[tokio::test]
 async fn index_then_read_surface() {
-    let db_dir = tempfile::tempdir().unwrap();
-    let source = tempfile::tempdir().unwrap();
+    // Exercise filesystem paths that require quoting in shell-based integrations and retain
+    // non-ASCII characters through Lance's URI handling, on Unix and native Windows alike.
+    let db_dir = tempfile::Builder::new().prefix("funes memory 测试 ").tempdir().unwrap();
+    let source = tempfile::Builder::new()
+        .prefix("funes transcripts 测试 ")
+        .tempdir()
+        .unwrap();
     // db::funes_dir() reads $FUNES_HOME; point the whole read/write surface at the temp dir.
     std::env::set_var("FUNES_HOME", db_dir.path());
     let (session, workdir) = write_transcript(source.path());

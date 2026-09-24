@@ -9,7 +9,7 @@ use hf_hub::{HFClient, HFError, RepoTypeDataset};
 
 /// `<org>/<repo>[/…]` with no scheme and not a path (`/` `.` `~`) → an HF dataset shorthand.
 pub fn is_remote_shorthand(spec: &str) -> bool {
-    !spec.starts_with(['/', '.', '~']) && spec.contains('/')
+    !crate::platform::is_windows_path(spec) && !spec.starts_with(['/', '.', '~']) && spec.contains('/')
 }
 
 /// Parse `hf://datasets/<owner>/<name>[/<prefix…>]` into (owner, name, prefix). Empty prefix = repo
@@ -93,10 +93,19 @@ pub fn has_token() -> bool {
 
 /// HF token from the standard env var, else the `huggingface_hub` cached token file.
 pub fn hf_token() -> Option<String> {
-    let token_file = std::env::var("HOME")
-        .ok()
-        .map(|h| PathBuf::from(h).join(".cache/huggingface/token"));
+    let token_file = std::env::var_os("HF_TOKEN_PATH")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| cache_home().map(|home| home.join("token")));
     token_from(|k| std::env::var(k).ok(), token_file.as_deref())
+}
+
+/// Hugging Face's cache root, retaining the explicit HF_HOME override.
+pub(crate) fn cache_home() -> Option<PathBuf> {
+    std::env::var_os("HF_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| crate::platform::user_home().map(|home| home.join(".cache/huggingface")))
 }
 
 /// Pure core of [`hf_token`]: env vars (in precedence order) win over the token file; blank
