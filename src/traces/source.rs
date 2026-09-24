@@ -18,15 +18,14 @@ use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-/// One artifact a source indexes as a unit. `key` identifies and locates it: a transcript path, an
-/// `hf://` shard uri, a `state.db` and the session inside it. A
-/// `Some` `signature` is a cheap change-stamp: the unit is skipped when it still matches what was
-/// recorded, and recorded after a successful index. `None` means "always read, never recorded" —
-/// for a bulk source whose idempotency comes from chunk-id dedup, not file stats.
+/// One artifact a source indexes as a unit. `key` identifies and locates it: a turns file's path
+/// or an `hf://` shard uri. A `Some` `signature` is a cheap change-stamp: the unit is skipped when
+/// it still matches what was recorded, and recorded after a successful index. `None` means "always
+/// read, never recorded" — for a bulk source whose idempotency comes from chunk-id dedup, not file
+/// stats.
 pub struct Unit {
     pub key: String,
     pub signature: Option<String>,
-    pub is_subagent: bool,
 }
 
 /// A source of agent-session transcripts. `units()` is cheap (enumerate + stat, no parsing);
@@ -146,7 +145,6 @@ impl TraceSource for ParquetDataset {
         Ok(vec![Unit {
             key: self.path.to_string_lossy().into_owned(),
             signature: None,
-            is_subagent: false,
         }])
     }
 
@@ -238,7 +236,6 @@ impl TraceSource for RemoteParquetDataset {
             .map(|s| Unit {
                 key: s.key.clone(),
                 signature: Some(self.revision.clone()),
-                is_subagent: false,
             })
             .collect())
     }

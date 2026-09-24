@@ -70,18 +70,13 @@ impl TraceSource for FunesJsonl {
         // A directory is a store funes revisits, so its files are stamped; a file named on its own
         // is re-read every time, and chunk-id dedup makes that a no-op.
         let stamped = self.path.is_dir();
-        let mut units: Vec<Unit> = files
+        Ok(files
             .into_iter()
             .map(|p| Unit {
                 signature: stamped.then(|| file_sig(&p)).flatten(),
-                is_subagent: jsonl::is_subagent(&jsonl::session_id_of(&p)),
                 key: p.to_string_lossy().into_owned(),
             })
-            .collect();
-        // Subagents last (stable sort preserves recency within each group), so a budgeted run
-        // spends its time on the sessions a person held before the ones an agent spawned.
-        units.sort_by_key(|u| u.is_subagent);
-        Ok(units)
+            .collect())
     }
 
     fn read(&self, unit: &Unit) -> Result<Vec<Turn>> {
@@ -172,23 +167,6 @@ mod tests {
         let capped = FunesJsonl::new(dir.path(), jsonl::iter_jsonl_files(dir.path()), Some(2));
         assert_eq!(capped.units().unwrap().len(), 2);
         assert_eq!(capped.unit_keys().unwrap().len(), 3);
-    }
-
-    #[test]
-    fn a_sub_agents_session_is_ordered_last() {
-        let dir = tempfile::tempdir().unwrap();
-        for name in [
-            "agent-x.funes.jsonl",
-            "s-a.funes.jsonl",
-            "agent-y.funes.jsonl",
-            "s-b.funes.jsonl",
-        ] {
-            write(dir.path(), name, &[LINE]);
-        }
-        let units = source(dir.path()).units().unwrap();
-        let first_sub = units.iter().position(|u| u.is_subagent).expect("has a sub-agent unit");
-        assert!(units[first_sub..].iter().all(|u| u.is_subagent), "whatever the mtimes");
-        assert_eq!(units.iter().filter(|u| u.is_subagent).count(), 2);
     }
 
     #[test]

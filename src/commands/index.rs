@@ -333,8 +333,8 @@ struct Indexer {
     rejected: HashSet<usize>,
 }
 
-/// Enumerate every source's units (each source orders its own — recency-desc, subagents last),
-/// tagged with the source index. When several sources are indexed at once (e.g. every known
+/// Enumerate every source's units (each source orders its own — recency-desc), tagged with the
+/// source index. When several sources are indexed at once (e.g. every known
 /// harness), one that fails to enumerate — say a spool holding a file that is not a turns file — is
 /// warned and skipped instead of aborting the rest; a lone source stays fatal, since its failure is
 /// then the whole result. But if the skips left nothing to index and at least one source errored, that's
@@ -1028,7 +1028,6 @@ mod tests {
                 .map(|k| source::Unit {
                     key: k.to_string(),
                     signature: Some("sig".to_string()),
-                    is_subagent: false,
                 })
                 .collect())
         }
@@ -1164,7 +1163,6 @@ mod tests {
         let unit = |key: &str, sig: Option<&str>| source::Unit {
             key: key.to_string(),
             signature: sig.map(str::to_string),
-            is_subagent: false,
         };
         let first = vec![
             unit("current", Some("1")),
