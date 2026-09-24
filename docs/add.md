@@ -128,7 +128,8 @@ scan the content for credentials. Local-only setup does not require TruffleHog.
 
 funes reads no agent's own transcripts. Each integration converts a session into
 `~/.funes/spool/<id>/<session id>.funes.jsonl` — at install for the history, then on every turn for
-the session in progress — and funes indexes what it finds there. The id names the spool; the
+the session in progress and any other changed since the last turn — and funes indexes what it finds
+there. The id names the spool; the
 `harness` each turn carries is the integration's own to choose (the four funes ships use their id,
 by convention), and `recall --harness` filters on what the turns carry, whatever is installed.
 

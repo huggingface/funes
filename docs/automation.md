@@ -16,10 +16,12 @@ it behaves; you rarely need to touch any of it by hand.
 `funes add claude`, `funes add codex`, `funes add pi`, and `funes add hermes` install, beyond the
 read tools:
 
-- **Per-turn indexing.** A per-turn hook runs `funes index` after every completed turn, so your
-  local memory tracks the session as it grows — a session killed mid-flight is already indexed up to
-  its last completed turn. Each run is time-boxed (text first, ~60s), so a large backlog fills in a
-  bounded step per turn instead of one long sweep.
+- **Per-turn indexing.** A per-turn hook converts the session that just changed and runs
+  `funes index` after every completed turn, so your local memory tracks the session as it grows — a
+  session killed mid-flight is already indexed up to its last completed turn. The same hook converts
+  any other session changed since it last ran, so one whose own hook never fired — untrusted, timed
+  out, a host that died mid-turn — is captured at the next turn. Each run is time-boxed (text first,
+  ~60s), so a large backlog fills in a bounded step per turn instead of one long sweep.
 - **Publishing at session boundaries.** Bind a shared memory — `funes add <agent> <org>/<repo>` — and
   session-boundary hooks run `funes push` to publish there. Without a memory, indexing is local-only
   and nothing is published.
