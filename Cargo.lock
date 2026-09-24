@@ -2585,7 +2585,7 @@ dependencies = [
 
 [[package]]
 name = "funes"
-version = "1.3.2+dev"
+version = "1.3.3+dev"
 dependencies = [
  "anyhow",
  "arrow-array",
