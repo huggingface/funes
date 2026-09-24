@@ -4,7 +4,10 @@
 one or many turns per file, no header. It is how a conversation reaches funes when funes has no parser
 for its source — a coding agent funes does not read natively, an issue tracker, a chat export. A
 *producer* (a plugin, a script, a Space) writes the file; funes indexes it through the same pipeline
-as its native transcripts, so recall, `get`, `sessions` and `sketch` work on it unchanged.
+as its native transcripts, so recall, `get`, `sessions` and `sketch` work on it unchanged. Writing it
+needs no integration and no registration: a file or a directory of them indexes with nothing
+installed. An [integration](add.md#the-integration-contract) is the managed journey for one agent;
+its converter writes this same format into that agent's spool.
 
 ```bash
 funes index thread-2026-06.funes.jsonl   # one file

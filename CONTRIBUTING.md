@@ -93,6 +93,23 @@ fine; CI runs them with the repository secret.
   (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`): short imperative subject, the
   "why" in the body when it isn't obvious.
 
+## Writing an integration
+
+An integration is a directory with a `manifest.json` and a `setup` executable; the contract, the
+environment `setup` gets, and the spool it writes into are in [docs/add.md](docs/add.md#the-integration-contract).
+The four under [integrations/](integrations/) are the worked examples — `pi/` is the smallest.
+`setup add` should convert the agent's existing sessions into the spool and install a hook that
+converts each finished session, then runs `funes index --harness <id>`; the converter writes
+[the turns format](docs/funes-jsonl.md), and `funes index --check <spool>` validates its output
+without writing anything. Keep a real transcript and the turns it must produce as the converter's
+test, the way each shipped bundle's `test/` does: a change that moves a chunk id re-keys sessions
+users already hold.
+
+Try it without touching the checkout: put the directory under one of your own and run
+`FUNES_INTEGRATIONS=/path/to/that funes add <id>`. funes confirms at the terminal before running
+files it can't vouch for, every time. Nothing in funes has to change for a new integration, and
+where it is published from is its own business.
+
 ## Pull requests
 
 1. Branch from `main`; keep the PR focused on one concern.

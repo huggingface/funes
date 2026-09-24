@@ -25,11 +25,16 @@ lassign [wait] pid spawn_id os_error status
 exit $status
 "#;
 
-/// An integration under `home`'s registry whose `setup` records its argv and the contract
-/// environment in `$FUNES_TEST_SETUP_LOG`, and converts the history it finds at
-/// `~/.clyde/history.funes.jsonl` into its spool, as a converter does at install.
+/// An integration under `home`'s registry, as a drop-in places it.
 fn install(home: &Path, id: &str, contract: u32) -> PathBuf {
-    let dir = home.join(".funes/agents").join(id);
+    bundle(&home.join(".funes/agents").join(id), id, contract, "")
+}
+
+/// A bundle at `dir` whose `setup` records `tag` when given, then its argv and the contract
+/// environment, in `$FUNES_TEST_SETUP_LOG`; keeps a `state` file beside itself; and converts the
+/// history it finds at `~/.clyde/history.funes.jsonl` into its spool, as a converter does at install.
+fn bundle(dir: &Path, id: &str, contract: u32, tag: &str) -> PathBuf {
+    let dir = dir.to_path_buf();
     fs::create_dir_all(&dir).unwrap();
     fs::write(
         dir.join("manifest.json"),
@@ -37,15 +42,23 @@ fn install(home: &Path, id: &str, contract: u32) -> PathBuf {
     )
     .unwrap();
     let setup = dir.join("setup");
+    let tagline = if tag.is_empty() {
+        String::new()
+    } else {
+        format!("printf '%s\\n' {tag} >> \"$FUNES_TEST_SETUP_LOG\"\n")
+    };
     fs::write(
         &setup,
-        r#"#!/bin/sh
-printf '%s\n' "$*" "FUNES_BIN=$FUNES_BIN" "FUNES_HOME=$FUNES_HOME" "FUNES_AGENT_ID=$FUNES_AGENT_ID" >> "$FUNES_TEST_SETUP_LOG"
+        format!(
+            r#"#!/bin/sh
+{tagline}printf '%s\n' "$*" "FUNES_BIN=$FUNES_BIN" "FUNES_HOME=$FUNES_HOME" "FUNES_AGENT_ID=$FUNES_AGENT_ID" >> "$FUNES_TEST_SETUP_LOG"
+printf kept > "$(dirname "$0")/state"
 if [ "$1" = add ] && [ -f "$HOME/.clyde/history.funes.jsonl" ]; then
     mkdir -p "$FUNES_HOME/spool/$FUNES_AGENT_ID"
     cp "$HOME/.clyde/history.funes.jsonl" "$FUNES_HOME/spool/$FUNES_AGENT_ID/h-1.funes.jsonl"
 fi
-"#,
+"#
+        ),
     )
     .unwrap();
     fs::set_permissions(&setup, fs::Permissions::from_mode(0o755)).unwrap();
@@ -75,8 +88,9 @@ fn funes_at_a_terminal(home: &Path, funes_home: &Path, log: &Path, args: &[&str]
 fn run(mut cmd: Command, home: &Path, funes_home: &Path, log: &Path) -> Output {
     cmd.env("HOME", home)
         .env("FUNES_HOME", funes_home)
-        // Authoritative and holding nothing: no checkout or bucket is consulted for clyde.
-        .env("FUNES_INTEGRATIONS", home.join("no-integrations"))
+        // Authoritative: only what this directory holds is consulted, never a checkout or the
+        // bucket. It is empty unless a test supplies a bundle there.
+        .env("FUNES_INTEGRATIONS", home.join("integrations"))
         .env("FUNES_TEST_SETUP_LOG", log)
         .env("HF_HOME", support::hf_home())
         .env_remove("HF_TOKEN")
@@ -89,6 +103,40 @@ fn run(mut cmd: Command, home: &Path, funes_home: &Path, log: &Path) -> Output {
 
 fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+#[test]
+fn an_integration_supplied_outside_the_checkout_is_refreshed_each_run_and_removed_whole() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let funes_home = tmp.path().join("funes");
+    let log = tmp.path().join("setup.log");
+    let source = bundle(&home.join("integrations/clyde"), "clyde", 1, "v1");
+    let installed = home.join(".funes/agents/clyde");
+
+    // Provisioned from `$FUNES_INTEGRATIONS`, confirmed as such, and run from the installed copy.
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde"]);
+    let transcript = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{transcript}");
+    assert!(transcript.contains("$FUNES_INTEGRATIONS"), "{transcript}");
+    assert!(fs::read_to_string(&log).unwrap().starts_with("v1\nadd\n"));
+    assert_eq!(fs::read_to_string(installed.join("state")).unwrap(), "kept");
+
+    // A changed source is what the next run executes; what setup keeps beside itself survives.
+    bundle(&source, "clyde", 1, "v2");
+    fs::remove_file(&log).unwrap();
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+    assert!(fs::read_to_string(&log).unwrap().starts_with("v2\nadd\n"));
+    assert!(installed.join("state").exists(), "a refresh prunes nothing");
+
+    // Removal takes the installed directory whole and leaves the source alone.
+    fs::remove_file(&log).unwrap();
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["remove", "clyde"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+    assert!(fs::read_to_string(&log).unwrap().starts_with("v2\nremove\n"));
+    assert!(!installed.exists());
+    assert!(source.join("setup").exists(), "the source is not funes's to touch");
 }
 
 /// One turn of clyde's history, under a facet of the integration's own choosing.

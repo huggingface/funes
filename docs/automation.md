@@ -89,7 +89,8 @@ timeout.
 
 An agent funes has no parser for joins through the same shape: its per-turn hook runs a converter
 that writes the session as a [`.funes.jsonl` turns file](funes-jsonl.md), then `funes index <that
-file>`. Three things to know when writing one: an explicit path is indexed in full, unbudgeted — a
+file>` — or, as an installed [integration](add.md#the-integration-contract), into the agent's spool
+followed by `funes index --harness <id>`. Three things to know when writing one: an explicit path is indexed in full, unbudgeted — a
 single session is small, so that is what you want; a run that finds the memory lock busy fails fast,
 and the next turn's run catches up (indexing is idempotent); and `funes index --check <file>`
 validates a producer's output without writing anything, so run it before wiring the hook.

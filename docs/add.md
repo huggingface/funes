@@ -140,6 +140,12 @@ stays, so a broken converter is visible rather than silent.
 That leaves the memory as the only copy of the converted turns. Rebuilding one from scratch is
 `funes add <agent>` again: its seed re-converts the agent's own history.
 
+What a producer owes the spool: write, never read back — funes may have drained what you wrote, so
+keep your own record if you need one; one file per session, named from the session id, so a re-emit
+overwrites its own file; write a temporary name in the same directory and rename it into place, with
+the temporary name off `.jsonl` (see [funes-jsonl.md](funes-jsonl.md)). The hook then runs
+`funes index --harness <id>`, one budgeted step over the spool.
+
 Re-run `funes add <agent> <memory>` any time to change the memory or refresh the setup — it's
 idempotent. On a new host, re-running it once clears the wrong-memory guard for that machine, as
 soon as that host has an index of its own to push.
@@ -147,6 +153,63 @@ Run `funes remove <agent>` to reverse the agent wiring without deleting the memo
 
 From here you just work: when something touches a past decision, its rationale, or an earlier
 finding, the agent reaches for [`recall`](recall.md) itself.
+
+## The integration contract
+
+`funes add <id>` runs an *integration*: a directory funes installs at `~/.funes/agents/<id>/` and
+executes. The four above are integrations like any other, and a fifth needs no change to funes and
+no approval from anyone. Using funes needs no integration at all: the CLI and MCP read verbs,
+`funes index` on a turns file or directory, and `funes push` work with nothing installed, and any
+producer that writes [the turns format](funes-jsonl.md) is indexed the same way. An integration is
+the managed journey — setup, conversion, automation, removal — for one agent.
+
+### The bundle
+
+| File | Role |
+| --- | --- |
+| `manifest.json` | `{"contract_version": 1, "id": "<id>", "label": "<name for humans>", "repo": "<where it comes from>"}`. `id` is the directory name, lowercase `[a-z0-9_-]`. `contract_version` is the contract this section describes: funes refuses a mismatch before running anything, pointing at `funes update`. |
+| `setup` | An executable. `setup add [MEMORY]` wires funes into the agent, bound to `MEMORY` when given (an `<org>/<repo>` shorthand or an `hf://…` URI; absent is the local memory); `setup remove` undoes it. A non-zero exit fails the command. |
+
+`setup` runs with three variables: `FUNES_BIN`, the funes command to record or invoke (the user's
+pin, else `funes`); `FUNES_HOME`, the home whose memory and spool this install serves; and
+`FUNES_AGENT_ID`, its own id, which names its spool. Everything else the bundle needs — converter,
+hook scripts, plugin files — sits beside `setup`, and so does any state it keeps: a refresh rewrites
+only the files that changed and prunes nothing, while `funes remove` deletes the directory whole.
+
+The location is fixed rather than under `$FUNES_HOME` because an agent records the path it is
+handed (pi installs the directory as an extension), so the files must outlive any one home. funes
+refuses a `setup` that anyone but its owner could have written: the file and every directory from
+`~/.funes/agents` down must belong to you and be neither group- nor world-writable.
+
+### Where the files come from
+
+`funes add` refreshes the bundle before every run, so the `setup` it executes is the one it just
+wrote. The source, in order: the directory `$FUNES_INTEGRATIONS` names, when set — authoritative,
+nothing else is consulted; the checkout this funes was built from, when it exists; the release
+bucket, where the four maintained integrations ship as checksummed archives. With none of those —
+an id nothing published, or offline — the installed copy runs as it is.
+
+funes vouches only for files it built or verified: its own checkout, or an archive whose checksum
+matched. Anything else — a `$FUNES_INTEGRATIONS` directory, an installed copy refreshed by
+nothing — is confirmed at the terminal every time, before `setup` runs, and never remembered:
+anyone able to plant the files could forge the record. Off a terminal, funes refuses rather than
+assumes. An id with no files anywhere is an error naming what is installed.
+
+So a fifth integration is used today by putting its directory under `~/.funes/agents/<id>/`, or by
+pointing `$FUNES_INTEGRATIONS` at a directory holding it, then `funes add <id>`. Installing one by
+name from a source of its own is planned.
+
+### What the managed `add` assumes
+
+The maintained four register `$FUNES_BIN mcp [MEMORY]` as the agent's MCP server, convert the
+agent's history into the spool at install, and install automation that converts each finished
+session and runs `funes index --harness <id>`, plus a session-boundary `funes push` when a memory
+is bound. None of that is required of an integration — one may register the read tools alone — but
+the bootstrap around `setup` is built for the full journey: a first add asks before indexing, a
+remote memory requires TruffleHog, and the first push follows the first index. An integration that
+converts nothing goes through the same steps: the index step notes an empty spool, and a bound
+memory gets a note that nothing was indexed rather than a push. What a consumer-only install should
+mean is a decision for the distribution work, not made here.
 
 ## See also
 
