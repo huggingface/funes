@@ -1,6 +1,7 @@
 #!/bin/sh
 # Claude Code's per-turn capture: convert the transcript that just changed into funes's spool, then
-# advance the index over it. Fired by Stop and by SubagentStop, whose payloads arrive on stdin.
+# any other changed since the last run, then advance the index over it. Fired by Stop and by
+# SubagentStop, whose payloads arrive on stdin.
 #
 # The foreground half reads that payload and returns, so a turn never waits on the conversion or on
 # the embedder; the worker it leaves behind does both. Detaching uses nohup alone, which is portable
@@ -45,28 +46,24 @@ convert_one() {
     fi
 }
 
-# A sub-agent writes its own transcript under the session's directory, nested a further level when
-# it belongs to a workflow, so the sweep recurses. SubagentStop names the one that just finished and
-# is the cheap path; this catches any whose event funes did not see. What the spool holds cannot say
-# which those are — funes drains it — so the sweep keeps its own mark, per session, and looks only at
-# transcripts written since the last one.
-convert_subagents() {
+# The transcripts changed since the last sweep: sessions whose own hook never fired — untrusted,
+# timed out, a host that died mid-turn — and the sub-agents a workflow nests under a session, whose
+# SubagentStop funes may not see. What the spool holds cannot say which those are (funes drains it),
+# so the sweep keeps its own mark: the previous sweep's stamp, or, before there is one, the `spool`
+# record `setup add` wrote just before it converted the history. The transcript the payload named
+# was converted already and is skipped.
+convert_stale() {
     jq=$1
-    parent=$2
-    dir="${parent%.jsonl}/subagents"
-    [ -d "$dir" ] || return 0
-    stem=${parent##*/}
-    mark="$HERE/swept/${stem%.jsonl}"
-    mkdir -p "$HERE/swept"
-    # Stamped before the sweep, so one written while it runs is swept again next turn.
+    named=$2
+    projects="$HOME/.claude/projects"
+    [ -d "$projects" ] || return 0
+    mark="$HERE/swept"
+    since=$mark
+    [ -e "$since" ] || since="$HERE/spool"
+    # Stamped before the sweep, so a transcript written while it runs is swept again next turn.
     : >"$mark.new"
-    if [ -e "$mark" ]; then
-        set -- "$dir" -type f -name '*.jsonl' -newer "$mark"
-    else
-        set -- "$dir" -type f -name '*.jsonl'
-    fi
-    find "$@" 2>/dev/null | while IFS= read -r src; do
-        convert_one "$jq" "$src"
+    find "$projects" -type f -name '*.jsonl' -newer "$since" 2>/dev/null | while IFS= read -r src; do
+        [ "$src" = "$named" ] || convert_one "$jq" "$src"
     done
     mv -f "$mark.new" "$mark"
 }
@@ -93,12 +90,9 @@ worker() {
     # which `convert_one` skips.
     agent_src=$(printf '%s' "$payload" | "$jq" -r '.agent_transcript_path // empty' 2>/dev/null || true)
     src=$(printf '%s' "$payload" | "$jq" -r '.transcript_path // empty' 2>/dev/null || true)
-    if [ -n "$agent_src" ]; then
-        convert_one "$jq" "$agent_src"
-    else
-        convert_one "$jq" "$src"
-        convert_subagents "$jq" "$src"
-    fi
+    named=${agent_src:-$src}
+    convert_one "$jq" "$named"
+    convert_stale "$jq" "$named"
 
     log "index[$HARNESS]: start"
     if "$funes" index --harness "$HARNESS" >>"$LOG" 2>&1; then

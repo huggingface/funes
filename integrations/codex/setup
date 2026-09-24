@@ -191,7 +191,7 @@ remove() {
     # re-add cannot rebuild, and leaving it would have funes keep indexing an agent it no longer
     # serves.
     rm -rf "$(spool_dir)"
-    rm -f "$PLUGIN_DIR/scripts/spool"
+    rm -f "$PLUGIN_DIR/scripts/spool" "$PLUGIN_DIR/scripts/swept"
     drop_pre_plugin_install
 
     if ! have_codex; then

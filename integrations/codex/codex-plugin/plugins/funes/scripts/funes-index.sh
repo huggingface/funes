@@ -1,6 +1,7 @@
 #!/bin/sh
-# Codex's per-turn capture: convert the session that just changed into funes's spool, then advance
-# the index over it. Fired by the Stop hook, whose payload arrives on stdin.
+# Codex's per-turn capture: convert the session that just changed into funes's spool, then any other
+# rollout changed since the last run, then advance the index over it. Fired by the Stop hook, whose
+# payload arrives on stdin.
 #
 # The foreground half reads that payload and returns, so a turn never waits on the conversion or on
 # the embedder; the worker it leaves behind does both. Detaching uses nohup alone, which is portable
@@ -49,6 +50,41 @@ rollout() {
         2>/dev/null | head -1
 }
 
+# One rollout into the spool, named after its own file stem.
+convert_one() {
+    jq=$1
+    src=$2
+    [ -n "$src" ] && [ -r "$src" ] || return 0
+    stem=${src##*/}
+    stem=${stem%.jsonl}
+    if PATH="$(dirname "$jq"):$PATH" "$HERE/../convert" "$src" "$SPOOL/$stem.funes.jsonl" 2>>"$LOG"; then
+        log "convert: $stem"
+    else
+        log "convert: FAILED for $src"
+    fi
+}
+
+# The rollouts changed since the last sweep: sessions whose own hook never fired — untrusted, timed
+# out, a host that died mid-turn. What the spool holds cannot say which those are (funes drains it),
+# so the sweep keeps its own mark: the previous sweep's stamp, or, before there is one, the `spool`
+# record `setup add` wrote just before it converted the history. The rollout the payload named was
+# converted already and is skipped.
+convert_stale() {
+    jq=$1
+    named=$2
+    sessions="$CODEX_DIR/sessions"
+    [ -d "$sessions" ] || return 0
+    mark="$HERE/swept"
+    since=$mark
+    [ -e "$since" ] || since="$HERE/spool"
+    # Stamped before the sweep, so a rollout written while it runs is swept again next turn.
+    : >"$mark.new"
+    find "$sessions" -type f -name 'rollout-*.jsonl' -newer "$since" 2>/dev/null | while IFS= read -r src; do
+        [ "$src" = "$named" ] || convert_one "$jq" "$src"
+    done
+    mv -f "$mark.new" "$mark"
+}
+
 worker() {
     payload=$1
     funes=$(find_bin funes || true)
@@ -68,16 +104,11 @@ worker() {
 
     src=$(rollout "$jq" "$payload" || true)
     if [ -n "$src" ]; then
-        stem=${src##*/}
-        stem=${stem%.jsonl}
-        if PATH="$(dirname "$jq"):$PATH" "$HERE/../convert" "$src" "$SPOOL/$stem.funes.jsonl" 2>>"$LOG"; then
-            log "convert: $stem"
-        else
-            log "convert: FAILED for $src"
-        fi
+        convert_one "$jq" "$src"
     else
         log "convert: the payload named no readable rollout"
     fi
+    convert_stale "$jq" "$src"
 
     log "index[$HARNESS]: start"
     if "$funes" index --harness "$HARNESS" >>"$LOG" 2>&1; then
