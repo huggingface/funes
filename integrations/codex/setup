@@ -83,8 +83,9 @@ write_hooks() {
 }
 
 # Clear what an install before the plugin left in Codex's own tree. The skill and the scripts are
-# funes's to delete; `hooks.json` is the user's file, so it goes only when funes wrote every command
-# in it — otherwise it is left as it is, along with the scripts its entries still run.
+# funes's to delete; `hooks.json` is the user's file: funes's entries come out of it, the user's
+# stay, and it goes only once nothing is left. Without jq to do that, the file is left as it is,
+# along with the scripts its entries still run.
 drop_pre_plugin_install() {
     # `skills` is Codex's own root, so only funes's directory in it goes; the shared tree, which
     # every harness implementing the skills standard reads, is funes's own and is pruned when empty.
@@ -92,15 +93,32 @@ drop_pre_plugin_install() {
     rmdir "$HOME/.agents/skills" "$HOME/.agents" 2>/dev/null || true
     config="$CODEX_DIR/hooks.json"
     if [ -f "$config" ] && grep -qE 'funes-(index|push)\.sh' "$config"; then
-        if [ "$(grep -c '"command"' "$config")" = "$(grep -cE '"command".*funes-(index|push)\.sh' "$config")" ]; then
-            rm -f "$config"
-        else
+        if ! prune_hooks "$config"; then
             echo "$config still holds funes hook entries beside your own — delete the groups whose command runs funes-index.sh or funes-push.sh." >&2
             return 0
         fi
     fi
     rm -f "$CODEX_DIR/hooks/funes-index.sh" "$CODEX_DIR/hooks/funes-push.sh" "$CODEX_DIR/hooks/funes-sync.log"
     rmdir "$CODEX_DIR/hooks" 2>/dev/null || true
+}
+
+# Take funes's entries out of a hooks file: a hook whose command runs a funes script goes, then any
+# group and any event left empty, and the file itself once nothing is left. Fails, touching nothing,
+# without jq or on a file jq cannot read as hooks.
+prune_hooks() {
+    config=$1
+    command -v jq >/dev/null 2>&1 || return 1
+    pruned=$(jq '
+        .hooks |= ((. // {})
+            | with_entries(.value |= (
+                map(.hooks |= ((. // []) | map(select(((.command // "") | test("funes-(index|push)\\.sh")) | not))))
+                | map(select((.hooks | length) > 0))))
+            | with_entries(select((.value | length) > 0)))' "$config") || return 1
+    if printf '%s\n' "$pruned" | jq -e '(.hooks | length) == 0 and (del(.hooks) | length) == 0' >/dev/null; then
+        rm -f "$config"
+    else
+        printf '%s\n' "$pruned" >"$config.funes-tmp" && mv -f "$config.funes-tmp" "$config"
+    fi
 }
 
 manual_add() {

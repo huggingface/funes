@@ -41,30 +41,29 @@ fn remove_claude_unregisters_both_surfaces_and_deletes_the_installed_plugin() {
 }
 
 #[test]
-fn remove_codex_unregisters_the_plugin_and_leaves_a_shared_hooks_file() {
+fn remove_codex_unregisters_the_plugin_and_prunes_a_shared_hooks_file() {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("home");
     let log = tmp.path().join("cli.log");
     let bin = support::fake_cli(tmp.path(), "codex");
     // Installed on demand from the checkout, and taken with the integration.
     let plugin = home.join(".funes/agents/codex");
-    // A pre-plugin install that shares Codex's hooks file with a hook of the user's: taking funes's
-    // entries out of it needs a parser, so the file stays, and so do the scripts it still runs.
+    // A pre-plugin install that shares Codex's hooks file with a hook of the user's, and still
+    // publishes to a memory: funes's entries go — the publishing one with them — and the user's
+    // stay. Written on one line, the way an editor or a tool may leave it.
     let codex_dir = home.join(".codex");
     let hooks = codex_dir.join("hooks");
     fs::create_dir_all(&hooks).unwrap();
     fs::write(hooks.join("funes-index.sh"), "owned").unwrap();
+    fs::write(hooks.join("funes-push.sh"), "owned").unwrap();
     fs::write(hooks.join("user-hook.sh"), "keep").unwrap();
     fs::write(
         codex_dir.join("hooks.json"),
-        r#"{
-          "hooks": {
-            "Stop": [
-              { "hooks": [{ "type": "command", "command": "make lint" }] },
-              { "hooks": [{ "type": "command", "command": "bash \"/old/funes-index.sh\" \"codex\"" }] }
-            ]
-          }
-        }"#,
+        concat!(
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"make lint"}]},"#,
+            r#"{"hooks":[{"type":"command","command":"bash \"/old/funes-index.sh\" \"codex\""}]}],"#,
+            r#""SessionEnd":[{"hooks":[{"type":"command","command":"bash \"/old/funes-push.sh\" \"acme/old\" \"codex\""}]}]}}"#,
+        ),
     )
     .unwrap();
     let memory = home.join(".funes/memory/chunks.lance");
@@ -76,10 +75,17 @@ fn remove_codex_unregisters_the_plugin_and_leaves_a_shared_hooks_file() {
     assert!(!plugin.exists());
     assert_eq!(fs::read_to_string(memory.join("keep")).unwrap(), "memory");
     let config: Value = serde_json::from_str(&fs::read_to_string(codex_dir.join("hooks.json")).unwrap()).unwrap();
-    assert_eq!(config["hooks"]["Stop"].as_array().unwrap().len(), 2, "left as it is");
-    assert!(hooks.join("funes-index.sh").exists(), "the script its entry runs");
+    let stop = config["hooks"]["Stop"].as_array().unwrap();
+    assert_eq!(stop.len(), 1, "funes's group is gone: {config}");
+    assert_eq!(stop[0]["hooks"][0]["command"], "make lint");
+    assert!(
+        config["hooks"].get("SessionEnd").is_none(),
+        "no longer publishes: {config}"
+    );
+    assert!(!hooks.join("funes-index.sh").exists(), "nothing runs it any more");
+    assert!(!hooks.join("funes-push.sh").exists());
     assert!(hooks.join("user-hook.sh").exists());
-    assert!(String::from_utf8_lossy(&first.stderr).contains("delete the groups"));
+    assert!(!String::from_utf8_lossy(&first.stderr).contains("delete the groups"));
     assert_eq!(
         fs::read_to_string(&log).unwrap(),
         "mcp remove funes\n\

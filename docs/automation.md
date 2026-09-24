@@ -63,8 +63,8 @@ when they're indexed, and `funes index` re-embeds nothing already written. Keepi
   change to a funes hook — run `/hooks` in Codex and review them; until then it skips them and
   nothing is indexed or published
   ([Codex docs](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks)). An install from before
-  the plugin is cleared on sight, its entries in Codex's own `hooks.json` included — unless you keep
-  hooks of your own in that file, which funes then leaves untouched for you to edit.
+  the plugin is cleared on sight, its entries in Codex's own `hooks.json` included — hooks of your
+  own in that file stay, and the file goes only once nothing is left in it.
 - **Hermes** (indexing is **beta**) discovers plugins under its own home, so funes installs one at
   `~/.hermes/plugins/funes/` and has hermes enable it with `hermes plugins enable funes` — hermes
   edits its own `config.yaml`, funes never does. The plugin's lifecycle hooks (`post_llm_call` per
