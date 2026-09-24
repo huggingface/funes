@@ -8,7 +8,6 @@ use crate::chunk;
 use crate::inference::{self, Embedder, Reranker};
 use crate::memory::dataset;
 use crate::memory::{Memory, MemoryState};
-use crate::traces::harness::Harness;
 use anyhow::{anyhow, bail, Context, Result};
 use arrow_array::{Float32Array, Int64Array, RecordBatch, StringArray, UInt64Array};
 use chrono::{DateTime, Utc};
@@ -191,16 +190,13 @@ fn build_where(block_type: Option<&str>, harness: &[String]) -> Option<String> {
     }
 }
 
-/// The stored `harness` facets a `--harness` value names. A known agent's name matches both its
-/// stored facet and its CLI spelling where they differ (`claude_code` and `claude`), since a turns
-/// file may store either; any other value matches as given.
+/// The stored `harness` facets a `--harness` value names. `claude` and `claude_code` name each
+/// other: Claude's turns were stored under the second before its integration wrote the first, and
+/// a memory may hold both. Any other value matches as given.
 fn harness_spellings(h: String) -> Vec<String> {
-    match Harness::parse(&h) {
-        Ok(known) if known.as_str() != known.cli_name() => {
-            vec![known.as_str().to_string(), known.cli_name().to_string()]
-        }
-        Ok(known) => vec![known.as_str().to_string()],
-        Err(_) => vec![h],
+    match h.as_str() {
+        "claude" | "claude_code" => vec!["claude_code".to_string(), "claude".to_string()],
+        _ => vec![h],
     }
 }
 
