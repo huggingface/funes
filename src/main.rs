@@ -605,13 +605,15 @@ fn confirm_trust(id: &str, dir: &Path, provenance: registry::Provenance) -> Resu
     Ok(())
 }
 
-/// Run `id`'s `setup remove`, then delete its files. Nothing on disk and nowhere to fetch from is
-/// the state `remove` produces, so meeting it is a success, not an unknown agent.
+/// Run `id`'s `setup remove`, then delete its files. Nothing on disk and no source that could hold
+/// it is the state `remove` produces, so meeting it is a success, not an unknown agent. A source
+/// that could not be reached is another matter: an install its setup would have taken away may
+/// well be there, so that failure is reported.
 async fn remove_agent(id: &str) -> Result<()> {
     let root = registry::default_root()?;
     let integration = match prepare_agent(id, false).await {
         Ok(integration) => integration,
-        Err(e) if !root.join(id).is_dir() => {
+        Err(e) if spool::is_id(id) && !root.join(id).is_dir() && !registry::has_source(id) => {
             eprintln!("nothing to remove — {e:#}");
             return Ok(());
         }

@@ -229,6 +229,12 @@ fn source_for(id: &str) -> Result<Source> {
     Ok(Source::Published)
 }
 
+/// Whether anywhere funes looks could hold `id`'s files. Only `$FUNES_INTEGRATIONS` can say no
+/// outright; the bucket has to be asked.
+pub fn has_source(id: &str) -> bool {
+    source_for(id).is_ok()
+}
+
 /// The bucket prefix for the contract this funes speaks: an integration fix reaches installed
 /// binaries without a release, and a binary only reads the layout it understands.
 fn published_prefix() -> String {
