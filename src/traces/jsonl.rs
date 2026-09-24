@@ -1,8 +1,6 @@
-//! Format-agnostic JSONL machinery: the recursive file walk, the workdir facet a recorded `cwd`
-//! resolves to, and the line-1 peek harness detection reads.
+//! Format-agnostic JSONL machinery: the recursive file walk and the workdir facet a recorded `cwd`
+//! resolves to.
 
-use serde_json::Value;
-use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 use walkdir::WalkDir;
@@ -37,24 +35,6 @@ pub fn workdir_of_cwd(cwd: &str) -> Option<String> {
 /// The workdir facet of a session: its recorded `cwd` munged ([`workdir_of_cwd`]), else `fallback`.
 pub fn workdir_facet(cwd: Option<&str>, fallback: &str) -> String {
     cwd.and_then(workdir_of_cwd).unwrap_or_else(|| fallback.to_string())
-}
-
-/// The first non-blank, parseable JSON record of a `*.jsonl` file — a cheap line-1 peek (for
-/// harness detection and Codex's session id) that stops reading after the first record rather than
-/// loading the whole file.
-pub fn first_record(p: &Path) -> Option<Value> {
-    let file = std::fs::File::open(p).ok()?;
-    for line in std::io::BufReader::new(file).lines() {
-        let line = line.ok()?;
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if let Ok(v) = serde_json::from_str::<Value>(line) {
-            return Some(v);
-        }
-    }
-    None
 }
 
 #[cfg(test)]

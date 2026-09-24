@@ -8,7 +8,6 @@
 //! commit). A turns file is one session; a parquet dataset is many sessions in one file.
 
 use super::funes_jsonl;
-use super::harness::{self, Harness};
 use super::jsonl;
 use super::parquet;
 use super::Turn;
@@ -57,17 +56,10 @@ pub trait TraceSource {
 }
 
 /// Pick the source for `path`: a `*.parquet` file is a parquet trace dataset, a `.funes.jsonl` file
-/// (or a directory holding them) is a turns file, and anything else is an agent's own session tree,
-/// which is refused by naming the integration that converts it. `limit` caps how many sessions are
-/// read (`None` = all) — used to bound a benchmark's build time.
+/// (or a directory holding them) is a turns store. Anything else is refused: funes reads no agent's
+/// own transcripts, its integration converts them. `limit` caps how many sessions are read
+/// (`None` = all) — used to bound a benchmark's build time.
 pub fn open(path: &Path, limit: Option<usize>) -> Result<Box<dyn TraceSource>> {
-    open_with_harness(path, limit, None)
-}
-
-/// Like [`open`], but a `Some` `harness` forces the JSONL tree's harness (the CLI's `--harness`)
-/// instead of detecting it. A `*.parquet` path is a parquet dataset regardless; a turns file
-/// carries its harness in each turn and refuses the override.
-pub fn open_with_harness(path: &Path, limit: Option<usize>, harness: Option<Harness>) -> Result<Box<dyn TraceSource>> {
     let is_parquet = path
         .extension()
         .and_then(|e| e.to_str())
@@ -78,46 +70,17 @@ pub fn open_with_harness(path: &Path, limit: Option<usize>, harness: Option<Harn
             limit,
         }));
     }
-    // A path named by a known session dir is refused on its name alone; anything else is listed
-    // once, here, and the source that wins keeps the listing.
-    let listing = Harness::from_known_dir(path)
-        .is_none()
-        .then(|| jsonl::iter_jsonl_files(path));
-    // Nothing to read is an empty turns store rather than an agent's: a spool no integration has
-    // written into yet indexes as a no-op instead of being refused.
-    let holds_turns = listing
-        .as_ref()
-        .is_some_and(|l| l.is_empty() || l.iter().any(|p| funes_jsonl::is_turns_file(p)));
-    if holds_turns {
-        // A spool is the root funes resolved *from* the harness, so the override it carries is its
-        // own and redundant. Anywhere else the flag is a mistake worth naming.
-        if harness.is_some() && !harness::is_spool(path) {
-            bail!(
-                "`--harness` does not apply to {}: a funes JSONL turn names its own harness",
-                path.display()
-            );
-        }
-        return Ok(Box::new(funes_jsonl::FunesJsonl::new(
-            path,
-            listing.unwrap_or_default(),
-            limit,
-        )));
+    // Listed once, here; the source keeps the listing. Nothing to read is an empty turns store: a
+    // spool no integration has written into yet indexes as a no-op instead of being refused.
+    let listing = jsonl::iter_jsonl_files(path);
+    if listing.is_empty() || listing.iter().any(|p| funes_jsonl::is_turns_file(p)) {
+        return Ok(Box::new(funes_jsonl::FunesJsonl::new(path, listing, limit)));
     }
-    let harness = harness.unwrap_or_else(|| detect_harness(path, listing.as_deref()));
     bail!(
-        "{0} sessions are converted by its integration — run `funes add {0}`, which indexes them",
-        harness.cli_name()
+        "{} holds no turns files — an agent's own transcripts are converted by its integration \
+         (`funes add <agent>`); any other producer writes the format in docs/funes-jsonl.md",
+        path.display()
     )
-}
-
-/// Detect a JSONL tree's harness: a known session dir wins (a cheap tail match), else sniff the
-/// first record of the `listing`'s first transcript (see [`Harness::detect`]).
-fn detect_harness(root: &Path, listing: Option<&[PathBuf]>) -> Harness {
-    if let Some(h) = Harness::from_known_dir(root) {
-        return h;
-    }
-    let first = listing.and_then(|l| l.first()).and_then(|p| jsonl::first_record(p));
-    Harness::detect(root, first.as_ref())
 }
 
 /// "size:mtime_secs" for a file's incremental change-stamp, or `None` if it can't be stat'd.
@@ -315,12 +278,10 @@ mod tests {
             .unwrap()
             .describe()
             .contains("parquet"));
-        let err = open(Path::new("/x/.claude/projects"), None).err().expect("refused");
-        assert!(err.to_string().contains("funes add claude"), "{err}");
     }
 
     #[test]
-    fn open_routes_turns_files_and_refuses_a_harness_override() {
+    fn open_routes_turns_files_and_a_directory_of_them() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("thread.funes.jsonl");
         std::fs::write(&file, b"").unwrap();
@@ -330,18 +291,15 @@ mod tests {
         std::fs::create_dir_all(nested.path().join("a/b")).unwrap();
         std::fs::write(nested.path().join("a/b/t.funes.jsonl"), b"").unwrap();
         assert!(open(nested.path(), None).unwrap().describe().contains("funes JSONL"));
-        let err = open_with_harness(&file, None, Some(Harness::Claude))
-            .err()
-            .expect("refused");
-        assert!(err.to_string().contains("--harness"), "{err}");
     }
 
     #[test]
-    fn a_transcript_names_the_integration_that_converts_it_and_an_empty_root_reads_as_none() {
+    fn a_transcript_that_is_no_turns_file_is_refused_and_an_empty_root_reads_as_none() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("s.jsonl"), b"{\"type\":\"session_meta\"}\n").unwrap();
         let err = open(dir.path(), None).err().expect("refused");
-        assert!(err.to_string().contains("funes add codex"), "{err}");
+        assert!(err.to_string().contains("holds no turns files"), "{err}");
+        assert!(err.to_string().contains("funes-jsonl.md"), "{err}");
         let empty = tempfile::tempdir().unwrap();
         assert!(open(empty.path(), None).unwrap().units().unwrap().is_empty());
     }

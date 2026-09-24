@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 
 use arrow_array::{Array, StringArray};
 use funes::memory::dataset;
-use funes::traces::harness::Harness;
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -66,16 +65,17 @@ async fn turns_files_are_indexed_and_invalid_ones_rejected() {
     assert!(err.contains("unknown format 2"), "{err}");
     index(&fixture("valid.funes.jsonl")).await.unwrap();
     assert_eq!(stored_sessions().await, BTreeSet::from(["b3f2e0c4".to_string()]));
-    // `--harness` is refused: the facet is in the data.
-    let err = funes::commands::index::run_index_roots(
-        &[(fixture("valid.funes.jsonl"), Some(Harness::Claude))],
-        false,
-        None,
-        true,
-    )
-    .await
-    .unwrap_err();
-    assert!(err.to_string().contains("--harness"), "{err}");
+    // `--harness` is refused with a path: the facet is in the data.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_funes"))
+        .arg("index")
+        .arg(fixture("valid.funes.jsonl"))
+        .args(["--harness", "claude"])
+        .env("FUNES_HOME", home.path())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("names its own harness"), "{err}");
 
     // The directory: the valid files land, the two rejected ones are counted and fail the exit
     // status.
@@ -96,7 +96,7 @@ async fn turns_files_are_indexed_and_invalid_ones_rejected() {
     // once.
     let home = tempfile::tempdir().unwrap();
     std::env::set_var("FUNES_HOME", home.path());
-    let err = funes::commands::index::run_index_budgeted(&[(fixture(""), None)], false, None, true)
+    let err = funes::commands::index::run_index_budgeted(&[fixture("")], false, None, true)
         .await
         .unwrap_err()
         .to_string();

@@ -127,8 +127,10 @@ scan the content for credentials. Local-only setup does not require TruffleHog.
 ### The spool
 
 funes reads no agent's own transcripts. Each integration converts a session into
-`~/.funes/spool/<agent>/<session id>.funes.jsonl` — at install for the history, then on every turn
-for the session in progress — and funes indexes what it finds there.
+`~/.funes/spool/<id>/<session id>.funes.jsonl` — at install for the history, then on every turn for
+the session in progress — and funes indexes what it finds there. The id names the spool; the
+`harness` each turn carries is the integration's own to choose (the four funes ships use their id,
+by convention), and `recall --harness` filters on what the turns carry, whatever is installed.
 
 The directory is funes's. A bundle only ever writes into it, and funes deletes a file once the whole
 of it is in the memory, so what is left on disk is exactly the backlog still owed: the whole history

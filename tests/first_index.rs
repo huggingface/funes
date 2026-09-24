@@ -3,6 +3,7 @@
 //! from a source that still holds the session. Own test binary so its `$FUNES_HOME` can't race the
 //! other integration tests'.
 
+use funes::traces::spool;
 use std::io::Write;
 
 /// A session with a user text turn, an assistant `tool_use`, and a `tool_result` — one block in
@@ -42,12 +43,20 @@ fn state_level(home: &std::path::Path) -> String {
 async fn seed_finishes_a_small_history_and_a_rerun_is_a_noop() {
     let home = tempfile::tempdir().unwrap();
     std::env::set_var("FUNES_HOME", home.path());
-    // Where the agent's integration converts into.
-    let src = funes::traces::harness::spool_dir(
-        &funes::traces::harness::spool_root(),
-        funes::traces::harness::Harness::Claude,
-    );
+    // Where the agent's integration converts into. funes finds it by listing the spool root, so a
+    // stray file or a directory no id could name is not a producer; `--harness <id>` selects one
+    // that exists.
+    let src = spool::spool_dir("claude");
     std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(spool::spool_root().join("Not An Id")).unwrap();
+    std::fs::write(spool::spool_root().join(".DS_Store"), b"").unwrap();
+    assert_eq!(spool::spools(), vec![src.clone()]);
+    assert_eq!(spool::select("claude").unwrap(), src);
+    let err = spool::select("codex").unwrap_err().to_string();
+    assert!(err.contains("no codex spool"), "{err}");
+    assert!(err.contains("funes add codex"), "{err}");
+    let err = spool::select("Not An Id").unwrap_err().to_string();
+    assert!(err.contains("not an integration id"), "{err}");
     write_session(&src);
 
     // The seed `funes add` runs: budgeted, tier-major. This history fits the budget, so every
@@ -66,7 +75,7 @@ async fn seed_finishes_a_small_history_and_a_rerun_is_a_noop() {
     );
 
     // The budgeted no-path run (the per-turn hook): nothing owed, nothing added.
-    let roots = [(src.clone(), Some(funes::traces::harness::Harness::Claude))];
+    let roots = [src.clone()];
     funes::commands::index::run_index_budgeted(&roots, false, None, false)
         .await
         .unwrap();
@@ -79,7 +88,7 @@ async fn seed_finishes_a_small_history_and_a_rerun_is_a_noop() {
     let kept = home.path().join("elsewhere");
     std::fs::create_dir_all(&kept).unwrap();
     write_session(&kept);
-    let roots = [(kept.clone(), None)];
+    let roots = [kept.clone()];
     funes::commands::index::run_index_budgeted(&roots, false, None, false)
         .await
         .unwrap();

@@ -13,7 +13,7 @@ use crate::inference::{self, embed_batched, Embedder};
 use crate::memory::dataset::{self, build_batch, schema, MODEL};
 use crate::memory::lock;
 use crate::scan;
-use crate::traces::harness::{self, Harness};
+use crate::traces::spool;
 use crate::traces::{self, repo, source};
 use anyhow::{anyhow, Context, Result};
 use arrow_array::{Array, RecordBatchIterator, StringArray};
@@ -203,7 +203,7 @@ fn unit_refused(entry: Option<&UnitState>, sig: &str) -> bool {
 fn drains(key: &str, sig: &str, level: Tier) -> bool {
     let path = Path::new(key);
     level >= *Tier::ALL.iter().max().expect("Tier::ALL is non-empty")
-        && harness::is_spool(path)
+        && spool::is_spool(path)
         && source::file_sig(path).as_deref() == Some(sig)
 }
 
@@ -685,20 +685,19 @@ fn run_summary(done: bool, sessions: u64, skipped: u64, chunks: u64, rejected: u
     }
 }
 
-/// Build/update the local index from one or more source roots — each `(path, harness override)`
-/// where `None` auto-detects. All roots share one memory, embedder, and `state.json` (keyed by
-/// absolute file path, so cross-root incremental works). Writes only locally — publishing is the
-/// separate `push`. `max_sessions` caps sessions *per root* to the most recent N (`None` = all).
-/// `yes` skips the first-index confirmation (`--yes`).
+/// Build/update the local index from one or more source roots. All roots share one memory,
+/// embedder, and `state.json` (keyed by absolute file path, so cross-root incremental works).
+/// Writes only locally — publishing is the separate `push`. `max_sessions` caps sessions *per
+/// root* to the most recent N (`None` = all). `yes` skips the first-index confirmation (`--yes`).
 pub async fn run_index_roots(
-    roots: &[(PathBuf, Option<Harness>)],
+    roots: &[PathBuf],
     no_thinking: bool,
     max_sessions: Option<usize>,
     yes: bool,
 ) -> Result<()> {
     let sources = roots
         .iter()
-        .map(|(path, harness)| source::open_with_harness(path, max_sessions, *harness))
+        .map(|path| source::open(path, max_sessions))
         .collect::<Result<Vec<_>>>()?;
     index_sources(sources, no_thinking, yes).await
 }
@@ -728,20 +727,20 @@ enum Finish {
     All,
 }
 
-/// Build/update the local index from harness session roots, budgeted and tier-major: text across
+/// Build/update the local index from spools, budgeted and tier-major: text across
 /// every session first, then tool_use, then tool_result, stopping at the first whole-session
 /// boundary past the budget. The no-path `funes index` — the per-turn hook advances the backfill
 /// one bounded step per run; an interactive run offers to finish the rest; `yes` finishes it
 /// without asking.
 pub async fn run_index_budgeted(
-    roots: &[(PathBuf, Option<Harness>)],
+    roots: &[PathBuf],
     no_thinking: bool,
     max_sessions: Option<usize>,
     yes: bool,
 ) -> Result<()> {
     let sources = roots
         .iter()
-        .map(|(path, harness)| source::open_with_harness(path, max_sessions, *harness))
+        .map(|path| source::open(path, max_sessions))
         .collect::<Result<Vec<_>>>()?;
     let finish = if yes { Finish::All } else { Finish::Ask };
     run_budgeted(sources, no_thinking, finish).await
@@ -884,11 +883,11 @@ impl CheckReport {
 /// Dry-run `path`: read and chunk every unit exactly as an index would, count turns and chunks,
 /// find the ids a unit produces twice (a turn re-emitted under its `turn_uuid` would be deduped
 /// away, never indexed), and write nothing — no lock, no memory, no model.
-pub fn check(path: &Path, no_thinking: bool, limit: Option<usize>, harness: Option<Harness>) -> Result<CheckReport> {
+pub fn check(path: &Path, no_thinking: bool, limit: Option<usize>) -> Result<CheckReport> {
     if !path.exists() {
         anyhow::bail!("no such path: {}", path.display());
     }
-    let src = source::open_with_harness(path, limit, harness)?;
+    let src = source::open(path, limit)?;
     let units = src.units()?;
     let scanner = find_scanner();
     let mut text = format!("checking {}\n", path.display());
@@ -931,11 +930,11 @@ pub fn check(path: &Path, no_thinking: bool, limit: Option<usize>, harness: Opti
     })
 }
 
-/// Build/update the local index from a single source root, auto-detecting its harness — a thin
-/// convenience over [`run_index_roots`] for a single path (tests, benchmarks, one explicit path).
-/// Passes `yes = true`: these callers are non-interactive and must not gate on the first-index prompt.
+/// Build/update the local index from a single source root — a thin convenience over
+/// [`run_index_roots`] for a single path (tests, benchmarks, one explicit path). Passes
+/// `yes = true`: these callers are non-interactive and must not gate on the first-index prompt.
 pub async fn run_index(path: &Path, no_thinking: bool, max_sessions: Option<usize>) -> Result<()> {
-    run_index_roots(&[(path.to_path_buf(), None)], no_thinking, max_sessions, true).await
+    run_index_roots(&[path.to_path_buf()], no_thinking, max_sessions, true).await
 }
 
 /// A first interactive index estimated at ≥ this many seconds prompts before continuing.
@@ -1209,7 +1208,7 @@ mod tests {
         let key = |f: &str| root.join(f).to_string_lossy().into_owned();
         let sweep = || -> Vec<Box<dyn source::TraceSource>> {
             vec![
-                source::open_with_harness(&root, None, None).unwrap(),
+                source::open(&root, None).unwrap(),
                 // A store that claims no key contributes none, however its units are signed.
                 Box::new(MockSource {
                     name: "remote",

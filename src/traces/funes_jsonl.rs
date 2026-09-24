@@ -5,6 +5,7 @@
 
 use super::jsonl;
 use super::source::{file_sig, TraceSource, Unit};
+use super::spool;
 use super::{Turn, BLOCK_TYPES};
 use anyhow::{anyhow, bail, Context, Result};
 use std::path::{Path, PathBuf};
@@ -121,8 +122,7 @@ fn validate(t: &Turn) -> Result<()> {
             bail!("{field} {v:?} contains `:`");
         }
     }
-    let harness_char = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-';
-    if t.harness.is_empty() || !t.harness.chars().all(harness_char) {
+    if !spool::is_id(&t.harness) {
         bail!("harness {:?} is not [a-z0-9_-]", t.harness);
     }
     if !t.ts.ends_with('Z') || chrono::DateTime::parse_from_rfc3339(&t.ts).is_err() {

@@ -8,11 +8,11 @@
 //! parquet.
 
 pub mod funes_jsonl;
-pub mod harness;
 pub mod jsonl;
 pub mod parquet;
 pub mod repo;
 pub mod source;
+pub mod spool;
 
 use serde::{Deserialize, Deserializer, Serialize};
 

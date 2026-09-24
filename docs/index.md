@@ -5,14 +5,15 @@ runs it for you on every turn; run it by hand to seed a memory, to fold in a new
 sessions from a machine or agent that never ran the automation.
 
 ```bash
-funes index      # a fast, text-first pass over every installed agent's spool, into one memory
+funes index      # a fast, text-first pass over every spool, into one memory
 ```
 
 ## What it indexes
 
-With **no argument**, in a terminal, `funes index` sweeps every agent whose integration is installed
-— each converts its own sessions into `~/.funes/spool/<agent>`, which is what funes reads — into one
-memory, then offers to finish any deeper work left. Scope it to a single agent with `--harness`:
+With **no argument**, in a terminal, `funes index` sweeps every spool under `~/.funes/spool/` — each
+integration converts its agent's sessions into its own, `~/.funes/spool/<id>`, which is what funes
+reads — into one memory, then offers to finish any deeper work left. Scope it to one integration's
+spool with `--harness <id>`:
 
 ```bash
 funes index --harness codex        # only Codex's sessions
@@ -29,12 +30,13 @@ funes index <org>/<repo>                   # a Hub trace dataset (or a full hf:/
 ```
 
 An existing local path always wins over reading the same string as a repo ref. An **automated
-(non-terminal) run must name a target** — a path or `--harness <name>`; funes refuses to sweep every
-harness root unattended (a Claude session-end shouldn't pull in Codex or pi sessions).
+(non-terminal) run must name a target** — a path or `--harness <id>`; funes refuses to sweep every
+spool unattended (a Claude session-end shouldn't pull in Codex or pi sessions).
 
-funes reads no agent's own transcripts: each integration converts its sessions into that agent's
-spool, and a path naming a native store is refused with a pointer at `funes add <agent>`. A session
-no integration has converted is not indexed — install it, and its history is converted at install.
+funes reads no agent's own transcripts: each integration converts its sessions into its spool, and a
+path holding transcripts that are not turns files is refused with a pointer at the format
+([funes-jsonl.md](funes-jsonl.md)) and at `funes add <agent>`. A session no integration has
+converted is not indexed — install it, and its history is converted at install.
 funes owns the spool and drains it as it goes: a file is deleted once the whole of it is in the
 memory (see [add.md](add.md)), which is why a memory is rebuilt by re-running `funes add <agent>`.
 
@@ -132,7 +134,7 @@ scanned or stored: a pasted screenshot is megabytes of base64 with nothing recal
 
 | Flag | Meaning |
 | --- | --- |
-| `--harness <name>` | Index one agent's spool: `claude \| codex \| pi \| hermes`. Refused with a PATH of turns files, whose turns name their own harness. |
+| `--harness <id>` | Index one integration's spool, `~/.funes/spool/<id>`. Refused with a PATH, whose turns name their own harness. |
 | `--check` | Validate PATH without indexing it: turns, chunks, rejected files, duplicate ids; writes nothing, exits non-zero if a unit was rejected. |
 | `--limit <N>` | Index only the most recent N sessions per source. Omit to index all. A Hub repo ignores it and indexes every shard. |
 | `--no-thinking` | Exclude thinking blocks. |
@@ -143,7 +145,7 @@ scanned or stored: a pasted screenshot is megabytes of base64 with nothing recal
 Indexing and recall are one deterministic pipeline:
 
 ```
-~/.funes/spool/<agent>   (each agent's integration converts its own sessions into it)
+~/.funes/spool/<id>      (each integration converts its agent's sessions into its own)
    (or a .parquet trace, or a .funes.jsonl turns file)
    │  parse        deterministic — turns (text / thinking / tool_use / tool_result), tagged by agent
    │  chunk        one chunk per content block, tight provenance

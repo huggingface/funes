@@ -7,8 +7,8 @@
 //!
 //! One directory per layer, each with one job:
 //!
-//! - [`traces`] — where sessions come from and how each harness's transcript is parsed, plus the
-//!   `Turn`/`Block` model every parser produces.
+//! - [`traces`] — where turns come from: turns files, the spools integrations write them into,
+//!   Hub parquet, and the `Turn`/`Block` model they all produce.
 //! - [`chunk`], [`scan`] — the two models the layers share: chunk text and its ids, and secret
 //!   findings.
 //! - [`inference`] — embedding and reranking behind traits, so a backend swaps at build time.

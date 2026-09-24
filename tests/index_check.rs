@@ -31,7 +31,7 @@ async fn check_reports_without_writing() {
     let home = tempfile::tempdir().unwrap();
     std::env::set_var("FUNES_HOME", home.path());
 
-    let report = funes::commands::index::check(&fixture(""), false, None, None).unwrap();
+    let report = funes::commands::index::check(&fixture(""), false, None).unwrap();
     assert!(!report.all_accepted());
     assert_eq!((report.rejected, report.duplicate_ids), (2, 1));
     for want in [
@@ -47,12 +47,12 @@ async fn check_reports_without_writing() {
         assert!(report.text.contains(want), "missing {want:?} in:\n{}", report.text);
     }
 
-    let report = funes::commands::index::check(&fixture("valid.funes.jsonl"), false, None, None).unwrap();
+    let report = funes::commands::index::check(&fixture("valid.funes.jsonl"), false, None).unwrap();
     assert!(report.all_accepted(), "{}", report.text);
     assert!(report.text.contains("3 turns, 5 chunks"), "{}", report.text);
 
     // A path that does not exist is an error, not a clean zero-unit check.
-    let err = funes::commands::index::check(&fixture("missing.funes.jsonl"), false, None, None)
+    let err = funes::commands::index::check(&fixture("missing.funes.jsonl"), false, None)
         .err()
         .expect("a missing path is refused");
     assert!(err.to_string().contains("no such path"), "{err}");
@@ -76,7 +76,7 @@ async fn check_reports_without_writing() {
     // The fixture holds a turn re-emitted under its `turn_uuid`, so the dry run predicts a duplicate
     // id and still passes.
     let dup = fixture("dup_turn.funes.jsonl");
-    let report = funes::commands::index::check(&dup, false, None, None).unwrap();
+    let report = funes::commands::index::check(&dup, false, None).unwrap();
     assert!(report.all_accepted(), "{}", report.text);
     assert_eq!((report.rejected, report.duplicate_ids), (0, 1));
     assert!(report.text.contains("duplicate id"), "{}", report.text);
@@ -95,7 +95,7 @@ async fn check_reports_without_writing() {
     let home = tempfile::tempdir().unwrap();
     std::env::set_var("FUNES_HOME", home.path());
     let elided = fixture("elided.funes.jsonl");
-    let report = funes::commands::index::check(&elided, false, None, None).unwrap();
+    let report = funes::commands::index::check(&elided, false, None).unwrap();
     assert!(report.all_accepted(), "{}", report.text);
     assert!(report.text.contains("1 turns, 1 chunks"), "{}", report.text);
     funes::commands::index::run_index(&elided, false, None).await.unwrap();

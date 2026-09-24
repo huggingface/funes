@@ -13,6 +13,7 @@ use std::process::Command;
 
 use crate::hub;
 use crate::memory::dataset;
+use crate::traces::spool;
 
 /// The integration contract this funes speaks.
 pub const CONTRACT_VERSION: u32 = 1;
@@ -95,13 +96,7 @@ pub fn open(root: &Path, id: &str) -> Result<Integration> {
             manifest.id
         );
     }
-    // The id is also the harness facet the agent's turns carry, so it takes that charset.
-    if manifest.id.is_empty()
-        || !manifest
-            .id
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
-    {
+    if !spool::is_id(&manifest.id) {
         bail!("the integration id {:?} must be lowercase [a-z0-9_-]", manifest.id);
     }
 

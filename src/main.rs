@@ -9,7 +9,7 @@ use funes::commands::{ask, index, mcp, push, recall, scrub, sketch, update};
 use funes::hub;
 use funes::memory;
 use funes::scan;
-use funes::traces::harness::Harness;
+use funes::traces::spool;
 use funes::ui::render;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -84,13 +84,13 @@ enum Cmd {
     /// Build or update your local memory from session transcripts.
     Index {
         /// A `.funes.jsonl` turns file (or a directory of them), a `.parquet` file, or a Hub
-        /// trace repo `<org>/<repo>`. Omit — in a terminal — to index every installed agent's spool
-        /// (~/.funes/spool/<agent>); `--harness <name>` alone targets one. An automated
-        /// (non-terminal) run must name a target.
+        /// trace repo `<org>/<repo>`. Omit — in a terminal — to index every integration's spool
+        /// (~/.funes/spool/<id>); `--harness <id>` alone targets one. An automated (non-terminal)
+        /// run must name a target.
         path: Option<String>,
-        /// Index only this agent's spool: claude | codex | pi | hermes. Refused with a PATH of
-        /// turns files, whose turns name their own.
-        #[arg(long)]
+        /// Index only this integration's spool, ~/.funes/spool/<id>. Refused with a PATH, whose
+        /// turns name their own harness.
+        #[arg(long, value_name = "ID")]
         harness: Option<String>,
         /// Validate PATH without indexing it: parse, count turns and chunks, report rejected files
         /// and duplicate ids; write nothing. Exits non-zero if a unit was rejected.
@@ -397,24 +397,29 @@ async fn main() -> Result<()> {
             limit,
             yes,
         } => {
-            let harness = harness.map(|h| Harness::parse(&h)).transpose()?;
+            // `--harness` selects a spool; a path's turns name their own harness.
+            if let (Some(p), Some(_)) = (&path, &harness) {
+                return Err(anyhow!(
+                    "`--harness` selects an integration's spool and does not apply to {p}: a turns file names its own harness"
+                ));
+            }
             if check {
                 let path = path.expect("clap requires PATH with --check");
-                let report = index::check(&PathBuf::from(&path), no_thinking, limit, harness)?;
+                let report = index::check(&PathBuf::from(&path), no_thinking, limit)?;
                 print!("{}", report.text);
                 if !report.all_accepted() {
                     return Err(anyhow!("{} unit(s) rejected", report.rejected));
                 }
                 return Ok(());
             }
-            // A harness-dirs refresh (no explicit path — the per-turn hook and the terminal "keep
-            // me fresh" case) is budgeted and text-first; an explicit path or Hub repo is indexed
-            // in full.
+            // A spool refresh (no explicit path — the per-turn hook and the terminal "keep me
+            // fresh" case) is budgeted and text-first; an explicit path or Hub repo is indexed in
+            // full.
             let budgeted = path.is_none();
-            let roots: Vec<(PathBuf, Option<Harness>)> = match path {
+            let roots: Vec<PathBuf> = match (path, harness) {
                 // An existing local path wins over reading the same string as a repo ref.
-                Some(p) if PathBuf::from(&p).exists() => vec![(PathBuf::from(p), harness)],
-                Some(p) if p.starts_with("hf://") || hub::is_remote_shorthand(&p) => {
+                (Some(p), _) if PathBuf::from(&p).exists() => vec![PathBuf::from(p)],
+                (Some(p), _) if p.starts_with("hf://") || hub::is_remote_shorthand(&p) => {
                     // A Hub trace dataset: resolve to `hf://datasets/<owner>/<name>` and index its
                     // auto-converted parquet.
                     let memory::Memory::Remote { uri } = memory::Memory::parse(&p) else {
@@ -422,44 +427,27 @@ async fn main() -> Result<()> {
                     };
                     return index::run_index_remote(&uri, no_thinking).await;
                 }
-                Some(p) => return Err(anyhow!("no such path: {p}")),
-                // `--harness X` with no path targets that harness's spool.
-                None if harness.is_some() => {
-                    let h = harness.unwrap();
-                    funes::traces::harness::known_harness_roots()
-                        .into_iter()
-                        .find(|(_, kh)| *kh == h)
-                        .map(|(dir, _)| vec![(dir, Some(h))])
-                        .unwrap_or_default()
-                }
-                // No target at all: index every known harness root — but only in a terminal. An
-                // automated run (no TTY) must name a target, so a session-end hook indexes just its
-                // own harness — a Claude session-end shouldn't pull in Codex or pi sessions.
-                None => {
+                (Some(p), _) => return Err(anyhow!("no such path: {p}")),
+                (None, Some(id)) => vec![spool::select(&id)?],
+                // No target at all: index every spool — but only in a terminal. An automated run
+                // (no TTY) must name a target, so a session-end hook indexes just its own spool — a
+                // Claude session-end shouldn't pull in Codex or pi sessions.
+                (None, None) => {
                     if !std::io::stdin().is_terminal() {
                         return Err(anyhow!(
-                            "automated `funes index` needs a target — pass a path or `--harness <claude|codex|pi|hermes>`; \
-                             refusing to index all harness roots unattended"
+                            "automated `funes index` needs a target — pass a path or `--harness <id>`; \
+                             refusing to index every spool unattended"
                         ));
                     }
-                    funes::traces::harness::known_harness_roots()
-                        .into_iter()
-                        .map(|(dir, h)| (dir, Some(h)))
-                        .collect()
+                    spool::spools()
                 }
             };
             if roots.is_empty() {
-                match harness {
-                    Some(h) => println!(
-                        "no {0} sessions to index yet — `funes add {0}` converts them as they happen.",
-                        h.cli_name()
-                    ),
-                    None => println!(
-                        "no agent converts its sessions here yet — `funes add <agent>` sets that up, \
-                         and funes indexes what lands in {}.",
-                        funes::traces::harness::spool_root().display()
-                    ),
-                }
+                println!(
+                    "no agent converts its sessions here yet — `funes add <agent>` sets that up, \
+                     and funes indexes what lands in {}.",
+                    spool::spool_root().display()
+                );
                 return Ok(());
             }
             if budgeted {
@@ -781,7 +769,7 @@ where
 /// `$FUNES_HOME/spool/<agent>`. An empty or absent spool and a build error are notes, not
 /// failures: the hooks are in, and they drain whatever lands there.
 async fn seed_local_index(agent: &str) {
-    let spool = funes::traces::harness::spool_root().join(agent);
+    let spool = spool::spool_dir(agent);
     let has_sessions = std::fs::read_dir(&spool).is_ok_and(|mut entries| entries.next().is_some());
     if !has_sessions {
         eprintln!(
