@@ -28,8 +28,17 @@ pub fn spool_dir(id: &str) -> PathBuf {
 }
 
 /// Whether `path` is inside a spool funes resolved for itself, rather than a path someone named.
+/// funes deletes what it owns here, so the answer is by what the paths resolve to: a `..` or a
+/// symlink cannot make a file elsewhere look like the spool's.
 pub fn is_spool(path: &Path) -> bool {
-    path.starts_with(spool_root())
+    is_under(&spool_root(), path)
+}
+
+fn is_under(root: &Path, path: &Path) -> bool {
+    match (root.canonicalize(), path.canonicalize()) {
+        (Ok(root), Ok(path)) => path.starts_with(root),
+        _ => false,
+    }
 }
 
 /// The spool `--harness <id>` selects: a valid id whose directory a producer has created. Finding
@@ -113,10 +122,29 @@ mod tests {
     #[test]
     fn a_spool_is_under_the_root_and_named_by_its_id() {
         assert_eq!(spool_dir("pi").file_name().unwrap(), "pi");
-        assert!(is_spool(&spool_dir("pi").join("s.funes.jsonl")));
         assert!(
             !is_spool(Path::new("/elsewhere/pi")),
             "a directory elsewhere is not funes's"
         );
+    }
+
+    /// What funes owns is decided on resolved paths: a file reached through `..` or a symlink from
+    /// inside the spool is someone else's, and a file in the spool is funes's however it is spelled.
+    #[test]
+    fn ownership_follows_the_resolved_path_not_its_spelling() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("spool");
+        let mine = tmp.path().join("mine");
+        std::fs::create_dir_all(root.join("pi")).unwrap();
+        std::fs::create_dir_all(&mine).unwrap();
+        std::fs::write(root.join("pi/s.funes.jsonl"), "").unwrap();
+        std::fs::write(mine.join("y.funes.jsonl"), "").unwrap();
+        std::os::unix::fs::symlink(mine.join("y.funes.jsonl"), root.join("pi/link.funes.jsonl")).unwrap();
+
+        assert!(is_under(&root, &root.join("pi/s.funes.jsonl")));
+        assert!(is_under(&root, &root.join("pi/../pi/s.funes.jsonl")));
+        assert!(!is_under(&root, &root.join("pi/../../mine/y.funes.jsonl")));
+        assert!(!is_under(&root, &root.join("pi/link.funes.jsonl")));
+        assert!(!is_under(&root, &root.join("pi/gone.funes.jsonl")), "nothing to own");
     }
 }
