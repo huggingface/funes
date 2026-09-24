@@ -329,9 +329,17 @@ fn copy_into(src: &Path, dst: &Path, force: bool) -> Result<()> {
     for entry in std::fs::read_dir(src).with_context(|| format!("reading {}", src.display()))? {
         let from = entry?.path();
         let to = dst.join(from.file_name().expect("a directory entry has a file name"));
-        // Follows a symlink, so a checkout that links a shared script in copies the file.
+        // Follows a symlink, so a checkout that links a shared script in copies the file — a file
+        // only: a link to a directory could name any tree on the disk, and none of it is the
+        // bundle's to bring along.
         let meta = std::fs::metadata(&from).with_context(|| format!("reading {}", from.display()))?;
         if meta.is_dir() {
+            if from.symlink_metadata()?.file_type().is_symlink() {
+                bail!(
+                    "{} is a symlink to a directory, which an integration may not carry",
+                    from.display()
+                );
+            }
             copy_into(&from, &to, force)?;
             continue;
         }
@@ -459,6 +467,11 @@ mod tests {
             "drift is refreshed"
         );
         assert_eq!(std::fs::read_to_string(dst.join("memory")).unwrap(), "acme/kb\n");
+
+        // A link to a directory is refused: it could name any tree on the disk.
+        std::os::unix::fs::symlink(tmp.path(), src.join("everything")).unwrap();
+        let err = copy_into(&src, &dst, false).unwrap_err().to_string();
+        assert!(err.contains("symlink to a directory"), "{err}");
     }
 
     #[test]
