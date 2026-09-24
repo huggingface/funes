@@ -744,22 +744,33 @@ fn parse_confirm(input: &str, default_yes: bool) -> bool {
 }
 
 /// `funes add <agent> [memory]`: bootstrap the one-time steps the hooks can't do unattended,
-/// around the integration's own `setup add` (hooks + MCP).
+/// around the integration's own `setup add` (converts the agent's history into its spool,
+/// registers hooks + MCP).
 ///
-/// 1. ask, then build the first index if the local memory is missing (so recall/push have content);
-///    declining aborts the add — the integration is never run, so nothing is wired up;
-/// 2. `install` — register hooks + MCP (bakes the memory);
-/// 3. first push if a memory is bound — clears the overlap guard so the push hook works thereafter.
+/// 1. on a first add (no local memory yet), ask — the first index is about a minute of work, and
+///    declining aborts the add before anything is installed, so nothing is wired up;
+/// 2. `install` — writes the spool, bakes the memory in;
+/// 3. build the first index from that spool, so recall and the push have content;
+/// 4. first push if a memory is bound — clears the overlap guard so the push hook works thereafter.
 async fn bootstrap_add<F, Fut>(agent: &str, resolved: Option<Resolved>, install: F) -> Result<()>
 where
     F: FnOnce(Option<String>) -> Fut,
     Fut: std::future::Future<Output = Result<()>>,
 {
-    if !ensure_local_index(agent).await {
+    let first_add = memory::Memory::local().open().await.is_err();
+    if first_add
+        && !confirm(
+            &format!("funes will index your recent {agent} sessions so recall works (about a minute). Proceed? [Y/n] "),
+            true,
+        )
+    {
         eprintln!("funes: skipped — nothing was wired up. Run `funes add {agent}` again when you're ready.");
         return Ok(());
     }
     install(resolved.as_ref().map(|r| r.memory.clone())).await?;
+    if first_add {
+        seed_local_index(agent).await;
+    }
     // First push only when there's actually a local index to publish. Without one (a failed first
     // build, or no sessions yet) there's nothing to push, and running it would just error on the
     // absent memory.
@@ -773,38 +784,24 @@ where
     Ok(())
 }
 
-/// Build the first index from `agent`'s sessions when the local memory is missing — asking first,
-/// since it's about a minute of work. Returns whether `add` should proceed: declining (or EOF — a
-/// no-TTY run reads none) returns `false`, so the caller installs nothing. An empty/absent session
-/// dir or a build error is a note, not a decline: the hooks still go in and `funes index` builds
-/// it later — as is an agent whose transcripts funes has no parser for.
-async fn ensure_local_index(agent: &str) -> bool {
-    if memory::Memory::local().open().await.is_ok() {
-        return true; // already have a local index
-    }
-    let Some((root, _)) = Harness::parse(agent).ok().and_then(|harness| {
-        funes::traces::harness::known_harness_roots()
-            .into_iter()
-            .find(|(_, h)| *h == harness)
-    }) else {
+/// Build the first index from the spool `agent`'s setup has just converted its history into,
+/// `$FUNES_HOME/spool/<agent>`. An empty or absent spool and a build error are notes, not
+/// failures: the hooks are in, and they drain whatever lands there.
+async fn seed_local_index(agent: &str) {
+    let spool = funes::traces::harness::spool_root().join(agent);
+    let has_sessions = std::fs::read_dir(&spool).is_ok_and(|mut entries| entries.next().is_some());
+    if !has_sessions {
         eprintln!(
-            "funes: no {agent} sessions found yet — the hooks are installed; run `funes index` once you've used it."
+            "funes: no {agent} sessions to index yet — the hooks are installed and index each one as it happens."
         );
-        return true;
-    };
-    if !confirm(
-        &format!("funes will index your recent {agent} sessions so recall works (about a minute). Proceed? [Y/n] "),
-        true,
-    ) {
-        return false;
+        return;
     }
     eprintln!("funes: indexing your recent {agent} sessions…");
-    if let Err(e) = index::run_index_seed(&root).await {
+    if let Err(e) = index::run_index_seed(&spool).await {
         eprintln!(
             "funes: initial index didn't complete ({e:#}) — the hooks are installed; run `funes index` to build it."
         );
     }
-    true
 }
 
 /// The one-time first publish `add` performs when a memory is bound (the push hook can't, off a

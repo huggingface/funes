@@ -113,13 +113,15 @@ scan the content for credentials. Local-only setup does not require TruffleHog.
 
 ## What a run does
 
-For Claude, Codex, and Hermes, `funes add` runs the one-time bootstrap the hooks can't do unattended:
+`funes add` runs the one-time bootstrap the hooks can't do unattended:
 
-1. **Builds your first index** if you don't have one — a fast, text-first pass over that agent's
-   sessions (about a minute, after asking). Declining aborts the add; nothing is installed. Deeper
-   content and older sessions backfill on later turns.
-2. **Installs the hooks and registers the MCP server** (baking in the bound memory).
-3. **Does the first push** to a freshly-bound memory — the publish the hook refuses to do off a
+1. **Asks** before your first index, about a minute of work. Declining aborts the add; nothing is
+   installed.
+2. **Installs the hooks and registers the MCP server** (baking in the bound memory). This is where
+   the integration converts the agent's existing sessions into its spool.
+3. **Builds your first index** from that spool if you don't have one — a fast, text-first pass.
+   Deeper content and older sessions backfill on later turns.
+4. **Does the first push** to a freshly-bound memory — the publish the hook refuses to do off a
    terminal (the wrong-memory guard; see [automation.md](automation.md)).
 
 ### The spool
