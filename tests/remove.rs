@@ -202,6 +202,8 @@ fn missing_agent_cli_still_removes_owned_claude_and_pi_files() {
     assert!(String::from_utf8_lossy(&pi.stdout).contains("remove the registration manually"));
 }
 
+/// Nothing installed and nowhere to fetch from is what `remove` leaves behind, so meeting it is a
+/// no-op that says what it found — and settles the id locally, off the network.
 #[test]
 fn an_agent_nothing_knows_is_named_rather_than_fetched() {
     let tmp = tempfile::tempdir().unwrap();
@@ -219,8 +221,9 @@ fn an_agent_nothing_knows_is_named_rather_than_fetched() {
         .env_remove("FUNES_HOME")
         .output()
         .unwrap();
-    assert!(!out.status.success());
+    support::assert_success(&out);
     let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.starts_with("nothing to remove"), "{err}");
     assert!(err.contains("no clyde integration on this machine"), "{err}");
     assert!(err.contains("docs/add.md"), "{err}");
 }

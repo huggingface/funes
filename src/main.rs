@@ -602,11 +602,20 @@ fn confirm_trust(id: &str, dir: &Path, provenance: registry::Provenance) -> Resu
     Ok(())
 }
 
-/// Run `id`'s `setup remove`, then delete its files.
+/// Run `id`'s `setup remove`, then delete its files. Nothing on disk and nowhere to fetch from is
+/// the state `remove` produces, so meeting it is a success, not an unknown agent.
 async fn remove_agent(id: &str) -> Result<()> {
-    let integration = prepare_agent(id, false).await?;
+    let root = registry::default_root()?;
+    let integration = match prepare_agent(id, false).await {
+        Ok(integration) => integration,
+        Err(e) if !root.join(id).is_dir() => {
+            eprintln!("nothing to remove — {e:#}");
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
     integration.remove()?;
-    registry::discard(&registry::default_root()?, id)
+    registry::discard(&root, id)
 }
 
 /// A resolved memory binding: the memory spec, and whether funes just created the repo this run — the

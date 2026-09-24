@@ -220,6 +220,13 @@ fn an_installed_only_integration_adds_and_removes_once_trusted_at_a_terminal() {
     assert!(transcript.contains("Trust it? [y/N]"), "{transcript}");
     assert!(fs::read_to_string(&log).unwrap().starts_with("remove\n"));
     assert!(!dir.exists(), "the installed copy is taken with the integration");
+
+    // Gone, with no source to refresh it from: a second remove has nothing to do and says so.
+    fs::remove_file(&log).unwrap();
+    let out = funes(&home, &funes_home, &log, &["remove", "clyde"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stderr(&out).starts_with("nothing to remove"), "{}", stderr(&out));
+    assert!(!log.exists(), "no setup ran");
 }
 
 #[test]
