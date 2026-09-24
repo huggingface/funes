@@ -7,7 +7,7 @@
 use anyhow::{bail, Context, Result};
 use hf_hub::buckets::BucketDownload;
 use serde::Deserialize;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -307,8 +307,19 @@ pub fn discard(root: &Path, id: &str) -> Result<()> {
     super::remove_tree(&root.join(id))
 }
 
+/// Create `dir`, and any parent missing, as funes's own: 0755 whatever the umask, since `open`
+/// refuses a registry anyone else could write to and a umask of 002 would make one. A directory
+/// that already exists is left as it is, to be judged then.
+fn create_owned(dir: &Path) -> Result<()> {
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o755)
+        .create(dir)
+        .with_context(|| format!("creating {}", dir.display()))
+}
+
 fn copy_into(src: &Path, dst: &Path, force: bool) -> Result<()> {
-    std::fs::create_dir_all(dst).with_context(|| format!("creating {}", dst.display()))?;
+    create_owned(dst)?;
     for entry in std::fs::read_dir(src).with_context(|| format!("reading {}", src.display()))? {
         let from = entry?.path();
         let to = dst.join(from.file_name().expect("a directory entry has a file name"));

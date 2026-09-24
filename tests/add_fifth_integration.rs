@@ -67,25 +67,26 @@ fi
 
 /// `funes <args>` against `home`, off a terminal.
 fn funes(home: &Path, funes_home: &Path, log: &Path, args: &[&str]) -> Output {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_funes"));
-    cmd.args(args);
-    run(cmd, home, funes_home, log)
+    let mut argv = vec![env!("CARGO_BIN_EXE_funes")];
+    argv.extend(args);
+    run(&argv, home, funes_home, log)
 }
 
 /// `funes <args>` against `home`, at a terminal that says yes to what funes asks.
 fn funes_at_a_terminal(home: &Path, funes_home: &Path, log: &Path, args: &[&str]) -> Output {
     let script = home.join("answer-yes.exp");
     fs::write(&script, ANSWER_YES).unwrap();
-    let mut cmd = Command::new("expect");
-    cmd.arg("-f")
-        .arg(&script)
-        .arg("--")
-        .arg(env!("CARGO_BIN_EXE_funes"))
-        .args(args);
-    run(cmd, home, funes_home, log)
+    let script = script.to_str().unwrap().to_string();
+    let mut argv = vec!["expect", "-f", &script, "--", env!("CARGO_BIN_EXE_funes")];
+    argv.extend(args);
+    run(&argv, home, funes_home, log)
 }
 
-fn run(mut cmd: Command, home: &Path, funes_home: &Path, log: &Path) -> Output {
+/// Runs `argv` under a umask of 002 — what a user-private-group distribution gives a login — so
+/// the directories funes creates must be its own doing, not the umask's.
+fn run(argv: &[&str], home: &Path, funes_home: &Path, log: &Path) -> Output {
+    let mut cmd = Command::new("sh");
+    cmd.args(["-c", r#"umask 002; exec "$@""#, "sh"]).args(argv);
     cmd.env("HOME", home)
         .env("FUNES_HOME", funes_home)
         // Authoritative: only what this directory holds is consulted, never a checkout or the
