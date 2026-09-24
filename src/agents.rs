@@ -14,23 +14,21 @@ use crate::traces::spool;
 /// registered integration speaks another contract (an install by another binary). The cure is the
 /// same, `funes add <id>` again — and funes knows no agent here, only what asked and what is
 /// registered.
-pub fn stale_install_notice() -> Option<String> {
-    let mut lines: Vec<String> = spool::missing()
-        .into_iter()
-        .map(|id| {
-            format!(
-                "the {id} integration does not match this version of funes. \
-                 Re-run `funes add {id}` to update it."
-            )
-        })
-        .collect();
+///
+/// `memory` is the one the caller serves, when it knows it: the MCP server's own, since the agent
+/// launched it with the binding `funes add` recorded. A bare `funes add <id>` would bind anew, so
+/// the cure names the memory when it can and asks for it when it cannot.
+pub fn stale_install_notice(memory: Option<&str>) -> Option<String> {
+    let line = |id: &str| {
+        let cure = match memory {
+            Some(memory) => format!("Re-run `funes add {id} {memory}` to update it."),
+            None => format!("Re-run `funes add {id}`, naming the memory it is bound to, to update it."),
+        };
+        format!("the {id} integration does not match this version of funes. {cure}")
+    };
+    let mut lines: Vec<String> = spool::missing().iter().map(|id| line(id)).collect();
     if let Ok(root) = registry::default_root() {
-        lines.extend(registry::mismatched(&root).into_iter().map(|(id, _)| {
-            format!(
-                "the {id} integration does not match this version of funes. \
-                 Re-run `funes add {id}` to update it."
-            )
-        }));
+        lines.extend(registry::mismatched(&root).iter().map(|(id, _)| line(id)));
     }
     (!lines.is_empty()).then(|| lines.iter().map(|line| format!("note: {line}\n")).collect())
 }

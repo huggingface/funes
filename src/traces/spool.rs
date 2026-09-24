@@ -51,7 +51,7 @@ pub fn select(id: &str) -> Result<PathBuf> {
     if !dir.is_dir() {
         bail!(
             "the {id} integration does not match this version of funes. \
-             Re-run `funes add {id}` to update it."
+             Re-run `funes add {id}`, naming the memory it is bound to, to update it."
         );
     }
     let _ = std::fs::remove_file(missing_stamp(id));

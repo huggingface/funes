@@ -306,7 +306,7 @@ async fn main() -> Result<()> {
             | Cmd::Sketch { .. }
             | Cmd::Status { .. }
     ) {
-        if let Some(note) = agents::stale_install_notice() {
+        if let Some(note) = agents::stale_install_notice(None) {
             eprint!("{note}");
         }
     }

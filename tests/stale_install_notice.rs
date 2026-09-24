@@ -32,11 +32,11 @@ fn stdout(out: &Output) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-/// Speak MCP to `funes mcp` over stdio: initialize, then call `status`. Returns the server's
-/// instructions and the tool's text.
-fn mcp_status(home: &Path, funes_home: &Path) -> (String, String) {
+/// Speak MCP to `funes mcp <memory>` over stdio, as an agent bound to `memory` launches it:
+/// initialize, then call `status`. Returns the server's instructions and the tool's text.
+fn mcp_status(home: &Path, funes_home: &Path, memory: &str) -> (String, String) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_funes"))
-        .arg("mcp")
+        .args(["mcp", memory])
         .env("HOME", home)
         .env("FUNES_HOME", funes_home)
         .env("HF_HOME", support::hf_home())
@@ -94,7 +94,7 @@ fn a_stale_install_is_said_on_every_read_until_funes_add_runs_again() {
     assert_eq!(
         stderr(&refused).lines().next(),
         Some(
-            "Error: the codex integration does not match this version of funes. Re-run `funes add codex` to update it."
+            "Error: the codex integration does not match this version of funes. Re-run `funes add codex`, naming the memory it is bound to, to update it."
         )
     );
     assert!(stamp.is_file(), "the refusal leaves its stamp");
@@ -108,22 +108,31 @@ fn a_stale_install_is_said_on_every_read_until_funes_add_runs_again() {
     )
     .unwrap();
 
-    // The CLI says both on stderr and keeps stdout as it was.
+    // The CLI says both on stderr and keeps stdout as it was. It does not know which memory the
+    // install was bound to, so the cure asks for it: a bare `funes add` would bind anew.
     let status = funes(&home, &funes_home, &["status"]);
     support::assert_success(&status);
     let err = stderr(&status);
-    let notes = "note: the codex integration does not match this version of funes. Re-run `funes add codex` to update it.\n\
-                 note: the clyde integration does not match this version of funes. Re-run `funes add clyde` to update it.\n";
+    let notes = "note: the codex integration does not match this version of funes. Re-run `funes add codex`, naming the memory it is bound to, to update it.\n\
+                 note: the clyde integration does not match this version of funes. Re-run `funes add clyde`, naming the memory it is bound to, to update it.\n";
     assert_eq!(err, notes);
     assert!(!stdout(&status).contains("note:"), "{}", stdout(&status));
 
-    // The MCP server says both in its instructions and ahead of every tool's text.
-    let (instructions, text) = mcp_status(&home, &funes_home);
-    assert!(instructions.contains(notes), "{instructions}");
-    assert!(text.starts_with(notes), "{text}");
+    // The MCP server says both in its instructions and ahead of every tool's text — and it was
+    // launched with the binding, so its cure carries the memory.
+    let team = tmp.path().join("team-memory");
+    let (instructions, text) = mcp_status(&home, &funes_home, team.to_str().unwrap());
+    let notes = format!(
+        "note: the codex integration does not match this version of funes. Re-run `funes add codex {m}` to update it.\n\
+         note: the clyde integration does not match this version of funes. Re-run `funes add clyde {m}` to update it.\n",
+        m = team.display()
+    );
+    assert!(instructions.contains(&notes), "{instructions}");
+    assert!(text.starts_with(&notes), "{text}");
+    let body = &text[notes.len()..];
     assert!(
-        text.contains("\n\nmemory: "),
-        "the status text follows the notes: {text}"
+        body.starts_with('\n') && body.len() > 1,
+        "the tool's own text follows the notes after a blank line: {body:?}"
     );
 
     // `funes add codex` creates the spool; the next hook finds it and the stamp goes. `funes add
