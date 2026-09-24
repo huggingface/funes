@@ -29,7 +29,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/funes-push.sh\" \"\" \"claude\"",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/funes-index.sh\" --publish",
             "timeout": 15,
             "statusMessage": "Publishing funes memory"
           }
@@ -41,7 +41,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/funes-push.sh\" \"\" \"claude\"",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/funes-index.sh\" --publish",
             "timeout": 15,
             "statusMessage": "Publishing funes memory"
           }

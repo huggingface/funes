@@ -1,7 +1,9 @@
 #!/bin/sh
 # Claude Code's per-turn capture: convert the transcript that just changed into funes's spool, then
 # any other changed since the last run, then advance the index over it. Fired by Stop and by
-# SubagentStop, whose payloads arrive on stdin.
+# SubagentStop, whose payloads arrive on stdin — and, as `funes-index.sh --publish`, by the session
+# boundaries, where the same conversion runs first and the publish follows it, so the last turn is
+# in the spool before it is indexed and pushed.
 #
 # The foreground half reads that payload and returns, so a turn never waits on the conversion or on
 # the embedder; the worker it leaves behind does both. Detaching uses nohup alone, which is portable
@@ -70,6 +72,7 @@ convert_stale() {
 
 worker() {
     payload=$1
+    mode=${2:-}
     funes=$(find_bin funes || true)
     if [ -z "$funes" ] || [ ! -x "$funes" ]; then
         log "index ABORT: funes not found; skipping."
@@ -94,6 +97,14 @@ worker() {
     convert_one "$jq" "$named"
     convert_stale "$jq" "$named"
 
+    # At a boundary the publish worker takes it from here: it indexes, waiting out a per-turn
+    # writer's lock, then pushes to the memory `setup add` recorded beside this script.
+    if [ "$mode" = --publish ]; then
+        memory=$(head -n 1 "$HERE/memory" 2>/dev/null | tr -d '[:space:]')
+        bash "$HERE/funes-push.sh" --worker "$memory" "$HARNESS"
+        return
+    fi
+
     log "index[$HARNESS]: start"
     if "$funes" index --harness "$HARNESS" >>"$LOG" 2>&1; then
         log "index[$HARNESS]: ok"
@@ -102,12 +113,13 @@ worker() {
     fi
 }
 
-# Worker mode (re-exec): the payload is the argument, and the turn is already over.
+# Worker mode (re-exec): the payload and the mode are the arguments, and the turn is already over.
 if [ "${1:-}" = "--worker" ]; then
-    worker "${2:-}"
+    worker "${2:-}" "${3:-}"
     exit 0
 fi
 
+mode=${1:-}
 payload=$(cat)
-nohup sh "$0" --worker "$payload" >/dev/null 2>&1 </dev/null &
+nohup sh "$0" --worker "$payload" "$mode" >/dev/null 2>&1 </dev/null &
 exit 0

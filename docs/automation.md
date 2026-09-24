@@ -103,10 +103,10 @@ validates a producer's output without writing anything, so run it before wiring 
   touches the network — and with no memory bound, there's no push hook at all.
 - **Fresh every turn.** Each completed turn re-indexes; because indexing is incremental, the
   re-sweep is cheap.
-- **The boundary publish indexes first.** The per-turn index detaches, so a session's last turn may
-  still be landing when the boundary fires; the publish hook sweeps the harness itself (retrying
-  while the per-turn writer holds the memory lock) and then pushes, rather than leaving that turn to
-  the next session's catch-up.
+- **The boundary publish converts and indexes first.** The per-turn hook detaches, so a session's
+  last turn may still be converting when the boundary fires; the boundary hook converts that
+  session itself — and any other changed since the hook last ran — then indexes (waiting out the
+  per-turn writer's lock) and pushes, rather than leaving that turn to the next session's catch-up.
 - **Published at the boundaries you have.** Claude publishes on `SessionEnd` and again on
   `SessionStart` (catching up anything a missed `SessionEnd` left behind — a disconnect, a closed
   window). Hermes publishes on `on_session_finalize` (its true session end) and again on

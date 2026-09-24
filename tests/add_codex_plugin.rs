@@ -88,8 +88,9 @@ async fn add_codex_installs_the_plugin_and_clears_a_pre_plugin_install() {
         cfg["hooks"].get("SessionStart").is_some(),
         "codex publishes on SessionStart too"
     );
+    // A boundary converts before it publishes, so it goes through the index script.
     let end = cfg["hooks"]["SessionEnd"][0]["hooks"][0]["command"].as_str().unwrap();
-    assert!(end.contains("funes-push.sh"), "end: {end}");
+    assert!(end.contains("funes-index.sh\" --publish"), "end: {end}");
     // The memory rides in a file, not the hook command, so the hooks stay static files.
     assert!(!end.contains("acme/kb"), "end: {end}");
     assert_eq!(fs::read_to_string(plugin.join("scripts/memory")).unwrap(), "acme/kb\n");

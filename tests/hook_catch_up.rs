@@ -25,12 +25,14 @@ async fn install(home: &Path, id: &str, scripts: &str, spool: &Path) -> PathBuf 
     scripts
 }
 
-/// Run the worker half of the hook, as the foreground half would, with `payload`.
-fn fire(scripts: &Path, home: &Path, bin: &Path, payload: &str) {
+/// Run the worker half of the hook, as the foreground half would, with `payload`; `mode` is
+/// `--publish` at a session boundary and empty per turn.
+fn fire(scripts: &Path, home: &Path, bin: &Path, payload: &str, mode: &str) {
     let out = Command::new("sh")
         .arg(scripts.join("funes-index.sh"))
         .arg("--worker")
         .arg(payload)
+        .arg(mode)
         .env("HOME", home)
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
         .env("FUNES_TEST_CLI_LOG", home.join("cli.log"))
@@ -53,13 +55,14 @@ fn converted(spool: &Path, stem: &str) -> bool {
 }
 
 /// The journey both hooks share: a session whose hook never fired is converted by the next one; a
-/// session converted already is not converted again; one written after that is.
+/// session converted already is not converted again; one written after that is; and a boundary
+/// converts before it publishes.
 async fn catches_up(
     id: &str,
     scripts_rel: &str,
     fixture: &str,
     tree: &str,
-    names: [&str; 3],
+    names: [&str; 4],
     payload: fn(&Path) -> String,
 ) {
     let tmp = tempfile::tempdir().unwrap();
@@ -70,14 +73,14 @@ async fn catches_up(
     let scripts = install(&home, id, scripts_rel, &spool).await;
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join(fixture);
     let tree = home.join(tree);
-    let [a, b, c] = names;
+    let [a, b, c, d] = names;
     let stem = |name: &str| name.trim_end_matches(".jsonl").to_string();
 
     // Two sessions written after the install: the hook fires for one of them only.
     sleep(TICK);
     let named = transcript(&tree, a, &fixture);
     transcript(&tree, b, &fixture);
-    fire(&scripts, &home, &bin, &payload(&named));
+    fire(&scripts, &home, &bin, &payload(&named), "");
     assert!(converted(&spool, &stem(a)), "the session the payload named");
     assert!(converted(&spool, &stem(b)), "and the one whose hook never fired");
     assert!(scripts.join("swept").is_file(), "the sweep left its mark");
@@ -86,12 +89,23 @@ async fn catches_up(
     sleep(TICK);
     transcript(&tree, c, &fixture);
     fs::remove_file(spool.join(format!("{}.funes.jsonl", stem(b)))).unwrap();
-    fire(&scripts, &home, &bin, &payload(&named));
+    fire(&scripts, &home, &bin, &payload(&named), "");
     assert!(converted(&spool, &stem(c)), "written since the last sweep");
     assert!(!converted(&spool, &stem(b)), "unchanged since the last sweep");
 
+    // A boundary: what was written since is converted first, then the publish worker indexes and
+    // pushes to the memory recorded beside the scripts.
+    sleep(TICK);
+    transcript(&tree, d, &fixture);
+    fs::write(scripts.join("memory"), "acme/kb\n").unwrap();
+    fire(&scripts, &home, &bin, &payload(&named), "--publish");
+    assert!(converted(&spool, &stem(d)), "converted before the publish");
+
     let log = fs::read_to_string(home.join("cli.log")).unwrap();
-    assert_eq!(log, format!("index --harness {id}\nindex --harness {id}\n"));
+    assert_eq!(
+        log,
+        format!("index --harness {id}\nindex --harness {id}\nindex --harness {id}\npush acme/kb\n")
+    );
 }
 
 #[tokio::test]
@@ -101,7 +115,7 @@ async fn the_claude_hook_converts_the_transcripts_its_predecessors_missed() {
         "claude-plugin/funes/scripts",
         "integrations/claude/claude-plugin/funes/test/session.jsonl",
         ".claude/projects/-Users-me-repo",
-        ["a.jsonl", "b.jsonl", "c.jsonl"],
+        ["a.jsonl", "b.jsonl", "c.jsonl", "d.jsonl"],
         |named| format!(r#"{{"transcript_path":"{}"}}"#, named.display()),
     )
     .await;
@@ -114,7 +128,12 @@ async fn the_codex_hook_converts_the_rollouts_its_predecessors_missed() {
         "codex-plugin/plugins/funes/scripts",
         "integrations/codex/codex-plugin/plugins/funes/test/session.jsonl",
         ".codex/sessions/2026/09/24",
-        ["rollout-a.jsonl", "rollout-b.jsonl", "rollout-c.jsonl"],
+        [
+            "rollout-a.jsonl",
+            "rollout-b.jsonl",
+            "rollout-c.jsonl",
+            "rollout-d.jsonl",
+        ],
         |named| format!(r#"{{"transcript_path":"{}","session_id":"s"}}"#, named.display()),
     )
     .await;
