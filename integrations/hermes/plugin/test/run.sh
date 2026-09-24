@@ -15,9 +15,21 @@ out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT INT TERM
 
 python3 "$HERE/../convert.py" "$HERE/state.db" "$out" 20260101_000000_fixture >/dev/null
-if diff -u "$HERE/expected.funes.jsonl" "$out/20260101_000000_fixture.funes.jsonl"; then
-    echo "hermes converter: ok"
-else
+if ! diff -u "$HERE/expected.funes.jsonl" "$out/20260101_000000_fixture.funes.jsonl"; then
     echo "hermes converter: output changed — see the diff above" >&2
     exit 1
 fi
+# The turns file carries the session's own time: that of its last message.
+if ! python3 - "$HERE/state.db" "$out/20260101_000000_fixture.funes.jsonl" <<'EOF'
+import os, sqlite3, sys
+db, out = sys.argv[1:]
+latest = sqlite3.connect(f"file:{db}?mode=ro", uri=True).execute(
+    "SELECT MAX(timestamp) FROM messages WHERE session_id = '20260101_000000_fixture'"
+).fetchone()[0]
+sys.exit(0 if abs(os.path.getmtime(out) - latest) < 1 else 1)
+EOF
+then
+    echo "hermes converter: the turns file does not carry the session's own time" >&2
+    exit 1
+fi
+echo "hermes converter: ok"

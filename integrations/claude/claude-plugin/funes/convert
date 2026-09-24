@@ -104,6 +104,9 @@ if [ $# -eq 2 ]; then
     tmp=$2.tmp.$$
     trap 'rm -f "$tmp"' EXIT INT TERM
     run >"$tmp"
+    # Stamped with the transcript's own time, so funes drains the spool newest session first
+    # rather than in the order the seed happened to convert them.
+    touch -r "$src" "$tmp"
     mv -f "$tmp" "$2"
     trap - EXIT INT TERM
 else

@@ -12,7 +12,7 @@
 // keyed pi's sessions by while it parsed them itself, and changing it would re-key every session a
 // memory already holds.
 
-import { readFileSync, writeFileSync, renameSync, mkdirSync, readdirSync, statSync, realpathSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync, mkdirSync, readdirSync, statSync, realpathSync, utimesSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -193,6 +193,10 @@ export function convert(sessionPath, outArg) {
   const tmp = `${out}.tmp${process.pid}`;
   mkdirSync(dirname(out), { recursive: true });
   writeFileSync(tmp, body);
+  // Stamped with the session's own time, so funes drains the spool newest session first rather
+  // than in the order the seed happened to convert them.
+  const { atime, mtime } = statSync(sessionPath);
+  utimesSync(tmp, atime, mtime);
   renameSync(tmp, out);
   return out;
 }

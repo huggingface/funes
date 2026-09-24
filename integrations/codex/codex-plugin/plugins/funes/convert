@@ -139,5 +139,8 @@ else
     tmp=$out.$$.tmp
     trap 'rm -f "$tmp"' EXIT HUP INT TERM
     run > "$tmp"
+    # Stamped with the rollout's own time, so funes drains the spool newest session first rather
+    # than in the order the seed happened to convert them.
+    touch -r "$src" "$tmp"
     mv -f "$tmp" "$out"
 fi

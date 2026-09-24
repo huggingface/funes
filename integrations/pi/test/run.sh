@@ -12,9 +12,12 @@ out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT INT TERM
 
 "$JS" "$HERE/../convert.mjs" "$HERE/session.jsonl" "$out"
-if diff -u "$HERE/expected.funes.jsonl" "$out/session.funes.jsonl"; then
-    echo "pi converter: ok"
-else
+if ! diff -u "$HERE/expected.funes.jsonl" "$out/session.funes.jsonl"; then
     echo "pi converter: output changed — see the diff above" >&2
     exit 1
 fi
+if [ "$out/session.funes.jsonl" -nt "$HERE/session.jsonl" ] || [ "$out/session.funes.jsonl" -ot "$HERE/session.jsonl" ]; then
+    echo "pi converter: the turns file does not carry the session's own time" >&2
+    exit 1
+fi
+echo "pi converter: ok"

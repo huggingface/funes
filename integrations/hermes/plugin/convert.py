@@ -180,6 +180,13 @@ def turns_of(db, session_id):
     return turns
 
 
+def latest_timestamp(db, session_id):
+    """When the session's last message landed, as epoch seconds, or None when no row says."""
+    with _open(db) as conn:
+        row = conn.execute("SELECT MAX(timestamp) FROM messages WHERE session_id = ?", (session_id,)).fetchone()
+    return row[0] if row and isinstance(row[0], (int, float)) else None
+
+
 def convert(db, spool, session_id):
     """One session into `<spool>/<session id>.funes.jsonl`; returns the path written."""
     out = os.path.join(spool, f"{session_id}.funes.jsonl")
@@ -190,6 +197,11 @@ def convert(db, spool, session_id):
     tmp = f"{out}.tmp{os.getpid()}"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(body)
+    # Stamped with the session's own time, so funes drains the spool newest session first rather
+    # than in the order the seed happened to convert them.
+    latest = latest_timestamp(db, session_id)
+    if latest is not None:
+        os.utime(tmp, (latest, latest))
     os.replace(tmp, out)
     return out
 

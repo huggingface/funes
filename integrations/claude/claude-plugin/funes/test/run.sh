@@ -11,9 +11,12 @@ out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT INT TERM
 
 "$HERE/../convert" "$HERE/session.jsonl" "$out/got.funes.jsonl"
-if diff -u "$HERE/expected.funes.jsonl" "$out/got.funes.jsonl"; then
-    echo "claude converter: ok"
-else
+if ! diff -u "$HERE/expected.funes.jsonl" "$out/got.funes.jsonl"; then
     echo "claude converter: output changed — see the diff above" >&2
     exit 1
 fi
+if [ "$out/got.funes.jsonl" -nt "$HERE/session.jsonl" ] || [ "$out/got.funes.jsonl" -ot "$HERE/session.jsonl" ]; then
+    echo "claude converter: the turns file does not carry the transcript's own time" >&2
+    exit 1
+fi
+echo "claude converter: ok"
