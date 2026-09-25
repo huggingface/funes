@@ -36,7 +36,7 @@ sha1 = "0.10"                    # chunk id = sha1(...)[:16]
 sha2 = "0.10"                    # verify release binaries before the installer/updater executes them
 hex = "0.4"
 walkdir = "2"                    # recursive *.jsonl walk
-rmcp = { version = "1", features = ["server", "macros", "transport-io", "schemars"] }  # MCP stdio server
+rmcp = { version = "3", features = ["server", "macros", "transport-io", "schemars"] }  # MCP stdio server
 tempfile = "3"                   # temp dir for the pre-publish secret scan; temp files/dirs in tests
 hf-hub = { version = "1.0.0-rc.1", features = ["rustls-tls", "blocking"] }  # native create_commit + parent_commit CAS + Xet upload; blocking: model download in the blas backend
 # Optional handle on the transitively-pulled openssl-sys (native-tls, via lance).
