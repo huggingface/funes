@@ -19,6 +19,7 @@ nothing but the Python hermes itself runs on.
 
 import json
 import os
+import re
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -192,7 +193,11 @@ def latest_timestamp(db, session_id):
 
 
 def convert(db, spool, session_id):
-    """One session into `<spool>/<session id>.funes.jsonl`; returns the path written."""
+    """One session into `<spool>/<session id>.funes.jsonl`; returns the path written. The id comes
+    out of the store and names a file, so one that is not a plain name is refused rather than
+    written wherever it points."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", session_id):
+        raise ValueError(f"hermes session id {session_id!r} is not a file name")
     out = os.path.join(spool, f"{session_id}.funes.jsonl")
     body = "".join(compact(t) + "\n" for t in turns_of(db, session_id))
     os.makedirs(spool, exist_ok=True)

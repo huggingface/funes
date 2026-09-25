@@ -33,4 +33,21 @@ then
     echo "hermes converter: the turns file does not carry the session's own time" >&2
     exit 1
 fi
+# A session id names the file it becomes, so one that is not a plain name is refused.
+if ! python3 - "$HERE/../convert.py" "$HERE/state.db" "$out" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("convert", sys.argv[1])
+convert = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(convert)
+for bad in ("../escape", "a/b", "", ".hidden"):
+    try:
+        convert.convert(sys.argv[2], sys.argv[3], bad)
+    except ValueError:
+        continue
+    sys.exit(f"converted a session id that is not a file name: {bad!r}")
+PY
+then
+    echo "hermes converter: a session id that is not a file name was written" >&2
+    exit 1
+fi
 echo "hermes converter: ok"
