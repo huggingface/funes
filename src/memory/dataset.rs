@@ -123,6 +123,7 @@ pub async fn scan_rows(
 /// progress around these opaque (no incremental hook), potentially slow Lance calls. Pass `|_| {}`
 /// to stay silent.
 pub async fn build_indexes(ds: &mut Dataset, on_phase: impl Fn(&str)) {
+    sweep_shuffle_leftovers(&std::env::temp_dir());
     on_phase("text search index");
     let _ = ds
         .create_index(
@@ -139,6 +140,62 @@ pub async fn build_indexes(ds: &mut Dataset, on_phase: impl Fn(&str)) {
             .create_index(&["vector"], IndexType::Vector, None, &params, true)
             .await;
     }
+}
+
+/// The files a lance IVF shuffle directory holds, and nothing else.
+const SHUFFLE_FILES: [&str; 4] = [
+    "shuffle_data.lance",
+    "shuffle_data.spill",
+    "shuffle_offsets.lance",
+    "shuffle_offsets.spill",
+];
+
+/// A shuffle directory is fair game only once no build could still be writing to it.
+const SHUFFLE_LEFTOVER_AGE: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Best-effort: remove the shuffle directories a previous IVF build left in `$TMPDIR`.
+///
+/// Building the IVF index hands lance a temp directory whose guard lance drops before the shuffler
+/// writes to it (`index/vector.rs::prepare_vector_segment_build`), so the writer recreates the
+/// directory and nothing owns it — every build leaks one, tens of MB apiece. lance fixed this in
+/// 13.0.0; 11 and 12 both leak, so this sweep goes away when funes moves off them. Sweeping
+/// on the way in rather than on the way out is what keeps this safe: a directory another process is
+/// still filling is younger than [`SHUFFLE_LEFTOVER_AGE`], and one it has finished with holds
+/// nothing but [`SHUFFLE_FILES`] (mid-write, object_store's own staging files sit alongside them).
+fn sweep_shuffle_leftovers(tmp_root: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(tmp_root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with(".tmp") {
+            continue;
+        }
+        let path = entry.path();
+        if entry.metadata().is_ok_and(|m| {
+            m.is_dir()
+                && m.modified()
+                    .is_ok_and(|t| t.elapsed().is_ok_and(|age| age > SHUFFLE_LEFTOVER_AGE))
+        }) && holds_only_shuffle_files(&path)
+        {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    }
+}
+
+/// Whether `dir` is non-empty and every name in it is one of [`SHUFFLE_FILES`].
+fn holds_only_shuffle_files(dir: &std::path::Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    let mut seen = false;
+    for entry in entries {
+        let Ok(entry) = entry else { return false };
+        if !SHUFFLE_FILES.contains(&entry.file_name().to_string_lossy().as_ref()) {
+            return false;
+        }
+        seen = true;
+    }
+    seen
 }
 
 /// IVF_PQ parameters sized from the `vector` column's dimension (matching lancedb's defaults).
@@ -236,6 +293,40 @@ pub(crate) fn build_batch(chunks: &[chunk::Chunk], vectors: &[Vec<f32>]) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A directory under `root` holding `files`, backdated by `age`.
+    fn shuffle_dir(root: &std::path::Path, name: &str, files: &[&str], age: std::time::Duration) -> PathBuf {
+        let dir = root.join(name);
+        std::fs::create_dir(&dir).unwrap();
+        for f in files {
+            std::fs::write(dir.join(f), b"x").unwrap();
+        }
+        let when = std::time::SystemTime::now() - age;
+        std::fs::File::open(&dir).unwrap().set_modified(when).unwrap();
+        dir
+    }
+
+    #[test]
+    fn sweep_reclaims_only_settled_shuffle_dirs() {
+        let hour = SHUFFLE_LEFTOVER_AGE;
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+
+        let stale = shuffle_dir(root, ".tmpStale", &SHUFFLE_FILES, hour * 2);
+        // A build still writing: its shuffle files are there, but so are object_store's staging files.
+        let writing = shuffle_dir(root, ".tmpWriting", &["shuffle_data.lance", ".tmpStaging"], hour * 2);
+        let fresh = shuffle_dir(root, ".tmpFresh", &SHUFFLE_FILES, std::time::Duration::ZERO);
+        let foreign = shuffle_dir(root, ".tmpForeign", &["notes.txt"], hour * 2);
+        let empty = shuffle_dir(root, ".tmpEmpty", &[], hour * 2);
+        let named = shuffle_dir(root, "scratch", &SHUFFLE_FILES, hour * 2);
+
+        sweep_shuffle_leftovers(root);
+
+        assert!(!stale.exists(), "a settled shuffle dir must be reclaimed");
+        for kept in [&writing, &fresh, &foreign, &empty, &named] {
+            assert!(kept.exists(), "{} must be left alone", kept.display());
+        }
+    }
 
     #[test]
     fn schema_column_order_is_load_bearing() {
