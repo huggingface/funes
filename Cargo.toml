@@ -14,6 +14,7 @@ arrow-array = "58"               # RecordBatch types (must match lance's arrow v
 arrow-schema = "58"              # Schema/Field/DataType for building batches
 arrow-select = "58"              # filter_record_batch: drop secret-bearing rows before a push
 # huggingface = hf:// reads/writes (Xet-cached).
+# 11 and 12 leak an IVF scratch dir per index build; on 13.0.0 drop `sweep_shuffle_leftovers`.
 lance = { version = "=11.0.0", default-features = false, features = ["huggingface"] }  # Dataset open/scan/append + create_index, local and over hf://
 lance-io = { version = "=11.0.0", default-features = false, features = ["huggingface"] }  # hf:// object store + WrappingObjectStore
 lance-index = "=11.0.0"          # FTS/IVF index params + FullTextSearchQuery
