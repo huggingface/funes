@@ -55,7 +55,7 @@ async fn seed_finishes_a_small_history_and_a_rerun_is_a_noop() {
     let err = spool::select("codex").unwrap_err().to_string();
     assert_eq!(
         err,
-        "the codex integration does not match this version of funes. Re-run `funes add codex` to update it."
+        "the codex integration does not match this version of funes. Re-run `funes add codex`, naming the memory it is bound to, to update it."
     );
     let err = spool::select("Not An Id").unwrap_err().to_string();
     assert!(err.contains("not an integration id"), "{err}");
