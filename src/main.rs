@@ -616,7 +616,9 @@ async fn remove_agent(id: &str) -> Result<()> {
     let root = registry::default_root()?;
     let integration = match prepare_agent(id, false).await {
         Ok(integration) => integration,
-        Err(e) if spool::is_id(id) && !root.join(id).is_dir() && !registry::has_source(id) => {
+        // Nothing installed and nothing to fetch is what `remove` leaves behind. A source funes could
+        // not reach is reported instead: the agent may still hold the registration.
+        Err(e) if !root.join(id).is_dir() && e.downcast_ref::<registry::Absent>().is_some() => {
             eprintln!("nothing to remove — {e:#}");
             return spool::forget_missing(id);
         }

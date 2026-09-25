@@ -6,6 +6,7 @@
 
 use anyhow::{bail, Context, Result};
 use hf_hub::buckets::BucketDownload;
+use hf_hub::HFError;
 use serde::Deserialize;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -201,6 +202,19 @@ enum Source {
     Published,
 }
 
+/// No files for an id anywhere funes looks: `$FUNES_INTEGRATIONS` holds none, or the release bucket
+/// publishes none for this contract. A source funes could not reach is any other error.
+#[derive(Debug)]
+pub struct Absent(String);
+
+impl std::fmt::Display for Absent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Absent {}
+
 /// Whether funes vouches for the files it installed: a published archive it verified, or the
 /// checkout it was built from. Anything else is someone's files on this disk, and the caller
 /// confirms before funes executes them.
@@ -217,22 +231,16 @@ pub enum Provenance {
 fn source_for(id: &str) -> Result<Source> {
     if let Some(dir) = std::env::var_os("FUNES_INTEGRATIONS") {
         let dir = PathBuf::from(dir).join(id);
-        return dir
-            .is_dir()
-            .then_some(Source::Redirected(dir))
-            .with_context(|| format!("$FUNES_INTEGRATIONS holds no {id}"));
+        if !dir.is_dir() {
+            return Err(Absent(format!("$FUNES_INTEGRATIONS holds no {id}")).into());
+        }
+        return Ok(Source::Redirected(dir));
     }
     let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("integrations").join(id);
     if checkout.is_dir() {
         return Ok(Source::Checkout(checkout));
     }
     Ok(Source::Published)
-}
-
-/// Whether anywhere funes looks could hold `id`'s files. Only `$FUNES_INTEGRATIONS` can say no
-/// outright; the bucket has to be asked.
-pub fn has_source(id: &str) -> bool {
-    source_for(id).is_ok()
 }
 
 /// The bucket prefix for the contract this funes speaks: an integration fix reaches installed
@@ -287,7 +295,13 @@ async fn fetch_published(id: &str, dir: &Path) -> Result<PathBuf> {
         ])
         .send()
         .await
-        .with_context(|| format!("downloading {prefix}/{asset} from the funes release bucket"))?;
+        .map_err(|e| match e {
+            HFError::EntryNotFound { .. } => Absent(format!(
+                "the funes release bucket publishes no {id} integration for contract {CONTRACT_VERSION}"
+            ))
+            .into(),
+            e => anyhow::Error::from(e).context(format!("downloading {prefix}/{asset} from the funes release bucket")),
+        })?;
     hub::verify_checksum(&archive, &manifest, &asset)?;
     Ok(archive)
 }
