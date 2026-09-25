@@ -150,28 +150,30 @@ fn chunks_of(
         .collect())
 }
 
-/// Units read and scanned for secrets together: one scanner spawn (~1 s) per batch rather than per
-/// unit, so a directory of hundreds of session files is scanned in seconds, not minutes.
+/// Units a batch consumes: those read are scanned for secrets in one scanner spawn (~1 s) rather
+/// than one per unit, so a directory of hundreds of session files is scanned in seconds, not
+/// minutes.
 const SCAN_BATCH: usize = 32;
 
 /// Block text a batch holds before it is scanned: bounds the memory a batch of bulk units (a Hub
 /// shard holds thousands of sessions) takes, where the unit count alone would not.
 const SCAN_BATCH_BYTES: usize = 64 << 20;
 
-/// Read units from the front of `units` until a batch fills — [`SCAN_BATCH`] read, or
-/// [`SCAN_BATCH_BYTES`] of their block text, whichever comes first. `read(n, unit)` gives the
-/// `n`th unit's turns, or `None` for one the batch has no use for (already indexed, rejected);
-/// either way the unit is consumed. Returns one entry per unit consumed, in order.
+/// Read units from the front of `units` until a batch fills — [`SCAN_BATCH`] consumed, or
+/// [`SCAN_BATCH_BYTES`] of block text read, whichever comes first. `read(n, unit)` gives the
+/// `n`th unit's turns, or `None` for one the batch has no use for (already indexed, rejected).
+/// Either way the unit is consumed and counts, so whatever a backlog holds, a caller's check
+/// between batches is never more than a batch away. Returns one entry per unit consumed, in
+/// order.
 fn take_batch<T>(
     units: &[T],
     mut read: impl FnMut(usize, &T) -> Result<Option<Vec<traces::Turn>>>,
 ) -> Result<Vec<Option<Vec<traces::Turn>>>> {
     let mut batch = Vec::new();
-    let (mut read_units, mut bytes) = (0usize, 0usize);
+    let mut bytes = 0usize;
     for (n, unit) in units.iter().enumerate() {
         let turns = read(n, unit)?;
         if let Some(turns) = &turns {
-            read_units += 1;
             bytes += turns
                 .iter()
                 .flat_map(|t| &t.blocks)
@@ -179,7 +181,7 @@ fn take_batch<T>(
                 .sum::<usize>();
         }
         batch.push(turns);
-        if read_units >= SCAN_BATCH || bytes >= SCAN_BATCH_BYTES {
+        if batch.len() >= SCAN_BATCH || bytes >= SCAN_BATCH_BYTES {
             break;
         }
     }
@@ -1689,10 +1691,13 @@ mod tests {
         let rest = take_batch(&units[batch.len()..], |_, _| Ok(Some(turns_of(1)))).unwrap();
         assert_eq!(rest.len(), 40 - SCAN_BATCH);
 
-        // A unit the pass has no use for is consumed, and counts toward neither cap.
+        // A unit the pass has no use for is consumed and counts: a backlog of them still ends a
+        // batch, so a budget check is never more than a batch away.
         let batch = take_batch(&units, |n, _| Ok((n % 2 == 0).then(|| turns_of(1)))).unwrap();
-        assert_eq!(batch.len(), 40);
-        assert_eq!(batch.iter().flatten().count(), 20);
+        assert_eq!(batch.len(), SCAN_BATCH);
+        assert_eq!(batch.iter().flatten().count(), SCAN_BATCH / 2);
+        let batch = take_batch(&units, |_, _| Ok(None)).unwrap();
+        assert_eq!(batch.len(), SCAN_BATCH);
 
         // Text fills a batch before the count does.
         let batch = take_batch(&units, |_, _| Ok(Some(turns_of(SCAN_BATCH_BYTES / 4)))).unwrap();
