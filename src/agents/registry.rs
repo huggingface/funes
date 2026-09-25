@@ -321,13 +321,19 @@ pub fn open(root: &Path, id: &str) -> Result<Integration> {
     let manifest = read_manifest(&manifest_path, id)?;
 
     let setup = dir.join(SETUP);
-    let meta = std::fs::metadata(&setup).with_context(|| format!("{id} has no {SETUP} at {}", setup.display()))?;
-    if meta.permissions().mode() & 0o111 == 0 {
-        bail!("{} is not executable", setup.display());
-    }
+    require_executable(&setup)?;
     owned_by_me(root, &setup, 0o022)?;
 
     Ok(Integration { dir, manifest })
+}
+
+/// Refuse a `setup` that is not there to run, or could not.
+fn require_executable(setup: &Path) -> Result<()> {
+    let meta = std::fs::metadata(setup).with_context(|| format!("no {SETUP} at {}", setup.display()))?;
+    if meta.permissions().mode() & 0o111 == 0 {
+        bail!("{} is not executable", setup.display());
+    }
+    Ok(())
 }
 
 /// Read what the manifest at `path` declares for the integration `id`, and check it. Every
@@ -640,10 +646,12 @@ pub async fn provision(root: &Path, id: &str, from: Option<&str>) -> Result<Prov
 }
 
 /// Copy `src` over `root/<id>` once what it declares checks out: a manifest that would be refused
-/// installed is refused here, before a byte moves, and so is another publisher's. The files
-/// copied, with their digests.
+/// installed is refused here, before a byte moves, and so is another publisher's, and so is a
+/// package without its `setup` — the copy prunes nothing, so the installed one would run outside
+/// the record. The files copied, with their digests.
 fn install_from(root: &Path, id: &str, src: &Path) -> Result<Files> {
     let incoming = read_manifest(&src.join("manifest.json"), id)?;
+    require_executable(&src.join(SETUP))?;
     refuse_takeover(root, id, &incoming)?;
     copy_into(src, &root.join(id))
 }
@@ -1177,6 +1185,38 @@ mod tests {
         std::fs::set_permissions(root.join("pi.json"), std::fs::Permissions::from_mode(0o666)).unwrap();
         let err = verify_installed(&root, "pi").unwrap_err().to_string();
         assert!(err.contains("writable by other users"), "{err}");
+    }
+
+    /// A package without its executable would leave the installed one running outside the
+    /// record: refused before the copy, like one whose executable cannot run.
+    #[test]
+    fn a_package_without_its_executable_is_refused_before_the_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("agents");
+        integration(&root, "pi", &manifest("pi", CONTRACT_VERSION), "true");
+        let installed_setup = || std::fs::read_to_string(root.join("pi").join(SETUP)).unwrap();
+
+        let bare = integration(
+            &tmp.path().join("bare"),
+            "pi",
+            &manifest("pi", CONTRACT_VERSION),
+            "echo bare",
+        );
+        std::fs::remove_file(bare.join(SETUP)).unwrap();
+        let err = format!("{:#}", install_from(&root, "pi", &bare).unwrap_err());
+        assert!(err.contains(&format!("no {SETUP} at")), "{err}");
+        assert_eq!(installed_setup(), "#!/bin/sh\ntrue\n", "nothing copied");
+
+        let inert = integration(
+            &tmp.path().join("inert"),
+            "pi",
+            &manifest("pi", CONTRACT_VERSION),
+            "echo inert",
+        );
+        std::fs::set_permissions(inert.join(SETUP), std::fs::Permissions::from_mode(0o644)).unwrap();
+        let err = install_from(&root, "pi", &inert).unwrap_err().to_string();
+        assert!(err.contains("not executable"), "{err}");
+        assert_eq!(installed_setup(), "#!/bin/sh\ntrue\n", "nothing copied");
     }
 
     /// Another publisher's files are refused before a byte moves, whether funes recorded where
