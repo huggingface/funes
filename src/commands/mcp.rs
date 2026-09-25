@@ -8,7 +8,7 @@ use crate::memory::Memory;
 use anyhow::Result;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{Implementation, ProtocolVersion, ServerCapabilities, ServerConfig};
+use rmcp::model::{Implementation, ServerCapabilities, ServerConfig};
 use rmcp::transport::stdio;
 use rmcp::{schemars, tool, tool_handler, tool_router, ServerHandler, ServiceExt};
 
@@ -352,7 +352,6 @@ impl ServerHandler for Funes {
         }
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(server_info)
-            .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_instructions(instructions)
     }
 }
