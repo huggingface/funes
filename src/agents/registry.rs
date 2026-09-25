@@ -130,13 +130,25 @@ pub fn open(root: &Path, id: &str) -> Result<Integration> {
 /// every directory from `top` down as well as the file itself: funes is about to execute what it
 /// finds there. `others` is the mode bits that give it away — group and world write for the
 /// registry, world write alone for a checkout, whose files a private group's umask leaves
-/// group-writable.
+/// group-writable. Below `top`, a link is refused rather than followed: what it points at has
+/// parents of its own that this walk would never see.
 fn owned_by_me(top: &Path, path: &Path, others: u32) -> Result<()> {
     // SAFETY: `geteuid` reads a process attribute and cannot fail.
     let me = unsafe { libc::geteuid() };
     let mut path = path.to_path_buf();
     loop {
-        let meta = std::fs::metadata(&path).with_context(|| format!("reading {}", path.display()))?;
+        let meta = if path == top {
+            std::fs::metadata(&path)
+        } else {
+            std::fs::symlink_metadata(&path)
+        }
+        .with_context(|| format!("reading {}", path.display()))?;
+        if meta.file_type().is_symlink() {
+            bail!(
+                "{} is a symlink — funes will not run through it; remove it and reinstall",
+                path.display()
+            );
+        }
         if meta.permissions().mode() & others != 0 {
             bail!(
                 "{} is writable by other users — funes will not run it; `chmod go-w` it or reinstall",
@@ -635,6 +647,35 @@ mod tests {
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
         let err = owned_by_me(&top, &file, 0o002).unwrap_err().to_string();
         assert!(err.contains("a is writable"), "a directory on the way counts: {err}");
+    }
+
+    /// A link anywhere below the top is refused, not followed: its target's parents are nobody's
+    /// to vouch for here.
+    #[test]
+    fn a_setup_reached_through_a_link_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("agents");
+        let dir = integration(&root, "pi", &manifest("pi", 1), "true");
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::write(&elsewhere, "#!/bin/sh\ntrue\n").unwrap();
+        std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::remove_file(dir.join(SETUP)).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, dir.join(SETUP)).unwrap();
+        let err = open(&root, "pi").unwrap_err().to_string();
+        assert!(err.contains("setup is a symlink"), "{err}");
+
+        // A linked directory on the way is refused the same.
+        let real = tmp.path().join("real-clyde");
+        integration(tmp.path(), "real-clyde", &manifest("clyde", 1), "true");
+        std::os::unix::fs::symlink(&real, root.join("clyde")).unwrap();
+        let err = open(&root, "clyde").unwrap_err().to_string();
+        assert!(err.contains("clyde is a symlink"), "{err}");
+
+        // The top itself may be reached through a link: that is the user's own layout.
+        let linked_root = tmp.path().join("agents-link");
+        std::os::unix::fs::symlink(&root, &linked_root).unwrap();
+        integration(&root, "hermes", &manifest("hermes", 1), "true");
+        open(&linked_root, "hermes").unwrap();
     }
 
     /// The registry's manifest says what `setup` last installed: a refresh whose `setup add` never
