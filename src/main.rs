@@ -582,13 +582,14 @@ async fn add_agent(id: &str, memory: AddMemory, update: bool, from: Option<&str>
             // Whatever an older hook asked for, this install's hooks are the ones that ask now.
             spool::forget_missing(id)
         };
-        bootstrap_add(id, resolved, install).await?;
-        // Recorded once setup has run, so the record says what the agent runs; an installed copy
-        // nothing refreshed keeps the record it has.
-        match record {
-            Some(record) if ran.get() => registry::record(&root, &record),
-            _ => Ok(()),
+        let outcome = bootstrap_add(id, resolved, install).await;
+        // Recorded once setup has run, whatever came after: a first push that failed leaves the
+        // new files installed, and the record must say so. An installed copy nothing refreshed
+        // keeps the record it has.
+        if let (Some(record), true) = (record, ran.get()) {
+            registry::record(&root, &record)?;
         }
+        outcome
     }
     .await;
     if !installed.get() {

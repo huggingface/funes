@@ -350,6 +350,36 @@ fn a_relative_source_is_recorded_absolute() {
     assert_eq!(path.canonicalize().unwrap(), elsewhere.canonicalize().unwrap());
 }
 
+/// Setup ran, so the install is recorded — even when a later step of the bootstrap fails: the
+/// files it installed are what the agent runs, and an unattended removal must find them recorded.
+#[test]
+fn a_failed_first_push_still_records_the_install() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let funes_home = tmp.path().join("funes");
+    let log = tmp.path().join("setup.log");
+    bundle(&home.join("integrations/clyde"), "clyde", 1, "v1");
+    fs::create_dir_all(home.join(".clyde")).unwrap();
+    fs::write(home.join(".clyde/history.funes.jsonl"), format!("{HISTORY}\n")).unwrap();
+    let record = home.join(".funes/agents/clyde.json");
+
+    // A path is no push target: the first push fails, after setup and the seed.
+    let memory = tmp.path().join("team-memory");
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde", memory.to_str().unwrap()]);
+    let transcript = String::from_utf8_lossy(&out.stdout);
+    assert!(!out.status.success(), "{transcript}");
+    assert!(transcript.contains("push target must be a remote"), "{transcript}");
+    assert!(fs::read_to_string(&log).unwrap().starts_with("v1\nadd"), "setup ran");
+    assert!(record.exists(), "recorded all the same");
+
+    // Recorded and intact, it removes unattended.
+    fs::remove_file(&log).unwrap();
+    let out = funes_pinned(&home, &funes_home, &log, &["remove", "clyde"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(fs::read_to_string(&log).unwrap().starts_with("v1\nremove\n"));
+    assert!(!record.exists());
+}
+
 /// Installed, an integration runs as installed: nothing is fetched to rebind or remove it, and a
 /// copy confirmed once runs unasked until one of its files changes — or its files are named again.
 #[test]
