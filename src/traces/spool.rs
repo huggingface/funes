@@ -27,6 +27,12 @@ pub fn spool_dir(id: &str) -> PathBuf {
     spool_root().join(id)
 }
 
+/// Whether `path` is a spool directory itself, not a link to one: funes drains only what resolves
+/// under the root, so a link would be swept and never emptied.
+fn is_spool_dir(path: &Path) -> bool {
+    path.symlink_metadata().is_ok_and(|m| m.is_dir())
+}
+
 /// Whether `path` is inside a spool funes resolved for itself, rather than a path someone named.
 /// funes deletes what it owns here, so the answer is by what the paths resolve to: a `..` or a
 /// symlink cannot make a file elsewhere look like the spool's.
@@ -48,7 +54,7 @@ pub fn select(id: &str) -> Result<PathBuf> {
         bail!("{id:?} is not an integration id (lowercase [a-z0-9_-])");
     }
     let dir = spool_dir(id);
-    if !dir.is_dir() {
+    if !is_spool_dir(&dir) {
         bail!(
             "the {id} integration does not match this version of funes. \
              Re-run `funes add {id}`, naming the memory it is bound to, to update it."
@@ -95,7 +101,7 @@ pub fn missing() -> Vec<String> {
         .flatten()
         .filter_map(|e| e.file_name().into_string().ok())
         .filter_map(|name| name.strip_suffix(".missing").map(str::to_string))
-        .filter(|id| is_id(id) && !spool_dir(id).is_dir())
+        .filter(|id| is_id(id) && !is_spool_dir(&spool_dir(id)))
         .collect();
     ids.sort();
     ids
@@ -103,13 +109,17 @@ pub fn missing() -> Vec<String> {
 
 /// Every spool a producer has created, in id order — what a no-argument `funes index` sweeps.
 pub fn spools() -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(spool_root()) else {
+    spools_in(&spool_root())
+}
+
+fn spools_in(root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
     };
     let mut dirs: Vec<PathBuf> = entries
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.is_dir() && p.file_name().and_then(|n| n.to_str()).is_some_and(is_id))
+        .filter(|p| is_spool_dir(p) && p.file_name().and_then(|n| n.to_str()).is_some_and(is_id))
         .collect();
     dirs.sort();
     dirs
@@ -156,5 +166,23 @@ mod tests {
         assert!(!is_under(&root, &root.join("pi/../../mine/y.funes.jsonl")));
         assert!(!is_under(&root, &root.join("pi/link.funes.jsonl")));
         assert!(!is_under(&root, &root.join("pi/gone.funes.jsonl")), "nothing to own");
+    }
+
+    /// A spool is a directory of the root's own: a link there, however it is named, is neither
+    /// swept nor selected, since what it holds resolves elsewhere and would never be drained.
+    #[test]
+    fn a_link_in_the_root_is_not_a_spool() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("spool");
+        let mine = tmp.path().join("mine");
+        std::fs::create_dir_all(root.join("pi")).unwrap();
+        std::fs::create_dir_all(&mine).unwrap();
+        std::os::unix::fs::symlink(&mine, root.join("clyde")).unwrap();
+        std::fs::write(root.join("pi.missing"), "").unwrap();
+
+        assert_eq!(spools_in(&root), vec![root.join("pi")]);
+        assert!(is_spool_dir(&root.join("pi")));
+        assert!(!is_spool_dir(&root.join("clyde")), "a link is not a spool");
+        assert!(!is_spool_dir(&root.join("pi.missing")), "nor is a stamp");
     }
 }
