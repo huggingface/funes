@@ -243,6 +243,60 @@ fn another_publishers_integration_replaces_an_installed_one_only_after_its_remov
     assert_eq!(recorded()["repo"], "other/clyde");
 }
 
+/// A directory named on the command line is where the integration comes from, over
+/// `$FUNES_INTEGRATIONS`, and the confirmation says what is about to run: the package by publisher
+/// and version, and its source.
+#[test]
+fn an_integration_installs_from_a_directory_named_on_the_command_line() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let funes_home = tmp.path().join("funes");
+    let log = tmp.path().join("setup.log");
+    fs::create_dir_all(&home).unwrap();
+    let elsewhere = bundle(&tmp.path().join("elsewhere/clyde"), "clyde", 1, "named");
+    let from = elsewhere.to_str().unwrap();
+
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde", "--from", from]);
+    let transcript = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{transcript}");
+    assert!(
+        transcript.contains(&format!(
+            "clyde 1.0.0 by example (example/clyde), from {from}. Trust it?"
+        )),
+        "{transcript}"
+    );
+    assert!(fs::read_to_string(&log).unwrap().starts_with("named\nadd\n"));
+    let recorded: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(home.join(".funes/agents/clyde.json")).unwrap()).unwrap();
+    assert_eq!(recorded["origin"]["path"], from);
+
+    // Another directory's files, off a terminal: refused, naming the same.
+    let other = bundle(&tmp.path().join("other/clyde"), "clyde", 1, "other");
+    fs::remove_file(&log).unwrap();
+    let out = funes(
+        &home,
+        &funes_home,
+        &log,
+        &["add", "clyde", "--from", other.to_str().unwrap()],
+    );
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(
+        err.contains("clyde 1.0.0 by example (example/clyde) — comes from"),
+        "{err}"
+    );
+    assert!(!log.exists(), "setup did not run");
+
+    // Neither a directory nor an archive URL is an error before anything runs.
+    let out = funes(&home, &funes_home, &log, &["add", "clyde", "--from", "/nowhere/clyde"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("is not a directory, nor an hf://buckets/… archive URL"),
+        "{}",
+        stderr(&out)
+    );
+}
+
 /// Installed, an integration runs as installed: nothing is fetched to rebind or remove it, and a
 /// copy confirmed once runs unasked until one of its files changes — or its files are named again.
 #[test]

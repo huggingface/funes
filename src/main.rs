@@ -224,6 +224,11 @@ enum Cmd {
         /// an installed integration runs as installed.
         #[arg(long)]
         update: bool,
+        /// Install the integration from here rather than from the release bucket: a directory
+        /// holding it, or an `hf://buckets/<owner>/<bucket>/<path>/<id>.tar.gz` archive with a
+        /// `SHA256SUMS` beside it.
+        #[arg(long, value_name = "DIR|URL")]
+        from: Option<String>,
     },
     /// Remove funes from a coding agent.
     ///
@@ -526,7 +531,12 @@ async fn main() -> Result<()> {
         Cmd::Mcp { memory } => mcp::run(memory).await,
         // `add` bootstraps the local pipeline: build the first index and do the first push — the
         // two one-time steps the automation can't do unattended — so nothing is left to run by hand.
-        Cmd::Add { agent, memory, update } => add_agent(&agent, memory, update).await,
+        Cmd::Add {
+            agent,
+            memory,
+            update,
+            from,
+        } => add_agent(&agent, memory, update, from.as_deref()).await,
         Cmd::Remove { agent } => remove_agent(&agent).await,
     }
 }
@@ -536,7 +546,7 @@ async fn main() -> Result<()> {
 /// short of `setup add` — a memory that does not resolve, a first index declined — puts the
 /// previous manifest back: what the agent runs is still the old install, and every read must keep
 /// saying so.
-async fn add_agent(id: &str, memory: AddMemory, update: bool) -> Result<()> {
+async fn add_agent(id: &str, memory: AddMemory, update: bool, from: Option<&str>) -> Result<()> {
     if !spool::is_id(id) {
         bail!("{id:?} is not an integration id (lowercase [a-z0-9_-])");
     }
@@ -549,9 +559,10 @@ async fn add_agent(id: &str, memory: AddMemory, update: bool) -> Result<()> {
         // named, and unless this funes cannot run what is there.
         let refresh = !root.join(id).is_dir()
             || update
+            || from.is_some()
             || std::env::var_os("FUNES_INTEGRATIONS").is_some()
             || registry::speaks_another_contract(&root, id);
-        let (integration, provisioned) = prepare_agent(id, refresh).await?;
+        let (integration, provisioned) = prepare_agent(id, refresh, from).await?;
         let resolved = resolve_add_memory(memory).await?;
         let record = provisioned.map(|(origin, files)| registry::Installed::new(&integration.manifest, origin, files));
         let install = |memory: Option<String>| async move {
@@ -585,13 +596,14 @@ async fn add_agent(id: &str, memory: AddMemory, update: bool) -> Result<()> {
 async fn prepare_agent(
     id: &str,
     refresh: bool,
+    from: Option<&str>,
 ) -> Result<(registry::Integration, Option<(registry::Origin, registry::Files)>)> {
     let root = registry::default_root()?;
     // Decided before the refresh: a first install that fails part-way is not an installed copy.
     let installed = root.join(id).is_dir();
     let mut provisioned = None;
     let provenance = if refresh {
-        match registry::provision(&root, id).await {
+        match registry::provision(&root, id, from).await {
             Ok(registry::Provisioned {
                 provenance,
                 origin,
@@ -632,7 +644,7 @@ async fn prepare_agent(
         None => installed_provenance(&root, id)?,
     };
     let integration = registry::open(&root, id)?;
-    confirm_trust(id, &integration.dir, provenance)?;
+    confirm_trust(&integration, provenance)?;
     Ok((integration, provisioned))
 }
 
@@ -666,24 +678,31 @@ fn unknown_agent(root: &Path, id: &str, e: anyhow::Error) -> anyhow::Error {
     ))
 }
 
-/// Confirm before funes executes an integration it does not vouch for: one `$FUNES_INTEGRATIONS`
-/// redirected it to, or one already on disk that no source refreshed. The default is no, and it is
-/// asked every time rather than recorded — anything able to plant the files could forge a record.
-fn confirm_trust(id: &str, dir: &Path, provenance: registry::Provenance) -> Result<()> {
+/// Confirm before funes executes an integration it does not vouch for, saying what it is — the
+/// package by publisher and version — and where it came from. The default is no.
+fn confirm_trust(integration: &registry::Integration, provenance: registry::Provenance) -> Result<()> {
     let registry::Provenance::Unvouched(origin) = provenance else {
         return Ok(());
     };
+    let manifest = &integration.manifest;
+    let id = &manifest.id;
+    let package = format!(
+        "{id}{} by {} ({})",
+        manifest.version.as_ref().map(|v| format!(" {v}")).unwrap_or_default(),
+        registry::publisher(&manifest.repo),
+        manifest.repo
+    );
     if !std::io::stdin().is_terminal() {
         bail!(
-            "the {id} integration at {} comes from {origin}, which funes can't vouch for — \
-             run this in a terminal to confirm it",
-            dir.display()
+            "the {id} integration at {} — {package} — comes from {origin}, which funes can't vouch \
+             for — run this in a terminal to confirm it",
+            integration.dir.display()
         );
     }
     if !confirm(
         &format!(
-            "funes is about to run {}/setup, from {origin}. Trust it? [y/N] ",
-            dir.display()
+            "funes is about to run {}/setup — {package}, from {origin}. Trust it? [y/N] ",
+            integration.dir.display()
         ),
         false,
     ) {
@@ -705,7 +724,7 @@ async fn remove_agent(id: &str) -> Result<()> {
         registry::discard(&root, id)?;
         return spool::forget_missing(id);
     }
-    let (integration, _) = prepare_agent(id, registry::speaks_another_contract(&root, id)).await?;
+    let (integration, _) = prepare_agent(id, registry::speaks_another_contract(&root, id), None).await?;
     integration.remove()?;
     registry::discard(&root, id)?;
     // The hooks that asked for the spool are gone with the integration, so the refusals they left

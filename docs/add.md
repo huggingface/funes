@@ -205,17 +205,20 @@ refuses a `setup` that anyone but its owner could have written: the file and eve
 
 `funes add <id>` installs the integration when none is installed, and runs the installed one as it
 is otherwise: `--update` fetches its newest release for this funes first, and a copy speaking a
-contract this funes cannot run is refreshed regardless. The source, in order: the directory
-`$FUNES_INTEGRATIONS` names, when set — authoritative, consulted on every run, and nothing else is;
-the checkout this funes was built from, when it exists; the release bucket, where the four
-maintained integrations ship as checksummed archives. A source that cannot be reached leaves the
-installed copy to run. `funes remove` fetches nothing: it runs the installed copy, unless this
+contract this funes cannot run is refreshed regardless. The source, in order: what `--from` names
+— a directory holding the integration, or an `hf://buckets/<owner>/<bucket>/<path>/<id>.tar.gz`
+archive published with a `SHA256SUMS` beside it; the directory `$FUNES_INTEGRATIONS` names, when
+set — authoritative, consulted on every run, and nothing else is; the checkout this funes was built
+from, when it exists; the release bucket, where the four maintained integrations ship as
+checksummed archives. A source that cannot be reached leaves the installed copy to run. `funes remove` fetches nothing: it runs the installed copy, unless this
 funes cannot run it. An id with no files anywhere is an error naming what is installed.
 
-funes vouches for files it built or verified — its own checkout, or an archive whose checksum
-matched — and runs them without asking. Anything else — a `$FUNES_INTEGRATIONS` directory, files
-it has no record of installing — is confirmed at the terminal before `setup` runs; off a terminal,
-funes refuses rather than assumes.
+funes vouches for files it built or published — its own checkout, or the release bucket's archive
+whose checksum matched — and runs them without asking. Anything else — what `--from` names, a
+`$FUNES_INTEGRATIONS` directory, files it has no record of installing — is confirmed at the
+terminal before `setup` runs, naming the package by publisher and version and where it came from;
+off a terminal, funes refuses rather than assumes. An archive's checksum proves it arrived intact,
+not who published it, so an archive `--from` names is confirmed like a directory.
 
 What `funes add` installed is recorded beside the directory, in `~/.funes/agents/<id>.json`: the
 package as its manifest declared it — publisher, id, version, contract — where the files came
@@ -225,9 +228,10 @@ installed copy, funes checks the package's files against it, and asks again only
 or when the same source hands it different files. Files it has no record of installing — a copy put
 in place by hand — are asked about every time. The record goes with the directory on `funes remove`.
 
-So a fifth integration is used today by putting its directory under `~/.funes/agents/<id>/`, or by
-pointing `$FUNES_INTEGRATIONS` at a directory holding it, then `funes add <id>`. Installing one by
-name from a source of its own is planned.
+So a fifth integration installs from wherever its publisher put it: `funes add <id> --from <dir>`
+for a directory holding it, `funes add <id> --from hf://buckets/<owner>/<bucket>/<path>/<id>.tar.gz`
+for a published archive — confirmed once, and remembered until its files change. Installing one by
+name alone is for the maintained four.
 
 ### What the managed `add` assumes
 

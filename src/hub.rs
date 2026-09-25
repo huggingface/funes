@@ -130,7 +130,25 @@ const BUCKET_NAME: &str = "funes";
 /// set (the bucket is public, so a token isn't required). `retries` is false for the fail-fast
 /// status check, true for the update's default.
 pub(crate) fn release_bucket(retries: bool) -> Result<HFBucket> {
-    Ok(client(hf_token().as_deref(), retries)?.bucket(BUCKET_OWNER, BUCKET_NAME))
+    bucket(BUCKET_OWNER, BUCKET_NAME, retries)
+}
+
+/// An [`HFBucket`] handle for `owner/name`, with the standard HF token if one is set.
+pub(crate) fn bucket(owner: &str, name: &str, retries: bool) -> Result<HFBucket> {
+    Ok(client(hf_token().as_deref(), retries)?.bucket(owner, name))
+}
+
+/// Split an `hf://buckets/<owner>/<name>/<path>` URL into its three parts.
+pub(crate) fn parse_bucket_url(url: &str) -> Result<(String, String, String)> {
+    let malformed = || anyhow!("{url} is not an hf://buckets/<owner>/<bucket>/<path> URL");
+    let rest = url.strip_prefix("hf://buckets/").ok_or_else(malformed)?;
+    let mut parts = rest.splitn(3, '/');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(owner), Some(name), Some(path)) if !owner.is_empty() && !name.is_empty() && !path.is_empty() => {
+            Ok((owner.to_string(), name.to_string(), path.to_string()))
+        }
+        _ => Err(malformed()),
+    }
 }
 
 /// Verify `asset` against its one unambiguous entry in a strict SHA256SUMS manifest, and say
@@ -204,6 +222,23 @@ pub(crate) fn sha256_file(path: &Path) -> Result<[u8; 32]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bucket_urls_split_into_owner_name_and_path() {
+        assert_eq!(
+            parse_bucket_url("hf://buckets/acme/funes-clyde/clyde/1.0.0/clyde.tar.gz").unwrap(),
+            ("acme".into(), "funes-clyde".into(), "clyde/1.0.0/clyde.tar.gz".into())
+        );
+        for malformed in [
+            "hf://datasets/acme/kb/x",
+            "https://example.com/x.tar.gz",
+            "hf://buckets/acme/funes-clyde",
+            "hf://buckets//funes-clyde/x",
+            "hf://buckets/acme/funes-clyde/",
+        ] {
+            assert!(parse_bucket_url(malformed).is_err(), "{malformed}");
+        }
+    }
 
     #[test]
     fn checksum_manifest_is_strict_and_target_bound() {

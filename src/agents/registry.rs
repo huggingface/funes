@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use crate::hub;
@@ -24,6 +24,10 @@ pub const CONTRACT_VERSION: u32 = 1;
 
 /// The executable every integration provides: `setup add [MEMORY]`, `setup remove`.
 const SETUP: &str = "setup";
+
+/// The most an integration's archive may weigh: the four maintained ones are a few hundred
+/// kilobytes, and an archive is unpacked before anything about it is checked but its listing.
+const MAX_ARCHIVE_BYTES: u64 = 16 << 20;
 
 /// What an integration declares about itself, in `manifest.json`.
 #[derive(Debug, Deserialize)]
@@ -41,7 +45,7 @@ pub struct Manifest {
 }
 
 /// The owner in a `<publisher>/<name>` repo.
-fn publisher(repo: &str) -> &str {
+pub fn publisher(repo: &str) -> &str {
     repo.split('/').next().unwrap_or_default()
 }
 
@@ -408,6 +412,10 @@ enum Source {
     Checkout(PathBuf),
     /// A directory `$FUNES_INTEGRATIONS` points at.
     Redirected(PathBuf),
+    /// A directory named on the command line.
+    Named(PathBuf),
+    /// An archive named on the command line, `hf://buckets/…/<id>.tar.gz`.
+    Archive(String),
     /// The archive published in the release bucket.
     Published,
 }
@@ -456,12 +464,22 @@ pub struct Provisioned {
     pub files: Files,
 }
 
-/// Resolve `id`'s files: `$FUNES_INTEGRATIONS` if set — authoritative, so a test or a fork cannot
-/// reach the network by accident — else the checkout this binary was built from, else the bucket.
-/// A released binary's build path does not exist where it runs, so it falls through; and what sits
-/// at that path is vouched for only while it is the user's own, since anyone could have put a tree
-/// there once the checkout is gone.
-fn source_for(id: &str) -> Result<Source> {
+/// Resolve `id`'s files: what `from` names, else `$FUNES_INTEGRATIONS` if set — authoritative, so
+/// a test or a fork cannot reach the network by accident — else the checkout this binary was built
+/// from, else the bucket. A released binary's build path does not exist where it runs, so it falls
+/// through; and what sits at that path is vouched for only while it is the user's own, since
+/// anyone could have put a tree there once the checkout is gone.
+fn source_for(id: &str, from: Option<&str>) -> Result<Source> {
+    if let Some(from) = from {
+        if from.starts_with("hf://") {
+            return Ok(Source::Archive(from.to_string()));
+        }
+        let dir = PathBuf::from(from);
+        if !dir.is_dir() {
+            bail!("{from} is not a directory, nor an hf://buckets/… archive URL");
+        }
+        return Ok(Source::Named(dir));
+    }
     if let Some(dir) = std::env::var_os("FUNES_INTEGRATIONS") {
         let dir = PathBuf::from(dir).join(id);
         if !dir.is_dir() {
@@ -489,14 +507,14 @@ fn published_prefix() -> String {
     format!("integrations/v{CONTRACT_VERSION}")
 }
 
-/// Install `id`'s files into the registry. Only a file that differs is rewritten, and nothing is
-/// pruned — an integration's `setup` keeps its own state beside them. The id names the directory
-/// written, so it is checked here, before anything is.
-pub async fn provision(root: &Path, id: &str) -> Result<Provisioned> {
+/// Install `id`'s files into the registry, from what `from` names when it names one. Only a file
+/// that differs is rewritten, and nothing is pruned — an integration's `setup` keeps its own state
+/// beside them. The id names the directory written, so it is checked here, before anything is.
+pub async fn provision(root: &Path, id: &str, from: Option<&str>) -> Result<Provisioned> {
     if !spool::is_id(id) {
         bail!("{id:?} is not an integration id (lowercase [a-z0-9_-])");
     }
-    match source_for(id)? {
+    match source_for(id, from)? {
         Source::Checkout(src) => {
             let files = install_from(root, id, &src)?;
             Ok(Provisioned {
@@ -513,9 +531,31 @@ pub async fn provision(root: &Path, id: &str) -> Result<Provisioned> {
                 files,
             })
         }
+        Source::Named(src) => {
+            let files = install_from(root, id, &src)?;
+            Ok(Provisioned {
+                provenance: Provenance::Unvouched(src.display().to_string()),
+                origin: Origin::Directory { path: src },
+                files,
+            })
+        }
+        Source::Archive(url) => {
+            let staging = tempfile::tempdir().context("creating a staging directory")?;
+            let (archive, sha256) = fetch_archive(&url, staging.path()).await?;
+            validate_archive(&archive)?;
+            let unpacked = staging.path().join("unpacked");
+            unpack(&archive, &unpacked)?;
+            let files = install_from(root, id, &unpacked)?;
+            Ok(Provisioned {
+                provenance: Provenance::Unvouched(url.clone()),
+                origin: Origin::Archive { url, sha256 },
+                files,
+            })
+        }
         Source::Published => {
             let staging = tempfile::tempdir().context("creating a staging directory")?;
             let (archive, sha256) = fetch_published(id, staging.path()).await?;
+            validate_archive(&archive)?;
             let unpacked = staging.path().join("unpacked");
             unpack(&archive, &unpacked)?;
             let files = install_from(root, id, &unpacked)?;
@@ -565,28 +605,100 @@ fn refuse_takeover(root: &Path, id: &str, incoming: &Manifest) -> Result<()> {
 /// Download `id`'s published archive into `dir` and check it against the prefix's `SHA256SUMS`;
 /// the archive, and its digest as hex.
 async fn fetch_published(id: &str, dir: &Path) -> Result<(PathBuf, String)> {
-    let asset = format!("{id}.tar.gz");
+    eprintln!("fetching the {id} integration…");
+    let url = hub::release_asset_url(&format!("{}/{id}.tar.gz", published_prefix()));
+    fetch_archive(&url, dir)
+        .await
+        .map_err(|e| match e.downcast_ref::<HFError>() {
+            Some(HFError::EntryNotFound { .. }) => Absent(format!(
+                "the funes release bucket publishes no {id} integration for contract {CONTRACT_VERSION}"
+            ))
+            .into(),
+            _ => e,
+        })
+}
+
+/// Download the archive an `hf://buckets/…/<name>.tar.gz` URL names into `dir`, with the
+/// `SHA256SUMS` beside it, and check the one against the other; the archive, and its digest as
+/// hex. Its size is checked before a byte of it is fetched.
+async fn fetch_archive(url: &str, dir: &Path) -> Result<(PathBuf, String)> {
+    let (owner, name, path) = hub::parse_bucket_url(url)?;
+    let (prefix, asset) = match path.rsplit_once('/') {
+        Some((prefix, asset)) if asset.ends_with(".tar.gz") => (prefix.to_string(), asset.to_string()),
+        _ => bail!("{url} does not name a <prefix>/<name>.tar.gz archive"),
+    };
+    let bucket = hub::bucket(&owner, &name, true)?;
+    let size = bucket
+        .get_file_metadata()
+        .remote_path(path.clone())
+        .send()
+        .await
+        .with_context(|| format!("looking up {url}"))?
+        .size;
+    if size > MAX_ARCHIVE_BYTES {
+        bail!("{url} is {size} bytes, more than the {MAX_ARCHIVE_BYTES} an integration may weigh");
+    }
     let archive = dir.join(&asset);
     let manifest = dir.join("SHA256SUMS");
-    let prefix = published_prefix();
-    eprintln!("fetching the {id} integration…");
-    hub::release_bucket(true)?
+    bucket
         .download_files()
         .files(vec![
-            BucketDownload::new(format!("{prefix}/{asset}"), &archive),
+            BucketDownload::new(path, &archive),
             BucketDownload::new(format!("{prefix}/SHA256SUMS"), &manifest),
         ])
         .send()
         .await
-        .map_err(|e| match e {
-            HFError::EntryNotFound { .. } => Absent(format!(
-                "the funes release bucket publishes no {id} integration for contract {CONTRACT_VERSION}"
-            ))
-            .into(),
-            e => anyhow::Error::from(e).context(format!("downloading {prefix}/{asset} from the funes release bucket")),
-        })?;
+        .with_context(|| format!("downloading {url} and the SHA256SUMS beside it"))?;
     let digest = hub::verify_checksum(&archive, &manifest, &asset)?;
     Ok((archive, hex::encode(digest)))
+}
+
+/// Refuse an archive whose listing names anything an integration may not carry — a path outside
+/// its root, or a link — before a byte of it is extracted.
+fn validate_archive(archive: &Path) -> Result<()> {
+    let names = tar_list(archive, "-tzf")?;
+    let entries = tar_list(archive, "-tvzf")?;
+    if names.len() != entries.len() {
+        bail!("{} lists differently twice", archive.display());
+    }
+    for (name, entry) in names.iter().zip(&entries) {
+        archive_entry_allowed(name, entry).with_context(|| format!("refusing {}", archive.display()))?;
+    }
+    Ok(())
+}
+
+/// One archive entry: its `name` as `tar -t` lists it, and its `-tv` line, whose first character
+/// is its type.
+fn archive_entry_allowed(name: &str, entry: &str) -> Result<()> {
+    let path = Path::new(name);
+    if path.is_absolute() || path.components().any(|c| matches!(c, Component::ParentDir)) {
+        bail!("{name} lies outside the archive's root");
+    }
+    if matches!(entry.chars().next(), Some('l') | Some('h')) {
+        bail!("{name} is a link, which an integration may not carry");
+    }
+    Ok(())
+}
+
+/// The lines `tar <flag> archive` prints.
+fn tar_list(archive: &Path, flag: &str) -> Result<Vec<String>> {
+    let output = Command::new("tar")
+        .arg(flag)
+        .arg(archive)
+        .output()
+        .context("running tar to list the integration")?;
+    if !output.status.success() {
+        bail!(
+            "listing {} failed (exit {:?}): {}",
+            archive.display(),
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect())
 }
 
 /// Unpack a verified archive: an integration's files sit at its root.
@@ -1057,6 +1169,82 @@ mod tests {
         assert!(setup().contains("echo mine"), "untouched");
     }
 
+    /// What an archive lists is judged before any of it is extracted.
+    #[test]
+    fn an_archive_is_refused_for_what_it_lists() {
+        for (name, entry, refused) in [
+            (
+                "./manifest.json",
+                "-rw-r--r--  0 me me 12 Sep 25 10:00 ./manifest.json",
+                false,
+            ),
+            (
+                "scripts/hook.sh",
+                "-rwxr-xr-x  0 me me 12 Sep 25 10:00 scripts/hook.sh",
+                false,
+            ),
+            ("../evil", "-rw-r--r--  0 me me 12 Sep 25 10:00 ../evil", true),
+            (
+                "./a/../../evil",
+                "-rw-r--r--  0 me me 12 Sep 25 10:00 ./a/../../evil",
+                true,
+            ),
+            ("/etc/passwd", "-rw-r--r--  0 me me 12 Sep 25 10:00 /etc/passwd", true),
+            (
+                "./setup",
+                "lrwxr-xr-x  0 me me 12 Sep 25 10:00 ./setup -> /bin/sh",
+                true,
+            ),
+            (
+                "./twin",
+                "hrw-r--r--  0 me me 12 Sep 25 10:00 ./twin link to ./setup",
+                true,
+            ),
+        ] {
+            assert_eq!(archive_entry_allowed(name, entry).is_err(), refused, "{name}");
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("manifest.json"), "{}").unwrap();
+        std::fs::write(src.join("setup"), "#!/bin/sh\n").unwrap();
+        let pack = |archive: &Path, extra: &[&str]| {
+            let status = Command::new("tar")
+                .arg("-czf")
+                .arg(archive)
+                .args(extra)
+                .arg("-C")
+                .arg(&src)
+                .arg(".")
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+        let clean = tmp.path().join("clean.tar.gz");
+        pack(&clean, &[]);
+        validate_archive(&clean).unwrap();
+
+        std::os::unix::fs::symlink("/bin/sh", src.join("sh")).unwrap();
+        let linked = tmp.path().join("linked.tar.gz");
+        pack(&linked, &[]);
+        let err = format!("{:#}", validate_archive(&linked).unwrap_err());
+        assert!(err.contains("sh is a link"), "{err}");
+        std::fs::remove_file(src.join("sh")).unwrap();
+
+        // Packed with absolute names kept.
+        let absolute = tmp.path().join("absolute.tar.gz");
+        let status = Command::new("tar")
+            .arg("-czPf")
+            .arg(&absolute)
+            .arg(src.join("setup"))
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let err = format!("{:#}", validate_archive(&absolute).unwrap_err());
+        assert!(err.contains("outside the archive's root"), "{err}");
+    }
+
     #[test]
     fn a_copy_this_funes_cannot_run_is_told_apart() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1156,7 +1344,7 @@ mod tests {
     async fn an_id_that_is_not_one_is_refused_before_anything_is_written() {
         let root = tempfile::tempdir().unwrap();
         for id in ["../docs", "Pi", "a/b", ""] {
-            let err = provision(root.path(), id).await.unwrap_err().to_string();
+            let err = provision(root.path(), id, None).await.unwrap_err().to_string();
             assert!(err.contains("not an integration id"), "{id:?}: {err}");
         }
         assert!(

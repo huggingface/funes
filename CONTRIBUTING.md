@@ -106,10 +106,10 @@ without writing anything. Keep a real transcript and the turns it must produce a
 test, the way each shipped bundle's `test/` does: a change that moves a chunk id re-keys sessions
 users already hold.
 
-Try it without touching the checkout: put the directory under one of your own and run
-`FUNES_INTEGRATIONS=/path/to/that funes add <id>`. funes confirms at the terminal before running
-files it can't vouch for, every time. Nothing in funes has to change for a new integration, and
-where it is published from is its own business.
+Try it from wherever it is: `funes add <id> --from /path/to/it`. funes confirms at the terminal
+before running files it can't vouch for — once, until they change. Nothing in funes has to change
+for a new integration, and where it is published from is its own business: an
+`hf://buckets/…/<id>.tar.gz` archive with a `SHA256SUMS` beside it installs the same way.
 
 ## Pull requests
 
