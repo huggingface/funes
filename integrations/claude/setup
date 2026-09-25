@@ -60,7 +60,8 @@ require_jq() {
 # walk.
 seed() {
     spool=$1
-    projects="$HOME/.claude/projects"
+    # Claude Code keeps its transcripts under its config directory, which `CLAUDE_CONFIG_DIR` moves.
+    projects="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"
     [ -d "$projects" ] || return 0
     find "$projects" -type f -name '*.jsonl' | while IFS= read -r src; do
         stem=${src##*/}

@@ -57,7 +57,7 @@ convert_one() {
 convert_stale() {
     jq=$1
     named=$2
-    projects="$HOME/.claude/projects"
+    projects="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"
     [ -d "$projects" ] || return 0
     mark="$HERE/swept"
     since=$mark
@@ -101,6 +101,7 @@ publish() {
 worker() {
     payload=$1
     mode=${2:-}
+    trap 'rm -f "$payload"' EXIT
     funes=$(find_bin funes || true)
     if [ -z "$funes" ] || [ ! -x "$funes" ]; then
         log "index ABORT: funes not found; skipping."
@@ -119,8 +120,8 @@ worker() {
     # SubagentStop carries the sub-agent's own transcript in its own field; the session's is still
     # `transcript_path`. A reported bug fires the event for internal calls whose file never exists,
     # which `convert_one` skips.
-    agent_src=$(printf '%s' "$payload" | "$jq" -r '.agent_transcript_path // empty' 2>/dev/null || true)
-    src=$(printf '%s' "$payload" | "$jq" -r '.transcript_path // empty' 2>/dev/null || true)
+    agent_src=$("$jq" -r '.agent_transcript_path // empty' "$payload" 2>/dev/null || true)
+    src=$("$jq" -r '.transcript_path // empty' "$payload" 2>/dev/null || true)
     named=${agent_src:-$src}
     convert_one "$jq" "$named"
     convert_stale "$jq" "$named"
@@ -138,13 +139,20 @@ worker() {
     fi
 }
 
-# Worker mode (re-exec): the payload and the mode are the arguments, and the turn is already over.
+# Worker mode (re-exec): the payload's file and the mode are the arguments, and the turn is already
+# over.
 if [ "${1:-}" = "--worker" ]; then
     worker "${2:-}" "${3:-}"
     exit 0
 fi
 
+# The payload carries the last assistant message, which can outgrow what a kernel lets an argument
+# hold, so it goes through a file the worker takes with it.
 mode=${1:-}
-payload=$(cat)
+payload=$(mktemp "${TMPDIR:-/tmp}/funes-payload.XXXXXX") || {
+    log "index ABORT: no temporary file for the payload"
+    exit 0
+}
+cat >"$payload"
 nohup sh "$0" --worker "$payload" "$mode" >/dev/null 2>&1 </dev/null &
 exit 0

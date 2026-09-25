@@ -41,12 +41,12 @@ find_bin() {
 rollout() {
     jq=$1
     payload=$2
-    path=$(printf '%s' "$payload" | "$jq" -r '.transcript_path // empty' 2>/dev/null || true)
+    path=$("$jq" -r '.transcript_path // empty' "$payload" 2>/dev/null || true)
     if [ -n "$path" ] && [ -r "$path" ]; then
         printf '%s\n' "$path"
         return 0
     fi
-    sid=$(printf '%s' "$payload" | "$jq" -r '.session_id // empty' 2>/dev/null || true)
+    sid=$("$jq" -r '.session_id // empty' "$payload" 2>/dev/null || true)
     [ -n "$sid" ] || return 1
     find "$CODEX_DIR/sessions" \( -name "rollout-*-$sid.jsonl" -o -name "rollout-*-${sid}_*.jsonl" \) \
         2>/dev/null | head -1
@@ -118,6 +118,7 @@ publish() {
 worker() {
     payload=$1
     mode=${2:-}
+    trap 'rm -f "$payload"' EXIT
     funes=$(find_bin funes || true)
     if [ -z "$funes" ] || [ ! -x "$funes" ]; then
         log "index ABORT: funes not found; skipping."
@@ -154,13 +155,20 @@ worker() {
     fi
 }
 
-# Worker mode (re-exec): the payload and the mode are the arguments, and the turn is already over.
+# Worker mode (re-exec): the payload's file and the mode are the arguments, and the turn is already
+# over.
 if [ "${1:-}" = "--worker" ]; then
     worker "${2:-}" "${3:-}"
     exit 0
 fi
 
+# The payload carries the last assistant message, which can outgrow what a kernel lets an argument
+# hold, so it goes through a file the worker takes with it.
 mode=${1:-}
-payload=$(cat)
+payload=$(mktemp "${TMPDIR:-/tmp}/funes-payload.XXXXXX") || {
+    log "index ABORT: no temporary file for the payload"
+    exit 0
+}
+cat >"$payload"
 nohup sh "$0" --worker "$payload" "$mode" >/dev/null 2>&1 </dev/null &
 exit 0

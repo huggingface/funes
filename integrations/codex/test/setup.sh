@@ -36,6 +36,9 @@ hooks="$plugin/hooks.json"
 run_script='sh "${PLUGIN_ROOT}/scripts/funes-index.sh"'
 codex_dir="$HOME/.codex"
 
+# A rollout Codex already wrote — the converter's fixture — for the seed to find.
+mkdir -p "$codex_dir/sessions/2026/09/25"
+cp "$BUNDLE/codex-plugin/plugins/funes/test/session.jsonl" "$codex_dir/sessions/2026/09/25/rollout-seed.jsonl"
 # What an install before the plugin left: hook entries funes wrote in Codex's own file, the scripts
 # they ran, and a skill in Codex's tree and in the shared one an earlier install used.
 mkdir -p "$codex_dir/hooks" "$codex_dir/skills/funes" "$HOME/.agents/skills/funes"
@@ -60,6 +63,7 @@ grep -q "name: funes" "$plugin/skills/funes/SKILL.md" || fail "no skill in the p
 if grep -q acme/kb "$hooks"; then fail "the memory is in the hook command"; fi
 [ "$(cat "$plugin/scripts/memory")" = acme/kb ] || fail "no memory file"
 [ "$(cat "$plugin/scripts/spool")" = "$FUNES_HOME/spool/codex" ] || fail "the spool is not recorded"
+[ -f "$FUNES_HOME/spool/codex/rollout-seed.funes.jsonl" ] || fail "the history was not seeded"
 # The pre-plugin install is gone: funes wrote every hook in that file, so the file goes with the
 # scripts its entries ran, and both skill copies with it.
 [ ! -e "$codex_dir/hooks.json" ] || fail "the pre-plugin hook entries stay"

@@ -24,6 +24,11 @@ chmod +x "$tmp/bin/claude"
 export PATH="$tmp/bin:/usr/bin:/bin"
 export FUNES_TEST_CLI_LOG="$tmp/cli.log"
 export FUNES_BIN=funes FUNES_HOME="$HOME/.funes" FUNES_AGENT_ID=claude
+# Claude Code's transcripts live under its config directory, wherever the user put it: the
+# converter's fixture, for the seed to find.
+export CLAUDE_CONFIG_DIR="$tmp/claude-config"
+mkdir -p "$CLAUDE_CONFIG_DIR/projects/-Users-me-repo"
+cp "$BUNDLE/claude-plugin/funes/test/session.jsonl" "$CLAUDE_CONFIG_DIR/projects/-Users-me-repo/session.jsonl"
 
 cp -R "$BUNDLE" "$HOME/.funes/agents/claude"
 setup="$HOME/.funes/agents/claude/setup"
@@ -46,7 +51,7 @@ grep -q "installed funes into Claude Code" "$tmp/add.out" || fail "add did not r
 if grep -q acme/kb "$hooks"; then fail "the memory is in the hook command"; fi
 [ "$(cat "$plugin/funes/scripts/memory")" = acme/kb ] || fail "no memory file"
 [ "$(cat "$plugin/funes/scripts/spool")" = "$FUNES_HOME/spool/claude" ] || fail "the spool is not recorded"
-[ -d "$FUNES_HOME/spool/claude" ] || fail "the spool was not created"
+[ -f "$FUNES_HOME/spool/claude/session.funes.jsonl" ] || fail "the history was not seeded"
 expected="plugin marketplace add $plugin
 plugin uninstall funes@huggingface
 plugin install funes@huggingface

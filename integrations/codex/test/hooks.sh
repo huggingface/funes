@@ -37,8 +37,13 @@ fixture="$BUNDLE/codex-plugin/plugins/funes/test/session.jsonl"
 
 # A rollout written now: `cp` would keep the fixture's stamp, and the sweep goes by stamps.
 rollout() { cat "$fixture" >"$tree/$1"; }
-# The worker half, as the foreground half runs it: the payload, then `--publish` at a boundary.
-fire() { sh "$scripts/funes-index.sh" --worker "{\"transcript_path\":\"$tree/rollout-a.jsonl\",\"session_id\":\"s\"}" "${1:-}"; }
+# The worker half, as the foreground half runs it: the payload's file, then `--publish` at a
+# boundary. The worker takes the file with it.
+fire() {
+    printf '{"transcript_path":"%s","session_id":"s"}' "$tree/rollout-a.jsonl" >"$tmp/payload"
+    sh "$scripts/funes-index.sh" --worker "$tmp/payload" "${1:-}"
+    [ ! -e "$tmp/payload" ] || fail "the worker left the payload's file"
+}
 # Filesystems stamp to the second at worst, and `find -newer` compares stamps.
 tick() { sleep 2; }
 
@@ -72,4 +77,19 @@ index --harness codex
 push acme/kb"
 [ "$(cat "$FUNES_TEST_CLI_LOG")" = "$expected" ] || fail "funes was asked:
 $(cat "$FUNES_TEST_CLI_LOG")"
+
+# The foreground half, as the hook runs it: the payload on stdin — carrying an assistant message
+# larger than any argument could — handed to a detached worker, and the hook returns at once.
+tick
+rollout rollout-e.jsonl
+{
+    printf '{"transcript_path":"%s","session_id":"e","last_assistant_message":"' "$tree/rollout-e.jsonl"
+    head -c 1100000 /dev/zero | tr '\0' x
+    printf '"}'
+} | sh "$scripts/funes-index.sh"
+for _ in $(seq 1 100); do
+    [ -f "$spool/rollout-e.funes.jsonl" ] && break
+    sleep 0.1
+done
+[ -f "$spool/rollout-e.funes.jsonl" ] || fail "the detached worker never converted the rollout the hook named"
 echo "codex hooks: ok"
