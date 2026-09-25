@@ -47,11 +47,16 @@ fn install(home: &Path, id: &str, contract: u32) -> PathBuf {
 /// environment, in `$FUNES_TEST_SETUP_LOG`; keeps a `state` file beside itself; and converts the
 /// history it finds at `~/.clyde/history.funes.jsonl` into its spool, as a converter does at install.
 fn bundle(dir: &Path, id: &str, contract: u32, tag: &str) -> PathBuf {
+    bundle_published_by(dir, id, "example/clyde", contract, tag)
+}
+
+/// [`bundle`], declaring `repo` as where it is published from.
+fn bundle_published_by(dir: &Path, id: &str, repo: &str, contract: u32, tag: &str) -> PathBuf {
     let dir = dir.to_path_buf();
     fs::create_dir_all(&dir).unwrap();
     fs::write(
         dir.join("manifest.json"),
-        format!(r#"{{"contract_version":{contract},"id":"{id}","label":"Clyde","repo":"example/clyde"}}"#),
+        format!(r#"{{"contract_version":{contract},"id":"{id}","label":"Clyde","repo":"{repo}","version":"1.0.0"}}"#),
     )
     .unwrap();
     let setup = dir.join("setup");
@@ -158,6 +163,66 @@ fn an_integration_supplied_outside_the_checkout_is_refreshed_each_run_and_remove
     assert!(source.join("setup").exists(), "the source is not funes's to touch");
 }
 
+/// What `add` installed is recorded beside the directory; another publisher's files are refused
+/// where it sits, and `remove` — which runs the installed copy's setup, not theirs — is how the
+/// user says they mean it.
+#[test]
+fn another_publishers_integration_replaces_an_installed_one_only_after_its_removal() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let funes_home = tmp.path().join("funes");
+    let log = tmp.path().join("setup.log");
+    let source = bundle(&home.join("integrations/clyde"), "clyde", 1, "v1");
+    let installed = home.join(".funes/agents/clyde");
+    let record = home.join(".funes/agents/clyde.json");
+    let recorded = || -> serde_json::Value { serde_json::from_str(&fs::read_to_string(&record).unwrap()).unwrap() };
+
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+    let first = recorded();
+    assert_eq!(first["contract_version"], 1);
+    assert_eq!(first["id"], "clyde");
+    assert_eq!(first["repo"], "example/clyde");
+    assert_eq!(first["version"], "1.0.0");
+    assert_eq!(first["origin"]["kind"], "directory");
+    assert_eq!(first["origin"]["path"], source.to_str().unwrap());
+    assert!(first["installed_at"].is_string(), "{first}");
+
+    // Another publisher's clyde at the same source: refused before setup, before a byte moves.
+    bundle_published_by(&source, "clyde", "other/clyde", 1, "v2");
+    fs::remove_file(&log).unwrap();
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde"]);
+    let transcript = String::from_utf8_lossy(&out.stdout);
+    assert!(!out.status.success(), "{transcript}");
+    assert!(
+        transcript.contains("example's, from") && transcript.contains("`funes remove clyde` first"),
+        "{transcript}"
+    );
+    assert!(!log.exists(), "setup did not run");
+    assert!(
+        fs::read_to_string(installed.join("manifest.json"))
+            .unwrap()
+            .contains("example/clyde"),
+        "the installed files are untouched"
+    );
+    assert_eq!(recorded(), first);
+
+    // `remove` runs the installed copy's setup, not the other publisher's, and takes the record.
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["remove", "clyde"]);
+    let transcript = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{transcript}");
+    assert!(transcript.contains("removing with the installed copy"), "{transcript}");
+    assert!(fs::read_to_string(&log).unwrap().starts_with("v1\nremove\n"));
+    assert!(!installed.exists() && !record.exists());
+
+    // Now theirs installs, and is recorded as theirs.
+    fs::remove_file(&log).unwrap();
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+    assert!(fs::read_to_string(&log).unwrap().starts_with("v2\nadd\n"));
+    assert_eq!(recorded()["repo"], "other/clyde");
+}
+
 /// One turn of clyde's history, under a facet of the integration's own choosing.
 const HISTORY: &str = r#"{"format":1,"session_id":"h-1","turn_uuid":"t0","seq":0,"ts":"2026-03-01T00:00:00Z","role":"user","harness":"clydebot","blocks":[{"block_type":"text","text":"the widget cache must be invalidated on every deploy: stale entries broke checkout twice"}]}"#;
 
@@ -239,6 +304,7 @@ fn declining_the_first_index_installs_nothing() {
         previous,
         "the manifest says what setup last installed"
     );
+    assert!(!home.join(".funes/agents/clyde.json").exists(), "nothing recorded");
 }
 
 #[test]
@@ -274,6 +340,10 @@ fn an_installed_only_integration_adds_and_removes_once_trusted_at_a_terminal() {
     // Clyde wrote no spool, so there was nothing to seed or publish — noted, not failed.
     assert!(transcript.contains("no clyde sessions to index yet"), "{transcript}");
     assert!(transcript.contains("nothing indexed yet"), "{transcript}");
+    assert!(
+        !home.join(".funes/agents/clyde.json").exists(),
+        "nothing refreshed the files, so nothing is recorded"
+    );
 
     fs::remove_file(&log).unwrap();
     refused();

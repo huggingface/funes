@@ -111,12 +111,13 @@ With **no memory named**, and an HF token present in a terminal, `funes add` off
 `<user>/funes-memory` for you so your memory follows you across machines; decline and it stays local.
 Without a token it stays local and tells you how to enable syncing later.
 
-Remote publishing also requires [TruffleHog](https://github.com/trufflesecurity/trufflehog). `add`
-checks for it before installing a publishing integration. See its
+Remote publishing also requires [TruffleHog](https://github.com/trufflesecurity/trufflehog). That
+is `push`'s requirement, not `add`'s: the first push `add` performs and every push the automation
+runs fail closed unless funes can scan the content for credentials — agent traces commonly capture
+exported environment variables. See its
 [installation documentation](https://github.com/trufflesecurity/trufflehog#installation); funes
-looks for it on `PATH`, or at the path set by `FUNES_TRUFFLEHOG`. Agent traces commonly capture
-exported environment variables, so the first push and every later push fail closed unless funes can
-scan the content for credentials. Local-only setup does not require TruffleHog.
+looks for it on `PATH`, or at the path set by `FUNES_TRUFFLEHOG`. A local-only setup, or an
+integration that never publishes, does not need it.
 
 ## What a run does
 
@@ -175,8 +176,16 @@ the managed journey — setup, conversion, automation, removal — for one agent
 
 | File | Role |
 | --- | --- |
-| `manifest.json` | `{"contract_version": 1, "id": "<id>", "label": "<name for humans>", "repo": "<where it comes from>"}`. `id` is the directory name, lowercase `[a-z0-9_-]`. `contract_version` is the contract this section describes: funes refuses a mismatch before running anything, pointing at `funes update`. |
+| `manifest.json` | What the integration declares — the fields below. |
 | `setup` | An executable. `setup add [MEMORY]` wires funes into the agent, bound to `MEMORY` when given (an `<org>/<repo>` shorthand or an `hf://…` URI; absent is the local memory); `setup remove` undoes it. A non-zero exit fails the command. |
+
+| Field | |
+| --- | --- |
+| `contract_version` | The contract this section describes, `1`. funes refuses a mismatch before running anything, pointing at `funes update`. |
+| `id` | The directory name, lowercase `[a-z0-9_-]`; it names the installation and its spool. |
+| `label` | The agent's name as a human writes it. |
+| `repo` | Where it is published from, `<publisher>/<name>`. The publisher and the `id` are what the package is: funes will not put one publisher's files where another's are installed — `funes remove <id>` first says you mean to replace it. |
+| `version` | Its own release, `MAJOR.MINOR.PATCH`, moving independently of the contract. Optional. |
 
 `setup` runs with three variables: `FUNES_BIN`, the funes command to record or invoke (the user's
 pin, else `funes`); `FUNES_HOME`, the home whose memory and spool this install serves; and
@@ -203,6 +212,11 @@ nothing — is confirmed at the terminal every time, before `setup` runs, and ne
 anyone able to plant the files could forge the record. Off a terminal, funes refuses rather than
 assumes. An id with no files anywhere is an error naming what is installed.
 
+What `funes add` installed is recorded beside the directory, in `~/.funes/agents/<id>.json`: the
+package as its manifest declared it — publisher, id, version, contract — and where the files came
+from: the checkout, the directory, or the archive and its checksum. The record says what the agent
+runs, never whether funes vouched for it, and goes with the directory on `funes remove`.
+
 So a fifth integration is used today by putting its directory under `~/.funes/agents/<id>/`, or by
 pointing `$FUNES_INTEGRATIONS` at a directory holding it, then `funes add <id>`. Installing one by
 name from a source of its own is planned.
@@ -212,12 +226,11 @@ name from a source of its own is planned.
 The maintained four register `$FUNES_BIN mcp [MEMORY]` as the agent's MCP server, convert the
 agent's history into the spool at install, and install automation that converts each finished
 session and runs `funes index --harness <id>`, plus a session-boundary `funes push` when a memory
-is bound. None of that is required of an integration — one may register the read tools alone — but
-the bootstrap around `setup` is built for the full journey: a first add asks before indexing, a
-remote memory requires TruffleHog, and the first push follows the first index. An integration that
-converts nothing goes through the same steps: the index step notes an empty spool, and a bound
-memory gets a note that nothing was indexed rather than a push. What a consumer-only install should
-mean is a decision for the distribution work, not made here.
+is bound. None of that is required of an integration — one may register the read tools alone — and
+funes does not ask which kind it is running: the bootstrap around `setup` is the same for every
+integration, and each step is a no-op when there is nothing for it. A first add asks before
+indexing, the seed indexes what the spool holds, and the first push publishes what was indexed; an
+integration that converts nothing gets a note at each step and nothing else.
 
 ### Converting by hand
 

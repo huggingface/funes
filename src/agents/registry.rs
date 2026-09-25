@@ -5,9 +5,10 @@
 //! `$FUNES_AGENT_ID` in its environment.
 
 use anyhow::{bail, Context, Result};
+use chrono::{SecondsFormat, Utc};
 use hf_hub::buckets::BucketDownload;
 use hf_hub::HFError;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -37,11 +38,9 @@ pub struct Manifest {
     pub version: Option<String>,
 }
 
-impl Manifest {
-    /// Who publishes it: the owner in `repo`.
-    pub fn publisher(&self) -> &str {
-        self.repo.split('/').next().unwrap_or_default()
-    }
+/// The owner in a `<publisher>/<name>` repo.
+fn publisher(repo: &str) -> &str {
+    repo.split('/').next().unwrap_or_default()
 }
 
 /// `<publisher>/<name>`, both non-empty.
@@ -63,6 +62,75 @@ fn is_release_version(s: &str) -> bool {
 pub struct Integration {
     pub dir: PathBuf,
     pub manifest: Manifest,
+}
+
+/// Where an integration's files came from, as funes resolved them.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Origin {
+    /// The `integrations/` directory of the checkout this binary was built from.
+    Checkout { path: PathBuf },
+    /// A directory the user pointed funes at.
+    Directory { path: PathBuf },
+    /// A published archive, verified against the checksum beside it.
+    Archive { url: String, sha256: String },
+}
+
+impl std::fmt::Display for Origin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Origin::Checkout { path } => write!(f, "the checkout at {}", path.display()),
+            Origin::Directory { path } => write!(f, "{}", path.display()),
+            Origin::Archive { url, .. } => f.write_str(url),
+        }
+    }
+}
+
+/// What funes installed at `<root>/<id>`, kept beside the directory as `<root>/<id>.json`: the
+/// package as its manifest declared it, and where the files came from.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct Installed {
+    pub contract_version: u32,
+    pub id: String,
+    pub repo: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    pub origin: Origin,
+    pub installed_at: String,
+}
+
+impl Installed {
+    /// The record of `manifest`'s files, installed from `origin` now.
+    pub fn new(manifest: &Manifest, origin: Origin) -> Installed {
+        Installed {
+            contract_version: manifest.contract_version,
+            id: manifest.id.clone(),
+            repo: manifest.repo.clone(),
+            version: manifest.version.clone(),
+            origin,
+            installed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+        }
+    }
+}
+
+fn record_path(root: &Path, id: &str) -> PathBuf {
+    root.join(format!("{id}.json"))
+}
+
+/// The record of what is installed at `root/<id>`, when funes wrote one.
+pub fn installed(root: &Path, id: &str) -> Option<Installed> {
+    let text = std::fs::read_to_string(record_path(root, id)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Write `record` as `root/<id>.json`.
+pub fn record(root: &Path, record: &Installed) -> Result<()> {
+    let path = record_path(root, &record.id);
+    let mut text = serde_json::to_string_pretty(record).context("serializing the install record")?;
+    text.push('\n');
+    let tmp = root.join(format!(".{}.json.funes-tmp{}", record.id, std::process::id()));
+    std::fs::write(&tmp, text).with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).with_context(|| format!("replacing {}", path.display()))
 }
 
 /// The registry root, `~/.funes/agents` — fixed, not under `$FUNES_HOME`: an agent records the
@@ -295,6 +363,18 @@ impl std::fmt::Display for Absent {
 
 impl std::error::Error for Absent {}
 
+/// Another publisher's files where an integration is installed.
+#[derive(Debug)]
+pub struct Takeover(String);
+
+impl std::fmt::Display for Takeover {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Takeover {}
+
 /// Whether funes vouches for the files it installed: a published archive it verified, or the
 /// checkout it was built from. Anything else is someone's files on this disk, and the caller
 /// confirms before funes executes them.
@@ -303,6 +383,13 @@ pub enum Provenance {
     Vouched,
     /// Where they came from, for the confirmation.
     Unvouched(String),
+}
+
+/// What a provision resolved: whether funes vouches for the files, and where they came from.
+#[derive(Debug)]
+pub struct Provisioned {
+    pub provenance: Provenance,
+    pub origin: Origin,
 }
 
 /// Resolve `id`'s files: `$FUNES_INTEGRATIONS` if set — authoritative, so a test or a fork cannot
@@ -341,36 +428,75 @@ fn published_prefix() -> String {
 /// Install `id`'s files into the registry. Only a file that differs is rewritten (`force` rewrites
 /// regardless), and nothing is pruned — an integration's `setup` keeps its own state beside them.
 /// The id names the directory written, so it is checked here, before anything is.
-pub async fn provision(root: &Path, id: &str, force: bool) -> Result<Provenance> {
+pub async fn provision(root: &Path, id: &str, force: bool) -> Result<Provisioned> {
     if !spool::is_id(id) {
         bail!("{id:?} is not an integration id (lowercase [a-z0-9_-])");
     }
-    let dst = root.join(id);
     match source_for(id)? {
         Source::Checkout(src) => {
-            copy_into(&src, &dst, force)?;
-            Ok(Provenance::Vouched)
+            install_from(root, id, &src, force)?;
+            Ok(Provisioned {
+                provenance: Provenance::Vouched,
+                origin: Origin::Checkout { path: src },
+            })
         }
         Source::Redirected(src) => {
-            copy_into(&src, &dst, force)?;
-            Ok(Provenance::Unvouched(format!(
-                "$FUNES_INTEGRATIONS ({})",
-                src.display()
-            )))
+            install_from(root, id, &src, force)?;
+            Ok(Provisioned {
+                provenance: Provenance::Unvouched(format!("$FUNES_INTEGRATIONS ({})", src.display())),
+                origin: Origin::Directory { path: src },
+            })
         }
         Source::Published => {
             let staging = tempfile::tempdir().context("creating a staging directory")?;
-            let archive = fetch_published(id, staging.path()).await?;
+            let (archive, sha256) = fetch_published(id, staging.path()).await?;
             let unpacked = staging.path().join("unpacked");
             unpack(&archive, &unpacked)?;
-            copy_into(&unpacked, &dst, force)?;
-            Ok(Provenance::Vouched)
+            install_from(root, id, &unpacked, force)?;
+            Ok(Provisioned {
+                provenance: Provenance::Vouched,
+                origin: Origin::Archive {
+                    url: hub::release_asset_url(&format!("{}/{id}.tar.gz", published_prefix())),
+                    sha256,
+                },
+            })
         }
     }
 }
 
-/// Download `id`'s published archive into `dir` and check it against the prefix's `SHA256SUMS`.
-async fn fetch_published(id: &str, dir: &Path) -> Result<PathBuf> {
+/// Copy `src` over `root/<id>` once what it declares checks out: a manifest that would be refused
+/// installed is refused here, before a byte moves, and so is another publisher's.
+fn install_from(root: &Path, id: &str, src: &Path, force: bool) -> Result<()> {
+    let incoming = read_manifest(&src.join("manifest.json"), id)?;
+    refuse_takeover(root, id, &incoming)?;
+    copy_into(src, &root.join(id), force)
+}
+
+/// Refuse another publisher's files where `id`'s are installed. What funes recorded at install
+/// names the publisher, else the installed manifest does; with neither there is nothing to keep.
+fn refuse_takeover(root: &Path, id: &str, incoming: &Manifest) -> Result<()> {
+    let (owner, from) = match installed(root, id) {
+        Some(record) => (publisher(&record.repo).to_string(), format!(", from {}", record.origin)),
+        None => match installed_manifest(root, id).and_then(|bytes| serde_json::from_slice::<Manifest>(&bytes).ok()) {
+            Some(manifest) => (publisher(&manifest.repo).to_string(), String::new()),
+            None => return Ok(()),
+        },
+    };
+    if owner != publisher(&incoming.repo) {
+        return Err(Takeover(format!(
+            "the {id} integration installed here is {owner}'s{from}; this one is {}'s ({}) — \
+             `funes remove {id}` first to replace it",
+            publisher(&incoming.repo),
+            incoming.repo
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// Download `id`'s published archive into `dir` and check it against the prefix's `SHA256SUMS`;
+/// the archive, and its digest as hex.
+async fn fetch_published(id: &str, dir: &Path) -> Result<(PathBuf, String)> {
     let asset = format!("{id}.tar.gz");
     let archive = dir.join(&asset);
     let manifest = dir.join("SHA256SUMS");
@@ -391,8 +517,8 @@ async fn fetch_published(id: &str, dir: &Path) -> Result<PathBuf> {
             .into(),
             e => anyhow::Error::from(e).context(format!("downloading {prefix}/{asset} from the funes release bucket")),
         })?;
-    hub::verify_checksum(&archive, &manifest, &asset)?;
-    Ok(archive)
+    let digest = hub::verify_checksum(&archive, &manifest, &asset)?;
+    Ok((archive, hex::encode(digest)))
 }
 
 /// Unpack a verified archive: an integration's files sit at its root.
@@ -411,9 +537,11 @@ fn unpack(archive: &Path, dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Delete an integration's directory, including the state its `setup` wrote there.
+/// Delete an integration's directory, including the state its `setup` wrote there, and funes's
+/// record of it.
 pub fn discard(root: &Path, id: &str) -> Result<()> {
-    super::remove_tree(&root.join(id))
+    super::remove_tree(&root.join(id))?;
+    super::remove_tree(&record_path(root, id))
 }
 
 /// Create `dir`, and any parent missing, as funes's own: 0755 whatever the umask, since `open`
@@ -723,6 +851,91 @@ mod tests {
         open(&linked_root, "hermes").unwrap();
     }
 
+    /// The record round-trips, is not an integration, and goes with the directory.
+    #[test]
+    fn what_was_installed_is_recorded_beside_the_directory_and_discarded_with_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("agents");
+        integration(&root, "pi", &manifest("pi", CONTRACT_VERSION), "true");
+        assert!(installed(&root, "pi").is_none());
+
+        let declared = open(&root, "pi").unwrap().manifest;
+        let rec = Installed::new(
+            &declared,
+            Origin::Archive {
+                url: "hf://buckets/huggingface/funes/integrations/v1/pi.tar.gz".to_string(),
+                sha256: "ab".repeat(32),
+            },
+        );
+        record(&root, &rec).unwrap();
+        assert_eq!(installed(&root, "pi").unwrap(), rec);
+        assert_eq!(registered_ids(&root), vec!["pi"]);
+        let text = std::fs::read_to_string(root.join("pi.json")).unwrap();
+        assert!(
+            text.contains(r#""kind": "archive""#) && !text.contains(r#""version""#),
+            "{text}"
+        );
+
+        discard(&root, "pi").unwrap();
+        assert!(!root.join("pi").exists() && !root.join("pi.json").exists());
+    }
+
+    /// Another publisher's files are refused before a byte moves, whether funes recorded where
+    /// the install came from or only its manifest says whose it is.
+    #[test]
+    fn another_publishers_files_are_refused_where_an_integration_is_installed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("agents");
+        integration(&root, "pi", &manifest("pi", CONTRACT_VERSION), "true");
+        let setup = || std::fs::read_to_string(root.join("pi").join(SETUP)).unwrap();
+
+        let theirs = integration(
+            &tmp.path().join("theirs"),
+            "pi",
+            r#"{"contract_version": 1, "id": "pi", "label": "pi", "repo": "other/pi"}"#,
+            "echo theirs",
+        );
+        let err = install_from(&root, "pi", &theirs, false).unwrap_err();
+        assert!(err.downcast_ref::<Takeover>().is_some(), "{err}");
+        assert!(err.to_string().contains("`funes remove pi` first"), "{err}");
+        assert_eq!(setup(), "#!/bin/sh\ntrue\n", "nothing copied");
+
+        // With a record, the refusal says where the install came from.
+        let rec = Installed::new(
+            &open(&root, "pi").unwrap().manifest,
+            Origin::Checkout {
+                path: PathBuf::from("/src/funes/integrations/pi"),
+            },
+        );
+        record(&root, &rec).unwrap();
+        let err = install_from(&root, "pi", &theirs, false).unwrap_err().to_string();
+        assert!(
+            err.contains("acme's, from the checkout at /src/funes/integrations/pi"),
+            "{err}"
+        );
+
+        // The same publisher's files replace it.
+        let mine = integration(
+            &tmp.path().join("mine"),
+            "pi",
+            &manifest("pi", CONTRACT_VERSION),
+            "echo mine",
+        );
+        install_from(&root, "pi", &mine, false).unwrap();
+        assert!(setup().contains("echo mine"));
+
+        // A manifest that would be refused installed is refused before the copy too.
+        let bad = integration(
+            &tmp.path().join("bad"),
+            "pi",
+            &manifest("pi", CONTRACT_VERSION + 1),
+            "echo bad",
+        );
+        let err = install_from(&root, "pi", &bad, false).unwrap_err().to_string();
+        assert!(err.contains("contract version"), "{err}");
+        assert!(setup().contains("echo mine"), "untouched");
+    }
+
     /// The registry's manifest says what `setup` last installed: a refresh whose `setup add` never
     /// ran puts the previous one back.
     #[test]
@@ -869,7 +1082,7 @@ mod tests {
         );
         let declared = open(root.path(), "pi").unwrap().manifest;
         assert_eq!(declared.version.as_deref(), Some("1.2.3"));
-        assert_eq!(declared.publisher(), "acme");
+        assert_eq!(publisher(&declared.repo), "acme");
 
         // Left out, there is no release to speak of.
         integration(root.path(), "pi", &manifest("pi", CONTRACT_VERSION), "true");

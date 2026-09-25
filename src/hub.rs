@@ -133,15 +133,21 @@ pub(crate) fn release_bucket(retries: bool) -> Result<HFBucket> {
     Ok(client(hf_token().as_deref(), retries)?.bucket(BUCKET_OWNER, BUCKET_NAME))
 }
 
-/// Verify `asset` against its one unambiguous entry in a strict SHA256SUMS manifest.
-pub(crate) fn verify_checksum(path: &Path, manifest: &Path, asset: &str) -> Result<()> {
+/// Verify `asset` against its one unambiguous entry in a strict SHA256SUMS manifest, and say
+/// what the digest was.
+pub(crate) fn verify_checksum(path: &Path, manifest: &Path, asset: &str) -> Result<[u8; 32]> {
     let text = std::fs::read_to_string(manifest).context("reading SHA256SUMS")?;
     let expected = expected_digest(&text, asset)?;
     let actual = sha256_file(path)?;
     if actual != expected {
         bail!("checksum verification failed for {asset} — nothing changed");
     }
-    Ok(())
+    Ok(actual)
+}
+
+/// The `hf://` URL of a path in the release bucket.
+pub(crate) fn release_asset_url(path: &str) -> String {
+    format!("hf://buckets/{BUCKET_OWNER}/{BUCKET_NAME}/{path}")
 }
 
 pub(crate) fn expected_digest(manifest: &str, asset: &str) -> Result<[u8; 32]> {

@@ -41,6 +41,9 @@ registration and funes-owned files/entries:
 | Hermes | Plugin carrying the automation hooks at `~/.hermes/plugins/funes/`; enabled through hermes' plugin commands. |
 | pi | Extension and optional memory binding under `~/.funes/agents/pi/`. |
 
+Beside each integration's directory, `~/.funes/agents/<id>.json` records what `funes add`
+installed there and where the files came from.
+
 See [automation.md](automation.md) for how these files are merged and which events they handle.
 Hook logs sit beside the installed scripts as `funes-sync.log`.
 

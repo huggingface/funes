@@ -8,11 +8,10 @@ use funes::agents::{self, registry};
 use funes::commands::{ask, index, mcp, push, recall, scrub, sketch, update};
 use funes::hub;
 use funes::memory;
-use funes::scan;
 use funes::traces::spool;
 use funes::ui::render;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Result};
 use clap::{Args, Parser, Subcommand};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -542,18 +541,22 @@ async fn add_agent(id: &str, memory: AddMemory, force: bool) -> Result<()> {
     let installed = std::cell::Cell::new(false);
     let ran = &installed;
     let result = async {
-        let integration = prepare_agent(id, force).await?;
+        let (integration, origin) = prepare_agent(id, force).await?;
         let resolved = resolve_add_memory(memory).await?;
-        if let Some(remote) = resolved.as_ref().filter(|r| r.is_remote()) {
-            require_scanner(&remote.memory, id)?;
-        }
+        let record = origin.map(|origin| registry::Installed::new(&integration.manifest, origin));
         bootstrap_add(id, resolved, |memory| async move {
             integration.add(memory.as_deref())?;
             ran.set(true);
             // Whatever an older hook asked for, this install's hooks are the ones that ask now.
             spool::forget_missing(id)
         })
-        .await
+        .await?;
+        // What setup just installed, and from where. An installed copy nothing refreshed keeps
+        // the record it has.
+        match record {
+            Some(record) if ran.get() => registry::record(&root, &record),
+            _ => Ok(()),
+        }
     }
     .await;
     if !installed.get() {
@@ -569,18 +572,24 @@ async fn add_agent(id: &str, memory: AddMemory, force: bool) -> Result<()> {
 /// declare; and confirm them when funes can't vouch for them — all before `add` touches a memory
 /// or `remove` runs anything. With nothing to refresh from — no source names `id`, or the source
 /// can't be reached — the installed copy is what runs, and funes can't vouch for that either.
-async fn prepare_agent(id: &str, force: bool) -> Result<registry::Integration> {
+/// Says where the files came from when it refreshed them.
+async fn prepare_agent(id: &str, force: bool) -> Result<(registry::Integration, Option<registry::Origin>)> {
     if !spool::is_id(id) {
         bail!("{id:?} is not an integration id (lowercase [a-z0-9_-])");
     }
     let root = registry::default_root()?;
     // Decided before the refresh: a first install that fails part-way is not an installed copy.
     let installed = root.join(id).is_dir();
-    let provenance = match registry::provision(&root, id, force).await {
-        Ok(provenance) => provenance,
+    let (provenance, origin) = match registry::provision(&root, id, force).await {
+        Ok(registry::Provisioned { provenance, origin }) => (provenance, Some(origin)),
+        // Another publisher's files are not a refresh the installed copy stands in for.
+        Err(e) if e.downcast_ref::<registry::Takeover>().is_some() => return Err(e),
         Err(e) if installed => {
             eprintln!("note: the {id} integration could not be refreshed ({e:#}) — running the installed copy.");
-            registry::Provenance::Unvouched("the installed copy, refreshed by nothing".to_string())
+            (
+                registry::Provenance::Unvouched("the installed copy, refreshed by nothing".to_string()),
+                None,
+            )
         }
         Err(e) => {
             let _ = registry::discard(&root, id);
@@ -593,7 +602,7 @@ async fn prepare_agent(id: &str, force: bool) -> Result<registry::Integration> {
     };
     let integration = registry::open(&root, id)?;
     confirm_trust(id, &integration.dir, provenance)?;
-    Ok(integration)
+    Ok((integration, origin))
 }
 
 /// A failed provision for an agent with no files on this machine is usually a typo, so the error
@@ -643,12 +652,24 @@ fn confirm_trust(id: &str, dir: &Path, provenance: registry::Provenance) -> Resu
 async fn remove_agent(id: &str) -> Result<()> {
     let root = registry::default_root()?;
     let integration = match prepare_agent(id, false).await {
-        Ok(integration) => integration,
+        Ok((integration, _)) => integration,
         // Nothing installed and nothing to fetch is what `remove` leaves behind. A source funes could
         // not reach is reported instead: the agent may still hold the registration.
         Err(e) if !root.join(id).is_dir() && e.downcast_ref::<registry::Absent>().is_some() => {
             eprintln!("nothing to remove — {e:#}");
+            registry::discard(&root, id)?;
             return spool::forget_missing(id);
+        }
+        // Another publisher's setup must not take this install away: the installed copy's does.
+        Err(e) if e.downcast_ref::<registry::Takeover>().is_some() => {
+            eprintln!("note: {e:#} — removing with the installed copy.");
+            let integration = registry::open(&root, id)?;
+            confirm_trust(
+                id,
+                &integration.dir,
+                registry::Provenance::Unvouched("the installed copy, refreshed by nothing".to_string()),
+            )?;
+            integration
         }
         Err(e) => return Err(e),
     };
@@ -667,12 +688,6 @@ struct Resolved {
     created: bool,
 }
 
-impl Resolved {
-    fn is_remote(&self) -> bool {
-        matches!(memory::Memory::parse(&self.memory), memory::Memory::Remote { .. })
-    }
-}
-
 /// Resolve the memory `funes add` binds. An explicitly-named memory is validated — offer to create it
 /// if it's missing on the Hub (a typo guard). With no memory, offer to set one up on the Hub when a
 /// token is present (`<user>/funes-memory`); otherwise stay local.
@@ -684,15 +699,6 @@ async fn resolve_add_memory(raw: AddMemory) -> Result<Option<Resolved>> {
         }
         None => offer_hub_memory().await,
     }
-}
-
-fn require_scanner(memory: &str, agent: &str) -> Result<()> {
-    scan::Trufflehog::find().map(|_| ()).with_context(|| {
-        format!(
-            "can't publish agent traces to {memory} without TruffleHog. Once it is available, re-run \
-             `funes add {agent} {memory}`; to keep this setup local, run `funes add {agent} local` instead."
-        )
-    })
 }
 
 /// Validate an explicitly-named memory: fine if it exists; offer to create it if missing (default
@@ -819,7 +825,7 @@ where
     let first_add = memory::Memory::local().open().await.is_err();
     if first_add
         && !confirm(
-            &format!("funes will index your recent {agent} sessions so recall works (about a minute). Proceed? [Y/n] "),
+            &format!("funes will index your existing {agent} sessions, if any, so recall works (about a minute). Proceed? [Y/n] "),
             true,
         )
     {
@@ -837,7 +843,7 @@ where
         if memory::Memory::local().open().await.is_ok() {
             first_push(&memory, created).await?;
         } else {
-            eprintln!("funes: nothing indexed yet — nothing to publish to {memory} yet. Run `funes index`, and the hooks keep it current from there.");
+            eprintln!("funes: nothing indexed yet — nothing to publish to {memory} yet.");
         }
     }
     Ok(())
@@ -850,9 +856,7 @@ async fn seed_local_index(agent: &str) {
     let spool = spool::spool_dir(agent);
     let has_sessions = std::fs::read_dir(&spool).is_ok_and(|mut entries| entries.next().is_some());
     if !has_sessions {
-        eprintln!(
-            "funes: no {agent} sessions to index yet — the hooks are installed and index each one as it happens."
-        );
+        eprintln!("funes: no {agent} sessions to index yet.");
         return;
     }
     eprintln!("funes: indexing your recent {agent} sessions…");
