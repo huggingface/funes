@@ -33,6 +33,12 @@ fn is_spool_dir(path: &Path) -> bool {
     path.symlink_metadata().is_ok_and(|m| m.is_dir())
 }
 
+/// Whether `path` names a place in the spool, by its spelling alone: what a record of a file that
+/// may be gone can say. Ownership of a file that exists is `is_spool`'s to decide.
+pub fn names_spool(path: &Path) -> bool {
+    path.starts_with(spool_root())
+}
+
 /// Whether `path` is inside a spool funes resolved for itself, rather than a path someone named.
 /// funes deletes what it owns here, so the answer is by what the paths resolve to: a `..` or a
 /// symlink cannot make a file elsewhere look like the spool's.

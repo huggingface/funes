@@ -205,15 +205,27 @@ fn unit_refused(entry: Option<&UnitState>, sig: &str) -> bool {
     entry.is_some_and(|e| same_sig(&e.sig, sig) && e.refused.as_deref() == Some(VERSION))
 }
 
-/// Whether a finished unit is a spool file to drop. funes owns the spool: a bundle writes into it
+/// Whether a unit at `level` is a spool file to drop. funes owns the spool: a bundle writes into it
 /// and never reads back, so what stays there is exactly what is still owed. A turns directory
-/// someone else owns keeps its files. The stamp is re-read because a bundle may have replaced the
-/// file since this run listed it; only the bytes that were indexed are dropped.
-fn drains(key: &str, sig: &str, level: Tier) -> bool {
+/// someone else owns keeps its files, and so does a run that left the thinking out: the spool copy
+/// is the only place it can still be indexed from.
+fn drains(key: &str, level: Tier, include_thinking: bool) -> bool {
+    include_thinking
+        && level >= *Tier::ALL.iter().max().expect("Tier::ALL is non-empty")
+        && spool::is_spool(Path::new(key))
+}
+
+/// Drop a drained spool file — the bytes `sig` stamps, and only those. A bundle may replace the
+/// file at any moment, so it is claimed first: renamed aside, atomically against the bundle's own
+/// rename over the name, then judged. A replacement that got in first is put back for the next run.
+fn drain(key: &str, sig: &str) -> Result<()> {
     let path = Path::new(key);
-    level >= *Tier::ALL.iter().max().expect("Tier::ALL is non-empty")
-        && spool::is_spool(path)
-        && source::file_sig(path).as_deref() == Some(sig)
+    let claimed = PathBuf::from(format!("{key}.draining{}", std::process::id()));
+    std::fs::rename(path, &claimed).with_context(|| format!("claiming {key}"))?;
+    if source::file_sig(&claimed).as_deref() == Some(sig) {
+        return std::fs::remove_file(&claimed).with_context(|| format!("removing {}", claimed.display()));
+    }
+    std::fs::rename(&claimed, path).with_context(|| format!("returning {key} to the spool"))
 }
 
 /// Lightweight coverage snapshot written by indexing runs for `status` to read without walking
@@ -238,6 +250,12 @@ fn retire_vanished_units(path: &Path, sources: &[Box<dyn source::TraceSource>]) 
         let held: HashSet<String> = keys.into_iter().collect();
         snapshot.pending.retain(|key| !src.owns(key) || held.contains(key));
     }
+    // A spool `funes remove` took with its integration is nobody's to list, and what it owed is
+    // owed no more.
+    snapshot.pending.retain(|key| {
+        let path = Path::new(key);
+        !spool::names_spool(path) || path.exists()
+    });
     write_snapshot(path, &snapshot)
 }
 
@@ -511,6 +529,12 @@ impl Indexer {
         if let Some(sig) = &sig {
             let entry = self.state.get(&key);
             if unit_current(entry, sig, target) || unit_refused(entry, sig) {
+                // Recorded as done, still in the spool: a run that stopped between the two.
+                if unit_current(entry, sig, target) && drains(&key, target, self.include_thinking) {
+                    if let Err(e) = drain(&key, sig) {
+                        eprintln!("{progress} {key} — indexed, but the spool copy stayed: {e:#}");
+                    }
+                }
                 self.n_skipped += 1;
                 return Ok(0);
             }
@@ -593,9 +617,9 @@ impl Indexer {
                     refused: None,
                 },
             )?;
-            if drains(&key, sig, target) {
-                if let Err(e) = std::fs::remove_file(&key) {
-                    eprintln!("{progress} {key} — indexed, but the spool copy stayed: {e}");
+            if drains(&key, target, self.include_thinking) {
+                if let Err(e) = drain(&key, sig) {
+                    eprintln!("{progress} {key} — indexed, but the spool copy stayed: {e:#}");
                 }
             }
         }
@@ -1458,5 +1482,58 @@ mod tests {
             !scanner.0.borrow().contains("iVBORw0KGgo"),
             "the scanner must never see the payload: excising a match inside it would strand the rest"
         );
+    }
+
+    /// The drain drops the bytes it indexed and only those: a file the bundle replaced under the
+    /// same name since is left for the next run, untouched.
+    #[test]
+    fn a_drain_drops_what_it_indexed_and_keeps_a_replacement() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("s.funes.jsonl");
+        std::fs::write(&path, "indexed\n").unwrap();
+        let key = path.to_str().unwrap().to_string();
+        let sig = source::file_sig(&path).unwrap();
+
+        // Replaced the way a converter lands it: written beside, renamed over.
+        let newer = tmp.path().join("s.tmp");
+        std::fs::write(&newer, "indexed, and one more turn\n").unwrap();
+        std::fs::rename(&newer, &path).unwrap();
+        drain(&key, &sig).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "indexed, and one more turn\n",
+            "kept for the next run"
+        );
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1, "nothing left aside");
+
+        let sig = source::file_sig(&path).unwrap();
+        drain(&key, &sig).unwrap();
+        assert!(!path.exists(), "the bytes indexed are dropped");
+        assert!(drain(&key, &sig).is_err(), "nothing left to claim");
+    }
+
+    /// A pending spool file that is gone — its integration removed — is owed no more; a file of
+    /// the user's own is not funes's to judge.
+    #[test]
+    fn a_vanished_spool_key_is_retired() {
+        let tmp = tempfile::tempdir().unwrap();
+        let snapshot = tmp.path().join("index-coverage.json");
+        let gone = spool::spool_root().join("nobody/gone.funes.jsonl");
+        let kept = tmp.path().join("mine/kept.funes.jsonl");
+        std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
+        std::fs::write(&kept, "").unwrap();
+        let pending = [&gone, &kept].map(|p| p.to_str().unwrap().to_string());
+        write_snapshot(
+            &snapshot,
+            &IndexCoverageSnapshot {
+                pending: pending.into_iter().collect(),
+            },
+        )
+        .unwrap();
+
+        retire_vanished_units(&snapshot, &[]).unwrap();
+        let after = read_index_coverage(&snapshot);
+        assert!(!after.pending.contains(gone.to_str().unwrap()));
+        assert!(after.pending.contains(kept.to_str().unwrap()));
     }
 }
