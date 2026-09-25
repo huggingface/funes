@@ -46,17 +46,15 @@ async fn seed_finishes_a_small_history_and_a_rerun_is_a_noop() {
     // Where the agent's integration converts into. funes finds it by listing the spool root, so a
     // stray file or a directory no id could name is not a producer; `--harness <id>` selects one
     // that exists.
-    let src = spool::spool_dir("claude");
+    let src = spool::spool_dir("clyde");
     std::fs::create_dir_all(&src).unwrap();
     std::fs::create_dir_all(spool::spool_root().join("Not An Id")).unwrap();
     std::fs::write(spool::spool_root().join(".DS_Store"), b"").unwrap();
     assert_eq!(spool::spools(), vec![src.clone()]);
-    assert_eq!(spool::select("claude").unwrap(), src);
-    let err = spool::select("codex").unwrap_err().to_string();
-    assert_eq!(
-        err,
-        "the codex integration does not match this version of funes. Re-run `funes add codex`, naming the memory it is bound to, to update it."
-    );
+    assert_eq!(spool::select("clyde").unwrap(), src);
+    // Refused as an install this funes does not match; the wording is stale_install_notice's.
+    let err = spool::select("bonnie").unwrap_err().to_string();
+    assert!(err.contains("the bonnie integration does not match"), "{err}");
     let err = spool::select("Not An Id").unwrap_err().to_string();
     assert!(err.contains("not an integration id"), "{err}");
     write_session(&src);

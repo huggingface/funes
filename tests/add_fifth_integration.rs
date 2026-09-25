@@ -203,9 +203,11 @@ fn a_fifth_integration_seeds_and_drains_its_spool_under_its_own_facet() {
     support::assert_success(&funes(&home, &funes_home, &log, &["index", "--harness", "clyde"]));
     let out = funes(&home, &funes_home, &log, &["index", "--harness", "nope"]);
     assert!(!out.status.success());
-    assert_eq!(
-        stderr(&out).lines().next(),
-        Some("Error: the nope integration does not match this version of funes. Re-run `funes add nope`, naming the memory it is bound to, to update it.")
+    // The wording is stale_install_notice's to pin.
+    assert!(
+        stderr(&out).contains("the nope integration does not match"),
+        "{}",
+        stderr(&out)
     );
 }
 

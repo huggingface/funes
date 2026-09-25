@@ -81,20 +81,20 @@ fn a_stale_install_is_said_on_every_read_until_funes_add_runs_again() {
     let funes_home = tmp.path().join("funes");
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(&funes_home).unwrap();
-    let stamp = funes_home.join("spool/codex.missing");
+    let stamp = funes_home.join("spool/bonnie.missing");
 
     // Nothing to say on a machine where nothing is installed.
     let quiet = funes(&home, &funes_home, &["status"]);
     support::assert_success(&quiet);
     assert!(!stderr(&quiet).contains("note:"), "{}", stderr(&quiet));
 
-    // An old hook: `funes index --harness codex` off a terminal, with no spool to drain.
-    let refused = funes(&home, &funes_home, &["index", "--harness", "codex"]);
+    // An old hook: `funes index --harness bonnie` off a terminal, with no spool to drain.
+    let refused = funes(&home, &funes_home, &["index", "--harness", "bonnie"]);
     assert!(!refused.status.success());
     assert_eq!(
         stderr(&refused).lines().next(),
         Some(
-            "Error: the codex integration does not match this version of funes. Re-run `funes add codex`, naming the memory it is bound to, to update it."
+            "Error: the bonnie integration does not match this version of funes. Re-run `funes add bonnie`, naming the memory it is bound to, to update it."
         )
     );
     assert!(stamp.is_file(), "the refusal leaves its stamp");
@@ -113,7 +113,7 @@ fn a_stale_install_is_said_on_every_read_until_funes_add_runs_again() {
     let status = funes(&home, &funes_home, &["status"]);
     support::assert_success(&status);
     let err = stderr(&status);
-    let notes = "note: the codex integration does not match this version of funes. Re-run `funes add codex`, naming the memory it is bound to, to update it.\n\
+    let notes = "note: the bonnie integration does not match this version of funes. Re-run `funes add bonnie`, naming the memory it is bound to, to update it.\n\
                  note: the clyde integration does not match this version of funes. Re-run `funes add clyde`, naming the memory it is bound to, to update it.\n";
     assert_eq!(err, notes);
     assert!(!stdout(&status).contains("note:"), "{}", stdout(&status));
@@ -128,7 +128,7 @@ fn a_stale_install_is_said_on_every_read_until_funes_add_runs_again() {
     let team = tmp.path().join("team-memory");
     let (instructions, text) = mcp_status(&home, &funes_home, team.to_str().unwrap());
     let notes = format!(
-        "note: the codex integration does not match this version of funes. Re-run `funes add codex {m}` to update it.\n\
+        "note: the bonnie integration does not match this version of funes. Re-run `funes add bonnie {m}` to update it.\n\
          note: the clyde integration does not match this version of funes. Re-run `funes add clyde {m}` to update it.\n",
         m = team.display()
     );
@@ -140,10 +140,10 @@ fn a_stale_install_is_said_on_every_read_until_funes_add_runs_again() {
         "the tool's own text follows the notes after a blank line: {body:?}"
     );
 
-    // `funes add codex` creates the spool; the next hook finds it and the stamp goes. `funes add
+    // `funes add bonnie` creates the spool; the next hook finds it and the stamp goes. `funes add
     // clyde` replaces the manifest.
-    fs::create_dir_all(funes_home.join("spool/codex")).unwrap();
-    let found = funes(&home, &funes_home, &["index", "--harness", "codex"]);
+    fs::create_dir_all(funes_home.join("spool/bonnie")).unwrap();
+    let found = funes(&home, &funes_home, &["index", "--harness", "bonnie"]);
     support::assert_success(&found);
     assert!(!stamp.exists(), "found, so no longer missing");
     fs::write(
