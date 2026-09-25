@@ -37,6 +37,10 @@ Then add it to your agent:
 funes add claude    # or codex, pi, hermes
 ```
 
+Another agent? Integrations their authors maintain are listed in
+[funes-integrations/COMMUNITY.md](https://github.com/huggingface/funes-integrations/blob/main/COMMUNITY.md),
+and `funes add <id> --from …` installs one from wherever it is published.
+
 One command onboards you: your agent gets `recall` and `get` as tools, and — for Claude, Codex, and
 Hermes — funes builds your first index, installs a hook that keeps it current every turn, and (with a
 memory bound) publishes at each session boundary. From here you just work. See

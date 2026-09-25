@@ -111,6 +111,12 @@ before running files it can't vouch for — once, until they change. Nothing in 
 for a new integration, and where it is published from is its own business: an
 `hf://buckets/…/<id>.tar.gz` archive with a `SHA256SUMS` beside it installs the same way.
 
+To be found, list yours in
+[COMMUNITY.md](https://github.com/huggingface/funes-integrations/blob/main/COMMUNITY.md): a
+documentation-only pull request adding one row — name, publisher, harness or client, what it does,
+the funes interfaces it uses, and links you own. Nothing is installed or executed on review, and a
+row adds no `funes add` alias.
+
 ## Pull requests
 
 1. Branch from `main`; keep the PR focused on one concern.

@@ -53,7 +53,9 @@ These four are maintained in [huggingface/funes-integrations](https://github.com
 and released on their own; `funes add <id>` installs the newest release for this funes. The name is
 an integration id, not a fixed list: `funes add <id>` runs any integration installed under
 `~/.funes/agents/`, and one the catalog does not list installs from wherever its publisher put it,
-with `--from`.
+with `--from`. Integrations maintained by their authors are listed in that repository's
+[COMMUNITY.md](https://github.com/huggingface/funes-integrations/blob/main/COMMUNITY.md); a listing
+adds no alias — they install with `--from`, as their authors document.
 
 What exactly gets installed for each agent — and how the automation behaves — is in
 [automation.md](automation.md).
