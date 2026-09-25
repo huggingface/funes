@@ -25,6 +25,19 @@ lassign [wait] pid spawn_id os_error status
 exit $status
 "#;
 
+/// The same, declining the first index.
+const DECLINE_INDEX: &str = r#"
+set timeout 120
+spawn {*}$argv
+expect {
+    -re {Trust it\? \[y/N\] $} { send "y\r"; exp_continue }
+    -re {Proceed\? \[Y/n\] $} { send "n\r"; exp_continue }
+    eof
+}
+lassign [wait] pid spawn_id os_error status
+exit $status
+"#;
+
 /// An integration under `home`'s registry, as a drop-in places it.
 fn install(home: &Path, id: &str, contract: u32) -> PathBuf {
     bundle(&home.join(".funes/agents").join(id), id, contract, "")
@@ -74,8 +87,13 @@ fn funes(home: &Path, funes_home: &Path, log: &Path, args: &[&str]) -> Output {
 
 /// `funes <args>` against `home`, at a terminal that says yes to what funes asks.
 fn funes_at_a_terminal(home: &Path, funes_home: &Path, log: &Path, args: &[&str]) -> Output {
-    let script = home.join("answer-yes.exp");
-    fs::write(&script, ANSWER_YES).unwrap();
+    funes_at_a_terminal_answering(home, funes_home, log, args, ANSWER_YES)
+}
+
+/// `funes <args>` against `home`, at a terminal answering as `answers` says.
+fn funes_at_a_terminal_answering(home: &Path, funes_home: &Path, log: &Path, args: &[&str], answers: &str) -> Output {
+    let script = home.join("answers.exp");
+    fs::write(&script, answers).unwrap();
     let script = script.to_str().unwrap().to_string();
     let mut argv = vec!["expect", "-f", &script, "--", env!("CARGO_BIN_EXE_funes")];
     argv.extend(args);
@@ -189,6 +207,27 @@ fn a_fifth_integration_seeds_and_drains_its_spool_under_its_own_facet() {
         stderr(&out).lines().next(),
         Some("Error: the nope integration does not match this version of funes. Re-run `funes add nope`, naming the memory it is bound to, to update it.")
     );
+}
+
+/// Declining the first index at its prompt installs nothing: setup never runs, so nothing is
+/// converted, and nothing is indexed.
+#[test]
+fn declining_the_first_index_installs_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let funes_home = tmp.path().join("funes");
+    let log = tmp.path().join("setup.log");
+    bundle(&home.join("integrations/clyde"), "clyde", 1, "");
+    fs::create_dir_all(home.join(".clyde")).unwrap();
+    fs::write(home.join(".clyde/history.funes.jsonl"), format!("{HISTORY}\n")).unwrap();
+
+    let out = funes_at_a_terminal_answering(&home, &funes_home, &log, &["add", "clyde"], DECLINE_INDEX);
+    let transcript = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{transcript}");
+    assert!(transcript.contains("nothing was wired up"), "{transcript}");
+    assert!(!log.exists(), "setup did not run");
+    assert!(!funes_home.join("spool").exists(), "nothing converted");
+    assert!(!funes_home.join("memory").exists(), "nothing indexed");
 }
 
 #[test]

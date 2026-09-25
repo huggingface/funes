@@ -39,7 +39,7 @@ that will drift.
 ## Working on the repo
 
 Building needs `protoc` (lance compiles protobuf at build time).
-Before calling work done: `cargo fmt && cargo clippy && cargo test` (the integration tests download the embedder/reranker weights on first run).
+Before calling work done: `cargo fmt && cargo clippy && cargo test` (the integration tests download the embedder/reranker weights on first run), and `sh integrations/<agent>/test/run.sh` for any bundle you touched — a bundle's tests are its own, driven against fake agents, and funes's suite knows no agent.
 
 `src/` is one layer per directory — traces, hub, memory, commands, ui, agents, inference — and where
 a new function belongs follows from that; the layers and the placement test are in

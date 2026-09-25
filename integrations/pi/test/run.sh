@@ -1,4 +1,6 @@
 #!/bin/sh
+# Every test of the pi bundle: the converter, the extension's startup, and `setup`.
+#
 # The converter's acceptance test: a real pi session, trimmed and secret-scanned, and the turns file
 # it must produce. `expected.funes.jsonl` is what funes's own pi parser emitted while it had one, so
 # a change here that moves a chunk id re-keys sessions users already hold.
@@ -34,3 +36,5 @@ if ! "$JS" $TS "$HERE/startup.mjs"; then
     exit 1
 fi
 echo "pi startup: ok"
+
+sh "$HERE/setup.sh"

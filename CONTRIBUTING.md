@@ -45,6 +45,7 @@ You need:
 cargo build --release          # binary at target/release/funes
 cargo test --lib               # unit tests — hermetic, no network
 cargo test                     # full suite; first run downloads the embedder/reranker weights
+sh integrations/<agent>/test/run.sh   # one bundle's own suite: converter, setup, hooks — no funes binary
 ```
 
 The tests that talk to the Hugging Face Hub (`remote_recall`, `push_round_trip`) skip

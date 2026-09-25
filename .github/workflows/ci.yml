@@ -77,12 +77,12 @@ jobs:
       - name: Installer tests
         run: sh scripts/test-install.sh
 
-      - name: Integration converter tests
+      # Each bundle's own suite: its converter, its setup and its hooks, driven against fakes.
+      - name: Integration tests
         run: |
-          sh integrations/pi/test/run.sh
-          sh integrations/codex/codex-plugin/plugins/funes/test/run.sh
-          sh integrations/claude/claude-plugin/funes/test/run.sh
-          sh integrations/hermes/plugin/test/run.sh
+          for agent in claude codex hermes pi; do
+            sh "integrations/$agent/test/run.sh"
+          done
 
   integration-test:
     permissions:
