@@ -30,7 +30,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
 
 import { convert, convertTree } from "./convert.mjs";
 
@@ -49,6 +49,8 @@ function bound(name: string): string {
 // The directory funes drains for this bundle, resolved at install: funes hands `setup` its home and
 // this agent's id, neither of which reaches a running extension.
 const SPOOL = bound("spool");
+// Where pi kept its sessions when `setup` ran: one directory per project under it.
+const SESSIONS = bound("sessions");
 // The sessions root `setup` could not convert for want of a JS runtime, left for pi's own.
 const SEED_PENDING = join(HERE, "seed-pending");
 
@@ -206,7 +208,8 @@ const INDEX_SH = join(HERE, "scripts", "funes-index.sh");
 function runScript(script: string, ...args: string[]) {
   if (!SPOOL || !existsSync(script)) return;
   try {
-    const child = spawn("bash", [script, ...args], { detached: true, stdio: "ignore" });
+    // Through `sh`, the one shell a box running pi is promised.
+    const child = spawn("sh", [script, ...args], { detached: true, stdio: "ignore" });
     child.on("error", () => {});
     child.unref();
   } catch {}
@@ -238,11 +241,18 @@ function convertStale(file: string) {
     const since = statSync(existsSync(SWEPT) ? SWEPT : join(HERE, "spool")).mtimeMs;
     // Stamped before the sweep, so a session written while it runs is swept again next turn.
     const now = Date.now() / 1000;
-    // pi keeps `<sessions root>/<project directory>/<session>.jsonl`, so the root is two up.
-    convertTree(dirname(dirname(file)), SPOOL, since, file);
+    convertTree(sweepRoot(file), SPOOL, since, file);
     writeFileSync(SWEPT, "");
     utimesSync(SWEPT, now, now);
   } catch {}
+}
+
+// Where the sweep looks for the sessions the last one missed: the root `setup` found, when the
+// session in progress is under it; else the session's own directory — pi writes straight into a
+// `--session-dir`, with no directory per project, and a walk any higher would take in files that
+// are not sessions at all.
+function sweepRoot(file: string): string {
+  return SESSIONS && file.startsWith(SESSIONS + sep) ? SESSIONS : dirname(file);
 }
 
 // Convert the history `setup` left behind, once, and say whether it did. Failure keeps the marker,

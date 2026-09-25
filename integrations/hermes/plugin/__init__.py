@@ -57,8 +57,13 @@ def _convert_stale(named):
         # Stamped before the sweep, so a session that speaks while it runs is swept again next turn.
         now = time.time()
         for session_id in convert.session_ids_since(db, since):
-            if session_id != named:
+            if session_id == named:
+                continue
+            # One session that cannot be converted costs its own capture, not the sweep's.
+            try:
                 convert.convert(db, spool, session_id)
+            except Exception:
+                pass
         with open(mark, "a", encoding="utf-8"):
             pass
         os.utime(mark, (now, now))
@@ -67,8 +72,10 @@ def _convert_stale(named):
 
 
 def _spawn(script, *args):
+    """Run `script` detached and forget it — through `sh`, the one shell a box running hermes is
+    promised."""
     subprocess.Popen(
-        ["bash", os.path.join(HERE, script), *args],
+        ["sh", os.path.join(HERE, script), *args],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

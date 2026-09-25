@@ -94,6 +94,9 @@ add() {
     spool=$(spool_dir)
     mkdir -p "$spool"
     printf '%s\n' "$spool" >"$HERE/spool"
+    # The sessions root, for the extension's sweep: a session pi was pointed elsewhere is swept
+    # in its own directory alone.
+    sessions_dir >"$HERE/sessions"
     seed "$spool"
 
     drop_legacy
@@ -121,7 +124,7 @@ remove() {
     # The spool holds converted copies of pi's own sessions, so dropping it loses nothing a re-add
     # cannot rebuild — and leaving it would have funes keep indexing an agent it no longer serves.
     rm -rf "$(spool_dir)"
-    rm -f "$HERE/memory" "$HERE/spool" "$HERE/seed-pending" "$HERE/swept"
+    rm -f "$HERE/memory" "$HERE/spool" "$HERE/sessions" "$HERE/seed-pending" "$HERE/swept"
     drop_legacy
 
     if ! have_pi; then

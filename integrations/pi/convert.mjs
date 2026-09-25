@@ -205,11 +205,21 @@ export function convert(sessionPath, outArg) {
  * those written after it, and never `except`. */
 export function convertTree(root, spool, since = 0, except = "") {
   const written = [];
-  for (const entry of readdirSync(root, { withFileTypes: true })) {
+  let entries;
+  try {
+    entries = readdirSync(root, { withFileTypes: true });
+  } catch {
+    return written; // a directory that cannot be listed holds no session of pi's
+  }
+  for (const entry of entries) {
     const p = join(root, entry.name);
     if (entry.isDirectory()) written.push(...convertTree(p, spool, since, except));
-    else if (entry.name.endsWith(".jsonl") && p !== except && (!since || statSync(p).mtimeMs > since)) {
-      written.push(convert(p, spool));
+    else if (entry.name.endsWith(".jsonl") && p !== except) {
+      // One session that cannot be read costs its own capture, not everyone else's: the next
+      // sweep meets it again if it changes.
+      try {
+        if (!since || statSync(p).mtimeMs > since) written.push(convert(p, spool));
+      } catch {}
     }
   }
   return written;

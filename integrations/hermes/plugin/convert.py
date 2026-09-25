@@ -216,7 +216,14 @@ def convert(db, spool, session_id):
 
 
 def convert_all(db, spool):
-    return [convert(db, spool, sid) for sid in session_ids(db)]
+    """Every session into the spool; one that cannot be converted is named and skipped."""
+    written = []
+    for sid in session_ids(db):
+        try:
+            written.append(convert(db, spool, sid))
+        except Exception as e:
+            print(f"skipped session {sid!r}: {e}", file=sys.stderr)
+    return written
 
 
 if __name__ == "__main__":

@@ -36,6 +36,8 @@ hooks="$hermes_dir/hooks"
 config="$hermes_dir/config.yaml"
 plugin="$hermes_dir/plugins/funes"
 
+# hermes's store, holding the converter's fixture session: the seed converts it.
+cp "$BUNDLE/plugin/test/state.db" "$hermes_dir/state.db" 2>/dev/null || { mkdir -p "$hermes_dir" && cp "$BUNDLE/plugin/test/state.db" "$hermes_dir/state.db"; }
 # An install from before the plugin: its hook entries in the file that also holds the user's
 # configuration, and its scripts beside a script of the user's.
 mkdir -p "$hooks"
@@ -58,6 +60,7 @@ grep -q "def register(ctx)" "$plugin/__init__.py" || fail "no plugin entry point
 # The memory rides in a file the plugin reads, so the plugin stays a static file.
 [ "$(cat "$plugin/memory")" = acme/kb ] || fail "no memory file"
 [ "$(cat "$plugin/spool")" = "$FUNES_HOME/spool/hermes" ] || fail "the spool is not recorded"
+[ -f "$FUNES_HOME/spool/hermes/20260101_000000_fixture.funes.jsonl" ] || fail "the history was not seeded"
 # The pre-plugin hooks are in the user's own file, so funes names them rather than editing it —
 # but their approvals are revoked and their scripts gone, so they do nothing beside the plugin.
 [ "$(cat "$config")" = "$before" ] || fail "config.yaml was edited: $(cat "$config")"
