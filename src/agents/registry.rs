@@ -358,12 +358,18 @@ fn copy_into(src: &Path, dst: &Path, force: bool) -> Result<()> {
             continue;
         }
         let bytes = std::fs::read(&from).with_context(|| format!("reading {}", from.display()))?;
-        if force || std::fs::read(&to).map(|old| old != bytes).unwrap_or(true) {
-            std::fs::write(&to, &bytes).with_context(|| format!("writing {}", to.display()))?;
+        let mode = std::fs::Permissions::from_mode(meta.permissions().mode() & 0o777);
+        // Written beside and renamed over: a link left at the destination is replaced, never
+        // followed to wherever it points, and a reader never sees a half-written file.
+        let stale_link = to.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink());
+        if force || stale_link || std::fs::read(&to).map(|old| old != bytes).unwrap_or(true) {
+            let tmp = dst.join(format!(".{}.funes-tmp", from.file_name().unwrap().to_string_lossy()));
+            std::fs::write(&tmp, &bytes).with_context(|| format!("writing {}", tmp.display()))?;
+            std::fs::set_permissions(&tmp, mode).with_context(|| format!("setting the mode of {}", tmp.display()))?;
+            std::fs::rename(&tmp, &to).with_context(|| format!("replacing {}", to.display()))?;
+        } else {
+            std::fs::set_permissions(&to, mode).with_context(|| format!("setting the mode of {}", to.display()))?;
         }
-        let mode = meta.permissions().mode() & 0o777;
-        std::fs::set_permissions(&to, std::fs::Permissions::from_mode(mode))
-            .with_context(|| format!("setting the mode of {}", to.display()))?;
     }
     Ok(())
 }
@@ -481,6 +487,18 @@ mod tests {
             "drift is refreshed"
         );
         assert_eq!(std::fs::read_to_string(dst.join("memory")).unwrap(), "acme/kb\n");
+
+        // A link left where a file goes is replaced, not written through: the file it pointed at
+        // is untouched, and the bundle's file is a file.
+        let elsewhere = tmp.path().join("elsewhere.json");
+        std::fs::write(&elsewhere, "not the bundle's").unwrap();
+        std::fs::remove_file(dst.join("manifest.json")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, dst.join("manifest.json")).unwrap();
+        copy_into(&src, &dst, false).unwrap();
+        assert_eq!(std::fs::read_to_string(&elsewhere).unwrap(), "not the bundle's");
+        let manifest = dst.join("manifest.json");
+        assert!(!manifest.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(&manifest).unwrap(), "{}");
 
         // A link to a directory is refused: it could name any tree on the disk.
         std::os::unix::fs::symlink(tmp.path(), src.join("everything")).unwrap();
