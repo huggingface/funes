@@ -238,6 +238,7 @@ function convertStale(file: string) {
     const since = statSync(existsSync(SWEPT) ? SWEPT : join(HERE, "spool")).mtimeMs;
     // Stamped before the sweep, so a session written while it runs is swept again next turn.
     const now = Date.now() / 1000;
+    // pi keeps `<sessions root>/<project directory>/<session>.jsonl`, so the root is two up.
     convertTree(dirname(dirname(file)), SPOOL, since, file);
     writeFileSync(SWEPT, "");
     utimesSync(SWEPT, now, now);

@@ -28,9 +28,10 @@ async function startup(memory, funes = "exec cat") {
   const ext = join(root, "ext");
   mkdirSync(join(ext, "scripts"), { recursive: true });
   for (const name of ["index.ts", "convert.mjs"]) cpSync(join(HERE, "..", name), join(ext, name));
+  // pi's layout: one directory per project under the sessions root.
   const sessions = join(root, "sessions");
-  mkdirSync(join(sessions, "2026/09/25"), { recursive: true });
-  cpSync(join(HERE, "session.jsonl"), join(sessions, "2026/09/25/session.jsonl"));
+  mkdirSync(join(sessions, "--Users-me-repo--"), { recursive: true });
+  cpSync(join(HERE, "session.jsonl"), join(sessions, "--Users-me-repo--/session.jsonl"));
   const spool = join(root, "spool");
   mkdirSync(spool);
   writeFileSync(join(ext, "spool"), `${spool}\n`);
