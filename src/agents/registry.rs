@@ -30,8 +30,32 @@ pub struct Manifest {
     pub id: String,
     /// The agent's name as a human writes it.
     pub label: String,
-    /// Where the integration came from.
+    /// Where it is published from, `<publisher>/<name>`: with `id`, what the package is.
     pub repo: String,
+    /// Its own release, `MAJOR.MINOR.PATCH`, moving independently of the contract.
+    #[serde(default)]
+    pub version: Option<String>,
+}
+
+impl Manifest {
+    /// Who publishes it: the owner in `repo`.
+    pub fn publisher(&self) -> &str {
+        self.repo.split('/').next().unwrap_or_default()
+    }
+}
+
+/// `<publisher>/<name>`, both non-empty.
+fn is_repo(s: &str) -> bool {
+    matches!(s.split_once('/'), Some((owner, name)) if !owner.is_empty() && !name.is_empty() && !name.contains('/'))
+}
+
+/// `MAJOR.MINOR.PATCH`, digits only.
+fn is_release_version(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('.').collect();
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// A resolved integration: its directory and what it declares.
@@ -92,10 +116,23 @@ pub fn open(root: &Path, id: &str) -> Result<Integration> {
         bail!("{id} is not a registered agent ({listing})");
     }
 
-    let text =
-        std::fs::read_to_string(&manifest_path).with_context(|| format!("reading {}", manifest_path.display()))?;
-    let manifest: Manifest =
-        serde_json::from_str(&text).with_context(|| format!("parsing {}", manifest_path.display()))?;
+    let manifest = read_manifest(&manifest_path, id)?;
+
+    let setup = dir.join(SETUP);
+    let meta = std::fs::metadata(&setup).with_context(|| format!("{id} has no {SETUP} at {}", setup.display()))?;
+    if meta.permissions().mode() & 0o111 == 0 {
+        bail!("{} is not executable", setup.display());
+    }
+    owned_by_me(root, &setup, 0o022)?;
+
+    Ok(Integration { dir, manifest })
+}
+
+/// Read what the manifest at `path` declares for the integration `id`, and check it. Every
+/// refusal of a declaration happens here, the same for files installed and files about to be.
+fn read_manifest(path: &Path, id: &str) -> Result<Manifest> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let manifest: Manifest = serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
 
     if manifest.contract_version != CONTRACT_VERSION {
         bail!(
@@ -108,22 +145,30 @@ pub fn open(root: &Path, id: &str) -> Result<Integration> {
     if manifest.id != id {
         bail!(
             "{} declares the id {:?} — an integration's id is its directory name",
-            manifest_path.display(),
+            path.display(),
             manifest.id
         );
     }
     if !spool::is_id(&manifest.id) {
         bail!("the integration id {:?} must be lowercase [a-z0-9_-]", manifest.id);
     }
-
-    let setup = dir.join(SETUP);
-    let meta = std::fs::metadata(&setup).with_context(|| format!("{id} has no {SETUP} at {}", setup.display()))?;
-    if meta.permissions().mode() & 0o111 == 0 {
-        bail!("{} is not executable", setup.display());
+    if !is_repo(&manifest.repo) {
+        bail!(
+            "{} declares the repo {:?} — an integration is published from `<publisher>/<name>`",
+            path.display(),
+            manifest.repo
+        );
     }
-    owned_by_me(root, &setup, 0o022)?;
-
-    Ok(Integration { dir, manifest })
+    if let Some(version) = &manifest.version {
+        if !is_release_version(version) {
+            bail!(
+                "{} declares the version {:?} — a release is `MAJOR.MINOR.PATCH`",
+                path.display(),
+                version
+            );
+        }
+    }
+    Ok(manifest)
 }
 
 /// Refuse a `path` that someone other than the user running funes could have written, checking
@@ -811,6 +856,47 @@ mod tests {
         integration(root.path(), "Pi", &manifest("Pi", CONTRACT_VERSION), "true");
         let err = open(root.path(), "Pi").unwrap_err().to_string();
         assert!(err.contains("[a-z0-9_-]"), "{err}");
+    }
+
+    #[test]
+    fn a_manifest_declares_its_release_and_publisher() {
+        let root = tempfile::tempdir().unwrap();
+        integration(
+            root.path(),
+            "pi",
+            r#"{"contract_version": 1, "id": "pi", "label": "pi", "repo": "acme/funes-pi", "version": "1.2.3"}"#,
+            "true",
+        );
+        let declared = open(root.path(), "pi").unwrap().manifest;
+        assert_eq!(declared.version.as_deref(), Some("1.2.3"));
+        assert_eq!(declared.publisher(), "acme");
+
+        // Left out, there is no release to speak of.
+        integration(root.path(), "pi", &manifest("pi", CONTRACT_VERSION), "true");
+        assert_eq!(open(root.path(), "pi").unwrap().manifest.version, None);
+
+        for version in ["1.2", "v1.2.3", "1.2.3-beta", "1..3", ""] {
+            integration(
+                root.path(),
+                "pi",
+                &format!(
+                    r#"{{"contract_version": 1, "id": "pi", "label": "pi", "repo": "acme/funes-pi", "version": "{version}"}}"#
+                ),
+                "true",
+            );
+            let err = open(root.path(), "pi").unwrap_err().to_string();
+            assert!(err.contains("MAJOR.MINOR.PATCH"), "{version:?}: {err}");
+        }
+        for repo in ["acme", "acme/", "/pi", "acme/funes/pi", ""] {
+            integration(
+                root.path(),
+                "pi",
+                &format!(r#"{{"contract_version": 1, "id": "pi", "label": "pi", "repo": "{repo}"}}"#),
+                "true",
+            );
+            let err = open(root.path(), "pi").unwrap_err().to_string();
+            assert!(err.contains("<publisher>/<name>"), "{repo:?}: {err}");
+        }
     }
 
     #[test]
