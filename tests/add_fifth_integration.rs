@@ -186,6 +186,10 @@ fn another_publishers_integration_replaces_an_installed_one_only_after_its_remov
     assert_eq!(first["version"], "1.0.0");
     assert_eq!(first["origin"]["kind"], "directory");
     assert_eq!(first["origin"]["path"], source.to_str().unwrap());
+    assert!(
+        first["files"]["setup"].is_string() && first["files"]["manifest.json"].is_string(),
+        "{first}"
+    );
     assert!(first["installed_at"].is_string(), "{first}");
 
     // Another publisher's clyde at the same source: refused before setup, before a byte moves.

@@ -9,6 +9,8 @@ use chrono::{SecondsFormat, Utc};
 use hf_hub::buckets::BucketDownload;
 use hf_hub::HFError;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -86,8 +88,12 @@ impl std::fmt::Display for Origin {
     }
 }
 
+/// The package's files, by path relative to its directory, each with its sha256 as hex. What
+/// `setup` keeps beside them is not in it.
+pub type Files = BTreeMap<String, String>;
+
 /// What funes installed at `<root>/<id>`, kept beside the directory as `<root>/<id>.json`: the
-/// package as its manifest declared it, and where the files came from.
+/// package as its manifest declared it, where the files came from, and which files they are.
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct Installed {
     pub contract_version: u32,
@@ -96,21 +102,60 @@ pub struct Installed {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     pub origin: Origin,
+    #[serde(default)]
+    pub files: Files,
     pub installed_at: String,
 }
 
 impl Installed {
-    /// The record of `manifest`'s files, installed from `origin` now.
-    pub fn new(manifest: &Manifest, origin: Origin) -> Installed {
+    /// The record of `manifest`'s `files`, installed from `origin` now.
+    pub fn new(manifest: &Manifest, origin: Origin, files: Files) -> Installed {
         Installed {
             contract_version: manifest.contract_version,
             id: manifest.id.clone(),
             repo: manifest.repo.clone(),
             version: manifest.version.clone(),
             origin,
+            files,
             installed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
         }
     }
+}
+
+/// How `root/<id>`'s files compare with the record of their installation.
+#[derive(Debug, PartialEq)]
+pub enum Verification {
+    /// Every file the record names is as funes installed it.
+    Intact,
+    /// These files differ from the record, or are gone.
+    Changed(Vec<String>),
+    /// No record: funes has no account of installing what is there.
+    Unrecorded,
+}
+
+/// Compare `root/<id>`'s files with what funes recorded installing there. The record is judged
+/// as `setup` is — the user's own, writable by nobody else — since what it vouches for runs.
+pub fn verify_installed(root: &Path, id: &str) -> Result<Verification> {
+    let Some(record) = installed(root, id) else {
+        return Ok(Verification::Unrecorded);
+    };
+    owned_by_me(root, &record_path(root, id), 0o022)?;
+    let dir = root.join(id);
+    let changed: Vec<String> = record
+        .files
+        .iter()
+        .filter(|(path, digest)| {
+            std::fs::read(dir.join(path))
+                .map(|bytes| hex::encode(Sha256::digest(&bytes)) != **digest)
+                .unwrap_or(true)
+        })
+        .map(|(path, _)| path.clone())
+        .collect();
+    Ok(if changed.is_empty() {
+        Verification::Intact
+    } else {
+        Verification::Changed(changed)
+    })
 }
 
 fn record_path(root: &Path, id: &str) -> PathBuf {
@@ -385,11 +430,13 @@ pub enum Provenance {
     Unvouched(String),
 }
 
-/// What a provision resolved: whether funes vouches for the files, and where they came from.
+/// What a provision resolved: whether funes vouches for the files, where they came from, and
+/// which files they are.
 #[derive(Debug)]
 pub struct Provisioned {
     pub provenance: Provenance,
     pub origin: Origin,
+    pub files: Files,
 }
 
 /// Resolve `id`'s files: `$FUNES_INTEGRATIONS` if set — authoritative, so a test or a fork cannot
@@ -434,17 +481,19 @@ pub async fn provision(root: &Path, id: &str, force: bool) -> Result<Provisioned
     }
     match source_for(id)? {
         Source::Checkout(src) => {
-            install_from(root, id, &src, force)?;
+            let files = install_from(root, id, &src, force)?;
             Ok(Provisioned {
                 provenance: Provenance::Vouched,
                 origin: Origin::Checkout { path: src },
+                files,
             })
         }
         Source::Redirected(src) => {
-            install_from(root, id, &src, force)?;
+            let files = install_from(root, id, &src, force)?;
             Ok(Provisioned {
                 provenance: Provenance::Unvouched(format!("$FUNES_INTEGRATIONS ({})", src.display())),
                 origin: Origin::Directory { path: src },
+                files,
             })
         }
         Source::Published => {
@@ -452,21 +501,23 @@ pub async fn provision(root: &Path, id: &str, force: bool) -> Result<Provisioned
             let (archive, sha256) = fetch_published(id, staging.path()).await?;
             let unpacked = staging.path().join("unpacked");
             unpack(&archive, &unpacked)?;
-            install_from(root, id, &unpacked, force)?;
+            let files = install_from(root, id, &unpacked, force)?;
             Ok(Provisioned {
                 provenance: Provenance::Vouched,
                 origin: Origin::Archive {
                     url: hub::release_asset_url(&format!("{}/{id}.tar.gz", published_prefix())),
                     sha256,
                 },
+                files,
             })
         }
     }
 }
 
 /// Copy `src` over `root/<id>` once what it declares checks out: a manifest that would be refused
-/// installed is refused here, before a byte moves, and so is another publisher's.
-fn install_from(root: &Path, id: &str, src: &Path, force: bool) -> Result<()> {
+/// installed is refused here, before a byte moves, and so is another publisher's. The files
+/// copied, with their digests.
+fn install_from(root: &Path, id: &str, src: &Path, force: bool) -> Result<Files> {
     let incoming = read_manifest(&src.join("manifest.json"), id)?;
     refuse_takeover(root, id, &incoming)?;
     copy_into(src, &root.join(id), force)
@@ -573,12 +624,15 @@ fn check_source(src: &Path) -> Result<()> {
     Ok(())
 }
 
-fn copy_into(src: &Path, dst: &Path, force: bool) -> Result<()> {
+/// Copy `src`'s tree over `dst`; the files copied, by path under `dst`, with their digests.
+fn copy_into(src: &Path, dst: &Path, force: bool) -> Result<Files> {
     check_source(src)?;
-    copy_tree(src, dst, force)
+    let mut files = Files::new();
+    copy_tree(src, dst, force, "", &mut files)?;
+    Ok(files)
 }
 
-fn copy_tree(src: &Path, dst: &Path, force: bool) -> Result<()> {
+fn copy_tree(src: &Path, dst: &Path, force: bool, under: &str, files: &mut Files) -> Result<()> {
     // Nothing is written through a link at the destination: a directory's would send the whole
     // copy wherever it points, so it is refused; a file's is replaced below.
     if dst.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink()) {
@@ -593,11 +647,13 @@ fn copy_tree(src: &Path, dst: &Path, force: bool) -> Result<()> {
         let name = from.file_name().expect("a directory entry has a file name").to_owned();
         let to = dst.join(&name);
         let meta = std::fs::metadata(&from).with_context(|| format!("reading {}", from.display()))?;
+        let path = format!("{under}{}", name.to_string_lossy());
         if meta.is_dir() {
-            copy_tree(&from, &to, force)?;
+            copy_tree(&from, &to, force, &format!("{path}/"), files)?;
             continue;
         }
         let bytes = std::fs::read(&from).with_context(|| format!("reading {}", from.display()))?;
+        files.insert(path, hex::encode(Sha256::digest(&bytes)));
         // The source's mode, closed to others: `open` refuses a file others could write, and a
         // private group's umask leaves a checkout's files group-writable.
         let mode = std::fs::Permissions::from_mode(meta.permissions().mode() & 0o777 & !0o022);
@@ -866,6 +922,7 @@ mod tests {
                 url: "hf://buckets/huggingface/funes/integrations/v1/pi.tar.gz".to_string(),
                 sha256: "ab".repeat(32),
             },
+            Files::new(),
         );
         record(&root, &rec).unwrap();
         assert_eq!(installed(&root, "pi").unwrap(), rec);
@@ -878,6 +935,52 @@ mod tests {
 
         discard(&root, "pi").unwrap();
         assert!(!root.join("pi").exists() && !root.join("pi.json").exists());
+    }
+
+    /// The copy names the package's files with their digests, and the record is verified against
+    /// them: what `setup` keeps beside them is not the package's, an edit to one of them is.
+    #[test]
+    fn the_record_names_the_files_and_verification_tells_them_apart_from_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("agents");
+        let src = integration(&tmp.path().join("src"), "pi", &manifest("pi", CONTRACT_VERSION), "true");
+        std::fs::create_dir_all(src.join("scripts")).unwrap();
+        std::fs::write(src.join("scripts/hook.sh"), "hook").unwrap();
+
+        assert_eq!(verify_installed(&root, "pi").unwrap(), Verification::Unrecorded);
+        create_owned(&root).unwrap();
+        let files = copy_into(&src, &root.join("pi"), false).unwrap();
+        assert_eq!(
+            files.keys().collect::<Vec<_>>(),
+            vec!["manifest.json", "scripts/hook.sh", "setup"]
+        );
+        assert_eq!(files["scripts/hook.sh"], hex::encode(Sha256::digest(b"hook")));
+
+        let rec = Installed::new(
+            &open(&root, "pi").unwrap().manifest,
+            Origin::Directory { path: src.clone() },
+            files,
+        );
+        record(&root, &rec).unwrap();
+        assert_eq!(installed(&root, "pi").unwrap().files, rec.files);
+        assert_eq!(verify_installed(&root, "pi").unwrap(), Verification::Intact);
+
+        // State beside the package is the integration's own business.
+        std::fs::write(root.join("pi/memory"), "acme/kb\n").unwrap();
+        assert_eq!(verify_installed(&root, "pi").unwrap(), Verification::Intact);
+
+        // A changed or missing package file is named.
+        std::fs::write(root.join("pi/scripts/hook.sh"), "hooked").unwrap();
+        std::fs::remove_file(root.join("pi/setup")).unwrap();
+        assert_eq!(
+            verify_installed(&root, "pi").unwrap(),
+            Verification::Changed(vec!["scripts/hook.sh".to_string(), "setup".to_string()])
+        );
+
+        // A record others could have written vouches for nothing.
+        std::fs::set_permissions(root.join("pi.json"), std::fs::Permissions::from_mode(0o666)).unwrap();
+        let err = verify_installed(&root, "pi").unwrap_err().to_string();
+        assert!(err.contains("writable by other users"), "{err}");
     }
 
     /// Another publisher's files are refused before a byte moves, whether funes recorded where
@@ -906,6 +1009,7 @@ mod tests {
             Origin::Checkout {
                 path: PathBuf::from("/src/funes/integrations/pi"),
             },
+            Files::new(),
         );
         record(&root, &rec).unwrap();
         let err = install_from(&root, "pi", &theirs, false).unwrap_err().to_string();

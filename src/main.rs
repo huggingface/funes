@@ -541,9 +541,9 @@ async fn add_agent(id: &str, memory: AddMemory, force: bool) -> Result<()> {
     let installed = std::cell::Cell::new(false);
     let ran = &installed;
     let result = async {
-        let (integration, origin) = prepare_agent(id, force).await?;
+        let (integration, provisioned) = prepare_agent(id, force).await?;
         let resolved = resolve_add_memory(memory).await?;
-        let record = origin.map(|origin| registry::Installed::new(&integration.manifest, origin));
+        let record = provisioned.map(|(origin, files)| registry::Installed::new(&integration.manifest, origin, files));
         bootstrap_add(id, resolved, |memory| async move {
             integration.add(memory.as_deref())?;
             ran.set(true);
@@ -572,16 +572,23 @@ async fn add_agent(id: &str, memory: AddMemory, force: bool) -> Result<()> {
 /// declare; and confirm them when funes can't vouch for them — all before `add` touches a memory
 /// or `remove` runs anything. With nothing to refresh from — no source names `id`, or the source
 /// can't be reached — the installed copy is what runs, and funes can't vouch for that either.
-/// Says where the files came from when it refreshed them.
-async fn prepare_agent(id: &str, force: bool) -> Result<(registry::Integration, Option<registry::Origin>)> {
+/// Says what it refreshed them with, when it did.
+async fn prepare_agent(
+    id: &str,
+    force: bool,
+) -> Result<(registry::Integration, Option<(registry::Origin, registry::Files)>)> {
     if !spool::is_id(id) {
         bail!("{id:?} is not an integration id (lowercase [a-z0-9_-])");
     }
     let root = registry::default_root()?;
     // Decided before the refresh: a first install that fails part-way is not an installed copy.
     let installed = root.join(id).is_dir();
-    let (provenance, origin) = match registry::provision(&root, id, force).await {
-        Ok(registry::Provisioned { provenance, origin }) => (provenance, Some(origin)),
+    let (provenance, provisioned) = match registry::provision(&root, id, force).await {
+        Ok(registry::Provisioned {
+            provenance,
+            origin,
+            files,
+        }) => (provenance, Some((origin, files))),
         // Another publisher's files are not a refresh the installed copy stands in for.
         Err(e) if e.downcast_ref::<registry::Takeover>().is_some() => return Err(e),
         Err(e) if installed => {
@@ -602,7 +609,7 @@ async fn prepare_agent(id: &str, force: bool) -> Result<(registry::Integration, 
     };
     let integration = registry::open(&root, id)?;
     confirm_trust(id, &integration.dir, provenance)?;
-    Ok((integration, origin))
+    Ok((integration, provisioned))
 }
 
 /// A failed provision for an agent with no files on this machine is usually a typo, so the error
