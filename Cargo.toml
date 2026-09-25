@@ -7,6 +7,7 @@ license = "Apache-2.0"
 repository = "https://github.com/huggingface/funes"
 
 [dependencies]
+libc = "0.2"  # geteuid: whose files funes will run
 # The `onnx` backend (feature below): embeddings + rerank on the ONNX Runtime. Off by default —
 # ort ships prebuilt against glibc 2.38, above the glibc 2.35 floor releases target (Ubuntu 22.04).
 fastembed = { version = "5", optional = true }

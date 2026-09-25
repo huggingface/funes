@@ -96,7 +96,7 @@ enum Cmd {
         /// and duplicate ids; write nothing. Exits non-zero if a unit was rejected.
         #[arg(long, requires = "path")]
         check: bool,
-        /// Exclude thinking blocks.
+        /// Exclude thinking blocks. A spool file indexed this way is kept, its thinking still owed.
         #[arg(long)]
         no_thinking: bool,
         /// Index only the most recent N sessions per source. Omit to index all.
@@ -526,23 +526,42 @@ async fn main() -> Result<()> {
         Cmd::Mcp { memory } => mcp::run(memory).await,
         // `add` bootstraps the local pipeline: build the first index and do the first push — the
         // two one-time steps the automation can't do unattended — so nothing is left to run by hand.
-        Cmd::Add { agent, memory, force } => {
-            let integration = prepare_agent(&agent, force).await?;
-            let resolved = resolve_add_memory(memory).await?;
-            if let Some(remote) = resolved.as_ref().filter(|r| r.is_remote()) {
-                require_scanner(&remote.memory, &agent)?;
-            }
-            bootstrap_add(
-                &agent,
-                resolved,
-                |memory| async move { integration.add(memory.as_deref()) },
-            )
-            .await?;
-            // Whatever an older hook asked for, this install's hooks are the ones that ask now.
-            spool::forget_missing(&agent)
-        }
+        Cmd::Add { agent, memory, force } => add_agent(&agent, memory, force).await,
         Cmd::Remove { agent } => remove_agent(&agent).await,
     }
+}
+
+/// Refresh `id`'s integration, resolve the memory, and run its `setup add`. The registry's
+/// manifest says what `setup` last installed, and the refresh writes the new one first, so a run
+/// that stops short of `setup add` — a memory that does not resolve, a first index declined —
+/// puts the previous manifest back: what the agent runs is still the old install, and every read
+/// must keep saying so.
+async fn add_agent(id: &str, memory: AddMemory, force: bool) -> Result<()> {
+    let root = registry::default_root()?;
+    let previous = registry::installed_manifest(&root, id);
+    let installed = std::cell::Cell::new(false);
+    let ran = &installed;
+    let result = async {
+        let integration = prepare_agent(id, force).await?;
+        let resolved = resolve_add_memory(memory).await?;
+        if let Some(remote) = resolved.as_ref().filter(|r| r.is_remote()) {
+            require_scanner(&remote.memory, id)?;
+        }
+        bootstrap_add(id, resolved, |memory| async move {
+            integration.add(memory.as_deref())?;
+            ran.set(true);
+            // Whatever an older hook asked for, this install's hooks are the ones that ask now.
+            spool::forget_missing(id)
+        })
+        .await
+    }
+    .await;
+    if !installed.get() {
+        if let Some(previous) = previous {
+            registry::restore_manifest(&root, id, &previous)?;
+        }
+    }
+    result
 }
 
 /// Resolve `id`'s integration for a run: refresh its files in the registry, so the script funes
@@ -555,13 +574,22 @@ async fn prepare_agent(id: &str, force: bool) -> Result<registry::Integration> {
         bail!("{id:?} is not an integration id (lowercase [a-z0-9_-])");
     }
     let root = registry::default_root()?;
+    // Decided before the refresh: a first install that fails part-way is not an installed copy.
+    let installed = root.join(id).is_dir();
     let provenance = match registry::provision(&root, id, force).await {
         Ok(provenance) => provenance,
-        Err(e) if root.join(id).is_dir() => {
+        Err(e) if installed => {
             eprintln!("note: the {id} integration could not be refreshed ({e:#}) — running the installed copy.");
             registry::Provenance::Unvouched("the installed copy, refreshed by nothing".to_string())
         }
-        Err(e) => return Err(unknown_agent(&root, id, e)),
+        Err(e) => {
+            let _ = registry::discard(&root, id);
+            return Err(if e.downcast_ref::<registry::Absent>().is_some() {
+                unknown_agent(&root, id, e)
+            } else {
+                e
+            });
+        }
     };
     let integration = registry::open(&root, id)?;
     confirm_trust(id, &integration.dir, provenance)?;

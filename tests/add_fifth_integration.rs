@@ -212,7 +212,8 @@ fn a_fifth_integration_seeds_and_drains_its_spool_under_its_own_facet() {
 }
 
 /// Declining the first index at its prompt installs nothing: setup never runs, so nothing is
-/// converted, and nothing is indexed.
+/// converted, and nothing is indexed — and the manifest of the install already there is put
+/// back, since that install is still what the agent runs.
 #[test]
 fn declining_the_first_index_installs_nothing() {
     let tmp = tempfile::tempdir().unwrap();
@@ -222,6 +223,9 @@ fn declining_the_first_index_installs_nothing() {
     bundle(&home.join("integrations/clyde"), "clyde", 1, "");
     fs::create_dir_all(home.join(".clyde")).unwrap();
     fs::write(home.join(".clyde/history.funes.jsonl"), format!("{HISTORY}\n")).unwrap();
+    let installed = install(&home, "clyde", 1);
+    let previous = r#"{"contract_version":1,"id":"clyde","label":"Clyde as installed","repo":"example/clyde"}"#;
+    fs::write(installed.join("manifest.json"), previous).unwrap();
 
     let out = funes_at_a_terminal_answering(&home, &funes_home, &log, &["add", "clyde"], DECLINE_INDEX);
     let transcript = String::from_utf8_lossy(&out.stdout);
@@ -230,6 +234,11 @@ fn declining_the_first_index_installs_nothing() {
     assert!(!log.exists(), "setup did not run");
     assert!(!funes_home.join("spool").exists(), "nothing converted");
     assert!(!funes_home.join("memory").exists(), "nothing indexed");
+    assert_eq!(
+        fs::read_to_string(installed.join("manifest.json")).unwrap(),
+        previous,
+        "the manifest says what setup last installed"
+    );
 }
 
 #[test]

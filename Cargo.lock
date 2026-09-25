@@ -2592,6 +2592,7 @@ dependencies = [
  "lance-index",
  "lance-io",
  "lance-linalg",
+ "libc",
  "multiversion",
  "object_store",
  "openssl-sys",

@@ -68,6 +68,7 @@ pub fn registered_ids(root: &Path) -> Vec<String> {
 pub fn mismatched(root: &Path) -> Vec<(String, u32)> {
     registered_ids(root)
         .into_iter()
+        .filter(|id| spool::is_id(id))
         .filter_map(|id| {
             let text = std::fs::read_to_string(root.join(&id).join("manifest.json")).ok()?;
             let manifest: Manifest = serde_json::from_str(&text).ok()?;
@@ -120,35 +121,36 @@ pub fn open(root: &Path, id: &str) -> Result<Integration> {
     if meta.permissions().mode() & 0o111 == 0 {
         bail!("{} is not executable", setup.display());
     }
-    only_owner_writes(root, &setup)?;
+    owned_by_me(root, &setup, 0o022)?;
 
     Ok(Integration { dir, manifest })
 }
 
-/// Refuse a `setup` that someone other than its owner could have written, checking every directory
-/// from `root` down as well as the file: funes is about to execute it. The owner is whoever owns
-/// `root`, and `root` itself is under the user's home.
-fn only_owner_writes(root: &Path, setup: &Path) -> Result<()> {
-    let owner = std::fs::metadata(root)
-        .with_context(|| format!("reading {}", root.display()))?
-        .uid();
-    let mut path = setup.to_path_buf();
+/// Refuse a `path` that someone other than the user running funes could have written, checking
+/// every directory from `top` down as well as the file itself: funes is about to execute what it
+/// finds there. `others` is the mode bits that give it away — group and world write for the
+/// registry, world write alone for a checkout, whose files a private group's umask leaves
+/// group-writable.
+fn owned_by_me(top: &Path, path: &Path, others: u32) -> Result<()> {
+    // SAFETY: `geteuid` reads a process attribute and cannot fail.
+    let me = unsafe { libc::geteuid() };
+    let mut path = path.to_path_buf();
     loop {
         let meta = std::fs::metadata(&path).with_context(|| format!("reading {}", path.display()))?;
-        if meta.permissions().mode() & 0o022 != 0 {
+        if meta.permissions().mode() & others != 0 {
             bail!(
                 "{} is writable by other users — funes will not run it; `chmod go-w` it or reinstall",
                 path.display()
             );
         }
-        if meta.uid() != owner {
+        if meta.uid() != me {
             bail!(
-                "{} is owned by uid {} rather than {owner} — funes will not run it",
+                "{} is owned by uid {} rather than you — funes will not run it",
                 path.display(),
                 meta.uid()
             );
         }
-        if path == root {
+        if path == top {
             return Ok(());
         }
         match path.parent() {
@@ -156,6 +158,27 @@ fn only_owner_writes(root: &Path, setup: &Path) -> Result<()> {
             None => return Ok(()),
         }
     }
+}
+
+/// The manifest `root/<id>` holds, when one is installed.
+pub fn installed_manifest(root: &Path, id: &str) -> Option<Vec<u8>> {
+    std::fs::read(root.join(id).join("manifest.json")).ok()
+}
+
+/// Put `manifest` back as `root/<id>`'s: the registry's manifest says what its `setup` last
+/// installed, so a refresh whose `setup add` never ran must not leave the new one.
+pub fn restore_manifest(root: &Path, id: &str, manifest: &[u8]) -> Result<()> {
+    let dir = root.join(id);
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    let path = dir.join("manifest.json");
+    if std::fs::read(&path).is_ok_and(|now| now == manifest) {
+        return Ok(());
+    }
+    let tmp = dir.join(format!(".manifest.json.funes-tmp{}", std::process::id()));
+    std::fs::write(&tmp, manifest).with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).with_context(|| format!("replacing {}", path.display()))
 }
 
 impl Integration {
@@ -227,7 +250,9 @@ pub enum Provenance {
 
 /// Resolve `id`'s files: `$FUNES_INTEGRATIONS` if set — authoritative, so a test or a fork cannot
 /// reach the network by accident — else the checkout this binary was built from, else the bucket.
-/// A released binary's build path does not exist where it runs, so it falls through.
+/// A released binary's build path does not exist where it runs, so it falls through; and what sits
+/// at that path is vouched for only while it is the user's own, since anyone could have put a tree
+/// there once the checkout is gone.
 fn source_for(id: &str) -> Result<Source> {
     if let Some(dir) = std::env::var_os("FUNES_INTEGRATIONS") {
         let dir = PathBuf::from(dir).join(id);
@@ -236,9 +261,16 @@ fn source_for(id: &str) -> Result<Source> {
         }
         return Ok(Source::Redirected(dir));
     }
-    let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("integrations").join(id);
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let checkout = manifest_dir.join("integrations").join(id);
     if checkout.is_dir() {
-        return Ok(Source::Checkout(checkout));
+        match owned_by_me(manifest_dir, &checkout.join(SETUP), 0o002) {
+            Ok(()) => return Ok(Source::Checkout(checkout)),
+            Err(e) => eprintln!(
+                "note: the checkout at {} is not yours alone ({e:#}) — using the published {id} integration instead.",
+                checkout.display()
+            ),
+        }
     }
     Ok(Source::Published)
 }
@@ -338,35 +370,68 @@ fn create_owned(dir: &Path) -> Result<()> {
         .with_context(|| format!("creating {}", dir.display()))
 }
 
-fn copy_into(src: &Path, dst: &Path, force: bool) -> Result<()> {
-    create_owned(dst)?;
+/// Refuse a source tree an integration may not carry before any of it is copied: a link to a
+/// directory could name any tree on the disk. A link to a file is followed and copied as a file.
+fn check_source(src: &Path) -> Result<()> {
     for entry in std::fs::read_dir(src).with_context(|| format!("reading {}", src.display()))? {
         let from = entry?.path();
-        let to = dst.join(from.file_name().expect("a directory entry has a file name"));
-        // Follows a symlink, so a checkout that links a shared script in copies the file — a file
-        // only: a link to a directory could name any tree on the disk, and none of it is the
-        // bundle's to bring along.
-        let meta = std::fs::metadata(&from).with_context(|| format!("reading {}", from.display()))?;
-        if meta.is_dir() {
+        if from.is_dir() {
             if from.symlink_metadata()?.file_type().is_symlink() {
                 bail!(
                     "{} is a symlink to a directory, which an integration may not carry",
                     from.display()
                 );
             }
-            copy_into(&from, &to, force)?;
+            check_source(&from)?;
+        }
+    }
+    Ok(())
+}
+
+fn copy_into(src: &Path, dst: &Path, force: bool) -> Result<()> {
+    check_source(src)?;
+    copy_tree(src, dst, force)
+}
+
+fn copy_tree(src: &Path, dst: &Path, force: bool) -> Result<()> {
+    // Nothing is written through a link at the destination: a directory's would send the whole
+    // copy wherever it points, so it is refused; a file's is replaced below.
+    if dst.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink()) {
+        bail!(
+            "{} is a symlink — funes will not write through it; remove it and retry",
+            dst.display()
+        );
+    }
+    create_owned(dst)?;
+    for entry in std::fs::read_dir(src).with_context(|| format!("reading {}", src.display()))? {
+        let from = entry?.path();
+        let name = from.file_name().expect("a directory entry has a file name").to_owned();
+        let to = dst.join(&name);
+        let meta = std::fs::metadata(&from).with_context(|| format!("reading {}", from.display()))?;
+        if meta.is_dir() {
+            copy_tree(&from, &to, force)?;
             continue;
         }
         let bytes = std::fs::read(&from).with_context(|| format!("reading {}", from.display()))?;
-        let mode = std::fs::Permissions::from_mode(meta.permissions().mode() & 0o777);
+        // The source's mode, closed to others: `open` refuses a file others could write, and a
+        // private group's umask leaves a checkout's files group-writable.
+        let mode = std::fs::Permissions::from_mode(meta.permissions().mode() & 0o777 & !0o022);
         // Written beside and renamed over: a link left at the destination is replaced, never
         // followed to wherever it points, and a reader never sees a half-written file.
         let stale_link = to.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink());
         if force || stale_link || std::fs::read(&to).map(|old| old != bytes).unwrap_or(true) {
-            let tmp = dst.join(format!(".{}.funes-tmp", from.file_name().unwrap().to_string_lossy()));
-            std::fs::write(&tmp, &bytes).with_context(|| format!("writing {}", tmp.display()))?;
-            std::fs::set_permissions(&tmp, mode).with_context(|| format!("setting the mode of {}", tmp.display()))?;
-            std::fs::rename(&tmp, &to).with_context(|| format!("replacing {}", to.display()))?;
+            let tmp = dst.join(format!(".{}.funes-tmp{}", name.to_string_lossy(), std::process::id()));
+            let written = std::fs::write(&tmp, &bytes)
+                .with_context(|| format!("writing {}", tmp.display()))
+                .and_then(|()| {
+                    std::fs::set_permissions(&tmp, mode)
+                        .with_context(|| format!("setting the mode of {}", tmp.display()))
+                })
+                .and_then(|()| std::fs::rename(&tmp, &to).with_context(|| format!("replacing {}", to.display())));
+            if written.is_err() {
+                let _ = std::fs::remove_file(&tmp);
+            }
+            written?;
         } else {
             std::fs::set_permissions(&to, mode).with_context(|| format!("setting the mode of {}", to.display()))?;
         }
@@ -500,10 +565,104 @@ mod tests {
         assert!(!manifest.symlink_metadata().unwrap().file_type().is_symlink());
         assert_eq!(std::fs::read_to_string(&manifest).unwrap(), "{}");
 
-        // A link to a directory is refused: it could name any tree on the disk.
+        // A link where a directory goes is refused outright, and nothing lands where it points.
+        std::fs::remove_dir_all(dst.join("scripts")).unwrap();
+        let elsewhere_dir = tmp.path().join("elsewhere-dir");
+        std::fs::create_dir_all(&elsewhere_dir).unwrap();
+        std::os::unix::fs::symlink(&elsewhere_dir, dst.join("scripts")).unwrap();
+        let err = copy_into(&src, &dst, false).unwrap_err().to_string();
+        assert!(err.contains("is a symlink"), "{err}");
+        assert!(
+            std::fs::read_dir(&elsewhere_dir).unwrap().next().is_none(),
+            "nothing written through"
+        );
+        std::fs::remove_file(dst.join("scripts")).unwrap();
+
+        // A link to a directory in the source is refused before anything is copied.
+        std::fs::write(&shared, "shared v3").unwrap();
         std::os::unix::fs::symlink(tmp.path(), src.join("everything")).unwrap();
         let err = copy_into(&src, &dst, false).unwrap_err().to_string();
         assert!(err.contains("symlink to a directory"), "{err}");
+        assert!(!dst.join("scripts/shared.sh").exists(), "refused before a byte moved");
+    }
+
+    /// A private group's umask leaves a checkout's files group-writable; the registry's copy is
+    /// closed to others, or `open` would refuse what funes itself just wrote.
+    #[test]
+    fn a_copied_file_is_closed_to_other_writers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("setup"), "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(src.join("setup"), std::fs::Permissions::from_mode(0o775)).unwrap();
+        std::fs::write(src.join("manifest.json"), "{}").unwrap();
+        std::fs::set_permissions(src.join("manifest.json"), std::fs::Permissions::from_mode(0o666)).unwrap();
+
+        let dst = tmp.path().join("dst");
+        copy_into(&src, &dst, false).unwrap();
+        assert_eq!(
+            std::fs::metadata(dst.join("setup")).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert_eq!(
+            std::fs::metadata(dst.join("manifest.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o644
+        );
+        assert!(owned_by_me(&dst, &dst.join("setup"), 0o022).is_ok());
+    }
+
+    /// Ownership is judged against the user running funes, file by file up to the top, and by the
+    /// bits that matter there: group write is fine for a checkout, not for the registry.
+    #[test]
+    fn ownership_is_the_running_users_up_to_the_top() {
+        let tmp = tempfile::tempdir().unwrap();
+        let top = tmp.path().join("top");
+        std::fs::create_dir_all(top.join("a")).unwrap();
+        let file = top.join("a/setup");
+        std::fs::write(&file, "").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o775)).unwrap();
+        assert!(
+            owned_by_me(&top, &file, 0o002).is_ok(),
+            "group write is a checkout's own business"
+        );
+        let err = owned_by_me(&top, &file, 0o022).unwrap_err().to_string();
+        assert!(err.contains("writable by other users"), "{err}");
+        std::fs::set_permissions(top.join("a"), std::fs::Permissions::from_mode(0o777)).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let err = owned_by_me(&top, &file, 0o002).unwrap_err().to_string();
+        assert!(err.contains("a is writable"), "a directory on the way counts: {err}");
+    }
+
+    /// The registry's manifest says what `setup` last installed: a refresh whose `setup add` never
+    /// ran puts the previous one back.
+    #[test]
+    fn a_manifest_is_restored_as_it_was() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("agents");
+        assert!(installed_manifest(&root, "pi").is_none(), "nothing installed");
+        restore_manifest(&root, "pi", b"{}").unwrap();
+        assert!(!root.join("pi").exists(), "nothing to restore into");
+
+        integration(&root, "pi", &manifest("pi", 1), "true");
+        let before = installed_manifest(&root, "pi").unwrap();
+        std::fs::write(root.join("pi/manifest.json"), manifest("pi", 2)).unwrap();
+        restore_manifest(&root, "pi", &before).unwrap();
+        assert_eq!(installed_manifest(&root, "pi").unwrap(), before);
+    }
+
+    /// A directory in the registry that is not an id is `open`'s to refuse, and never a note's
+    /// to name.
+    #[test]
+    fn a_mismatch_is_reported_for_ids_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("agents");
+        integration(&root, "pi (old)", &manifest("pi", 99), "true");
+        integration(&root, "clyde", &manifest("clyde", 99), "true");
+        assert_eq!(mismatched(&root), vec![("clyde".to_string(), 99)]);
     }
 
     #[test]
