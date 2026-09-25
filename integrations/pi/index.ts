@@ -96,6 +96,9 @@ class FunesMcp {
     };
     child.on("exit", (code) => die(new Error(`funes mcp exited (code ${code})`)));
     child.on("error", (e) => die(new Error(`funes mcp failed to start: ${e.message}`)));
+    // A write to a child that has just exited fails on the pipe, ahead of the exit itself; unheard,
+    // that error would take the host down.
+    child.stdin.on("error", (e) => die(new Error(`funes mcp went away: ${e.message}`)));
 
     const start = (async () => {
       try {
