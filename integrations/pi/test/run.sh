@@ -22,3 +22,15 @@ if ! "$JS" "$HERE/same-second.mjs" "$out/session.funes.jsonl" "$HERE/session.jso
     exit 1
 fi
 echo "pi converter: ok"
+
+# The extension's startup, run as pi runs it: node strips the types itself from 22.18 on; bun and
+# deno always did.
+case "$JS" in
+node) TS=--experimental-strip-types ;;
+*) TS= ;;
+esac
+if ! "$JS" $TS "$HERE/startup.mjs"; then
+    echo "pi startup: a history setup left pending is not indexed at the next start — see above" >&2
+    exit 1
+fi
+echo "pi startup: ok"

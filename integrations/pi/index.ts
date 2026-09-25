@@ -246,13 +246,17 @@ function convertStale(file: string) {
   } catch {}
 }
 
-// Convert the history `setup` left behind, once. Failure keeps the marker, so the next start retries.
-function seedPending() {
-  if (!SPOOL || !existsSync(SEED_PENDING)) return;
+// Convert the history `setup` left behind, once, and say whether it did. Failure keeps the marker,
+// so the next start retries.
+function seedPending(): boolean {
+  if (!SPOOL || !existsSync(SEED_PENDING)) return false;
   try {
     convertTree(readFileSync(SEED_PENDING, "utf8").trim(), SPOOL);
     rmSync(SEED_PENDING);
-  } catch {}
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export default async function (pi: any) {
@@ -282,10 +286,13 @@ export default async function (pi: any) {
 
   pi.on("session_start", async (event: any, ctx: any) => {
     if (failure) ctx?.ui?.notify(failure, "warning"); // at load it would land inside pi's own startup
+    if (event?.reason !== "startup") return;
     // A fresh process is the one start with no shutdown behind it, so it catches up whatever a
-    // process that never shut down cleanly left unpublished.
-    if (memory && event?.reason === "startup") runScript(PUSH_SH, memory, HARNESS);
-    if (event?.reason === "startup") seedPending();
+    // process that never shut down cleanly left unpublished — and whatever `setup` could not
+    // convert, seeded first so the worker's index takes it in: the publish indexes before it pushes.
+    const seeded = seedPending();
+    if (memory) runScript(PUSH_SH, memory, HARNESS);
+    else if (seeded) runScript(INDEX_SH, HARNESS);
   });
 
   // Per turn, so a session killed mid-flight is indexed up to its last completed turn.
