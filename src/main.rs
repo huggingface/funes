@@ -220,9 +220,10 @@ enum Cmd {
         agent: String,
         #[command(flatten)]
         memory: AddMemory,
-        /// Reinstall the integration even if the installed copy is already up to date.
+        /// Fetch the integration's newest release for this funes before running it. Without it,
+        /// an installed integration runs as installed.
         #[arg(long)]
-        force: bool,
+        update: bool,
     },
     /// Remove funes from a coding agent.
     ///
@@ -525,34 +526,43 @@ async fn main() -> Result<()> {
         Cmd::Mcp { memory } => mcp::run(memory).await,
         // `add` bootstraps the local pipeline: build the first index and do the first push — the
         // two one-time steps the automation can't do unattended — so nothing is left to run by hand.
-        Cmd::Add { agent, memory, force } => add_agent(&agent, memory, force).await,
+        Cmd::Add { agent, memory, update } => add_agent(&agent, memory, update).await,
         Cmd::Remove { agent } => remove_agent(&agent).await,
     }
 }
 
-/// Refresh `id`'s integration, resolve the memory, and run its `setup add`. The registry's
-/// manifest says what `setup` last installed, and the refresh writes the new one first, so a run
-/// that stops short of `setup add` — a memory that does not resolve, a first index declined —
-/// puts the previous manifest back: what the agent runs is still the old install, and every read
-/// must keep saying so.
-async fn add_agent(id: &str, memory: AddMemory, force: bool) -> Result<()> {
+/// Resolve `id`'s integration and the memory, and run its `setup add`. The registry's manifest
+/// says what `setup` last installed, and a refresh writes the new one first, so a run that stops
+/// short of `setup add` — a memory that does not resolve, a first index declined — puts the
+/// previous manifest back: what the agent runs is still the old install, and every read must keep
+/// saying so.
+async fn add_agent(id: &str, memory: AddMemory, update: bool) -> Result<()> {
+    if !spool::is_id(id) {
+        bail!("{id:?} is not an integration id (lowercase [a-z0-9_-])");
+    }
     let root = registry::default_root()?;
     let previous = registry::installed_manifest(&root, id);
     let installed = std::cell::Cell::new(false);
     let ran = &installed;
     let result = async {
-        let (integration, provisioned) = prepare_agent(id, force).await?;
+        // Installed, the integration runs as installed — unless asked, unless its files are
+        // named, and unless this funes cannot run what is there.
+        let refresh = !root.join(id).is_dir()
+            || update
+            || std::env::var_os("FUNES_INTEGRATIONS").is_some()
+            || registry::speaks_another_contract(&root, id);
+        let (integration, provisioned) = prepare_agent(id, refresh).await?;
         let resolved = resolve_add_memory(memory).await?;
         let record = provisioned.map(|(origin, files)| registry::Installed::new(&integration.manifest, origin, files));
-        bootstrap_add(id, resolved, |memory| async move {
+        let install = |memory: Option<String>| async move {
             integration.add(memory.as_deref())?;
             ran.set(true);
             // Whatever an older hook asked for, this install's hooks are the ones that ask now.
             spool::forget_missing(id)
-        })
-        .await?;
-        // What setup just installed, and from where. An installed copy nothing refreshed keeps
-        // the record it has.
+        };
+        bootstrap_add(id, resolved, install).await?;
+        // Recorded once setup has run, so the record says what the agent runs; an installed copy
+        // nothing refreshed keeps the record it has.
         match record {
             Some(record) if ran.get() => registry::record(&root, &record),
             _ => Ok(()),
@@ -567,49 +577,79 @@ async fn add_agent(id: &str, memory: AddMemory, force: bool) -> Result<()> {
     result
 }
 
-/// Resolve `id`'s integration for a run: refresh its files in the registry, so the script funes
-/// executes is the one it just wrote rather than whatever was sitting there; check what they
-/// declare; and confirm them when funes can't vouch for them — all before `add` touches a memory
-/// or `remove` runs anything. With nothing to refresh from — no source names `id`, or the source
-/// can't be reached — the installed copy is what runs, and funes can't vouch for that either.
-/// Says what it refreshed them with, when it did.
+/// Resolve `id`'s integration for a run and confirm it when funes can't vouch for it — all before
+/// `add` touches a memory or `remove` runs anything. With `refresh`, its files are fetched into
+/// the registry first, so the script funes executes is the one it just wrote; a source that can't
+/// be reached leaves the installed copy to run. Without, the installed copy runs as installed.
+/// Says what it refreshed the files with, when it did.
 async fn prepare_agent(
     id: &str,
-    force: bool,
+    refresh: bool,
 ) -> Result<(registry::Integration, Option<(registry::Origin, registry::Files)>)> {
-    if !spool::is_id(id) {
-        bail!("{id:?} is not an integration id (lowercase [a-z0-9_-])");
-    }
     let root = registry::default_root()?;
     // Decided before the refresh: a first install that fails part-way is not an installed copy.
     let installed = root.join(id).is_dir();
-    let (provenance, provisioned) = match registry::provision(&root, id, force).await {
-        Ok(registry::Provisioned {
-            provenance,
-            origin,
-            files,
-        }) => (provenance, Some((origin, files))),
-        // Another publisher's files are not a refresh the installed copy stands in for.
-        Err(e) if e.downcast_ref::<registry::Takeover>().is_some() => return Err(e),
-        Err(e) if installed => {
-            eprintln!("note: the {id} integration could not be refreshed ({e:#}) — running the installed copy.");
-            (
-                registry::Provenance::Unvouched("the installed copy, refreshed by nothing".to_string()),
-                None,
-            )
+    let mut provisioned = None;
+    let provenance = if refresh {
+        match registry::provision(&root, id).await {
+            Ok(registry::Provisioned {
+                provenance,
+                origin,
+                files,
+            }) => {
+                // Files confirmed once, from the same source, unchanged since: confirmed still.
+                let provenance = match provenance {
+                    registry::Provenance::Unvouched(_)
+                        if registry::installed(&root, id).is_some_and(|r| r.origin == origin && r.files == files) =>
+                    {
+                        registry::Provenance::Vouched
+                    }
+                    provenance => provenance,
+                };
+                provisioned = Some((origin, files));
+                Some(provenance)
+            }
+            // Another publisher's files are not a refresh the installed copy stands in for.
+            Err(e) if e.downcast_ref::<registry::Takeover>().is_some() => return Err(e),
+            Err(e) if installed => {
+                eprintln!("note: the {id} integration could not be refreshed ({e:#}) — running the installed copy.");
+                None
+            }
+            Err(e) => {
+                let _ = registry::discard(&root, id);
+                return Err(if e.downcast_ref::<registry::Absent>().is_some() {
+                    unknown_agent(&root, id, e)
+                } else {
+                    e
+                });
+            }
         }
-        Err(e) => {
-            let _ = registry::discard(&root, id);
-            return Err(if e.downcast_ref::<registry::Absent>().is_some() {
-                unknown_agent(&root, id, e)
-            } else {
-                e
-            });
-        }
+    } else {
+        None
+    };
+    let provenance = match provenance {
+        Some(provenance) => provenance,
+        None => installed_provenance(&root, id)?,
     };
     let integration = registry::open(&root, id)?;
     confirm_trust(id, &integration.dir, provenance)?;
     Ok((integration, provisioned))
+}
+
+/// Whether funes vouches for the copy installed at `root/<id>`: it does for files it recorded
+/// installing and finds as it left them. A changed file, or no record, is confirmed like any
+/// other files it did not write.
+fn installed_provenance(root: &Path, id: &str) -> Result<registry::Provenance> {
+    Ok(match registry::verify_installed(root, id)? {
+        registry::Verification::Intact => registry::Provenance::Vouched,
+        registry::Verification::Changed(files) => registry::Provenance::Unvouched(format!(
+            "the installed copy, whose {} changed since funes installed it",
+            files.join(", ")
+        )),
+        registry::Verification::Unrecorded => {
+            registry::Provenance::Unvouched("the installed copy, recorded by nothing".to_string())
+        }
+    })
 }
 
 /// A failed provision for an agent with no files on this machine is usually a typo, so the error
@@ -652,34 +692,20 @@ fn confirm_trust(id: &str, dir: &Path, provenance: registry::Provenance) -> Resu
     Ok(())
 }
 
-/// Run `id`'s `setup remove`, then delete its files. Nothing on disk and no source that could hold
-/// it is the state `remove` produces, so meeting it is a success, not an unknown agent. A source
-/// that could not be reached is another matter: an install its setup would have taken away may
-/// well be there, so that failure is reported.
+/// Run `id`'s `setup remove`, then delete its files. Nothing installed is the state `remove`
+/// produces, so meeting it is a success, not an unknown agent. The installed copy is what runs —
+/// fetched anew only when it speaks a contract this funes cannot run.
 async fn remove_agent(id: &str) -> Result<()> {
+    if !spool::is_id(id) {
+        bail!("{id:?} is not an integration id (lowercase [a-z0-9_-])");
+    }
     let root = registry::default_root()?;
-    let integration = match prepare_agent(id, false).await {
-        Ok((integration, _)) => integration,
-        // Nothing installed and nothing to fetch is what `remove` leaves behind. A source funes could
-        // not reach is reported instead: the agent may still hold the registration.
-        Err(e) if !root.join(id).is_dir() && e.downcast_ref::<registry::Absent>().is_some() => {
-            eprintln!("nothing to remove — {e:#}");
-            registry::discard(&root, id)?;
-            return spool::forget_missing(id);
-        }
-        // Another publisher's setup must not take this install away: the installed copy's does.
-        Err(e) if e.downcast_ref::<registry::Takeover>().is_some() => {
-            eprintln!("note: {e:#} — removing with the installed copy.");
-            let integration = registry::open(&root, id)?;
-            confirm_trust(
-                id,
-                &integration.dir,
-                registry::Provenance::Unvouched("the installed copy, refreshed by nothing".to_string()),
-            )?;
-            integration
-        }
-        Err(e) => return Err(e),
-    };
+    if !root.join(id).is_dir() {
+        eprintln!("nothing to remove — no {id} integration is installed.");
+        registry::discard(&root, id)?;
+        return spool::forget_missing(id);
+    }
+    let (integration, _) = prepare_agent(id, registry::speaks_another_contract(&root, id)).await?;
     integration.remove()?;
     registry::discard(&root, id)?;
     // The hooks that asked for the spool are gone with the integration, so the refusals they left

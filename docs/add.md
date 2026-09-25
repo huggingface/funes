@@ -22,12 +22,15 @@ original session transcripts, model/Hub caches, or any published memory. The
 command is idempotent, so an already-absent integration is a successful no-op.
 
 **Updating an install you already have: `funes add` again.** Re-running it is idempotent: it
-rebinds the memory you name, refreshes the setup, and each integration clears what an older funes
-put where the current one no longer looks. `funes remove` first is for a clean slate — it takes the
-install away in full, your memory aside:
+rebinds the memory you name and re-runs the installed integration's setup, which clears what an
+older funes put where the current one no longer looks. The integration itself stays at the release
+you installed until you ask — `--update` fetches its newest release for this funes first — except
+that an install this funes cannot run, one another funes made, is brought forward without asking.
+`funes remove` first is for a clean slate — it takes the install away in full, your memory aside:
 
 ```bash
-funes add codex <user|org>/funes-memory                          # brought forward in place
+funes add codex <user|org>/funes-memory                          # rebound; the integration as installed
+funes add codex <user|org>/funes-memory --update                 # its newest release first
 funes remove codex && funes add codex <user|org>/funes-memory    # from a clean slate
 ```
 
@@ -200,22 +203,27 @@ refuses a `setup` that anyone but its owner could have written: the file and eve
 
 ### Where the files come from
 
-`funes add` refreshes the bundle before every run, so the `setup` it executes is the one it just
-wrote. The source, in order: the directory `$FUNES_INTEGRATIONS` names, when set — authoritative,
-nothing else is consulted; the checkout this funes was built from, when it exists; the release
-bucket, where the four maintained integrations ship as checksummed archives. With none of those —
-an id nothing published, or offline — the installed copy runs as it is.
+`funes add <id>` installs the integration when none is installed, and runs the installed one as it
+is otherwise: `--update` fetches its newest release for this funes first, and a copy speaking a
+contract this funes cannot run is refreshed regardless. The source, in order: the directory
+`$FUNES_INTEGRATIONS` names, when set — authoritative, consulted on every run, and nothing else is;
+the checkout this funes was built from, when it exists; the release bucket, where the four
+maintained integrations ship as checksummed archives. A source that cannot be reached leaves the
+installed copy to run. `funes remove` fetches nothing: it runs the installed copy, unless this
+funes cannot run it. An id with no files anywhere is an error naming what is installed.
 
-funes vouches only for files it built or verified: its own checkout, or an archive whose checksum
-matched. Anything else — a `$FUNES_INTEGRATIONS` directory, an installed copy refreshed by
-nothing — is confirmed at the terminal every time, before `setup` runs, and never remembered:
-anyone able to plant the files could forge the record. Off a terminal, funes refuses rather than
-assumes. An id with no files anywhere is an error naming what is installed.
+funes vouches for files it built or verified — its own checkout, or an archive whose checksum
+matched — and runs them without asking. Anything else — a `$FUNES_INTEGRATIONS` directory, files
+it has no record of installing — is confirmed at the terminal before `setup` runs; off a terminal,
+funes refuses rather than assumes.
 
 What `funes add` installed is recorded beside the directory, in `~/.funes/agents/<id>.json`: the
-package as its manifest declared it — publisher, id, version, contract — and where the files came
-from: the checkout, the directory, or the archive and its checksum. The record says what the agent
-runs, never whether funes vouched for it, and goes with the directory on `funes remove`.
+package as its manifest declared it — publisher, id, version, contract — where the files came
+from — the checkout, the directory, or the archive and its checksum — and each of its files with
+its digest. That record is what lets a confirmed install run again unasked: before running an
+installed copy, funes checks the package's files against it, and asks again only when one changed,
+or when the same source hands it different files. Files it has no record of installing — a copy put
+in place by hand — are asked about every time. The record goes with the directory on `funes remove`.
 
 So a fifth integration is used today by putting its directory under `~/.funes/agents/<id>/`, or by
 pointing `$FUNES_INTEGRATIONS` at a directory holding it, then `funes add <id>`. Installing one by

@@ -168,14 +168,23 @@ pub fn installed(root: &Path, id: &str) -> Option<Installed> {
     serde_json::from_str(&text).ok()
 }
 
-/// Write `record` as `root/<id>.json`.
+/// Write `record` as `root/<id>.json`, closed to other writers whatever the umask.
 pub fn record(root: &Path, record: &Installed) -> Result<()> {
     let path = record_path(root, &record.id);
     let mut text = serde_json::to_string_pretty(record).context("serializing the install record")?;
     text.push('\n');
     let tmp = root.join(format!(".{}.json.funes-tmp{}", record.id, std::process::id()));
-    std::fs::write(&tmp, text).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, &path).with_context(|| format!("replacing {}", path.display()))
+    let written = std::fs::write(&tmp, text)
+        .with_context(|| format!("writing {}", tmp.display()))
+        .and_then(|()| {
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644))
+                .with_context(|| format!("setting the mode of {}", tmp.display()))
+        })
+        .and_then(|()| std::fs::rename(&tmp, &path).with_context(|| format!("replacing {}", path.display())));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
 }
 
 /// The registry root, `~/.funes/agents` — fixed, not under `$FUNES_HOME`: an agent records the
@@ -335,6 +344,14 @@ pub fn installed_manifest(root: &Path, id: &str) -> Option<Vec<u8>> {
     std::fs::read(root.join(id).join("manifest.json")).ok()
 }
 
+/// Whether the copy installed at `root/<id>` speaks a contract this funes does not: one it cannot
+/// run, however it came to be there.
+pub fn speaks_another_contract(root: &Path, id: &str) -> bool {
+    installed_manifest(root, id)
+        .and_then(|bytes| serde_json::from_slice::<Manifest>(&bytes).ok())
+        .is_some_and(|manifest| manifest.contract_version != CONTRACT_VERSION)
+}
+
 /// Put `manifest` back as `root/<id>`'s: the registry's manifest says what its `setup` last
 /// installed, so a refresh whose `setup add` never ran must not leave the new one.
 pub fn restore_manifest(root: &Path, id: &str, manifest: &[u8]) -> Result<()> {
@@ -472,16 +489,16 @@ fn published_prefix() -> String {
     format!("integrations/v{CONTRACT_VERSION}")
 }
 
-/// Install `id`'s files into the registry. Only a file that differs is rewritten (`force` rewrites
-/// regardless), and nothing is pruned — an integration's `setup` keeps its own state beside them.
-/// The id names the directory written, so it is checked here, before anything is.
-pub async fn provision(root: &Path, id: &str, force: bool) -> Result<Provisioned> {
+/// Install `id`'s files into the registry. Only a file that differs is rewritten, and nothing is
+/// pruned — an integration's `setup` keeps its own state beside them. The id names the directory
+/// written, so it is checked here, before anything is.
+pub async fn provision(root: &Path, id: &str) -> Result<Provisioned> {
     if !spool::is_id(id) {
         bail!("{id:?} is not an integration id (lowercase [a-z0-9_-])");
     }
     match source_for(id)? {
         Source::Checkout(src) => {
-            let files = install_from(root, id, &src, force)?;
+            let files = install_from(root, id, &src)?;
             Ok(Provisioned {
                 provenance: Provenance::Vouched,
                 origin: Origin::Checkout { path: src },
@@ -489,7 +506,7 @@ pub async fn provision(root: &Path, id: &str, force: bool) -> Result<Provisioned
             })
         }
         Source::Redirected(src) => {
-            let files = install_from(root, id, &src, force)?;
+            let files = install_from(root, id, &src)?;
             Ok(Provisioned {
                 provenance: Provenance::Unvouched(format!("$FUNES_INTEGRATIONS ({})", src.display())),
                 origin: Origin::Directory { path: src },
@@ -501,7 +518,7 @@ pub async fn provision(root: &Path, id: &str, force: bool) -> Result<Provisioned
             let (archive, sha256) = fetch_published(id, staging.path()).await?;
             let unpacked = staging.path().join("unpacked");
             unpack(&archive, &unpacked)?;
-            let files = install_from(root, id, &unpacked, force)?;
+            let files = install_from(root, id, &unpacked)?;
             Ok(Provisioned {
                 provenance: Provenance::Vouched,
                 origin: Origin::Archive {
@@ -517,10 +534,10 @@ pub async fn provision(root: &Path, id: &str, force: bool) -> Result<Provisioned
 /// Copy `src` over `root/<id>` once what it declares checks out: a manifest that would be refused
 /// installed is refused here, before a byte moves, and so is another publisher's. The files
 /// copied, with their digests.
-fn install_from(root: &Path, id: &str, src: &Path, force: bool) -> Result<Files> {
+fn install_from(root: &Path, id: &str, src: &Path) -> Result<Files> {
     let incoming = read_manifest(&src.join("manifest.json"), id)?;
     refuse_takeover(root, id, &incoming)?;
-    copy_into(src, &root.join(id), force)
+    copy_into(src, &root.join(id))
 }
 
 /// Refuse another publisher's files where `id`'s are installed. What funes recorded at install
@@ -625,14 +642,14 @@ fn check_source(src: &Path) -> Result<()> {
 }
 
 /// Copy `src`'s tree over `dst`; the files copied, by path under `dst`, with their digests.
-fn copy_into(src: &Path, dst: &Path, force: bool) -> Result<Files> {
+fn copy_into(src: &Path, dst: &Path) -> Result<Files> {
     check_source(src)?;
     let mut files = Files::new();
-    copy_tree(src, dst, force, "", &mut files)?;
+    copy_tree(src, dst, "", &mut files)?;
     Ok(files)
 }
 
-fn copy_tree(src: &Path, dst: &Path, force: bool, under: &str, files: &mut Files) -> Result<()> {
+fn copy_tree(src: &Path, dst: &Path, under: &str, files: &mut Files) -> Result<()> {
     // Nothing is written through a link at the destination: a directory's would send the whole
     // copy wherever it points, so it is refused; a file's is replaced below.
     if dst.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink()) {
@@ -649,7 +666,7 @@ fn copy_tree(src: &Path, dst: &Path, force: bool, under: &str, files: &mut Files
         let meta = std::fs::metadata(&from).with_context(|| format!("reading {}", from.display()))?;
         let path = format!("{under}{}", name.to_string_lossy());
         if meta.is_dir() {
-            copy_tree(&from, &to, force, &format!("{path}/"), files)?;
+            copy_tree(&from, &to, &format!("{path}/"), files)?;
             continue;
         }
         let bytes = std::fs::read(&from).with_context(|| format!("reading {}", from.display()))?;
@@ -660,7 +677,7 @@ fn copy_tree(src: &Path, dst: &Path, force: bool, under: &str, files: &mut Files
         // Written beside and renamed over: a link left at the destination is replaced, never
         // followed to wherever it points, and a reader never sees a half-written file.
         let stale_link = to.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink());
-        if force || stale_link || std::fs::read(&to).map(|old| old != bytes).unwrap_or(true) {
+        if stale_link || std::fs::read(&to).map(|old| old != bytes).unwrap_or(true) {
             let tmp = dst.join(format!(".{}.funes-tmp{}", name.to_string_lossy(), std::process::id()));
             let written = std::fs::write(&tmp, &bytes)
                 .with_context(|| format!("writing {}", tmp.display()))
@@ -743,7 +760,7 @@ mod tests {
         let unpacked = tmp.path().join("unpacked");
         unpack(&archive, &unpacked).unwrap();
         let dst = tmp.path().join("registry/pi");
-        copy_into(&unpacked, &dst, false).unwrap();
+        copy_into(&unpacked, &dst).unwrap();
 
         assert_eq!(
             std::fs::read_to_string(dst.join("scripts/funes-index.sh")).unwrap(),
@@ -772,7 +789,7 @@ mod tests {
         std::os::unix::fs::symlink(&shared, src.join("scripts/shared.sh")).unwrap();
 
         let dst = tmp.path().join("dst");
-        copy_into(&src, &dst, false).unwrap();
+        copy_into(&src, &dst).unwrap();
 
         let copied = dst.join("scripts/shared.sh");
         assert!(
@@ -785,7 +802,7 @@ mod tests {
         // The integration's own state, and a second run that must not disturb it.
         std::fs::write(dst.join("memory"), "acme/kb\n").unwrap();
         std::fs::write(&shared, "shared v2").unwrap();
-        copy_into(&src, &dst, false).unwrap();
+        copy_into(&src, &dst).unwrap();
 
         assert_eq!(
             std::fs::read_to_string(&copied).unwrap(),
@@ -800,7 +817,7 @@ mod tests {
         std::fs::write(&elsewhere, "not the bundle's").unwrap();
         std::fs::remove_file(dst.join("manifest.json")).unwrap();
         std::os::unix::fs::symlink(&elsewhere, dst.join("manifest.json")).unwrap();
-        copy_into(&src, &dst, false).unwrap();
+        copy_into(&src, &dst).unwrap();
         assert_eq!(std::fs::read_to_string(&elsewhere).unwrap(), "not the bundle's");
         let manifest = dst.join("manifest.json");
         assert!(!manifest.symlink_metadata().unwrap().file_type().is_symlink());
@@ -811,7 +828,7 @@ mod tests {
         let elsewhere_dir = tmp.path().join("elsewhere-dir");
         std::fs::create_dir_all(&elsewhere_dir).unwrap();
         std::os::unix::fs::symlink(&elsewhere_dir, dst.join("scripts")).unwrap();
-        let err = copy_into(&src, &dst, false).unwrap_err().to_string();
+        let err = copy_into(&src, &dst).unwrap_err().to_string();
         assert!(err.contains("is a symlink"), "{err}");
         assert!(
             std::fs::read_dir(&elsewhere_dir).unwrap().next().is_none(),
@@ -822,7 +839,7 @@ mod tests {
         // A link to a directory in the source is refused before anything is copied.
         std::fs::write(&shared, "shared v3").unwrap();
         std::os::unix::fs::symlink(tmp.path(), src.join("everything")).unwrap();
-        let err = copy_into(&src, &dst, false).unwrap_err().to_string();
+        let err = copy_into(&src, &dst).unwrap_err().to_string();
         assert!(err.contains("symlink to a directory"), "{err}");
         assert!(!dst.join("scripts/shared.sh").exists(), "refused before a byte moved");
     }
@@ -840,7 +857,7 @@ mod tests {
         std::fs::set_permissions(src.join("manifest.json"), std::fs::Permissions::from_mode(0o666)).unwrap();
 
         let dst = tmp.path().join("dst");
-        copy_into(&src, &dst, false).unwrap();
+        copy_into(&src, &dst).unwrap();
         assert_eq!(
             std::fs::metadata(dst.join("setup")).unwrap().permissions().mode() & 0o777,
             0o755
@@ -949,7 +966,7 @@ mod tests {
 
         assert_eq!(verify_installed(&root, "pi").unwrap(), Verification::Unrecorded);
         create_owned(&root).unwrap();
-        let files = copy_into(&src, &root.join("pi"), false).unwrap();
+        let files = copy_into(&src, &root.join("pi")).unwrap();
         assert_eq!(
             files.keys().collect::<Vec<_>>(),
             vec!["manifest.json", "scripts/hook.sh", "setup"]
@@ -998,7 +1015,7 @@ mod tests {
             r#"{"contract_version": 1, "id": "pi", "label": "pi", "repo": "other/pi"}"#,
             "echo theirs",
         );
-        let err = install_from(&root, "pi", &theirs, false).unwrap_err();
+        let err = install_from(&root, "pi", &theirs).unwrap_err();
         assert!(err.downcast_ref::<Takeover>().is_some(), "{err}");
         assert!(err.to_string().contains("`funes remove pi` first"), "{err}");
         assert_eq!(setup(), "#!/bin/sh\ntrue\n", "nothing copied");
@@ -1012,7 +1029,7 @@ mod tests {
             Files::new(),
         );
         record(&root, &rec).unwrap();
-        let err = install_from(&root, "pi", &theirs, false).unwrap_err().to_string();
+        let err = install_from(&root, "pi", &theirs).unwrap_err().to_string();
         assert!(
             err.contains("acme's, from the checkout at /src/funes/integrations/pi"),
             "{err}"
@@ -1025,7 +1042,7 @@ mod tests {
             &manifest("pi", CONTRACT_VERSION),
             "echo mine",
         );
-        install_from(&root, "pi", &mine, false).unwrap();
+        install_from(&root, "pi", &mine).unwrap();
         assert!(setup().contains("echo mine"));
 
         // A manifest that would be refused installed is refused before the copy too.
@@ -1035,9 +1052,22 @@ mod tests {
             &manifest("pi", CONTRACT_VERSION + 1),
             "echo bad",
         );
-        let err = install_from(&root, "pi", &bad, false).unwrap_err().to_string();
+        let err = install_from(&root, "pi", &bad).unwrap_err().to_string();
         assert!(err.contains("contract version"), "{err}");
         assert!(setup().contains("echo mine"), "untouched");
+    }
+
+    #[test]
+    fn a_copy_this_funes_cannot_run_is_told_apart() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("agents");
+        assert!(!speaks_another_contract(&root, "pi"), "nothing installed");
+        integration(&root, "pi", &manifest("pi", CONTRACT_VERSION), "true");
+        assert!(!speaks_another_contract(&root, "pi"));
+        integration(&root, "pi", &manifest("pi", CONTRACT_VERSION + 1), "true");
+        assert!(speaks_another_contract(&root, "pi"));
+        integration(&root, "pi", "not json", "true");
+        assert!(!speaks_another_contract(&root, "pi"), "unreadable is open's to refuse");
     }
 
     /// The registry's manifest says what `setup` last installed: a refresh whose `setup add` never
@@ -1126,7 +1156,7 @@ mod tests {
     async fn an_id_that_is_not_one_is_refused_before_anything_is_written() {
         let root = tempfile::tempdir().unwrap();
         for id in ["../docs", "Pi", "a/b", ""] {
-            let err = provision(root.path(), id, false).await.unwrap_err().to_string();
+            let err = provision(root.path(), id).await.unwrap_err().to_string();
             assert!(err.contains("not an integration id"), "{id:?}: {err}");
         }
         assert!(

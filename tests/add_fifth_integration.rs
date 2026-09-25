@@ -90,6 +90,14 @@ fn funes(home: &Path, funes_home: &Path, log: &Path, args: &[&str]) -> Output {
     run(&argv, home, funes_home, log)
 }
 
+/// `funes <args>` against `home`, off a terminal, with no `$FUNES_INTEGRATIONS`: only what is
+/// installed can answer.
+fn funes_pinned(home: &Path, funes_home: &Path, log: &Path, args: &[&str]) -> Output {
+    let mut argv = vec![env!("CARGO_BIN_EXE_funes")];
+    argv.extend(args);
+    run_with(&argv, home, funes_home, log, None)
+}
+
 /// `funes <args>` against `home`, at a terminal that says yes to what funes asks.
 fn funes_at_a_terminal(home: &Path, funes_home: &Path, log: &Path, args: &[&str]) -> Output {
     funes_at_a_terminal_answering(home, funes_home, log, args, ANSWER_YES)
@@ -106,15 +114,22 @@ fn funes_at_a_terminal_answering(home: &Path, funes_home: &Path, log: &Path, arg
 }
 
 /// Runs `argv` under a umask of 002 — what a user-private-group distribution gives a login — so
-/// the directories funes creates must be its own doing, not the umask's.
+/// the directories funes creates must be its own doing, not the umask's. `$FUNES_INTEGRATIONS`
+/// names `home`'s own directory: authoritative, so only what it holds is consulted, never a
+/// checkout or the bucket, and it is empty unless a test supplies a bundle there.
 fn run(argv: &[&str], home: &Path, funes_home: &Path, log: &Path) -> Output {
+    run_with(argv, home, funes_home, log, Some(&home.join("integrations")))
+}
+
+fn run_with(argv: &[&str], home: &Path, funes_home: &Path, log: &Path, integrations: Option<&Path>) -> Output {
     let mut cmd = Command::new("sh");
     cmd.args(["-c", r#"umask 002; exec "$@""#, "sh"]).args(argv);
+    match integrations {
+        Some(dir) => cmd.env("FUNES_INTEGRATIONS", dir),
+        None => cmd.env_remove("FUNES_INTEGRATIONS"),
+    };
     cmd.env("HOME", home)
         .env("FUNES_HOME", funes_home)
-        // Authoritative: only what this directory holds is consulted, never a checkout or the
-        // bucket. It is empty unless a test supplies a bundle there.
-        .env("FUNES_INTEGRATIONS", home.join("integrations"))
         .env("FUNES_TEST_SETUP_LOG", log)
         .env("HF_HOME", support::hf_home())
         .env_remove("HF_TOKEN")
@@ -211,11 +226,12 @@ fn another_publishers_integration_replaces_an_installed_one_only_after_its_remov
     );
     assert_eq!(recorded(), first);
 
-    // `remove` runs the installed copy's setup, not the other publisher's, and takes the record.
+    // `remove` runs the installed copy's setup, not the other publisher's — unasked, since the
+    // copy is as funes installed and confirmed it — and takes the record.
     let out = funes_at_a_terminal(&home, &funes_home, &log, &["remove", "clyde"]);
     let transcript = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{transcript}");
-    assert!(transcript.contains("removing with the installed copy"), "{transcript}");
+    assert!(!transcript.contains("Trust it?"), "{transcript}");
     assert!(fs::read_to_string(&log).unwrap().starts_with("v1\nremove\n"));
     assert!(!installed.exists() && !record.exists());
 
@@ -225,6 +241,74 @@ fn another_publishers_integration_replaces_an_installed_one_only_after_its_remov
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
     assert!(fs::read_to_string(&log).unwrap().starts_with("v2\nadd\n"));
     assert_eq!(recorded()["repo"], "other/clyde");
+}
+
+/// Installed, an integration runs as installed: nothing is fetched to rebind or remove it, and a
+/// copy confirmed once runs unasked until one of its files changes — or its files are named again.
+#[test]
+fn an_installed_integration_runs_as_installed_and_unasked_until_it_changes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let funes_home = tmp.path().join("funes");
+    let log = tmp.path().join("setup.log");
+    let source = bundle(&home.join("integrations/clyde"), "clyde", 1, "v1");
+    let installed = home.join(".funes/agents/clyde");
+    let record = home.join(".funes/agents/clyde.json");
+    // A history to seed, so the adds after the first are not first adds and run unattended.
+    fs::create_dir_all(home.join(".clyde")).unwrap();
+    fs::write(home.join(".clyde/history.funes.jsonl"), format!("{HISTORY}\n")).unwrap();
+
+    // Installed from `$FUNES_INTEGRATIONS`, confirmed once.
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde"]);
+    let transcript = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success() && transcript.contains("Trust it?"), "{transcript}");
+    assert!(record.exists());
+
+    // With no source in sight, the installed copy runs — unasked, off a terminal.
+    fs::remove_file(&log).unwrap();
+    let out = funes_pinned(&home, &funes_home, &log, &["add", "clyde"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(fs::read_to_string(&log).unwrap().starts_with("v1\nadd\n"));
+
+    // A newer source is not fetched for it…
+    bundle(&source, "clyde", 1, "v2");
+    fs::remove_file(&log).unwrap();
+    let out = funes_pinned(&home, &funes_home, &log, &["add", "clyde"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(fs::read_to_string(&log).unwrap().starts_with("v1\nadd\n"), "pinned");
+
+    // …until its files are named again, when the changed ones are confirmed anew.
+    fs::remove_file(&log).unwrap();
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde", "--update"]);
+    let transcript = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success() && transcript.contains("Trust it?"), "{transcript}");
+    assert!(fs::read_to_string(&log).unwrap().starts_with("v2\nadd\n"));
+
+    // The same source again, unchanged: confirmed once is enough, even off a terminal.
+    fs::remove_file(&log).unwrap();
+    let out = funes(&home, &funes_home, &log, &["add", "clyde"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(fs::read_to_string(&log).unwrap().starts_with("v2\nadd\n"));
+
+    // A file edited in place is not what funes installed: asked again, refused off a terminal.
+    let setup = installed.join("setup");
+    let mut edited = fs::read_to_string(&setup).unwrap();
+    edited.push_str("# edited by hand\n");
+    fs::write(&setup, edited).unwrap();
+    fs::remove_file(&log).unwrap();
+    let out = funes_pinned(&home, &funes_home, &log, &["add", "clyde"]);
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(err.contains("whose setup changed since funes installed it"), "{err}");
+    assert!(err.contains("run this in a terminal"), "{err}");
+    assert!(!log.exists(), "setup did not run");
+
+    // Removal runs the installed copy, fetching nothing — the edited one once confirmed.
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["remove", "clyde"]);
+    let transcript = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success() && transcript.contains("Trust it?"), "{transcript}");
+    assert!(fs::read_to_string(&log).unwrap().starts_with("v2\nremove\n"));
+    assert!(!installed.exists() && !record.exists());
 }
 
 /// One turn of clyde's history, under a facet of the integration's own choosing.
@@ -385,8 +469,7 @@ fn an_installed_only_integration_reaches_the_trust_confirmation() {
     let out = funes(&home, &funes_home, &log, &["add", "clyde"]);
     assert!(!out.status.success());
     let err = stderr(&out);
-    assert!(err.contains("could not be refreshed"), "{err}");
-    assert!(err.contains("the installed copy, refreshed by nothing"), "{err}");
+    assert!(err.contains("the installed copy, recorded by nothing"), "{err}");
     assert!(err.contains("run this in a terminal to confirm it"), "{err}");
     assert!(!log.exists(), "setup did not run");
     assert!(!funes_home.exists(), "no memory bootstrap started");
@@ -396,7 +479,7 @@ fn an_installed_only_integration_reaches_the_trust_confirmation() {
     let out = funes(&home, &funes_home, &log, &["remove", "clyde"]);
     assert!(!out.status.success());
     let err = stderr(&out);
-    assert!(err.contains("the installed copy, refreshed by nothing"), "{err}");
+    assert!(err.contains("the installed copy, recorded by nothing"), "{err}");
     assert!(!log.exists(), "setup did not run");
     assert!(dir.exists(), "an unconfirmed remove deletes nothing");
 }
