@@ -75,8 +75,8 @@ when they're indexed, and `funes index` re-embeds nothing already written. Keepi
   scripts as every other agent. Plugin hooks aren't shell hooks, so hermes' consent allowlist
   (`~/.hermes/shell-hooks-allowlist.json`) isn't involved. An install from before the plugin declared
   those hooks in your `config.yaml`; funes can't take them out of the file that holds the rest of
-  your configuration, so it names them — until you delete them they simply do the plugin's work a
-  second time.
+  your configuration, so it revokes their approvals, deletes their scripts, and names the entries —
+  inert until you delete them.
 
 `funes remove hermes` disables the plugin and deletes it, revokes the approvals a pre-plugin
 install left in the consent allowlist, and removes funes's own hook scripts and their
