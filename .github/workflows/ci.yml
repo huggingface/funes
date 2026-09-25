@@ -9,6 +9,7 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "scripts/**"
+      - "integrations/**"
       - ".github/workflows/ci.yml"
   push:
     branches: [main]
