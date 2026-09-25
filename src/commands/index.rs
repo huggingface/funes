@@ -129,25 +129,22 @@ fn redact_units(
     Ok(())
 }
 
-/// A batch of units' turns chunked at `tiers` as the memory stores them, one chunk list per unit —
-/// data URIs elided and, with a `scanner`, secrets redacted first, the batch in one scanner run,
-/// since both change the text a block splits into.
-fn chunks_of(
+/// Make a batch of units' turns what the memory stores — data URIs elided and, with a `scanner`,
+/// secrets redacted, the batch in one scanner run — before any of them is chunked, since both
+/// change the text a block splits into.
+fn sanitize_units(
     units: &mut [&mut [traces::Turn]],
     tiers: &[Tier],
     include_thinking: bool,
     scanner: Option<&scan::Trufflehog>,
-) -> Result<Vec<Vec<chunk::Chunk>>> {
+) -> Result<()> {
     for turns in units.iter_mut() {
         elide_turns(turns);
     }
     if let Some(scanner) = scanner {
         redact_units(units, scanner, tiers, include_thinking)?;
     }
-    Ok(units
-        .iter()
-        .map(|turns| chunk::chunks_from_turns(turns, tiers, include_thinking))
-        .collect())
+    Ok(())
 }
 
 /// Units a batch consumes: those read are scanned for secrets in one scanner spawn (~1 s) rather
@@ -371,10 +368,6 @@ pub(crate) fn local_index_coverage() -> Option<IndexCoverage> {
         pending: read_index_coverage(&path).pending.len(),
     })
 }
-
-/// What a batch holds per unit consumed: the unit's turns and their chunks, or nothing when the
-/// pass had no use for it.
-type BatchUnit = Option<(Vec<traces::Turn>, Vec<chunk::Chunk>)>;
 
 /// A set-up indexer: it holds the memory lock, embedder, dataset, redaction scanner, and incremental
 /// state, so a caller can index units in whatever batches it likes — one at a time to check the
@@ -608,30 +601,28 @@ impl Indexer {
         }
     }
 
-    /// Read a batch of `units` from position `from` — [`take_batch`] says where it ends — and
-    /// chunk what was read at `tiers`, the batch redacted in one scanner run. `label(pos)` names
-    /// the unit at `pos` for its output lines. Returns one entry per unit consumed: its turns and
-    /// chunks, or `None` when the pass had nothing to do with it.
+    /// Read a batch of `units` from position `from` — [`take_batch`] says where it ends — made
+    /// what the memory stores, the batch redacted in one scanner run. `label(pos)` names the unit
+    /// at `pos` for its output lines. Returns one entry per unit consumed: its turns, or `None`
+    /// when the pass had nothing to do with it.
     fn read_batch(
         &mut self,
         units: &[usize],
         from: usize,
         tiers: &[Tier],
         label: impl Fn(usize) -> String,
-    ) -> Result<Vec<BatchUnit>> {
+    ) -> Result<Vec<Option<Vec<traces::Turn>>>> {
         let target = *tiers.iter().max().expect("a pass covers at least one tier");
         let mut read = take_batch(&units[from..], |n, &i| self.read_unit(i, target, &label(from + n)))?;
         let mut all: Vec<&mut [traces::Turn]> = read.iter_mut().flatten().map(Vec::as_mut_slice).collect();
-        let mut chunks = chunks_of(&mut all, tiers, self.include_thinking, self.scanner.as_ref())?.into_iter();
-        Ok(read
-            .into_iter()
-            .map(|turns| turns.map(|t| (t, chunks.next().expect("one chunk list per unit read"))))
-            .collect())
+        sanitize_units(&mut all, tiers, self.include_thinking, self.scanner.as_ref())?;
+        Ok(read)
     }
 
-    /// Index unit `i`, read and chunked by [`Indexer::read_batch`] for a pass reaching `target`:
-    /// keeps only the chunks whose id isn't already stored, embeds them in a single append, and
-    /// stamps the unit's state. Returns the new-chunk count (0 when empty or already indexed).
+    /// Index unit `i` from its `turns`, as [`Indexer::read_batch`] hands them back, at `tiers`:
+    /// chunks them, keeps only the chunks whose id isn't already stored, embeds them in a single
+    /// append, and stamps the unit's state. Returns the new-chunk count (0 when empty or already
+    /// indexed).
     ///
     /// `progress` is the caller's label for the per-unit output line (e.g. `"text [1/3]"`) — the
     /// caller owns the counter because only it knows the iteration (which tier, how many owed).
@@ -640,19 +631,14 @@ impl Indexer {
     /// re-embedding or deleting what's unchanged. (A rewritten turn lands under new ids.) A unit's
     /// turns are written in one append, so a bulk source (many sessions in one unit) stays a single
     /// Lance fragment rather than one per session.
-    async fn write_unit(
-        &mut self,
-        i: usize,
-        turns: &[traces::Turn],
-        mut chunks: Vec<chunk::Chunk>,
-        target: Tier,
-        progress: &str,
-    ) -> Result<u64> {
+    async fn write_unit(&mut self, i: usize, turns: &[traces::Turn], tiers: &[Tier], progress: &str) -> Result<u64> {
+        let target = *tiers.iter().max().expect("a pass covers at least one tier");
         let (key, sig) = {
             let unit = &self.units[i].1;
             (unit.key.clone(), unit.signature.clone())
         };
         let (sessions, label) = unit_summary(turns, &key);
+        let mut chunks = chunk::chunks_from_turns(turns, tiers, self.include_thinking);
         let mut repo_by_turn: HashMap<(&str, &str), String> = HashMap::new();
         for t in turns {
             if let Some(cwd) = &t.cwd {
@@ -911,8 +897,8 @@ async fn run_budgeted(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: b
             let consumed = batch.len();
             for (n, unit) in batch.into_iter().enumerate() {
                 let pos = from + n;
-                if let Some((turns, chunks)) = unit {
-                    idx.write_unit(units[pos], &turns, chunks, *tier, &label(pos)).await?;
+                if let Some(turns) = unit {
+                    idx.write_unit(units[pos], &turns, &[*tier], &label(pos)).await?;
                 }
                 done += 1;
                 if capped && start.elapsed() >= budget {
@@ -981,12 +967,12 @@ async fn index_sources(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: 
         let batch = indexer.read_batch(&all, from, &Tier::ALL, label)?;
         let (consumed, prep) = (batch.len(), t_batch.elapsed());
         for (n, unit) in batch.into_iter().enumerate() {
-            let Some((turns, chunks)) = unit else {
+            let Some(turns) = unit else {
                 continue;
             };
             let i = from + n;
             let t_unit = Instant::now();
-            let added = indexer.write_unit(i, &turns, chunks, target, &label(i)).await?;
+            let added = indexer.write_unit(i, &turns, &Tier::ALL, &label(i)).await?;
 
             // Estimate off the first session that actually embedded — its share of the batch's read
             // and scan, plus its own embedding — and ask before a long haul.
@@ -1048,7 +1034,7 @@ pub fn check(path: &Path, no_thinking: bool, limit: Option<usize>) -> Result<Che
             }
         })?;
         let mut all: Vec<&mut [traces::Turn]> = read.iter_mut().flatten().map(Vec::as_mut_slice).collect();
-        let mut chunked = chunks_of(&mut all, &Tier::ALL, !no_thinking, scanner.as_ref())?.into_iter();
+        sanitize_units(&mut all, &Tier::ALL, !no_thinking, scanner.as_ref())?;
         let mut rejections = rejections.into_iter();
         for (n, unit_turns) in read.iter().enumerate() {
             let Some(unit_turns) = unit_turns else {
@@ -1060,7 +1046,7 @@ pub fn check(path: &Path, no_thinking: bool, limit: Option<usize>) -> Result<Che
                 );
                 continue;
             };
-            let unit_chunks = chunked.next().expect("one chunk list per unit read");
+            let unit_chunks = chunk::chunks_from_turns(unit_turns, &Tier::ALL, !no_thinking);
             text.push_str(&format!(
                 "  {} — {} turns, {} chunks\n",
                 units[from + n].key,
