@@ -95,7 +95,24 @@ fn funes(home: &Path, funes_home: &Path, log: &Path, args: &[&str]) -> Output {
 fn funes_pinned(home: &Path, funes_home: &Path, log: &Path, args: &[&str]) -> Output {
     let mut argv = vec![env!("CARGO_BIN_EXE_funes")];
     argv.extend(args);
-    run_with(&argv, home, funes_home, log, None)
+    run_with(&argv, home, funes_home, log, None, None)
+}
+
+/// [`funes_at_a_terminal`], run from `cwd`.
+fn funes_at_a_terminal_in(cwd: &Path, home: &Path, funes_home: &Path, log: &Path, args: &[&str]) -> Output {
+    let script = home.join("answers.exp");
+    fs::write(&script, ANSWER_YES).unwrap();
+    let script = script.to_str().unwrap().to_string();
+    let mut argv = vec!["expect", "-f", &script, "--", env!("CARGO_BIN_EXE_funes")];
+    argv.extend(args);
+    run_with(
+        &argv,
+        home,
+        funes_home,
+        log,
+        Some(&home.join("integrations")),
+        Some(cwd),
+    )
 }
 
 /// `funes <args>` against `home`, at a terminal that says yes to what funes asks.
@@ -118,16 +135,26 @@ fn funes_at_a_terminal_answering(home: &Path, funes_home: &Path, log: &Path, arg
 /// names `home`'s own directory: authoritative, so only what it holds is consulted, never a
 /// checkout or the bucket, and it is empty unless a test supplies a bundle there.
 fn run(argv: &[&str], home: &Path, funes_home: &Path, log: &Path) -> Output {
-    run_with(argv, home, funes_home, log, Some(&home.join("integrations")))
+    run_with(argv, home, funes_home, log, Some(&home.join("integrations")), None)
 }
 
-fn run_with(argv: &[&str], home: &Path, funes_home: &Path, log: &Path, integrations: Option<&Path>) -> Output {
+fn run_with(
+    argv: &[&str],
+    home: &Path,
+    funes_home: &Path,
+    log: &Path,
+    integrations: Option<&Path>,
+    cwd: Option<&Path>,
+) -> Output {
     let mut cmd = Command::new("sh");
     cmd.args(["-c", r#"umask 002; exec "$@""#, "sh"]).args(argv);
     match integrations {
         Some(dir) => cmd.env("FUNES_INTEGRATIONS", dir),
         None => cmd.env_remove("FUNES_INTEGRATIONS"),
     };
+    if let Some(cwd) = cwd {
+        cmd.current_dir(cwd);
+    }
     cmd.env("HOME", home)
         .env("FUNES_HOME", funes_home)
         .env("FUNES_TEST_SETUP_LOG", log)
@@ -295,6 +322,32 @@ fn an_integration_installs_from_a_directory_named_on_the_command_line() {
         "{}",
         stderr(&out)
     );
+}
+
+/// A directory named relative to where the command ran is recorded absolute: what an update
+/// follows later does not depend on where it runs then.
+#[test]
+fn a_relative_source_is_recorded_absolute() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let funes_home = tmp.path().join("funes");
+    let log = tmp.path().join("setup.log");
+    fs::create_dir_all(&home).unwrap();
+    let elsewhere = bundle(&tmp.path().join("elsewhere/clyde"), "clyde", 1, "");
+
+    let out = funes_at_a_terminal_in(
+        tmp.path(),
+        &home,
+        &funes_home,
+        &log,
+        &["add", "clyde", "--from", "elsewhere/clyde"],
+    );
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+    let recorded: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(home.join(".funes/agents/clyde.json")).unwrap()).unwrap();
+    let path = PathBuf::from(recorded["origin"]["path"].as_str().unwrap());
+    assert!(path.is_absolute(), "{}", path.display());
+    assert_eq!(path.canonicalize().unwrap(), elsewhere.canonicalize().unwrap());
 }
 
 /// Installed, an integration runs as installed: nothing is fetched to rebind or remove it, and a

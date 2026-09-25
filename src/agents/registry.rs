@@ -544,20 +544,21 @@ pub struct Provisioned {
 }
 
 /// Resolve `id`'s files: what `from` names, else `$FUNES_INTEGRATIONS` if set — authoritative, so
-/// a test or a fork cannot reach the network by accident — else the catalog.
+/// a test or a fork cannot reach the network by accident — else the catalog. A directory is made
+/// absolute here: the record names it, and an update follows it, from wherever funes runs then.
 fn source_for(id: &str, from: Option<&str>) -> Result<Source> {
     if let Some(from) = from {
         if from.starts_with("hf://") {
             return Ok(Source::Archive(from.to_string()));
         }
-        let dir = PathBuf::from(from);
+        let dir = std::path::absolute(from).with_context(|| format!("resolving {from}"))?;
         if !dir.is_dir() {
             bail!("{from} is not a directory, nor an hf://buckets/… archive URL");
         }
         return Ok(Source::Named(dir));
     }
     if let Some(dir) = std::env::var_os("FUNES_INTEGRATIONS") {
-        let dir = PathBuf::from(dir).join(id);
+        let dir = std::path::absolute(PathBuf::from(dir).join(id)).context("resolving $FUNES_INTEGRATIONS")?;
         if !dir.is_dir() {
             return Err(Absent(format!("$FUNES_INTEGRATIONS holds no {id}")).into());
         }
