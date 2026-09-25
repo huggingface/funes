@@ -24,8 +24,9 @@ command is idempotent, so an already-absent integration is a successful no-op.
 **Updating an install you already have: `funes add` again.** Re-running it is idempotent: it
 rebinds the memory you name and re-runs the installed integration's setup, which clears what an
 older funes put where the current one no longer looks. The integration itself stays at the release
-you installed until you ask — `--update` fetches its newest release for this funes first — except
-that an install this funes cannot run, one another funes made, is brought forward without asking.
+you installed until you ask — `--update` fetches its newest release for this funes first, from
+where it came: the catalog, or the directory or archive named at install — except that an install
+this funes cannot run, one another funes made, is brought forward without asking.
 `funes remove` first is for a clean slate — it takes the install away in full, your memory aside:
 
 ```bash
@@ -209,12 +210,14 @@ contract this funes cannot run is refreshed regardless. The source, in order: wh
 — a directory holding the integration, or an `hf://buckets/<owner>/<bucket>/<path>/<id>.tar.gz`
 archive published with a `SHA256SUMS` beside it; the directory `$FUNES_INTEGRATIONS` names, when
 set — authoritative, consulted on every run, and nothing else is; the checkout this funes was built
-from, when it exists; the release bucket, where the four maintained integrations ship as
-checksummed archives. A source that cannot be reached leaves the installed copy to run. `funes remove` fetches nothing: it runs the installed copy, unless this
+from, when it exists; the integrations catalog — `hf://buckets/huggingface/funes-integrations/catalog.json`,
+naming each maintained integration's releases — from which funes takes the newest for its contract
+and checks the archive against the digest the catalog names. A source that cannot be reached
+leaves the installed copy to run. `funes remove` fetches nothing: it runs the installed copy, unless this
 funes cannot run it. An id with no files anywhere is an error naming what is installed.
 
-funes vouches for files it built or published — its own checkout, or the release bucket's archive
-whose checksum matched — and runs them without asking. Anything else — what `--from` names, a
+funes vouches for files it built or published — its own checkout, or a release the catalog names
+whose digest matched — and runs them without asking. Anything else — what `--from` names, a
 `$FUNES_INTEGRATIONS` directory, files it has no record of installing — is confirmed at the
 terminal before `setup` runs, naming the package by publisher and version and where it came from;
 off a terminal, funes refuses rather than assumes. An archive's checksum proves it arrived intact,
@@ -231,7 +234,7 @@ in place by hand — are asked about every time. The record goes with the direct
 So a fifth integration installs from wherever its publisher put it: `funes add <id> --from <dir>`
 for a directory holding it, `funes add <id> --from hf://buckets/<owner>/<bucket>/<path>/<id>.tar.gz`
 for a published archive — confirmed once, and remembered until its files change. Installing one by
-name alone is for the maintained four.
+name alone is for what the catalog lists: the maintained four.
 
 ### What the managed `add` assumes
 

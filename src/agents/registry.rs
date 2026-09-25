@@ -7,10 +7,9 @@
 use anyhow::{bail, Context, Result};
 use chrono::{SecondsFormat, Utc};
 use hf_hub::buckets::BucketDownload;
-use hf_hub::HFError;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -56,11 +55,89 @@ fn is_repo(s: &str) -> bool {
 
 /// `MAJOR.MINOR.PATCH`, digits only.
 fn is_release_version(s: &str) -> bool {
-    let parts: Vec<&str> = s.split('.').collect();
-    parts.len() == 3
-        && parts
-            .iter()
-            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+    release_key(s).is_some()
+}
+
+/// A release version as something to order by, or `None` for what is not one.
+fn release_key(s: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = s.split('.').map(|p| {
+        (!p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| p.parse::<u64>().ok())
+            .flatten()
+    });
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(Some(a)), Some(Some(b)), Some(Some(c)), None) => Some((a, b, c)),
+        _ => None,
+    }
+}
+
+/// The catalog format this funes reads.
+pub const CATALOG_VERSION: u32 = 1;
+
+/// The catalog of maintained integrations: each id's releases. Fields it does not know are
+/// ignored, so the catalog may say more than this funes reads.
+#[derive(Debug, Deserialize)]
+pub struct Catalog {
+    pub catalog_version: u32,
+    pub integrations: BTreeMap<String, Listing>,
+}
+
+/// One maintained integration's releases.
+#[derive(Debug, Deserialize)]
+pub struct Listing {
+    pub repo: String,
+    pub releases: Vec<Release>,
+}
+
+/// One release: where its archive is, and what it must digest to.
+#[derive(Debug, Deserialize, PartialEq)]
+pub struct Release {
+    pub version: String,
+    pub contract_version: u32,
+    pub url: String,
+    pub sha256: String,
+}
+
+impl Catalog {
+    pub fn parse(text: &str) -> Result<Catalog> {
+        let catalog: Catalog = serde_json::from_str(text).context("parsing the integrations catalog")?;
+        if catalog.catalog_version != CATALOG_VERSION {
+            bail!(
+                "the integrations catalog is version {}, and this funes reads {CATALOG_VERSION} — run `funes update`",
+                catalog.catalog_version
+            );
+        }
+        Ok(catalog)
+    }
+
+    /// The newest release of `id` for this funes's contract; `None` when `id` is not listed.
+    pub fn resolve(&self, id: &str) -> Result<Option<&Release>> {
+        let Some(listing) = self.integrations.get(id) else {
+            return Ok(None);
+        };
+        let mut compatible: Vec<(&Release, (u64, u64, u64))> = Vec::new();
+        for release in &listing.releases {
+            let key = release_key(&release.version).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "the catalog lists {id} {:?}, which is not a release version",
+                    release.version
+                )
+            })?;
+            if release.contract_version == CONTRACT_VERSION {
+                compatible.push((release, key));
+            }
+        }
+        let Some(newest) = compatible.iter().max_by_key(|(_, key)| *key) else {
+            let contracts: BTreeSet<u32> = listing.releases.iter().map(|r| r.contract_version).collect();
+            let contracts: Vec<String> = contracts.iter().map(u32::to_string).collect();
+            bail!(
+                "the catalog lists {id} for contract {} only, and this funes speaks {CONTRACT_VERSION} — \
+                 run `funes update`, or name a release built for it with --from",
+                contracts.join(", ")
+            );
+        };
+        Ok(Some(newest.0))
+    }
 }
 
 /// A resolved integration: its directory and what it declares.
@@ -80,6 +157,8 @@ pub enum Origin {
     Directory { path: PathBuf },
     /// A published archive, verified against the checksum beside it.
     Archive { url: String, sha256: String },
+    /// The release the catalog named, verified against the digest it gave.
+    Catalog { url: String, sha256: String },
 }
 
 impl std::fmt::Display for Origin {
@@ -87,7 +166,7 @@ impl std::fmt::Display for Origin {
         match self {
             Origin::Checkout { path } => write!(f, "the checkout at {}", path.display()),
             Origin::Directory { path } => write!(f, "{}", path.display()),
-            Origin::Archive { url, .. } => f.write_str(url),
+            Origin::Archive { url, .. } | Origin::Catalog { url, .. } => f.write_str(url),
         }
     }
 }
@@ -416,12 +495,12 @@ enum Source {
     Named(PathBuf),
     /// An archive named on the command line, `hf://buckets/…/<id>.tar.gz`.
     Archive(String),
-    /// The archive published in the release bucket.
-    Published,
+    /// The release the catalog of maintained integrations names.
+    Catalog,
 }
 
-/// No files for an id anywhere funes looks: `$FUNES_INTEGRATIONS` holds none, or the release bucket
-/// publishes none for this contract. A source funes could not reach is any other error.
+/// No files for an id anywhere funes looks: `$FUNES_INTEGRATIONS` holds none, or the catalog lists
+/// none. A source funes could not reach is any other error.
 #[derive(Debug)]
 pub struct Absent(String);
 
@@ -493,18 +572,12 @@ fn source_for(id: &str, from: Option<&str>) -> Result<Source> {
         match owned_by_me(manifest_dir, &checkout.join(SETUP), 0o002) {
             Ok(()) => return Ok(Source::Checkout(checkout)),
             Err(e) => eprintln!(
-                "note: the checkout at {} is not yours alone ({e:#}) — using the published {id} integration instead.",
+                "note: the checkout at {} is not yours alone ({e:#}) — using the catalog's {id} integration instead.",
                 checkout.display()
             ),
         }
     }
-    Ok(Source::Published)
-}
-
-/// The bucket prefix for the contract this funes speaks: an integration fix reaches installed
-/// binaries without a release, and a binary only reads the layout it understands.
-fn published_prefix() -> String {
-    format!("integrations/v{CONTRACT_VERSION}")
+    Ok(Source::Catalog)
 }
 
 /// Install `id`'s files into the registry, from what `from` names when it names one. Only a file
@@ -552,17 +625,40 @@ pub async fn provision(root: &Path, id: &str, from: Option<&str>) -> Result<Prov
                 files,
             })
         }
-        Source::Published => {
+        Source::Catalog => {
             let staging = tempfile::tempdir().context("creating a staging directory")?;
-            let (archive, sha256) = fetch_published(id, staging.path()).await?;
+            let catalog = fetch_catalog(staging.path()).await?;
+            let release = catalog.resolve(id)?.ok_or_else(|| {
+                Absent(format!(
+                    "the integrations catalog lists no {id} — name where it comes from with --from"
+                ))
+            })?;
+            eprintln!("fetching the {id} integration {}…", release.version);
+            let (archive, sha256) = fetch_archive(&release.url, staging.path()).await?;
+            if sha256 != release.sha256 {
+                bail!(
+                    "{} is not the release the catalog names: it digests to {sha256}, the catalog says {}",
+                    release.url,
+                    release.sha256
+                );
+            }
             validate_archive(&archive)?;
             let unpacked = staging.path().join("unpacked");
             unpack(&archive, &unpacked)?;
+            let declared = read_manifest(&unpacked.join("manifest.json"), id)?;
+            if declared.version.as_deref() != Some(release.version.as_str()) {
+                bail!(
+                    "{} declares version {}, and the catalog lists it as {}",
+                    release.url,
+                    declared.version.as_deref().unwrap_or("none"),
+                    release.version
+                );
+            }
             let files = install_from(root, id, &unpacked)?;
             Ok(Provisioned {
                 provenance: Provenance::Vouched,
-                origin: Origin::Archive {
-                    url: hub::release_asset_url(&format!("{}/{id}.tar.gz", published_prefix())),
+                origin: Origin::Catalog {
+                    url: release.url.clone(),
                     sha256,
                 },
                 files,
@@ -602,20 +698,19 @@ fn refuse_takeover(root: &Path, id: &str, incoming: &Manifest) -> Result<()> {
     Ok(())
 }
 
-/// Download `id`'s published archive into `dir` and check it against the prefix's `SHA256SUMS`;
-/// the archive, and its digest as hex.
-async fn fetch_published(id: &str, dir: &Path) -> Result<(PathBuf, String)> {
-    eprintln!("fetching the {id} integration…");
-    let url = hub::release_asset_url(&format!("{}/{id}.tar.gz", published_prefix()));
-    fetch_archive(&url, dir)
+/// Download the catalog of maintained integrations into `dir` and read it.
+async fn fetch_catalog(dir: &Path) -> Result<Catalog> {
+    let url = hub::catalog_url();
+    let (owner, name, path) = hub::parse_bucket_url(&url)?;
+    let local = dir.join("catalog.json");
+    hub::bucket(&owner, &name, true)?
+        .download_files()
+        .files(vec![BucketDownload::new(path, &local)])
+        .send()
         .await
-        .map_err(|e| match e.downcast_ref::<HFError>() {
-            Some(HFError::EntryNotFound { .. }) => Absent(format!(
-                "the funes release bucket publishes no {id} integration for contract {CONTRACT_VERSION}"
-            ))
-            .into(),
-            _ => e,
-        })
+        .with_context(|| format!("downloading {url}"))?;
+    let text = std::fs::read_to_string(&local).with_context(|| format!("reading {}", local.display()))?;
+    Catalog::parse(&text)
 }
 
 /// Download the archive an `hf://buckets/…/<name>.tar.gz` URL names into `dir`, with the
@@ -1243,6 +1338,40 @@ mod tests {
         assert!(status.success());
         let err = format!("{:#}", validate_archive(&absolute).unwrap_err());
         assert!(err.contains("outside the archive's root"), "{err}");
+    }
+
+    /// The catalog names an alias's releases; funes takes the newest for its contract.
+    #[test]
+    fn the_catalog_resolves_an_alias_to_its_newest_release_for_this_contract() {
+        let text = format!(
+            r#"{{"catalog_version": 1, "integrations": {{
+                "pi": {{"repo": "huggingface/funes-integrations", "releases": [
+                    {{"version": "1.0.0", "contract_version": {c}, "url": "hf://buckets/huggingface/funes-integrations/pi/1.0.0/pi.tar.gz", "sha256": "aa"}},
+                    {{"version": "1.10.0", "contract_version": {c}, "url": "hf://buckets/huggingface/funes-integrations/pi/1.10.0/pi.tar.gz", "sha256": "bb"}},
+                    {{"version": "1.9.0", "contract_version": {c}, "url": "hf://buckets/huggingface/funes-integrations/pi/1.9.0/pi.tar.gz", "sha256": "cc"}},
+                    {{"version": "2.0.0", "contract_version": {next}, "url": "hf://buckets/huggingface/funes-integrations/pi/2.0.0/pi.tar.gz", "sha256": "dd", "notes": "ignored"}}
+                ]}},
+                "codex": {{"repo": "huggingface/funes-integrations", "releases": [
+                    {{"version": "3.0.0", "contract_version": {next}, "url": "hf://buckets/x/y/codex.tar.gz", "sha256": "ee"}}
+                ]}}
+            }}}}"#,
+            c = CONTRACT_VERSION,
+            next = CONTRACT_VERSION + 1
+        );
+        let catalog = Catalog::parse(&text).unwrap();
+        let pi = catalog.resolve("pi").unwrap().unwrap();
+        assert_eq!(pi.version, "1.10.0", "newest by number, not by text, for this contract");
+        assert!(catalog.resolve("clyde").unwrap().is_none(), "unlisted is not an error");
+        let err = catalog.resolve("codex").unwrap_err().to_string();
+        assert!(
+            err.contains(&format!("contract {} only", CONTRACT_VERSION + 1)) && err.contains("--from"),
+            "{err}"
+        );
+
+        let err = Catalog::parse(r#"{"catalog_version": 2, "integrations": {}}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("funes update"), "{err}");
     }
 
     #[test]

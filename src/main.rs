@@ -224,7 +224,7 @@ enum Cmd {
         /// an installed integration runs as installed.
         #[arg(long)]
         update: bool,
-        /// Install the integration from here rather than from the release bucket: a directory
+        /// Install the integration from here rather than from the catalog: a directory
         /// holding it, or an `hf://buckets/<owner>/<bucket>/<path>/<id>.tar.gz` archive with a
         /// `SHA256SUMS` beside it.
         #[arg(long, value_name = "DIR|URL")]
@@ -562,7 +562,18 @@ async fn add_agent(id: &str, memory: AddMemory, update: bool, from: Option<&str>
             || from.is_some()
             || std::env::var_os("FUNES_INTEGRATIONS").is_some()
             || registry::speaks_another_contract(&root, id);
-        let (integration, provisioned) = prepare_agent(id, refresh, from).await?;
+        // An update comes from where the install came: a directory or an archive named once is
+        // named again; the catalog resolves itself.
+        let from: Option<String> = from.map(str::to_string).or_else(|| {
+            registry::installed(&root, id)
+                .filter(|_| update)
+                .and_then(|record| match record.origin {
+                    registry::Origin::Directory { path } => Some(path.to_string_lossy().into_owned()),
+                    registry::Origin::Archive { url, .. } => Some(url),
+                    registry::Origin::Checkout { .. } | registry::Origin::Catalog { .. } => None,
+                })
+        });
+        let (integration, provisioned) = prepare_agent(id, refresh, from.as_deref()).await?;
         let resolved = resolve_add_memory(memory).await?;
         let record = provisioned.map(|(origin, files)| registry::Installed::new(&integration.manifest, origin, files));
         let install = |memory: Option<String>| async move {

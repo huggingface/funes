@@ -163,9 +163,14 @@ pub(crate) fn verify_checksum(path: &Path, manifest: &Path, asset: &str) -> Resu
     Ok(actual)
 }
 
-/// The `hf://` URL of a path in the release bucket.
-pub(crate) fn release_asset_url(path: &str) -> String {
-    format!("hf://buckets/{BUCKET_OWNER}/{BUCKET_NAME}/{path}")
+/// The public bucket holding the maintained integrations' releases and the catalog that names
+/// them — its own, so publishing an integration grants nothing over the binary's releases.
+const INTEGRATIONS_BUCKET_OWNER: &str = "huggingface";
+const INTEGRATIONS_BUCKET_NAME: &str = "funes-integrations";
+
+/// The catalog of maintained integrations, as an `hf://buckets/…` URL.
+pub(crate) fn catalog_url() -> String {
+    format!("hf://buckets/{INTEGRATIONS_BUCKET_OWNER}/{INTEGRATIONS_BUCKET_NAME}/catalog.json")
 }
 
 pub(crate) fn expected_digest(manifest: &str, asset: &str) -> Result<[u8; 32]> {
