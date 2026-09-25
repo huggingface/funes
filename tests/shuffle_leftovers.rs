@@ -1,10 +1,5 @@
-//! lance leaks the scratch directory of every IVF index build (fixed upstream in 13.0.0; funes pins
-//! 11), so `build_indexes` reclaims the settled ones on its way in. This exercises that against a
-//! real build rather than a hand-made directory: it is the tripwire for the file names the sweep
-//! matches on, which are lance's to change.
-//!
-//! Its own test binary so its `$TMPDIR` can't race another integration test's — the sweep reads the
-//! process-wide temp directory, and a leftover there can't be attributed to a particular build.
+//! The tripwire for the file names `build_indexes`'s sweep matches on, which are lance's to change.
+//! Its own test binary so its `$TMPDIR` can't race another integration test's.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -14,12 +9,10 @@ use arrow_array::{FixedSizeListArray, Float32Array, RecordBatch, RecordBatchIter
 use arrow_schema::{DataType, Field, Schema};
 use lance::Dataset;
 
-/// Wide enough to train IVF: lance needs a few hundred rows, below which it declines to build the
-/// vector index at all and nothing is shuffled.
+/// Wide enough to train IVF; below a few hundred rows lance builds no vector index and shuffles nothing.
 const ROWS: usize = 512;
 
-/// What a lance shuffle directory holds. Spelled out again here rather than shared with the sweep:
-/// the two lists agreeing is the property under test.
+/// Spelled out again rather than shared with the sweep: the two agreeing is the property under test.
 const SHUFFLE_FILES: [&str; 4] = [
     "shuffle_data.lance",
     "shuffle_data.spill",
@@ -30,8 +23,7 @@ const SHUFFLE_FILES: [&str; 4] = [
 #[test]
 fn a_settled_shuffle_dir_is_reclaimed_by_the_next_build() {
     let tmp = tempfile::tempdir().unwrap();
-    // Before the runtime exists, so no other thread can be reading the environment, and before
-    // anything asks for a temp directory: both lance and the sweep resolve `$TMPDIR` per call.
+    // Before the runtime exists, so no other thread can be reading the environment.
     std::env::set_var("TMPDIR", tmp.path());
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -39,7 +31,7 @@ fn a_settled_shuffle_dir_is_reclaimed_by_the_next_build() {
         .unwrap();
 
     rt.block_on(async {
-        // Outside the `.tmp*` namespace, so the dataset itself never reads as a leftover.
+        // Outside the `.tmp*` namespace, so the dataset never reads as a leftover.
         let mut ds = write_dataset(&tmp.path().join("memory.lance")).await;
 
         let before = tmp_dirs(tmp.path());
@@ -90,8 +82,7 @@ fn holds_only_shuffle_files(dir: &Path) -> bool {
     !names.is_empty() && names.iter().all(|n| SHUFFLE_FILES.contains(&n.as_str()))
 }
 
-/// A `text` + `vector` dataset at `uri`, shaped like funes's `chunks` table as far as the index
-/// build cares: enough distinct vectors for IVF to find centroids.
+/// A `text` + `vector` dataset at `uri`, shaped like `chunks` as far as the index build cares.
 async fn write_dataset(uri: &Path) -> Dataset {
     let dim = funes::memory::dataset::DIM;
     let item = Arc::new(Field::new("item", DataType::Float32, true));

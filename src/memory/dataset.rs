@@ -150,18 +150,15 @@ const SHUFFLE_FILES: [&str; 4] = [
     "shuffle_offsets.spill",
 ];
 
-/// A shuffle directory is fair game only once no build could still be writing to it.
+/// How long a shuffle directory must have sat untouched before a sweep may call it settled.
 const SHUFFLE_LEFTOVER_AGE: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// Best-effort: remove the shuffle directories a previous IVF build left in `$TMPDIR`.
 ///
-/// Building the IVF index hands lance a temp directory whose guard lance drops before the shuffler
-/// writes to it (`index/vector.rs::prepare_vector_segment_build`), so the writer recreates the
-/// directory and nothing owns it — every build leaks one, tens of MB apiece. lance fixed this in
-/// 13.0.0; 11 and 12 both leak, so this sweep goes away when funes moves off them. Sweeping
-/// on the way in rather than on the way out is what keeps this safe: a directory another process is
-/// still filling is younger than [`SHUFFLE_LEFTOVER_AGE`], and one it has finished with holds
-/// nothing but [`SHUFFLE_FILES`] (mid-write, object_store's own staging files sit alongside them).
+/// lance drops the scratch directory's guard before the shuffler writes to it, so every build leaks
+/// one, tens of MB apiece (fixed in lance 13.0.0). Swept on entry, never on exit: age says a
+/// directory is settled, not that nothing is still reading it, so the current build's own is left
+/// to a later run.
 fn sweep_shuffle_leftovers(tmp_root: &std::path::Path) {
     let Ok(entries) = std::fs::read_dir(tmp_root) else {
         return;
