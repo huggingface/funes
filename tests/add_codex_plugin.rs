@@ -66,18 +66,10 @@ async fn add_codex_installs_the_plugin_and_clears_a_pre_plugin_install() {
     let skill = fs::read_to_string(plugin.join("skills/funes/SKILL.md")).unwrap();
     assert!(skill.contains("name: funes"), "{skill}");
 
-    // The scripts the hooks drive are symlinks in the checkout and must arrive as executable files.
-    for name in ["funes-index.sh", "funes-push.sh"] {
-        let path = plugin.join("scripts").join(name);
-        assert!(
-            !path.symlink_metadata().unwrap().file_type().is_symlink(),
-            "{name} is a file"
-        );
-        assert!(
-            fs::metadata(&path).unwrap().permissions().mode() & 0o111 != 0,
-            "{name} executable"
-        );
-    }
+    // The script the hooks drive must arrive as an executable file.
+    let script = plugin.join("scripts").join("funes-index.sh");
+    assert!(!script.symlink_metadata().unwrap().file_type().is_symlink());
+    assert!(fs::metadata(&script).unwrap().permissions().mode() & 0o111 != 0);
 
     let cfg: Value = serde_json::from_str(&fs::read_to_string(plugin.join("hooks.json")).unwrap()).unwrap();
     let stop = cfg["hooks"]["Stop"][0]["hooks"][0]["command"].as_str().unwrap();

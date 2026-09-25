@@ -83,10 +83,11 @@ install left in the consent allowlist, and removes funes's own hook scripts and 
 `funes-sync.log`; other hooks, approvals, and config keys remain. Removing an integration never
 deletes the indexed memory or source transcripts.
 
-Every agent drives the same two scripts, installed alongside: `funes-index.sh` (the per-turn
-local index) and `funes-push.sh` (the network publish). Each drains the hook payload and re-execs a
-detached worker, so the hook returns in well under a second and never blocks the turn or trips a
-timeout.
+Every agent drives one script of its bundle's own, `funes-index.sh`, in two modes: per turn it
+advances the local index, and as `funes-index.sh --publish`, at the session boundaries, it indexes
+and pushes. The turn's conversion comes first either way — in the script for Claude and Codex, in
+the extension or plugin for pi and hermes. The work runs detached, so the hook returns in well under
+a second and never blocks the turn or trips a timeout.
 
 ## Other agents
 

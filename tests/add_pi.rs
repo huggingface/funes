@@ -34,9 +34,8 @@ async fn add_pi_installs_the_integration_and_registers_it() {
         "the memory index.ts reads at startup"
     );
 
-    // The script and the automation it drives, executable — the shared scripts are symlinks in the
-    // checkout and must arrive as files.
-    for name in ["setup", "scripts/funes-index.sh", "scripts/funes-push.sh"] {
+    // The script and the automation it drives must arrive as executable files.
+    for name in ["setup", "scripts/funes-index.sh"] {
         let path = dir.join(name);
         assert!(
             !path.symlink_metadata().unwrap().file_type().is_symlink(),

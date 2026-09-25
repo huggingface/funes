@@ -55,18 +55,10 @@ async fn add_hermes_installs_the_plugin_and_leaves_a_pre_plugin_config_alone() {
     let register = fs::read_to_string(plugin.join("__init__.py")).unwrap();
     assert!(register.contains("def register(ctx)"), "{register}");
 
-    // The scripts the hooks drive are symlinks in the checkout and must arrive as executable files.
-    for name in ["funes-index.sh", "funes-push.sh"] {
-        let path = plugin.join(name);
-        assert!(
-            !path.symlink_metadata().unwrap().file_type().is_symlink(),
-            "{name} is a file"
-        );
-        assert!(
-            fs::metadata(&path).unwrap().permissions().mode() & 0o111 != 0,
-            "{name} executable"
-        );
-    }
+    // The script the hooks drive must arrive as an executable file.
+    let script = plugin.join("funes-index.sh");
+    assert!(!script.symlink_metadata().unwrap().file_type().is_symlink());
+    assert!(fs::metadata(&script).unwrap().permissions().mode() & 0o111 != 0);
     // The memory rides in a file the push hook reads, so the plugin stays a static file.
     assert_eq!(fs::read_to_string(plugin.join("memory")).unwrap(), "acme/kb\n");
 

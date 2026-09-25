@@ -87,6 +87,34 @@ convert_stale() {
     mv -f "$mark.new" "$mark"
 }
 
+# The boundary's second half: land the turns in the memory, waiting out a per-turn worker that may
+# still hold its lock, then push them to the memory `setup add` recorded beside this script. A first
+# push to a memory this index shares no chunks with is refused off a terminal; `funes add` clears it
+# once, interactively.
+publish() {
+    for attempt in 1 2 3 4 5; do
+        if "$funes" index --harness "$HARNESS" >>"$LOG" 2>&1; then
+            log "index[$HARNESS]: ok (before push)"
+            break
+        fi
+        log "index[$HARNESS]: busy or failed, retry $attempt"
+        sleep 2
+    done
+    memory=$(head -n 1 "$HERE/memory" 2>/dev/null | tr -d '[:space:]')
+    if [ -z "$memory" ]; then
+        log "push: skipped (no memory bound)"
+        return
+    fi
+    log "push: start ($memory)"
+    "$funes" push "$memory" >>"$LOG" 2>&1
+    rc=$?
+    case "$rc" in
+    0) log "push: ok" ;;
+    2) log "push: WARN — secrets held back; run \`funes scrub\`, then it publishes next run" ;;
+    *) log "push: FAILED (exit $rc)" ;;
+    esac
+}
+
 worker() {
     payload=$1
     mode=${2:-}
@@ -113,11 +141,8 @@ worker() {
     fi
     convert_stale "$jq" "$src"
 
-    # At a boundary the publish worker takes it from here: it indexes, waiting out a per-turn
-    # writer's lock, then pushes to the memory `setup add` recorded beside this script.
     if [ "$mode" = --publish ]; then
-        memory=$(head -n 1 "$HERE/memory" 2>/dev/null | tr -d '[:space:]')
-        bash "$HERE/funes-push.sh" --worker "$memory" "$HARNESS"
+        publish
         return
     fi
 

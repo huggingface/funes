@@ -1,1 +1,0 @@
-../../../scripts/automation/funes-push.sh

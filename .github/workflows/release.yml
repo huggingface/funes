@@ -383,8 +383,7 @@ jobs:
           "$HF" buckets cp scripts/install.sh "$ROOT/install.sh"
 
       # Publish the agent integrations `funes add` installs, keyed by the contract version each one
-      # declares rather than by the release tag, so a fix reaches binaries already installed. `-h`
-      # dereferences the symlinked shared scripts, leaving each archive self-contained.
+      # declares rather than by the release tag, so a fix reaches binaries already installed.
       - name: Publish the agent integrations to the Hugging Face bucket
         env:
           HF_TOKEN: ${{ secrets.HF_FUNES_RELEASE_TOKEN }}
@@ -398,7 +397,7 @@ jobs:
             [ -f "$MANIFEST" ] || continue
             CONTRACT=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["contract_version"])' "$MANIFEST")
             mkdir -p "integrations-dist/v$CONTRACT"
-            tar -czhf "integrations-dist/v$CONTRACT/$ID.tar.gz" -C "$DIR" .
+            tar -czf "integrations-dist/v$CONTRACT/$ID.tar.gz" -C "$DIR" .
           done
 
           for PREFIX in integrations-dist/v*/; do

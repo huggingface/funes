@@ -59,9 +59,8 @@ install_plugin() {
     dest=$1
     memory=${2:-}
     mkdir -p "$dest"
-    cp "$SOURCE/plugin.yaml" "$SOURCE/__init__.py" "$SOURCE/convert.py" \
-        "$SOURCE/funes-index.sh" "$SOURCE/funes-push.sh" "$dest/"
-    chmod +x "$dest/funes-index.sh" "$dest/funes-push.sh"
+    cp "$SOURCE/plugin.yaml" "$SOURCE/__init__.py" "$SOURCE/convert.py" "$SOURCE/funes-index.sh" "$dest/"
+    chmod +x "$dest/funes-index.sh"
     if [ -n "$memory" ]; then
         printf '%s\n' "$memory" >"$dest/memory"
     else

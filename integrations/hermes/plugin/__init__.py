@@ -1,9 +1,9 @@
 """funes automation for hermes: the lifecycle hooks that keep the memory current.
 
 Each completed turn is converted out of hermes's SQLite store into the turns file funes indexes, in
-this process — it is a read and an atomic write — and the index itself is spawned and forgotten, as
-is the publish. Both scripts detach a worker of their own, so nothing here waits on an embedder or
-a network. The publish script takes its memory from the `memory` file beside it, written by
+this process — it is a read and an atomic write — and the index is spawned detached and forgotten,
+as is the publish at a session boundary, so nothing here waits on an embedder or a network. The
+publish takes its memory from the `memory` file beside this plugin, written by
 `funes add hermes <memory>`; with no memory bound, the file is absent and the publish hooks are not
 registered.
 """
@@ -15,7 +15,6 @@ import time
 from . import convert
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-HARNESS = "hermes"
 
 
 def _beside(name):
@@ -79,7 +78,7 @@ def _spawn(script, *args):
 
 def _on_turn(**kwargs):
     _convert_stale(_convert(kwargs.get("session_id")))
-    _spawn("funes-index.sh", HARNESS)
+    _spawn("funes-index.sh")
 
 
 def register(ctx):
@@ -87,4 +86,4 @@ def register(ctx):
     if os.path.exists(os.path.join(HERE, "memory")):
         # `on_session_start` catches up whatever a session that never finalized left unpublished.
         for event in ("on_session_start", "on_session_finalize"):
-            ctx.register_hook(event, lambda **kwargs: _spawn("funes-push.sh", "", HARNESS))
+            ctx.register_hook(event, lambda **kwargs: _spawn("funes-index.sh", "--publish"))

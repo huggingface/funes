@@ -27,13 +27,11 @@ async function startup(memory) {
   writeFileSync(join(ext, "spool"), `${spool}\n`);
   writeFileSync(join(ext, "seed-pending"), `${sessions}\n`);
   if (memory) writeFileSync(join(ext, "memory"), `${memory}\n`);
-  // Each worker records what it was launched for and what the spool held when it started.
+  // The worker records what it was launched for and what the spool held when it started.
   const log = join(root, "worker.log");
-  for (const name of ["funes-index.sh", "funes-push.sh"]) {
-    const script = join(ext, "scripts", name);
-    writeFileSync(script, `#!/bin/sh\n{ printf '%s %s\\n' "${name}" "$*"; ls "${spool}"; } >"${log}.tmp" && mv "${log}.tmp" "${log}"\n`);
-    chmodSync(script, 0o755);
-  }
+  const script = join(ext, "scripts", "funes-index.sh");
+  writeFileSync(script, `#!/bin/sh\n{ printf 'funes-index.sh%s\\n' "${"${*:+ $*}"}"; ls "${spool}"; } >"${log}.tmp" && mv "${log}.tmp" "${log}"\n`);
+  chmodSync(script, 0o755);
 
   const handlers = {};
   const pi = { registerTool() {}, on(name, fn) { handlers[name] = fn; } };
@@ -51,11 +49,11 @@ async function startup(memory) {
 }
 
 const local = await startup("");
-if (local !== "funes-index.sh pi\nsession.funes.jsonl\n") {
+if (local !== "funes-index.sh\nsession.funes.jsonl\n") {
   throw new Error(`local memory: expected the index worker to find the seeded session, got:\n${local}`);
 }
 const bound = await startup("acme/kb");
-if (bound !== "funes-push.sh acme/kb pi\nsession.funes.jsonl\n") {
+if (bound !== "funes-index.sh --publish acme/kb\nsession.funes.jsonl\n") {
   throw new Error(`memory bound: expected the publish worker to find the seeded session, got:\n${bound}`);
 }
 process.exit(0);

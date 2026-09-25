@@ -195,18 +195,13 @@ class FunesMcp {
 
 const funes = new FunesMcp();
 
-// The automation scripts `funes add pi` installs beside this extension. A checkout has none, hence
-// the guard in runScript: a missing script means no automation, not an error.
+// The automation beside this extension: the index per turn, the publish at a boundary. It serves
+// the spool `funes add pi` recorded; a run from a checkout has none, and spawns nothing.
 const INDEX_SH = join(HERE, "scripts", "funes-index.sh");
-const PUSH_SH = join(HERE, "scripts", "funes-push.sh");
-// Both scripts take the harness to index: the push runs that index itself, so a boundary publishes
-// the turns a detached per-turn worker may not have stored yet.
-const HARNESS = "pi";
 
-// Run one automation script and forget it: each hands off to a detached worker, and no failure of
-// theirs is worth disturbing the session with.
+// Run the automation detached and forget it: no failure of its is worth disturbing the session with.
 function runScript(script: string, ...args: string[]) {
-  if (!existsSync(script)) return;
+  if (!SPOOL || !existsSync(script)) return;
   try {
     const child = spawn("bash", [script, ...args], { detached: true, stdio: "ignore" });
     child.on("error", () => {});
@@ -291,18 +286,18 @@ export default async function (pi: any) {
     // process that never shut down cleanly left unpublished — and whatever `setup` could not
     // convert, seeded first so the worker's index takes it in: the publish indexes before it pushes.
     const seeded = seedPending();
-    if (memory) runScript(PUSH_SH, memory, HARNESS);
-    else if (seeded) runScript(INDEX_SH, HARNESS);
+    if (memory) runScript(INDEX_SH, "--publish", memory);
+    else if (seeded) runScript(INDEX_SH);
   });
 
   // Per turn, so a session killed mid-flight is indexed up to its last completed turn.
   pi.on("turn_end", async (_event: any, ctx: any) => {
     convertStale(convertSession(ctx));
-    runScript(INDEX_SH, HARNESS);
+    runScript(INDEX_SH);
   });
 
   // A reload replaces the extension instance without ending the session: nothing to publish.
   pi.on("session_shutdown", async (event: any) => {
-    if (memory && event?.reason !== "reload") runScript(PUSH_SH, memory, HARNESS);
+    if (memory && event?.reason !== "reload") runScript(INDEX_SH, "--publish", memory);
   });
 }
