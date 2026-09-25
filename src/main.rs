@@ -570,7 +570,7 @@ async fn add_agent(id: &str, memory: AddMemory, update: bool, from: Option<&str>
                 .and_then(|record| match record.origin {
                     registry::Origin::Directory { path } => Some(path.to_string_lossy().into_owned()),
                     registry::Origin::Archive { url, .. } => Some(url),
-                    registry::Origin::Checkout { .. } | registry::Origin::Catalog { .. } => None,
+                    registry::Origin::Catalog { .. } => None,
                 })
         });
         let (integration, provisioned) = prepare_agent(id, refresh, from.as_deref()).await?;
@@ -685,7 +685,7 @@ fn unknown_agent(root: &Path, id: &str, e: anyhow::Error) -> anyhow::Error {
         format!("installed: {}", installed.join(", "))
     };
     e.context(format!(
-        "no {id} integration on this machine ({listing}) — see docs/add.md for the agents funes ships and how to add your own"
+        "no {id} integration on this machine ({listing}) — see docs/add.md for the maintained agents and how to add your own"
     ))
 }
 

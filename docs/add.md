@@ -49,9 +49,11 @@ you have.
 | `hermes` | ✅ | ✅ **beta** (plugin hooks) | ✅ (with a memory bound) |
 | `pi` | ✅ | ✅ (extension events) | ✅ (with a memory bound) |
 
-These four ship with funes, which installs one on demand. The name is an integration id, not a fixed
-list: `funes add <id>` runs any integration installed under `~/.funes/agents/`, and an id nothing on
-this machine knows is refused with what is installed rather than guessed at.
+These four are maintained in [huggingface/funes-integrations](https://github.com/huggingface/funes-integrations)
+and released on their own; `funes add <id>` installs the newest release for this funes. The name is
+an integration id, not a fixed list: `funes add <id>` runs any integration installed under
+`~/.funes/agents/`, and one the catalog does not list installs from wherever its publisher put it,
+with `--from`.
 
 What exactly gets installed for each agent — and how the automation behaves — is in
 [automation.md](automation.md).
@@ -142,7 +144,7 @@ funes reads no agent's own transcripts. Each integration converts a session into
 `~/.funes/spool/<id>/<session id>.funes.jsonl` — at install for the history, then on every turn for
 the session in progress and any other changed since the last turn — and funes indexes what it finds
 there. The id names the spool; the
-`harness` each turn carries is the integration's own to choose (the four funes ships use their id,
+`harness` each turn carries is the integration's own to choose (the maintained four use their id,
 by convention), and `recall --harness` filters on what the turns carry, whatever is installed.
 
 The directory is funes's. A bundle only ever writes into it, and funes deletes a file once the whole
@@ -209,15 +211,15 @@ is otherwise: `--update` fetches its newest release for this funes first, and a 
 contract this funes cannot run is refreshed regardless. The source, in order: what `--from` names
 — a directory holding the integration, or an `hf://buckets/<owner>/<bucket>/<path>/<id>.tar.gz`
 archive published with a `SHA256SUMS` beside it; the directory `$FUNES_INTEGRATIONS` names, when
-set — authoritative, consulted on every run, and nothing else is; the checkout this funes was built
-from, when it exists; the integrations catalog — `hf://buckets/huggingface/funes-integrations/catalog.json`,
-naming each maintained integration's releases — from which funes takes the newest for its contract
+set — authoritative, consulted on every run, and nothing else is; the integrations catalog —
+`hf://buckets/huggingface/funes-integrations/catalog.json`, naming each maintained integration's
+releases — from which funes takes the newest for its contract
 and checks the archive against the digest the catalog names. A source that cannot be reached
 leaves the installed copy to run. `funes remove` fetches nothing: it runs the installed copy, unless this
 funes cannot run it. An id with no files anywhere is an error naming what is installed.
 
-funes vouches for files it built or published — its own checkout, or a release the catalog names
-whose digest matched — and runs them without asking. Anything else — what `--from` names, a
+funes vouches for files it published — a release the catalog names, whose digest matched — and runs
+them without asking. Anything else — what `--from` names, a
 `$FUNES_INTEGRATIONS` directory, files it has no record of installing — is confirmed at the
 terminal before `setup` runs, naming the package by publisher and version and where it came from;
 off a terminal, funes refuses rather than assumes. An archive's checksum proves it arrived intact,
@@ -225,8 +227,8 @@ not who published it, so an archive `--from` names is confirmed like a directory
 
 What `funes add` installed is recorded beside the directory, in `~/.funes/agents/<id>.json`: the
 package as its manifest declared it — publisher, id, version, contract — where the files came
-from — the checkout, the directory, or the archive and its checksum — and each of its files with
-its digest. That record is what lets a confirmed install run again unasked: before running an
+from — a directory, an archive, or the catalog's release, with its checksum — and each of its
+files with its digest. That record is what lets a confirmed install run again unasked: before running an
 installed copy, funes checks the package's files against it, and asks again only when one changed,
 or when the same source hands it different files. Files it has no record of installing — a copy put
 in place by hand — are asked about every time. The record goes with the directory on `funes remove`.
@@ -254,7 +256,7 @@ the automation — an archive, a colleague's export — is two steps: the bundle
 directory of your own, then `funes index` on that directory. A directory you own keeps its files;
 only the spool is drained. The converter is each bundle's own, not part of the contract, so its
 usage is listed here for the maintained four (`<bundle>` is `~/.funes/agents/<id>` once `funes add
-<id>` has run on any machine, or `integrations/<id>` in a checkout):
+<id>` has run on any machine, or `<id>/` in a checkout of huggingface/funes-integrations):
 
 | Agent | Converter |
 | --- | --- |

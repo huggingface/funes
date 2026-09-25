@@ -151,8 +151,6 @@ pub struct Integration {
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Origin {
-    /// The `integrations/` directory of the checkout this binary was built from.
-    Checkout { path: PathBuf },
     /// A directory the user pointed funes at.
     Directory { path: PathBuf },
     /// A published archive, verified against the checksum beside it.
@@ -164,7 +162,6 @@ pub enum Origin {
 impl std::fmt::Display for Origin {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Origin::Checkout { path } => write!(f, "the checkout at {}", path.display()),
             Origin::Directory { path } => write!(f, "{}", path.display()),
             Origin::Archive { url, .. } | Origin::Catalog { url, .. } => f.write_str(url),
         }
@@ -378,10 +375,9 @@ fn read_manifest(path: &Path, id: &str) -> Result<Manifest> {
 
 /// Refuse a `path` that someone other than the user running funes could have written, checking
 /// every directory from `top` down as well as the file itself: funes is about to execute what it
-/// finds there. `others` is the mode bits that give it away — group and world write for the
-/// registry, world write alone for a checkout, whose files a private group's umask leaves
-/// group-writable. Below `top`, a link is refused rather than followed: what it points at has
-/// parents of its own that this walk would never see.
+/// finds there. `others` is the mode bits that give it away: group and world write for the
+/// registry. Below `top`, a link is refused rather than followed: what it points at has parents of
+/// its own that this walk would never see.
 fn owned_by_me(top: &Path, path: &Path, others: u32) -> Result<()> {
     // SAFETY: `geteuid` reads a process attribute and cannot fail.
     let me = unsafe { libc::geteuid() };
@@ -487,8 +483,6 @@ impl Integration {
 
 /// Where an integration's files come from.
 enum Source {
-    /// The `integrations/` directory of the checkout this binary was built from.
-    Checkout(PathBuf),
     /// A directory `$FUNES_INTEGRATIONS` points at.
     Redirected(PathBuf),
     /// A directory named on the command line.
@@ -544,10 +538,7 @@ pub struct Provisioned {
 }
 
 /// Resolve `id`'s files: what `from` names, else `$FUNES_INTEGRATIONS` if set — authoritative, so
-/// a test or a fork cannot reach the network by accident — else the checkout this binary was built
-/// from, else the bucket. A released binary's build path does not exist where it runs, so it falls
-/// through; and what sits at that path is vouched for only while it is the user's own, since
-/// anyone could have put a tree there once the checkout is gone.
+/// a test or a fork cannot reach the network by accident — else the catalog.
 fn source_for(id: &str, from: Option<&str>) -> Result<Source> {
     if let Some(from) = from {
         if from.starts_with("hf://") {
@@ -566,17 +557,6 @@ fn source_for(id: &str, from: Option<&str>) -> Result<Source> {
         }
         return Ok(Source::Redirected(dir));
     }
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let checkout = manifest_dir.join("integrations").join(id);
-    if checkout.is_dir() {
-        match owned_by_me(manifest_dir, &checkout.join(SETUP), 0o002) {
-            Ok(()) => return Ok(Source::Checkout(checkout)),
-            Err(e) => eprintln!(
-                "note: the checkout at {} is not yours alone ({e:#}) — using the catalog's {id} integration instead.",
-                checkout.display()
-            ),
-        }
-    }
     Ok(Source::Catalog)
 }
 
@@ -588,14 +568,6 @@ pub async fn provision(root: &Path, id: &str, from: Option<&str>) -> Result<Prov
         bail!("{id:?} is not an integration id (lowercase [a-z0-9_-])");
     }
     match source_for(id, from)? {
-        Source::Checkout(src) => {
-            let files = install_from(root, id, &src)?;
-            Ok(Provisioned {
-                provenance: Provenance::Vouched,
-                origin: Origin::Checkout { path: src },
-                files,
-            })
-        }
         Source::Redirected(src) => {
             let files = install_from(root, id, &src)?;
             Ok(Provisioned {
@@ -879,7 +851,7 @@ fn copy_tree(src: &Path, dst: &Path, under: &str, files: &mut Files) -> Result<(
         let bytes = std::fs::read(&from).with_context(|| format!("reading {}", from.display()))?;
         files.insert(path, hex::encode(Sha256::digest(&bytes)));
         // The source's mode, closed to others: `open` refuses a file others could write, and a
-        // private group's umask leaves a checkout's files group-writable.
+        // private group's umask leaves a source directory's files group-writable.
         let mode = std::fs::Permissions::from_mode(meta.permissions().mode() & 0o777 & !0o022);
         // Written beside and renamed over: a link left at the destination is replaced, never
         // followed to wherever it points, and a reader never sees a half-written file.
@@ -984,7 +956,7 @@ mod tests {
     }
 
     #[test]
-    fn copying_a_checkout_follows_links_keeps_modes_and_keeps_local_state() {
+    fn copying_a_directory_follows_links_keeps_modes_and_keeps_local_state() {
         let tmp = tempfile::tempdir().unwrap();
         let shared = tmp.path().join("shared.sh");
         std::fs::write(&shared, "shared v1").unwrap();
@@ -1051,8 +1023,8 @@ mod tests {
         assert!(!dst.join("scripts/shared.sh").exists(), "refused before a byte moved");
     }
 
-    /// A private group's umask leaves a checkout's files group-writable; the registry's copy is
-    /// closed to others, or `open` would refuse what funes itself just wrote.
+    /// A private group's umask leaves a source directory's files group-writable; the registry's
+    /// copy is closed to others, or `open` would refuse what funes itself just wrote.
     #[test]
     fn a_copied_file_is_closed_to_other_writers() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1092,7 +1064,7 @@ mod tests {
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o775)).unwrap();
         assert!(
             owned_by_me(&top, &file, 0o002).is_ok(),
-            "group write is a checkout's own business"
+            "group write passes when world write alone is asked about"
         );
         let err = owned_by_me(&top, &file, 0o022).unwrap_err().to_string();
         assert!(err.contains("writable by other users"), "{err}");
@@ -1143,7 +1115,7 @@ mod tests {
         let rec = Installed::new(
             &declared,
             Origin::Archive {
-                url: "hf://buckets/huggingface/funes/integrations/v1/pi.tar.gz".to_string(),
+                url: "hf://buckets/huggingface/funes-integrations/pi/1.0.0/pi.tar.gz".to_string(),
                 sha256: "ab".repeat(32),
             },
             Files::new(),
@@ -1230,15 +1202,16 @@ mod tests {
         // With a record, the refusal says where the install came from.
         let rec = Installed::new(
             &open(&root, "pi").unwrap().manifest,
-            Origin::Checkout {
-                path: PathBuf::from("/src/funes/integrations/pi"),
+            Origin::Catalog {
+                url: "hf://buckets/huggingface/funes-integrations/pi/1.0.0/pi.tar.gz".to_string(),
+                sha256: "ab".repeat(32),
             },
             Files::new(),
         );
         record(&root, &rec).unwrap();
         let err = install_from(&root, "pi", &theirs).unwrap_err().to_string();
         assert!(
-            err.contains("acme's, from the checkout at /src/funes/integrations/pi"),
+            err.contains("acme's, from hf://buckets/huggingface/funes-integrations/pi/1.0.0/pi.tar.gz"),
             "{err}"
         );
 

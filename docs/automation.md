@@ -48,7 +48,7 @@ derives from `(session, turn, block, split)`, so a completed turn's chunks are i
 when they're indexed, and `funes index` re-embeds nothing already written. Keeping the network step
 (the push) off the per-turn path is what lets indexing run every turn cheaply.
 
-- **Claude Code** has a plugin system, so funes ships a hooks-only plugin (extracted to
+- **Claude Code** has a plugin system, so its integration is a hooks-only plugin (installed at
   `~/.funes/agents/claude/claude-plugin`) and registers it with `claude plugin marketplace add` +
   `claude plugin install`. Claude's loader activates the plugin's hooks — **funes never edits your
   `settings.json`**. `funes remove claude` removes the plugin, its local marketplace registration,
@@ -57,7 +57,7 @@ when they're indexed, and `funes index` re-embeds nothing already written. Keepi
   in the extension that already gives pi the read tools — the same scripts, run from `turn_end` and
   the session-boundary events. Nothing outside `~/.funes/agents/pi` is configured, so
   `funes remove pi` takes the whole install with it.
-- **Codex** has a plugin system too, so funes ships one plugin (installed at
+- **Codex** has a plugin system too, so its integration is one plugin (installed at
   `~/.funes/agents/codex/codex-plugin`) carrying both its hooks and a small skill, and registers it
   with `codex plugin marketplace add` + `codex plugin add`. The skill is what lets Codex recognize
   funes as memory before it loads any of its tools. **funes never edits your `config.toml`** — Codex

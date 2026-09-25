@@ -9,7 +9,6 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "scripts/**"
-      - "integrations/**"
       - ".github/workflows/ci.yml"
   push:
     branches: [main]
@@ -77,13 +76,6 @@ jobs:
 
       - name: Installer tests
         run: sh scripts/test-install.sh
-
-      # Each bundle's own suite: its converter, its setup and its hooks, driven against fakes.
-      - name: Integration tests
-        run: |
-          for agent in claude codex hermes pi; do
-            sh "integrations/$agent/test/run.sh"
-          done
 
   integration-test:
     permissions:

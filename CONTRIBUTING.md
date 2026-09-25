@@ -45,7 +45,6 @@ You need:
 cargo build --release          # binary at target/release/funes
 cargo test --lib               # unit tests — hermetic, no network
 cargo test                     # full suite; first run downloads the embedder/reranker weights
-sh integrations/<agent>/test/run.sh   # one bundle's own suite: converter, setup, hooks — no funes binary
 ```
 
 The tests that talk to the Hugging Face Hub (`remote_recall`, `push_round_trip`) skip
@@ -98,12 +97,13 @@ fine; CI runs them with the repository secret.
 
 An integration is a directory with a `manifest.json` and a `setup` executable; the contract, the
 environment `setup` gets, and the spool it writes into are in [docs/add.md](docs/add.md#the-integration-contract).
-The four under [integrations/](integrations/) are the worked examples — `pi/` is the smallest.
+The four Hugging Face maintains, in [huggingface/funes-integrations](https://github.com/huggingface/funes-integrations),
+are the worked examples — `pi/` is the smallest.
 `setup add` should convert the agent's existing sessions into the spool and install a hook that
 converts each finished session, then runs `funes index --harness <id>`; the converter writes
 [the turns format](docs/funes-jsonl.md), and `funes index --check <spool>` validates its output
 without writing anything. Keep a real transcript and the turns it must produce as the converter's
-test, the way each shipped bundle's `test/` does: a change that moves a chunk id re-keys sessions
+test, the way each maintained bundle's `test/` does: a change that moves a chunk id re-keys sessions
 users already hold.
 
 Try it from wherever it is: `funes add <id> --from /path/to/it`. funes confirms at the terminal
