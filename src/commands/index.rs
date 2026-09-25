@@ -1595,16 +1595,29 @@ mod tests {
 
     #[test]
     fn redact_scans_every_unit_in_one_pass_and_only_the_blocks_stored() {
+        // Finds the secret a text carries, so a finding must land on the unit it came from.
         struct Counting(std::cell::Cell<usize>);
         impl scan::SecretScanner for Counting {
             fn scan(&self, texts: &[&str]) -> Result<Vec<Vec<scan::Finding>>> {
                 self.0.set(self.0.get() + 1);
-                let hit = scan::Finding {
-                    detector: "PrivateKey".into(),
-                    raw: "SECRET".into(),
+                let finding = |detector: &str, raw: &str| scan::Finding {
+                    detector: detector.into(),
+                    raw: raw.into(),
                     decoder: "PLAIN".into(),
                 };
-                Ok(texts.iter().map(|_| vec![hit.clone()]).collect())
+                Ok(texts
+                    .iter()
+                    .map(|t| {
+                        let mut found = Vec::new();
+                        if t.contains("SECRET") {
+                            found.push(finding("PrivateKey", "SECRET"));
+                        }
+                        if t.contains("TOKEN") {
+                            found.push(finding("Slack", "TOKEN"));
+                        }
+                        found
+                    })
+                    .collect())
             }
         }
         let block = |bt: &str, text: &str| traces::Block {
@@ -1631,18 +1644,18 @@ mod tests {
             block("text", "note SECRET here"),
             block("thinking", "SECRET thought"),
         ])];
-        let mut b = vec![turn(vec![block("tool_result", "output SECRET dump")])];
+        let mut b = vec![turn(vec![block("tool_result", "output TOKEN dump")])];
         let scanner = Counting(std::cell::Cell::new(0));
         redact_units(&mut [&mut a, &mut b], &scanner, &chunk::Tier::ALL, false).unwrap();
         assert_eq!(scanner.0.get(), 1, "one scanner run for both units");
-        assert!(a[0].blocks[0].text.contains("[REDACTED:PrivateKey]"));
+        assert_eq!(a[0].blocks[0].text, "note [REDACTED:PrivateKey] here");
         assert_eq!(
             a[0].blocks[1].text, "SECRET thought",
             "a thinking block --no-thinking won't store is not scanned"
         );
-        assert!(
-            b[0].blocks[0].text.contains("[REDACTED:PrivateKey]"),
-            "every unit of the batch is scanned"
+        assert_eq!(
+            b[0].blocks[0].text, "output [REDACTED:Slack] dump",
+            "each unit of the batch gets its own secrets, and only those"
         );
     }
 
