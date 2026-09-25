@@ -37,6 +37,13 @@ One publish per memory at a time on a machine: a push that starts while another 
 says so and stops, and the next one picks up what it left. The hooks [`funes add`](add.md) installs
 run this at session boundaries automatically; see [automation.md](automation.md).
 
+### Temporary space
+
+Pushes stage reconstructed blocks, clean rows, and generated dataset files under `TMPDIR` when set.
+Otherwise, Linux uses `/var/tmp` to avoid the commonly RAM-backed `/tmp`; macOS uses its OS temporary
+directory. Allow enough free space there for the clean-row spool and generated dataset files
+together. Temporary files are removed when preparation or publication returns.
+
 ## Keeping secrets out: the gate and `funes scrub`
 
 When TruffleHog is available, indexing redacts detected credentials before storing a session. That
@@ -51,8 +58,11 @@ leaves *nothing* to publish does push exit non-zero (code `2`):
 
 ```console
 $ funes push <user|org>/funes-memory
-scanning 512 chunk(s) for secrets…
-hf://datasets/<user|org>/funes-memory: nothing published — held back 3 row(s) with secrets (AWS×2, PrivateKey×1); run `funes scrub`, then push again
+selecting chunks to publish…
+staging 512 chunk(s) for secret scanning…
+scanning 3 block(s) for secrets…
+preparing 0 clean chunk(s) for upload…
+hf://datasets/<user|org>/funes-memory: nothing published — held back 512 row(s) with secrets (AWS×2, PrivateKey×1); run `funes scrub`, then push again
 $ echo $?
 2
 ```

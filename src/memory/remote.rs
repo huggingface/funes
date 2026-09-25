@@ -17,8 +17,8 @@
 //!
 //! A multi-file write would then be several commits — non-atomic, no CAS. So the op runs through a
 //! [`CaptureStore`](super::capture_store::CaptureStore) installed via Lance's
-//! [`WrappingObjectStore`] seam: Lance's writes are captured in memory instead of hitting the Hub,
-//! and we ship the whole set as one guarded `create_commit`.
+//! [`WrappingObjectStore`] seam. Writes land in temporary files whose paths are passed to one
+//! guarded `create_commit`.
 //!
 //! # Why this shape
 //!
@@ -41,8 +41,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{ensure, Context, Result};
-use arrow_array::{RecordBatch, RecordBatchIterator};
-use arrow_schema::SchemaRef;
+use arrow_array::RecordBatchReader;
 use async_trait::async_trait;
 use bytes::Bytes;
 use hf_hub::progress::{Progress, ProgressEvent, ProgressHandler, UploadEvent};
@@ -53,9 +52,9 @@ use lance::dataset::{Dataset, NewColumnTransform, WriteParams};
 use lance::index::DatasetIndexExt;
 use lance_index::optimize::OptimizeOptions;
 use lance_io::object_store::WrappingObjectStore;
-use object_store::ObjectStore as OSObjectStore;
+use object_store::{path::Path as ObjectPath, ObjectStore as OSObjectStore};
 
-use super::capture_store::{CaptureStore, Captured};
+use super::capture_store::{CaptureStore, Captured, CapturedFile};
 use super::dataset;
 use super::fetch_store::{FetchStore, FileFetcher};
 use crate::hub;
@@ -78,7 +77,7 @@ pub(crate) enum Reindexed {
     Conflict,
 }
 
-/// Append `batches` to the remote Lance dataset at `dataset_uri` (an `hf://…/<table>.lance` URI)
+/// Append `reader` to the remote Lance dataset at `dataset_uri` (an `hf://…/<table>.lance` URI)
 /// and land them in one `create_commit` on branch `rev`, guarded by the current head. The append
 /// writes only data — a new fragment, manifest, and transaction — and leaves the new rows
 /// unindexed (refresh the index separately with [`reindex`]). `extra_files` (repo path → bytes,
@@ -94,27 +93,23 @@ pub(crate) async fn append(
     storage_options: HashMap<String, String>,
     rev: &str,
     message: String,
-    batches: Vec<RecordBatch>,
-    schema: SchemaRef,
+    reader: impl RecordBatchReader + Send + 'static,
     extra_files: &BTreeMap<String, Bytes>,
 ) -> Result<Appended> {
     let parent = head_oid(repo, rev).await?;
     let (mut ds, wrapper) = open_capturing(dataset_uri, storage_options).await?;
 
-    let reader = RecordBatchIterator::new(batches.into_iter().map(Ok), schema);
     ds.append(reader, None)
         .await
         .context("appending to the remote dataset")?;
 
     // Snapshot the captured writes before reading index stats: `index_statistics` can write a stats
     // migration through the same wrapper, and that must not leak into the data commit.
-    let mut files = captured_files(&wrapper);
+    let files = wrapper.captured.snapshot();
     let unindexed = max_unindexed_rows(&ds).await;
-    for (path, body) in extra_files {
-        files.insert(path.clone(), body.clone());
-    }
-
-    let (ops, _dir) = write_ops(&files)?;
+    let mut ops = capture_ops(&files);
+    let (extra_ops, _extra_dir) = write_ops(extra_files)?;
+    ops.extend(extra_ops);
     match send_commit(repo, ops, parent, rev, message).await {
         Ok(info) => Ok(Appended::Committed {
             oid: info.commit_oid.unwrap_or_else(|| "?".to_string()),
@@ -132,14 +127,13 @@ pub(crate) async fn append(
 pub(crate) async fn first_publish(
     repo: &HFRepository<RepoTypeDataset>,
     prefix: &str,
-    batches: Vec<RecordBatch>,
-    schema: SchemaRef,
+    reader: impl RecordBatchReader + Send + 'static,
     rev: &str,
     message: String,
     extra_files: &BTreeMap<String, Bytes>,
     on_phase: impl Fn(&str),
 ) -> Result<Option<String>> {
-    let staging = tempfile::tempdir()?;
+    let staging = tempfile::tempdir_in(dataset::staging_root())?;
     // Empty prefix = dataset at the repo root; joining "" would leave a stray trailing separator.
     let db_dir = if prefix.is_empty() {
         staging.path().to_path_buf()
@@ -148,14 +142,14 @@ pub(crate) async fn first_publish(
     };
     std::fs::create_dir_all(&db_dir)?;
     let table_uri = dataset::table_uri(&db_dir.to_string_lossy());
-    let reader = RecordBatchIterator::new(batches.into_iter().map(Ok), schema);
     let mut ds = Dataset::write(reader, &table_uri, Some(WriteParams::default()))
         .await
         .context("building the dataset for first publish")?;
     dataset::build_indexes(&mut ds, on_phase).await;
 
     let mut ops = Vec::new();
-    for entry in walkdir::WalkDir::new(&db_dir).into_iter().filter_map(|e| e.ok()) {
+    for entry in walkdir::WalkDir::new(&db_dir) {
+        let entry = entry.context("enumerating files for first publish")?;
         if !entry.file_type().is_file() {
             continue;
         }
@@ -218,11 +212,11 @@ pub(crate) async fn reindex(
             .context("optimizing the remote index")?;
     }
 
-    let files = captured_files(&wrapper);
+    let files = wrapper.captured.snapshot();
     if files.is_empty() {
         return Ok(Reindexed::AlreadyCurrent);
     }
-    let (ops, _dir) = write_ops(&files)?;
+    let ops = capture_ops(&files);
     match send_commit(repo, ops, parent, rev, message).await {
         Ok(info) => Ok(Reindexed::Committed(info.commit_oid.unwrap_or_else(|| "?".to_string()))),
         Err(e) if head_moved(&e) => Ok(Reindexed::Conflict),
@@ -249,9 +243,9 @@ pub async fn add_column(
     ds.add_columns(transform, Some(read_columns), None)
         .await
         .context("adding the remote column")?;
-    let files = captured_files(&wrapper);
+    let files = wrapper.captured.snapshot();
     ensure!(!files.is_empty(), "add_columns produced no files to commit");
-    let (ops, _dir) = write_ops(&files)?;
+    let ops = capture_ops(&files);
     let info = send_commit(repo, ops, parent, rev, message)
         .await
         .map_err(|e| anyhow::Error::new(e).context("add_column commit failed"))?;
@@ -265,7 +259,7 @@ async fn open_capturing(
     storage_options: HashMap<String, String>,
 ) -> Result<(Dataset, Arc<CaptureWrapper>)> {
     let wrapper = Arc::new(CaptureWrapper {
-        captured: Captured::default(),
+        captured: Captured::new()?,
     });
     let ds = DatasetBuilder::from_uri(dataset_uri)
         .with_storage_options(storage_options)
@@ -276,14 +270,11 @@ async fn open_capturing(
     Ok((ds, wrapper))
 }
 
-/// The captured writes as repo-path → bytes — the files Lance wrote, ready to commit.
-fn captured_files(wrapper: &CaptureWrapper) -> BTreeMap<String, Bytes> {
-    wrapper
-        .captured
-        .lock()
-        .unwrap()
+/// Upload directly from captured files. `files` must outlive the commit.
+fn capture_ops(files: &BTreeMap<ObjectPath, CapturedFile>) -> Vec<CommitOperation> {
+    files
         .iter()
-        .map(|(p, b)| (p.to_string(), b.clone()))
+        .map(|(path, file)| CommitOperation::add_file(path.to_string(), file.path.clone()))
         .collect()
 }
 
@@ -329,8 +320,8 @@ async fn head_oid(repo: &HFRepository<RepoTypeDataset>, rev: &str) -> Result<Str
         .context("target branch not found on the remote")
 }
 
-/// Write captured files (path → bytes) to a scratch dir and turn them into add-file commit
-/// operations — hf-hub uploads from local paths. The returned `TempDir` must outlive the commit.
+/// Stage small extra files (such as the dataset card) for path-based uploads. Captured Lance
+/// data already lives on disk. The returned `TempDir` must outlive the commit.
 fn write_ops(files: &BTreeMap<String, Bytes>) -> Result<(Vec<CommitOperation>, tempfile::TempDir)> {
     let dir = tempfile::tempdir()?;
     let mut ops = Vec::with_capacity(files.len());
@@ -546,10 +537,95 @@ pub(crate) async fn fetch_wrapper(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow_array::StringArray;
+    use arrow_array::{
+        new_null_array, types::Float32Type, ArrayRef, FixedSizeListArray, RecordBatch, RecordBatchIterator, StringArray,
+    };
     use arrow_schema::{DataType, Field, Schema};
     use lance_index::scalar::InvertedIndexParams;
     use lance_index::IndexType;
+
+    async fn store_inventory(store: &dyn OSObjectStore) -> Result<BTreeMap<String, Bytes>> {
+        use futures::TryStreamExt;
+
+        let mut listed = store.list(None);
+        let mut files = BTreeMap::new();
+        while let Some(meta) = listed.try_next().await? {
+            let bytes = store
+                .get_opts(&meta.location, Default::default())
+                .await?
+                .bytes()
+                .await?;
+            files.insert(meta.location.to_string(), bytes);
+        }
+        Ok(files)
+    }
+
+    #[tokio::test]
+    async fn captured_append_is_readable_and_replay_leaves_base_unchanged() {
+        let schema = dataset::schema();
+        let batch = |texts: &[&str]| {
+            let columns: Vec<ArrayRef> = schema
+                .fields()
+                .iter()
+                .map(|field| match field.name().as_str() {
+                    "id" | "text" => Arc::new(StringArray::from(texts.to_vec())) as ArrayRef,
+                    "vector" => Arc::new(FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
+                        texts.iter().map(|text| {
+                            Some((0..dataset::DIM).map(move |i| Some(text.len() as f32 + i as f32 / 100.0)))
+                        }),
+                        dataset::DIM,
+                    )),
+                    _ => new_null_array(field.data_type(), texts.len()),
+                })
+                .collect();
+            RecordBatch::try_new(schema.clone(), columns).unwrap()
+        };
+        let reader = |batch: RecordBatch| RecordBatchIterator::new([Ok(batch)], schema.clone());
+        let base = Dataset::write(reader(batch(&["original"])), "memory://capture-replay", None)
+            .await
+            .unwrap();
+        let store = base.object_store(None).await.unwrap();
+        assert!(!store.is_local());
+        let before = store_inventory(store.inner.as_ref()).await.unwrap();
+        let mut prior_snapshot = None;
+        for _ in 0..2 {
+            let wrapper = Arc::new(CaptureWrapper {
+                captured: Captured::new().unwrap(),
+            });
+            let mut ds = base.with_object_store_wrappers([wrapper.clone() as Arc<dyn WrappingObjectStore>]);
+            ds.append(reader(batch(&["new", "new"])), None).await.unwrap();
+            let files = wrapper.captured.snapshot();
+            assert!(
+                files.keys().any(|path| path.as_ref().contains("/data/")),
+                "data must be captured"
+            );
+            assert_eq!(
+                store_inventory(store.inner.as_ref()).await.unwrap(),
+                before,
+                "no stray writes"
+            );
+            assert_eq!(Schema::from(ds.schema()).metadata(), schema.metadata());
+            let batches = dataset::scan_rows(&ds, &[], None, None).await.unwrap();
+            assert_eq!(
+                arrow_select::concat::concat_batches(&schema, &batches).unwrap(),
+                batch(&["original", "new", "new"]),
+                "duplicate rows, embeddings, null metadata and column order survive replay"
+            );
+            drop(ds);
+            drop(wrapper);
+            assert!(
+                files.values().all(|file| file.path.is_file()),
+                "snapshot owns its files"
+            );
+            if let Some(previous) = prior_snapshot.replace(files) {
+                assert!(
+                    previous.values().all(|file| file.path.is_file()),
+                    "retry cannot replace earlier capture files"
+                );
+            }
+            assert_eq!(store_inventory(store.inner.as_ref()).await.unwrap(), before);
+        }
+    }
 
     /// Pins the Lance behavior [`reindex`] relies on: `append()` adds one delta sub-index per
     /// backlog, and `merge(deltas)` folds the deltas back into one without touching the base.
