@@ -634,7 +634,13 @@ async fn prepare_agent(
             // Another publisher's files are not a refresh the installed copy stands in for.
             Err(e) if e.downcast_ref::<registry::Takeover>().is_some() => return Err(e),
             Err(e) if installed => {
-                eprintln!("note: the {id} integration could not be refreshed ({e:#}) — running the installed copy.");
+                // What failed and why, without the layers between: a request error names its URL
+                // at every one.
+                let why = match e.chain().count() {
+                    1 => e.to_string(),
+                    _ => format!("{e}: {}", e.root_cause()),
+                };
+                eprintln!("note: the {id} integration could not be refreshed ({why}) — running the installed copy.");
                 None
             }
             Err(e) => {
