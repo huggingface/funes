@@ -4,9 +4,9 @@
 //! `setup`, run as `setup add [MEMORY]` or `setup remove` with `$FUNES_BIN`, `$FUNES_HOME` and
 //! `$FUNES_AGENT_ID` in its environment.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use chrono::{SecondsFormat, Utc};
-use hf_hub::buckets::BucketDownload;
+use hf_hub::buckets::{BucketDownload, BucketTreeEntry};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -704,13 +704,20 @@ async fn fetch_archive(url: &str, dir: &Path) -> Result<(PathBuf, String)> {
         _ => bail!("{url} does not name a <prefix>/<name>.tar.gz archive"),
     };
     let bucket = hub::bucket(&owner, &name, true)?;
+    // Listed, not resolved: the resolve endpoint answers with a redirect the metadata call will
+    // not follow.
     let size = bucket
-        .get_file_metadata()
-        .remote_path(path.clone())
+        .get_paths_info()
+        .paths(vec![path.clone()])
         .send()
         .await
         .with_context(|| format!("looking up {url}"))?
-        .size;
+        .into_iter()
+        .find_map(|entry| match entry {
+            BucketTreeEntry::File { path: listed, size, .. } if listed == path => Some(size),
+            _ => None,
+        })
+        .ok_or_else(|| anyhow!("the bucket lists no {url}"))?;
     if size > MAX_ARCHIVE_BYTES {
         bail!("{url} is {size} bytes, more than the {MAX_ARCHIVE_BYTES} an integration may weigh");
     }
