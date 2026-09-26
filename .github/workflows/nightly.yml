@@ -1,0 +1,84 @@
+name: Nightly
+
+on:
+  schedule:
+    # 06:00 UTC every weekday — main's overnight changes are ready by the time the
+    # integrations maintainers start their day.
+    - cron: "0 6 * * 1-5"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  integrations:
+    name: Integration bundles (latest main)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        id: [claude, codex, hermes, pi]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          shared-key: ci
+
+      - uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # v1
+
+      - name: Install protoc and expect
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler expect
+
+      - name: Build funes
+        run: cargo build --profile ci
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: huggingface/funes-integrations
+          path: funes-integrations
+
+      # Twice over: the release users get, resolved through the catalog, then the integrations'
+      # main, named with --from. Each is installed into a fresh home and removed unattended — the
+      # record funes wrote at install is what lets `remove` run unasked.
+      - name: Install and remove the integration, from its release and from main
+        env:
+          ID: ${{ matrix.id }}
+        run: |
+          set -eu
+          FUNES="$(pwd)/target/ci/funes"
+          BUNDLE="$(pwd)/funes-integrations/$ID"
+          # Nothing else answers: the catalog, or what --from names.
+          unset FUNES_INTEGRATIONS
+
+          for SOURCE in release main; do
+            HOME="$(mktemp -d)"
+            export HOME
+            export FUNES_HOME="$HOME/.funes"
+            export HF_HOME="$HOME/.cache/huggingface"
+
+            set -- add "$ID" local
+            [ "$SOURCE" = main ] && set -- "$@" --from "$BUNDLE"
+
+            # A release is vouched for and asks nothing; a directory install asks for trust once.
+            # Both ask about the first index. A prompt we don't expect times out and fails the job.
+            echo "== $ID from $SOURCE =="
+            expect -f /dev/stdin -- "$FUNES" "$@" <<'EXPECT'
+          set timeout 120
+          spawn {*}$argv
+          expect {
+              -re {Trust it\? \[y/N\] $} { send "y\r"; exp_continue }
+              -re {Proceed\? \[Y/n\] $} { send "y\r"; exp_continue }
+              eof
+          }
+          lassign [wait] pid spawn_id os_error status
+          exit $status
+          EXPECT
+
+            "$FUNES" remove "$ID"
+            rm -rf "$HOME"
+          done
