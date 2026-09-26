@@ -11,7 +11,7 @@ use funes::memory;
 use funes::traces::spool;
 use funes::ui::render;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -903,7 +903,13 @@ where
     // absent memory.
     if let Some(Resolved { memory, created }) = resolved {
         if memory::Memory::local().open().await.is_ok() {
-            first_push(&memory, created).await?;
+            // The integration is in place by now; only the push is owed, and it takes a terminal.
+            first_push(&memory, created).await.with_context(|| {
+                format!(
+                    "funes is added to {agent}, bound to {memory}, but the first push there did not go \
+                     through — run `funes push {memory}` at a terminal once it is reachable"
+                )
+            })?;
         } else {
             eprintln!("funes: nothing indexed yet — nothing to publish to {memory} yet.");
         }
