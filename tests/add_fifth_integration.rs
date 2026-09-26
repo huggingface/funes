@@ -25,6 +25,19 @@ lassign [wait] pid spawn_id os_error status
 exit $status
 "#;
 
+/// The same, declining to trust the integration.
+const DECLINE_TRUST: &str = r#"
+set timeout 120
+spawn {*}$argv
+expect {
+    -re {Trust it\? \[y/N\] $} { send "n\r"; exp_continue }
+    -re {Proceed\? \[Y/n\] $} { send "y\r"; exp_continue }
+    eof
+}
+lassign [wait] pid spawn_id os_error status
+exit $status
+"#;
+
 /// The same, declining the first index.
 const DECLINE_INDEX: &str = r#"
 set timeout 120
@@ -584,6 +597,76 @@ fn declining_the_first_index_installs_nothing() {
         "the manifest says what setup last installed"
     );
     assert!(!home.join(".funes/agents/clyde.json").exists(), "nothing recorded");
+}
+
+/// A first install that stops before setup — trust declined, the first index declined — leaves
+/// nothing in the registry: the files fetched for it were never an installed copy, so the next
+/// run fetches afresh and asks afresh rather than about "the installed copy, recorded by nothing".
+#[test]
+fn an_abandoned_first_install_leaves_nothing_in_the_registry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let funes_home = tmp.path().join("funes");
+    let log = tmp.path().join("setup.log");
+    bundle(&home.join("integrations/clyde"), "clyde", 1, "");
+    let installed = home.join(".funes/agents/clyde");
+
+    let out = funes_at_a_terminal_answering(&home, &funes_home, &log, &["add", "clyde"], DECLINE_TRUST);
+    let transcript = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !out.status.success() && transcript.contains("not confirmed"),
+        "{transcript}"
+    );
+    assert!(!installed.exists(), "declined files do not stay installed");
+
+    let out = funes_at_a_terminal_answering(&home, &funes_home, &log, &["add", "clyde"], DECLINE_INDEX);
+    let transcript = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && transcript.contains("nothing was wired up"),
+        "{transcript}"
+    );
+    assert!(!installed.exists() && !log.exists(), "nothing installed, nothing run");
+
+    // The next run is a first install again: the source, confirmed as such.
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde"]);
+    let transcript = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && transcript.contains("$FUNES_INTEGRATIONS"),
+        "{transcript}"
+    );
+    assert!(!transcript.contains("recorded by nothing"), "{transcript}");
+    assert!(home.join(".funes/agents/clyde.json").exists());
+}
+
+/// A setup that fails part-way may have wired some of the agent to its files, so the install is
+/// recorded all the same: `remove` runs it unasked, and a re-run does not ask about it either.
+#[test]
+fn a_setup_that_failed_is_recorded_and_removes_unasked() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let funes_home = tmp.path().join("funes");
+    let log = tmp.path().join("setup.log");
+    let source = bundle(&home.join("integrations/clyde"), "clyde", 1, "");
+    let mut setup = fs::read_to_string(source.join("setup")).unwrap();
+    setup.push_str("[ \"$1\" != add ] || exit 7\n");
+    fs::write(source.join("setup"), setup).unwrap();
+    let installed = home.join(".funes/agents/clyde");
+    let record = home.join(".funes/agents/clyde.json");
+
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde"]);
+    let transcript = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !out.status.success() && transcript.contains("exit Some(7)"),
+        "{transcript}"
+    );
+    assert!(fs::read_to_string(&log).unwrap().starts_with("add\n"), "setup ran");
+    assert!(installed.exists() && record.exists(), "recorded as installed");
+
+    fs::remove_file(&log).unwrap();
+    let out = funes_pinned(&home, &funes_home, &log, &["remove", "clyde"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(fs::read_to_string(&log).unwrap().starts_with("remove\n"));
+    assert!(!installed.exists() && !record.exists());
 }
 
 #[test]

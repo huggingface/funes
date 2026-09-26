@@ -539,20 +539,22 @@ async fn main() -> Result<()> {
 /// says what `setup` last installed, and a refresh writes the new one first, so a run that stops
 /// short of `setup add` — a memory that does not resolve, a first index declined — puts the
 /// previous manifest back: what the agent runs is still the old install, and every read must keep
-/// saying so.
+/// saying so. A first install that stops there takes its files away instead: nothing ran them,
+/// so they are not an installed copy for the next run to ask about.
 async fn add_agent(id: &str, memory: AddMemory, from: Option<&str>) -> Result<()> {
     if !spool::is_id(id) {
         bail!("{id:?} is not an integration id (lowercase [a-z0-9_-])");
     }
     let root = registry::default_root()?;
     let previous = registry::installed_manifest(&root, id);
+    let fresh = !root.join(id).is_dir();
     let installed = std::cell::Cell::new(false);
     let ran = &installed;
     let result = async {
         // The catalog's newest release is what a catalog install runs, so it is consulted on
         // every run; a directory or an archive named once stays until named again. Files named
         // now, and a copy this funes cannot run, are refreshed whatever is there.
-        let refresh = !root.join(id).is_dir()
+        let refresh = fresh
             || from.is_some()
             || std::env::var_os("FUNES_INTEGRATIONS").is_some()
             || registry::speaks_another_contract(&root, id)
@@ -564,8 +566,10 @@ async fn add_agent(id: &str, memory: AddMemory, from: Option<&str>) -> Result<()
         let memory = resolved.as_ref().map(|r| r.memory.clone());
         let record = provisioned.map(|(origin, files)| registry::Installed::new(&integration.manifest, origin, files));
         let install = |memory: Option<String>| async move {
-            integration.add(memory.as_deref())?;
+            // Counted as run before it runs: a setup that fails part-way may have wired some of
+            // the agent to these files, and `remove` must find them recorded to run unasked.
             ran.set(true);
+            integration.add(memory.as_deref())?;
             // Whatever an older hook asked for, this install's hooks are the ones that ask now.
             spool::forget_missing(id)
         };
@@ -583,7 +587,9 @@ async fn add_agent(id: &str, memory: AddMemory, from: Option<&str>) -> Result<()
     }
     .await;
     if !installed.get() {
-        if let Some(previous) = previous {
+        if fresh {
+            registry::discard(&root, id)?;
+        } else if let Some(previous) = previous {
             registry::restore_manifest(&root, id, &previous)?;
         }
     }
