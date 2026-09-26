@@ -220,10 +220,6 @@ enum Cmd {
         agent: String,
         #[command(flatten)]
         memory: AddMemory,
-        /// Fetch the integration's newest release for this funes before running it. Without it,
-        /// an installed integration runs as installed.
-        #[arg(long)]
-        update: bool,
         /// Install the integration from here rather than from the catalog: a directory
         /// holding it, or an `hf://buckets/<owner>/<bucket>/<path>/<id>.tar.gz` archive with a
         /// `SHA256SUMS` beside it.
@@ -531,12 +527,7 @@ async fn main() -> Result<()> {
         Cmd::Mcp { memory } => mcp::run(memory).await,
         // `add` bootstraps the local pipeline: build the first index and do the first push — the
         // two one-time steps the automation can't do unattended — so nothing is left to run by hand.
-        Cmd::Add {
-            agent,
-            memory,
-            update,
-            from,
-        } => add_agent(&agent, memory, update, from.as_deref()).await,
+        Cmd::Add { agent, memory, from } => add_agent(&agent, memory, from.as_deref()).await,
         Cmd::Remove { agent } => remove_agent(&agent).await,
     }
 }
@@ -546,7 +537,7 @@ async fn main() -> Result<()> {
 /// short of `setup add` — a memory that does not resolve, a first index declined — puts the
 /// previous manifest back: what the agent runs is still the old install, and every read must keep
 /// saying so.
-async fn add_agent(id: &str, memory: AddMemory, update: bool, from: Option<&str>) -> Result<()> {
+async fn add_agent(id: &str, memory: AddMemory, from: Option<&str>) -> Result<()> {
     if !spool::is_id(id) {
         bail!("{id:?} is not an integration id (lowercase [a-z0-9_-])");
     }
@@ -555,25 +546,15 @@ async fn add_agent(id: &str, memory: AddMemory, update: bool, from: Option<&str>
     let installed = std::cell::Cell::new(false);
     let ran = &installed;
     let result = async {
-        // Installed, the integration runs as installed — unless asked, unless its files are
-        // named, and unless this funes cannot run what is there.
+        // The catalog's newest release is what a catalog install runs, so it is consulted on
+        // every run; a directory or an archive named once stays until named again. Files named
+        // now, and a copy this funes cannot run, are refreshed whatever is there.
         let refresh = !root.join(id).is_dir()
-            || update
             || from.is_some()
             || std::env::var_os("FUNES_INTEGRATIONS").is_some()
-            || registry::speaks_another_contract(&root, id);
-        // An update comes from where the install came: a directory or an archive named once is
-        // named again; the catalog resolves itself.
-        let from: Option<String> = from.map(str::to_string).or_else(|| {
-            registry::installed(&root, id)
-                .filter(|_| update)
-                .and_then(|record| match record.origin {
-                    registry::Origin::Directory { path } => Some(path.to_string_lossy().into_owned()),
-                    registry::Origin::Archive { url, .. } => Some(url),
-                    registry::Origin::Catalog { .. } => None,
-                })
-        });
-        let (integration, provisioned) = prepare_agent(id, refresh, from.as_deref()).await?;
+            || registry::speaks_another_contract(&root, id)
+            || registry::installed_from_catalog(&root, id);
+        let (integration, provisioned) = prepare_agent(id, refresh, from).await?;
         let resolved = resolve_add_memory(memory).await?;
         let record = provisioned.map(|(origin, files)| registry::Installed::new(&integration.manifest, origin, files));
         let install = |memory: Option<String>| async move {
@@ -602,9 +583,10 @@ async fn add_agent(id: &str, memory: AddMemory, update: bool, from: Option<&str>
 
 /// Resolve `id`'s integration for a run and confirm it when funes can't vouch for it — all before
 /// `add` touches a memory or `remove` runs anything. With `refresh`, its files are fetched into
-/// the registry first, so the script funes executes is the one it just wrote; a source that can't
-/// be reached leaves the installed copy to run. Without, the installed copy runs as installed.
-/// Says what it refreshed the files with, when it did.
+/// the registry first, so the script funes executes is the one it just wrote — unless the source
+/// holds the release already installed; a source that can't be reached leaves the installed copy
+/// to run. Without, the installed copy runs as installed. Says what it refreshed the files with,
+/// when it did.
 async fn prepare_agent(
     id: &str,
     refresh: bool,
@@ -616,11 +598,12 @@ async fn prepare_agent(
     let mut provisioned = None;
     let provenance = if refresh {
         match registry::provision(&root, id, from).await {
-            Ok(registry::Provisioned {
+            Ok(None) => None,
+            Ok(Some(registry::Provisioned {
                 provenance,
                 origin,
                 files,
-            }) => {
+            })) => {
                 // Files confirmed once, from the same source, unchanged since: confirmed still.
                 let provenance = match provenance {
                     registry::Provenance::Unvouched(_)

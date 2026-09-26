@@ -324,8 +324,8 @@ fn an_integration_installs_from_a_directory_named_on_the_command_line() {
     );
 }
 
-/// A directory named relative to where the command ran is recorded absolute: what an update
-/// follows later does not depend on where it runs then.
+/// A directory named relative to where the command ran is recorded absolute: the record says
+/// where the files came from whatever directory funes ran in.
 #[test]
 fn a_relative_source_is_recorded_absolute() {
     let tmp = tempfile::tempdir().unwrap();
@@ -414,9 +414,10 @@ fn an_installed_integration_runs_as_installed_and_unasked_until_it_changes() {
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(fs::read_to_string(&log).unwrap().starts_with("v1\nadd\n"), "pinned");
 
-    // …until its files are named again, when the changed ones are confirmed anew.
+    // …until its source is consulted again — `$FUNES_INTEGRATIONS` is, on every run — when the
+    // changed files are confirmed anew.
     fs::remove_file(&log).unwrap();
-    let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde", "--update"]);
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde"]);
     let transcript = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success() && transcript.contains("Trust it?"), "{transcript}");
     assert!(fs::read_to_string(&log).unwrap().starts_with("v2\nadd\n"));

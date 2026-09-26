@@ -22,16 +22,15 @@ original session transcripts, model/Hub caches, or any published memory. The
 command is idempotent, so an already-absent integration is a successful no-op.
 
 **Updating an install you already have: `funes add` again.** Re-running it is idempotent: it
-rebinds the memory you name and re-runs the installed integration's setup, which clears what an
-older funes put where the current one no longer looks. The integration itself stays at the release
-you installed until you ask — `--update` fetches its newest release for this funes first, from
-where it came: the catalog, or the directory or archive named at install — except that an install
-this funes cannot run, one another funes made, is brought forward without asking.
-`funes remove` first is for a clean slate — it takes the install away in full, your memory aside:
+rebinds the memory you name and re-runs the integration's setup, which clears what an older funes
+put where the current one no longer looks. An integration the catalog installed is brought to its
+newest release for this funes first, when there is one; one installed with `--from` stays at what
+you named until you name it again — except that an install this funes cannot run, one another
+funes made, is brought forward whatever its source. `funes remove` first is for a clean slate — it
+takes the install away in full, your memory aside:
 
 ```bash
-funes add codex <user|org>/funes-memory                          # rebound; the integration as installed
-funes add codex <user|org>/funes-memory --update                 # its newest release first
+funes add codex <user|org>/funes-memory                          # rebound, at the catalog's newest release
 funes remove codex && funes add codex <user|org>/funes-memory    # from a clean slate
 ```
 
@@ -213,9 +212,10 @@ refuses a `setup` that anyone but its owner could have written: the file and eve
 
 ### Where the files come from
 
-`funes add <id>` installs the integration when none is installed, and runs the installed one as it
-is otherwise: `--update` fetches its newest release for this funes first, and a copy speaking a
-contract this funes cannot run is refreshed regardless. The source, in order: what `--from` names
+`funes add <id>` installs the integration when none is installed. Installed from the catalog, it
+takes the catalog's newest release for this funes on every run, fetching nothing when that is the
+release installed; installed from `--from`, it runs as installed until named again; and a copy
+speaking a contract this funes cannot run is refreshed regardless. The source, in order: what `--from` names
 — a directory holding the integration, or an `hf://buckets/<owner>/<bucket>/<path>/<id>.tar.gz`
 archive published with a `SHA256SUMS` beside it; the directory `$FUNES_INTEGRATIONS` names, when
 set — authoritative, consulted on every run, and nothing else is; the integrations catalog —
