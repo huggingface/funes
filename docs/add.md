@@ -22,15 +22,16 @@ original session transcripts, model/Hub caches, or any published memory. The
 command is idempotent, so an already-absent integration is a successful no-op.
 
 **Updating an install you already have: `funes add` again.** Re-running it is idempotent: it
-rebinds the memory you name and re-runs the integration's setup, which clears what an older funes
-put where the current one no longer looks. An integration the catalog installed is brought to its
+keeps the memory bound — or rebinds to the one you name, `local` included — and re-runs the
+integration's setup, which clears what an older funes put where the current one no longer looks. An integration the catalog installed is brought to its
 newest release for this funes first, when there is one; one installed with `--from` stays at what
 you named until you name it again — except that an install this funes cannot run, one another
 funes made, is brought forward whatever its source. `funes remove` first is for a clean slate — it
 takes the install away in full, your memory aside:
 
 ```bash
-funes add codex <user|org>/funes-memory                          # rebound, at the catalog's newest release
+funes add codex                                                  # as bound, at the catalog's newest release
+funes add codex <user|org>/funes-memory                          # rebound
 funes remove codex && funes add codex <user|org>/funes-memory    # from a clean slate
 ```
 
@@ -110,16 +111,18 @@ publishing, publishes to:
 
 ```bash
 funes add claude <user|org>/funes-memory   # recall reads it; the hooks publish there
-funes add claude local                     # explicit local (the default)
+funes add claude                           # re-run: keeps the memory bound; a first add stays local
+funes add claude local                     # back to the local memory
 ```
 
 A memory is an `<org>/<repo>` shorthand, a full `hf://…` URI, or `local`. The binding lives in the
-**agent's own config** — there is no hidden global default. If you name a memory that doesn't exist on
+**agent's own config**, and funes notes it beside the install (`~/.funes/agents/<id>.json`) so a
+bare re-run keeps it — there is no hidden global default, and `local` unbinds. If you name a memory that doesn't exist on
 the Hub yet, `funes add` offers to create it (default no, to catch typos). Dataset repositories that
 funes creates are **private by default**; changing their visibility later is an explicit action on
 the Hub. An existing repository keeps its existing visibility.
 
-With **no memory named**, and an HF token present in a terminal, `funes add` offers to set up
+With **no memory named** and none bound yet, and an HF token present in a terminal, `funes add` offers to set up
 `<user>/funes-memory` for you so your memory follows you across machines; decline and it stays local.
 Without a token it stays local and tells you how to enable syncing later.
 

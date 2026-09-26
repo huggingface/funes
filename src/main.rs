@@ -212,8 +212,8 @@ enum Cmd {
     /// Add funes to a coding agent.
     ///
     /// Installs funes's read tools and automatic per-turn indexing. Name a memory the agent recalls
-    /// from — and publishes to — an `<org>/<repo>` shorthand or an `hf://…` URI; omit it to stay
-    /// local (the default).
+    /// from — and publishes to — an `<org>/<repo>` shorthand or an `hf://…` URI; omit it and an
+    /// installed agent keeps the memory it is bound to, a first add stays local.
     Add {
         /// Agent to add: `claude`, `codex`, `pi`, `hermes`, or any other registered agent.
         #[arg(value_name = "AGENT")]
@@ -241,18 +241,21 @@ enum Cmd {
 // comes from the field doc below.
 #[derive(Args)]
 struct AddMemory {
-    /// Memory this agent recalls from — `<org>/<repo>`, an `hf://…` URI, or `local` (default).
+    /// Memory this agent recalls from — `<org>/<repo>`, an `hf://…` URI, or `local`. Omitted, the
+    /// memory the agent is bound to stays; a first add's is local.
     #[arg(value_name = "MEMORY")]
     memory: Option<String>,
 }
 
-/// The memory to bake into an agent's `funes mcp` registration: `None`/blank/`local` → the local
-/// memory (a bare `funes mcp`), else the named remote/explicit memory (`funes mcp <memory>`).
-fn baked_memory(memory: AddMemory) -> Option<String> {
-    memory
-        .memory
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty() && s != "local")
+/// The memory to bake into an agent's `funes mcp` registration: blank/`local` → the local memory
+/// (a bare `funes mcp`); none named → `bound`, the memory the install is recorded as bound to;
+/// else the named remote/explicit memory (`funes mcp <memory>`).
+fn baked_memory(memory: AddMemory, bound: Option<String>) -> Option<String> {
+    match memory.memory.map(|s| s.trim().to_string()) {
+        None => bound,
+        Some(s) if s.is_empty() || s == "local" => None,
+        Some(s) => Some(s),
+    }
 }
 
 // Flattened into every ask agent so they share the question positional and the read `--memory`
@@ -554,8 +557,11 @@ async fn add_agent(id: &str, memory: AddMemory, from: Option<&str>) -> Result<()
             || std::env::var_os("FUNES_INTEGRATIONS").is_some()
             || registry::speaks_another_contract(&root, id)
             || registry::installed_from_catalog(&root, id);
+        // Read before the record is rewritten: the memory this install was last bound to.
+        let bound = registry::installed(&root, id).and_then(|record| record.memory);
         let (integration, provisioned) = prepare_agent(id, refresh, from).await?;
-        let resolved = resolve_add_memory(memory).await?;
+        let resolved = resolve_add_memory(baked_memory(memory, bound)).await?;
+        let memory = resolved.as_ref().map(|r| r.memory.clone());
         let record = provisioned.map(|(origin, files)| registry::Installed::new(&integration.manifest, origin, files));
         let install = |memory: Option<String>| async move {
             integration.add(memory.as_deref())?;
@@ -565,10 +571,13 @@ async fn add_agent(id: &str, memory: AddMemory, from: Option<&str>) -> Result<()
         };
         let outcome = bootstrap_add(id, resolved, install).await;
         // Recorded once setup has run, whatever came after: a first push that failed leaves the
-        // new files installed, and the record must say so. An installed copy nothing refreshed
-        // keeps the record it has.
-        if let (Some(record), true) = (record, ran.get()) {
-            registry::record(&root, &record)?;
+        // new files installed, and the record must say so — the memory bound with it. An
+        // installed copy nothing refreshed keeps the record it has, rebound.
+        if ran.get() {
+            if let Some(mut record) = record.or_else(|| registry::installed(&root, id)) {
+                record.memory = memory;
+                registry::record(&root, &record)?;
+            }
         }
         outcome
     }
@@ -735,11 +744,11 @@ struct Resolved {
     created: bool,
 }
 
-/// Resolve the memory `funes add` binds. An explicitly-named memory is validated — offer to create it
-/// if it's missing on the Hub (a typo guard). With no memory, offer to set one up on the Hub when a
-/// token is present (`<user>/funes-memory`); otherwise stay local.
-async fn resolve_add_memory(raw: AddMemory) -> Result<Option<Resolved>> {
-    match baked_memory(raw) {
+/// Resolve the memory `funes add` binds. A named memory is validated — offer to create it if it's
+/// missing on the Hub (a typo guard). With none, offer to set one up on the Hub when a token is
+/// present (`<user>/funes-memory`); otherwise stay local.
+async fn resolve_add_memory(memory: Option<String>) -> Result<Option<Resolved>> {
+    match memory {
         Some(memory) => {
             let created = ensure_remote_exists(&memory).await?;
             Ok(Some(Resolved { memory, created }))

@@ -350,6 +350,59 @@ fn a_relative_source_is_recorded_absolute() {
     assert_eq!(path.canonicalize().unwrap(), elsewhere.canonicalize().unwrap());
 }
 
+/// The memory bound rides in the record, so a bare re-run keeps it, and `local` is how it is
+/// unbound. A path stands in for a remote: nothing to check on the Hub, and the first push fails
+/// after setup ran, which is when the binding is recorded.
+#[test]
+fn a_bare_re_add_keeps_the_memory_bound_and_local_unbinds() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let funes_home = tmp.path().join("funes");
+    let log = tmp.path().join("setup.log");
+    bundle(&home.join("integrations/clyde"), "clyde", 1, "");
+    fs::create_dir_all(home.join(".clyde")).unwrap();
+    fs::write(home.join(".clyde/history.funes.jsonl"), format!("{HISTORY}\n")).unwrap();
+    let record = home.join(".funes/agents/clyde.json");
+    let bound = || -> serde_json::Value {
+        serde_json::from_str::<serde_json::Value>(&fs::read_to_string(&record).unwrap()).unwrap()["memory"].clone()
+    };
+    let memory = tmp.path().join("team-memory");
+    let memory = memory.to_str().unwrap();
+
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde", memory]);
+    let transcript = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        fs::read_to_string(&log)
+            .unwrap()
+            .starts_with(&format!("add {memory}\n")),
+        "{transcript}"
+    );
+    assert_eq!(bound(), memory);
+
+    // Named nothing, the next run binds what the last one did.
+    fs::remove_file(&log).unwrap();
+    let out = funes(&home, &funes_home, &log, &["add", "clyde"]);
+    assert!(
+        fs::read_to_string(&log)
+            .unwrap()
+            .starts_with(&format!("add {memory}\n")),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(bound(), memory);
+
+    // `local` unbinds, and the record says so.
+    fs::remove_file(&log).unwrap();
+    let out = funes(&home, &funes_home, &log, &["add", "clyde", "local"]);
+    support::assert_success(&out);
+    assert!(
+        fs::read_to_string(&log).unwrap().starts_with("add\n"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(bound().is_null(), "unbound");
+}
+
 /// Setup ran, so the install is recorded — even when a later step of the bootstrap fails: the
 /// files it installed are what the agent runs, and an unattended removal must find them recorded.
 #[test]

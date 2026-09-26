@@ -185,6 +185,9 @@ pub struct Installed {
     #[serde(default)]
     pub files: Files,
     pub installed_at: String,
+    /// The memory the agent was bound to, when one was: what a bare re-run keeps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<String>,
 }
 
 impl Installed {
@@ -198,6 +201,7 @@ impl Installed {
             origin,
             files,
             installed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+            memory: None,
         }
     }
 }
