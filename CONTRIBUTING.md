@@ -1,8 +1,14 @@
 # Contributing to funes
 
 Contributions are welcome — bug reports, fixes, documentation, and features. Bug reports and
-docs improvements can go straight to an issue or PR. For features, please read the section
-below first.
+docs improvements can go straight to an issue or PR. For features in funes itself, please read
+the section below first.
+
+**Adding an agent integration?** Start with [Writing an integration](#writing-an-integration).
+You build and publish it in your own repository, and can list it in
+[funes-integrations/COMMUNITY.md](https://github.com/huggingface/funes-integrations/blob/main/COMMUNITY.md).
+You can develop and release it without an issue or code PR here. Fixes to the integrations Hugging
+Face maintains go to [huggingface/funes-integrations](https://github.com/huggingface/funes-integrations).
 
 ## Before you build a feature
 
@@ -18,8 +24,8 @@ Two more places to look before proposing:
 - [AGENTS.md](AGENTS.md) holds the conventions and the hardened decisions, and names the four
   surfaces that describe a verb — CLI help, MCP tool descriptions, docs, and the output shape. A
   change to one of them is a change to all four.
-- Adding support for another agent means implementing the [`TraceSource`](src/source.rs)
-  trait — the indexing and query paths should not need to change.
+- [Why integrations live outside this repository](docs/RATIONALE.md#why-integrations-live-outside-this-repository)
+  explains the boundary between funes's shared interfaces and each agent's integration.
 
 ## Development setup
 
@@ -71,7 +77,7 @@ fine; CI runs them with the repository secret.
 
   | Layer | Job |
   |---|---|
-  | `traces/` | where sessions come from, how each harness's transcript is parsed, and the `Turn`/`Block` model they produce |
+  | `traces/` | where turns come from: turns files, the spools integrations write them into, Hub parquet, and the `Turn`/`Block` model they produce |
   | `chunk.rs`, `scan.rs` | the models the layers share: chunk text and ids, secret findings |
   | `inference/` | embedding and reranking behind traits (backend chosen at build time) |
   | `hub.rs` | **transport**: the Hub's client, credentials, and dataset-repo identity and lifecycle. Knows nothing about memories — `memory`, `traces` and `commands` all call it |
@@ -95,27 +101,55 @@ fine; CI runs them with the repository secret.
 
 ## Writing an integration
 
-An integration is a directory with a `manifest.json` and a `setup` executable; the contract, the
-environment `setup` gets, and the spool it writes into are in [docs/add.md](docs/add.md#the-integration-contract).
-The four Hugging Face maintains, in [huggingface/funes-integrations](https://github.com/huggingface/funes-integrations),
-are the worked examples — `pi/` is the smallest.
-`setup add` should convert the agent's existing sessions into the spool and install a hook that
-converts each finished session, then runs `funes index --harness <id>`; the converter writes
-[the turns format](docs/funes-jsonl.md), and `funes index --check <spool>` validates its output
-without writing anything. Keep a real transcript and the turns it must produce as the converter's
-test, the way each maintained bundle's `test/` does: a change that moves a chunk id re-keys sessions
-users already hold.
+Keep your integration's source, tests, releases, installation instructions, and support in a
+repository you maintain. The four in
+[huggingface/funes-integrations](https://github.com/huggingface/funes-integrations) are worked
+examples maintained by Hugging Face; community integrations are published by their authors.
 
-Try it from wherever it is: `funes add <id> --from /path/to/it`. funes confirms at the terminal
-before running files it can't vouch for — once, until they change. Nothing in funes has to change
-for a new integration, and where it is published from is its own business: an
-`hf://buckets/…/<id>.tar.gz` archive with a `SHA256SUMS` beside it installs the same way.
+### Build and test
 
-To be found, list yours in
-[COMMUNITY.md](https://github.com/huggingface/funes-integrations/blob/main/COMMUNITY.md): a
-documentation-only pull request adding one row — name, publisher, harness or client, what it does,
-the funes interfaces it uses, and links you own. Nothing is installed or executed on review, and a
-row adds no `funes add` alias.
+Choose the funes interfaces your integration needs. A client can use the CLI or
+[MCP](docs/add.md#other-mcp-clients) to recall memory, and a converter can write
+[turns files](docs/funes-jsonl.md) for `funes index`. A native plugin or a converter alone can be
+shared and listed too.
+
+For installation through `funes add`, make a bundle with a `manifest.json` and an executable
+`setup` implementing `setup add [MEMORY]` and `setup remove`. Follow the
+[integration contract](docs/add.md#the-integration-contract) for the manifest, environment,
+and spool. The [pi bundle](https://github.com/huggingface/funes-integrations/tree/main/pi)
+shows how setup, a converter, automation, and tests fit together.
+
+If your integration indexes sessions, convert the agent's existing history at setup and use its
+hooks or events to keep the spool current, then run `funes index --harness <id>`. Keep a real
+transcript and its expected turns as a converter test, with stable session and turn ids across
+re-runs and releases. Test setup and removal against a fake agent and temporary configuration,
+as the maintained bundles do. Validate the converter's output, then try the full install in a
+test account or isolated agent configuration:
+
+```bash
+funes index --check /path/to/converted-turns
+funes add <id> local --from /absolute/path/to/bundle
+funes remove <id>
+```
+
+funes asks for confirmation before running your bundle's setup.
+
+### Publish and list
+
+Publish your source and installation instructions in your repository. Users can clone it and
+install from the bundle directory with `--from`. For a downloadable bundle, publish an
+`hf://buckets/<owner>/<bucket>/<path>/<id>.tar.gz` archive with `manifest.json` and `setup` at its
+root and a `SHA256SUMS` beside it; users pass that archive URL to `--from`. Keep release and
+compatibility notes with your integration.
+
+To make it discoverable, open a **documentation-only PR in huggingface/funes-integrations**
+adding one row to
+[COMMUNITY.md](https://github.com/huggingface/funes-integrations/blob/main/COMMUNITY.md#listing-yours).
+Include its name, publisher, target harness or client, what it does, the funes interfaces it uses,
+and links to your source, installation instructions, compatibility notes, and support.
+The listing points users to your project; its review checks attribution and links, and does not
+install or execute your code. A listing adds no catalog entry or `funes add <id>` alias: your
+instructions remain the way users install it.
 
 ## Pull requests
 

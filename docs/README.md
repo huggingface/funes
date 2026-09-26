@@ -26,8 +26,10 @@ This directory contains the user guides and design notes for
 
 ## Design and reference
 
+- [Writing an integration](../CONTRIBUTING.md#writing-an-integration) — build, test, publish, and
+  list support for another agent or client.
 - [Why funes](RATIONALE.md) — the rationale behind funes's core design choices.
-- [The funes JSONL format](funes-jsonl.md) — feed funes turns from a source it has no parser for:
+- [The funes JSONL format](funes-jsonl.md) — the shared format integrations and other producers write:
   fields, identity rules, validation, versioning.
 - [Storage growth](storage.md) — measured storage costs and growth estimates.
 - [Memory-tool landscape](landscape.md) — a comparison with other agent-memory tools.

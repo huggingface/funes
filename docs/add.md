@@ -57,6 +57,11 @@ with `--from`. Integrations maintained by their authors are listed in that repos
 [COMMUNITY.md](https://github.com/huggingface/funes-integrations/blob/main/COMMUNITY.md); a listing
 adds no alias — they install with `--from`, as their authors document.
 
+Building an integration? [Writing an integration](../CONTRIBUTING.md#writing-an-integration)
+walks through development, testing, publishing from your own repository, and listing it for others
+to find. The [rationale](RATIONALE.md#why-integrations-live-outside-this-repository) explains why
+agent integrations live outside the funes repository.
+
 What exactly gets installed for each agent — and how the automation behaves — is in
 [automation.md](automation.md).
 

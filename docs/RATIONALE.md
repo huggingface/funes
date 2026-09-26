@@ -93,6 +93,29 @@ about what matters right now. funes bets the model is the best judge of *when* i
 worth consulting — the same bet, applied to timing, that the other choices apply to
 interpretation. Pulled on demand, context stays clean and recall happens for a reason.
 
+## Why integrations live outside this repository
+
+funes owns the shared memory pipeline: the turns format, indexing, storage, recall, and publishing.
+An agent integration owns the parts that follow that agent: converting its transcripts, registering
+tools, and installing hooks or event handlers. The [integration contract](add.md#the-integration-contract)
+connects those parts to funes through its CLI, MCP server, and turns files.
+
+Agent transcript formats and configuration change on their own schedules. Keeping their converters
+and setup code outside this repository lets their maintainers test and release fixes independently
+of the Rust binary. It also keeps funes's tests focused on the common formats and memory behavior;
+each integration keeps tests for its transcript conversion, configuration, and hooks.
+
+The same boundary lets a contributor add support for an agent without waiting for a change to
+funes. Authors choose where to host their code, how to release it, and which workflows to support.
+Hugging Face maintains its integrations in
+[huggingface/funes-integrations](https://github.com/huggingface/funes-integrations); other authors
+maintain theirs in their own repositories. The
+[community directory](https://github.com/huggingface/funes-integrations/blob/main/COMMUNITY.md)
+makes those projects discoverable while leaving releases and support with their publishers.
+
+For the steps to build, test, publish, and list one, see
+[Writing an integration](../CONTRIBUTING.md#writing-an-integration).
+
 ## Why not just use a memory provider?
 
 Agent-memory providers are now plentiful — frameworks like [hermes-agent](https://github.com/NousResearch/hermes-agent/tree/main/plugins/memory) bundle a
