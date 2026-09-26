@@ -44,8 +44,10 @@ registration and funes-owned files/entries:
 Beside each integration's directory, `~/.funes/agents/<id>.json` records what `funes add`
 installed there and where the files came from.
 
-See [automation.md](automation.md) for how these files are merged and which events they handle.
-Hook logs sit beside the installed scripts as `funes-sync.log`.
+What each integration puts there, and which of its agent's events it hooks, is in the
+integration's README — the maintained ones are in
+[funes-integrations](https://github.com/huggingface/funes-integrations#readme). Hook logs sit
+beside the installed scripts as `funes-sync.log`.
 
 ## Authentication
 

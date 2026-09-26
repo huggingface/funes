@@ -62,8 +62,9 @@ walks through development, testing, publishing from your own repository, and lis
 to find. The [rationale](RATIONALE.md#why-integrations-live-outside-this-repository) explains why
 agent integrations live outside the funes repository.
 
-What exactly gets installed for each agent — and how the automation behaves — is in
-[automation.md](automation.md).
+How the automation behaves is in [automation.md](automation.md); what each integration installs
+into its agent, and needs on the box, is in that integration's README — the maintained ones are in
+[funes-integrations](https://github.com/huggingface/funes-integrations#readme).
 
 ## Other MCP clients
 
@@ -287,6 +288,6 @@ are one session in the memory, deduplicated on re-index.
 - [recall.md](recall.md) — the `recall`/`get` tools your agent now has.
 - [index.md](index.md) — building and updating the memory by hand.
 - [push.md](push.md) — publishing a memory and sharing it.
-- [automation.md](automation.md) — exactly what the hooks install and how they behave.
+- [automation.md](automation.md) — what `funes add` sets up and how the automation behaves.
 - [configuration.md](configuration.md) — installed paths, authentication, caches, and environment
   overrides.

@@ -13,8 +13,7 @@ it behaves; you rarely need to touch any of it by hand.
 
 ## What `funes add` sets up
 
-`funes add claude`, `funes add codex`, `funes add pi`, and `funes add hermes` install, beyond the
-read tools:
+`funes add <agent>` installs, beyond the read tools:
 
 - **Per-turn indexing.** A per-turn hook converts the session that just changed and runs
   `funes index` after every completed turn, so your local memory tracks the session as it grows — a
@@ -48,46 +47,13 @@ derives from `(session, turn, block, split)`, so a completed turn's chunks are i
 when they're indexed, and `funes index` re-embeds nothing already written. Keeping the network step
 (the push) off the per-turn path is what lets indexing run every turn cheaply.
 
-- **Claude Code** has a plugin system, so its integration is a hooks-only plugin (installed at
-  `~/.funes/agents/claude/claude-plugin`) and registers it with `claude plugin marketplace add` +
-  `claude plugin install`. Claude's loader activates the plugin's hooks — **funes never edits your
-  `settings.json`**. `funes remove claude` removes the plugin, its local marketplace registration,
-  the extracted source, and the separate MCP registration.
-- **pi** has no hook system: it exposes its lifecycle to extensions instead, so the automation rides
-  in the extension that already gives pi the read tools — the same scripts, run from `turn_end` and
-  the session-boundary events. Nothing outside `~/.funes/agents/pi` is configured, so
-  `funes remove pi` takes the whole install with it.
-- **Codex** has a plugin system too, so its integration is one plugin (installed at
-  `~/.funes/agents/codex/codex-plugin`) carrying both its hooks and a small skill, and registers it
-  with `codex plugin marketplace add` + `codex plugin add`. The skill is what lets Codex recognize
-  funes as memory before it loads any of its tools. **funes never edits your `config.toml`** — Codex
-  writes its own — and nothing of funes's goes into Codex's own `hooks.json`.
-  **Codex runs a hook only once you have trusted it**, so after installing — and again after any
-  change to a funes hook — run `/hooks` in Codex and review them; until then it skips them and
-  nothing is indexed or published
-  ([Codex docs](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks)). An install from before
-  the plugin is cleared on sight, its entries in Codex's own `hooks.json` included — hooks of your
-  own in that file stay, and the file goes only once nothing is left in it.
-- **Hermes** (indexing is **beta**) discovers plugins under its own home, so funes installs one at
-  `~/.hermes/plugins/funes/` and has hermes enable it with `hermes plugins enable funes` — hermes
-  edits its own `config.yaml`, funes never does. The plugin's lifecycle hooks (`post_llm_call` per
-  completed turn, `on_session_start` + `on_session_finalize` with a memory bound) drive the same two
-  scripts as every other agent. Plugin hooks aren't shell hooks, so hermes' consent allowlist
-  (`~/.hermes/shell-hooks-allowlist.json`) isn't involved. An install from before the plugin declared
-  those hooks in your `config.yaml`; funes can't take them out of the file that holds the rest of
-  your configuration, so it revokes their approvals, deletes their scripts, and names the entries —
-  inert until you delete them.
-
-`funes remove hermes` disables the plugin and deletes it, revokes the approvals a pre-plugin
-install left in the consent allowlist, and removes funes's own hook scripts and their
-`funes-sync.log`; other hooks, approvals, and config keys remain. Removing an integration never
-deletes the indexed memory or source transcripts.
-
-Every agent drives one script of its bundle's own, `funes-index.sh`, in two modes: per turn it
-advances the local index, and as `funes-index.sh --publish`, at the session boundaries, it indexes
-and pushes. The turn's conversion comes first either way — in the script for Claude and Codex, in
-the extension or plugin for pi and hermes. The work runs detached, so the hook returns in well under
-a second and never blocks the turn or trips a timeout.
+How an integration is wired into its agent — what it installs, which of the agent's events it
+hooks, what it needs on the box, and what a re-run clears — is the integration's own to describe.
+The maintained ones do so in their READMEs, [`claude`](https://github.com/huggingface/funes-integrations/tree/main/claude),
+[`codex`](https://github.com/huggingface/funes-integrations/tree/main/codex),
+[`hermes`](https://github.com/huggingface/funes-integrations/tree/main/hermes) and
+[`pi`](https://github.com/huggingface/funes-integrations/tree/main/pi), and what they share in
+[the repository's README](https://github.com/huggingface/funes-integrations#how-the-bundles-automate).
 
 ## Other agents
 
@@ -105,17 +71,9 @@ validates a producer's output without writing anything, so run it before wiring 
   touches the network — and with no memory bound, there's no push hook at all.
 - **Fresh every turn.** Each completed turn re-indexes; because indexing is incremental, the
   re-sweep is cheap.
-- **The boundary publish converts and indexes first.** The per-turn hook detaches, so a session's
-  last turn may still be converting when the boundary fires; the boundary hook converts that
-  session itself — and any other changed since the hook last ran — then indexes (waiting out the
-  per-turn writer's lock) and pushes, rather than leaving that turn to the next session's catch-up.
-- **Published at the boundaries you have.** Claude publishes on `SessionEnd` and again on
-  `SessionStart` (catching up anything a missed `SessionEnd` left behind — a disconnect, a closed
-  window). Hermes publishes on `on_session_finalize` (its true session end) and again on
-  `on_session_start` (the same catch-up). pi publishes on `session_shutdown`, and on `session_start`
-  only when the process is fresh — its other starts follow a shutdown that just published. Codex
-  publishes on the same pair, `SessionEnd` and `SessionStart`; its hooks ride in a plugin, so a Codex
-  too old to have plugins stops the install rather than leaving it silently unpublished.
+- **Published at the boundaries.** With a memory bound, an integration publishes at its agent's
+  session end and again at the next session start, catching up anything a missed end left behind —
+  a disconnect, a closed window. Which events those are for each agent is in its README.
 - **Serialized in the binary.** funes holds an advisory lock while it mutates the local memory, so
   only one writer touches it at a time, whatever launched it (a hook, a manual `funes index`, `funes
   scrub`). A run that hits the lock fails loudly and re-sweeps next turn (indexing is idempotent).
