@@ -11,7 +11,7 @@ use funes::memory;
 use funes::traces::spool;
 use funes::ui::render;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -212,18 +212,14 @@ enum Cmd {
     /// Add funes to a coding agent.
     ///
     /// Installs funes's read tools and automatic per-turn indexing. Name a memory the agent recalls
-    /// from — and publishes to — an `<org>/<repo>` shorthand or an `hf://…` URI; omit it to stay
-    /// local (the default).
+    /// from — and publishes to — an `<org>/<repo>` shorthand or an `hf://…` URI; omit it and an
+    /// installed agent keeps the memory it is bound to, a first add stays local.
     Add {
         /// Agent to add: `claude`, `codex`, `pi`, `hermes`, or any other registered agent.
         #[arg(value_name = "AGENT")]
         agent: String,
         #[command(flatten)]
         memory: AddMemory,
-        /// Fetch the integration's newest release for this funes before running it. Without it,
-        /// an installed integration runs as installed.
-        #[arg(long)]
-        update: bool,
         /// Install the integration from here rather than from the catalog: a directory
         /// holding it, or an `hf://buckets/<owner>/<bucket>/<path>/<id>.tar.gz` archive with a
         /// `SHA256SUMS` beside it.
@@ -245,18 +241,21 @@ enum Cmd {
 // comes from the field doc below.
 #[derive(Args)]
 struct AddMemory {
-    /// Memory this agent recalls from — `<org>/<repo>`, an `hf://…` URI, or `local` (default).
+    /// Memory this agent recalls from — `<org>/<repo>`, an `hf://…` URI, or `local`. Omitted, the
+    /// memory the agent is bound to stays; a first add's is local.
     #[arg(value_name = "MEMORY")]
     memory: Option<String>,
 }
 
-/// The memory to bake into an agent's `funes mcp` registration: `None`/blank/`local` → the local
-/// memory (a bare `funes mcp`), else the named remote/explicit memory (`funes mcp <memory>`).
-fn baked_memory(memory: AddMemory) -> Option<String> {
-    memory
-        .memory
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty() && s != "local")
+/// The memory to bake into an agent's `funes mcp` registration: blank/`local` → the local memory
+/// (a bare `funes mcp`); none named → `bound`, the memory the install is recorded as bound to;
+/// else the named remote/explicit memory (`funes mcp <memory>`).
+fn baked_memory(memory: AddMemory, bound: Option<String>) -> Option<String> {
+    match memory.memory.map(|s| s.trim().to_string()) {
+        None => bound,
+        Some(s) if s.is_empty() || s == "local" => None,
+        Some(s) => Some(s),
+    }
 }
 
 // Flattened into every ask agent so they share the question positional and the read `--memory`
@@ -531,12 +530,7 @@ async fn main() -> Result<()> {
         Cmd::Mcp { memory } => mcp::run(memory).await,
         // `add` bootstraps the local pipeline: build the first index and do the first push — the
         // two one-time steps the automation can't do unattended — so nothing is left to run by hand.
-        Cmd::Add {
-            agent,
-            memory,
-            update,
-            from,
-        } => add_agent(&agent, memory, update, from.as_deref()).await,
+        Cmd::Add { agent, memory, from } => add_agent(&agent, memory, from.as_deref()).await,
         Cmd::Remove { agent } => remove_agent(&agent).await,
     }
 }
@@ -545,55 +539,57 @@ async fn main() -> Result<()> {
 /// says what `setup` last installed, and a refresh writes the new one first, so a run that stops
 /// short of `setup add` — a memory that does not resolve, a first index declined — puts the
 /// previous manifest back: what the agent runs is still the old install, and every read must keep
-/// saying so.
-async fn add_agent(id: &str, memory: AddMemory, update: bool, from: Option<&str>) -> Result<()> {
+/// saying so. A first install that stops there takes its files away instead: nothing ran them,
+/// so they are not an installed copy for the next run to ask about.
+async fn add_agent(id: &str, memory: AddMemory, from: Option<&str>) -> Result<()> {
     if !spool::is_id(id) {
         bail!("{id:?} is not an integration id (lowercase [a-z0-9_-])");
     }
     let root = registry::default_root()?;
     let previous = registry::installed_manifest(&root, id);
+    let fresh = !root.join(id).is_dir();
     let installed = std::cell::Cell::new(false);
     let ran = &installed;
     let result = async {
-        // Installed, the integration runs as installed — unless asked, unless its files are
-        // named, and unless this funes cannot run what is there.
-        let refresh = !root.join(id).is_dir()
-            || update
+        // The catalog's newest release is what a catalog install runs, so it is consulted on
+        // every run; a directory or an archive named once stays until named again. Files named
+        // now, and a copy this funes cannot run, are refreshed whatever is there.
+        let refresh = fresh
             || from.is_some()
             || std::env::var_os("FUNES_INTEGRATIONS").is_some()
-            || registry::speaks_another_contract(&root, id);
-        // An update comes from where the install came: a directory or an archive named once is
-        // named again; the catalog resolves itself.
-        let from: Option<String> = from.map(str::to_string).or_else(|| {
-            registry::installed(&root, id)
-                .filter(|_| update)
-                .and_then(|record| match record.origin {
-                    registry::Origin::Directory { path } => Some(path.to_string_lossy().into_owned()),
-                    registry::Origin::Archive { url, .. } => Some(url),
-                    registry::Origin::Catalog { .. } => None,
-                })
-        });
-        let (integration, provisioned) = prepare_agent(id, refresh, from.as_deref()).await?;
-        let resolved = resolve_add_memory(memory).await?;
+            || registry::speaks_another_contract(&root, id)
+            || registry::installed_from_catalog(&root, id);
+        // Read before the record is rewritten: the memory this install was last bound to.
+        let bound = registry::installed(&root, id).and_then(|record| record.memory);
+        let (integration, provisioned) = prepare_agent(id, refresh, from).await?;
+        let resolved = resolve_add_memory(baked_memory(memory, bound)).await?;
+        let memory = resolved.as_ref().map(|r| r.memory.clone());
         let record = provisioned.map(|(origin, files)| registry::Installed::new(&integration.manifest, origin, files));
         let install = |memory: Option<String>| async move {
-            integration.add(memory.as_deref())?;
+            // Counted as run before it runs: a setup that fails part-way may have wired some of
+            // the agent to these files, and `remove` must find them recorded to run unasked.
             ran.set(true);
+            integration.add(memory.as_deref())?;
             // Whatever an older hook asked for, this install's hooks are the ones that ask now.
             spool::forget_missing(id)
         };
         let outcome = bootstrap_add(id, resolved, install).await;
         // Recorded once setup has run, whatever came after: a first push that failed leaves the
-        // new files installed, and the record must say so. An installed copy nothing refreshed
-        // keeps the record it has.
-        if let (Some(record), true) = (record, ran.get()) {
-            registry::record(&root, &record)?;
+        // new files installed, and the record must say so — the memory bound with it. An
+        // installed copy nothing refreshed keeps the record it has, rebound.
+        if ran.get() {
+            if let Some(mut record) = record.or_else(|| registry::installed(&root, id)) {
+                record.memory = memory;
+                registry::record(&root, &record)?;
+            }
         }
         outcome
     }
     .await;
     if !installed.get() {
-        if let Some(previous) = previous {
+        if fresh {
+            registry::discard(&root, id)?;
+        } else if let Some(previous) = previous {
             registry::restore_manifest(&root, id, &previous)?;
         }
     }
@@ -602,9 +598,10 @@ async fn add_agent(id: &str, memory: AddMemory, update: bool, from: Option<&str>
 
 /// Resolve `id`'s integration for a run and confirm it when funes can't vouch for it — all before
 /// `add` touches a memory or `remove` runs anything. With `refresh`, its files are fetched into
-/// the registry first, so the script funes executes is the one it just wrote; a source that can't
-/// be reached leaves the installed copy to run. Without, the installed copy runs as installed.
-/// Says what it refreshed the files with, when it did.
+/// the registry first, so the script funes executes is the one it just wrote — unless the source
+/// holds the release already installed; a source that can't be reached leaves the installed copy
+/// to run. Without, the installed copy runs as installed. Says what it refreshed the files with,
+/// when it did.
 async fn prepare_agent(
     id: &str,
     refresh: bool,
@@ -616,11 +613,12 @@ async fn prepare_agent(
     let mut provisioned = None;
     let provenance = if refresh {
         match registry::provision(&root, id, from).await {
-            Ok(registry::Provisioned {
+            Ok(None) => None,
+            Ok(Some(registry::Provisioned {
                 provenance,
                 origin,
                 files,
-            }) => {
+            })) => {
                 // Files confirmed once, from the same source, unchanged since: confirmed still.
                 let provenance = match provenance {
                     registry::Provenance::Unvouched(_)
@@ -636,7 +634,13 @@ async fn prepare_agent(
             // Another publisher's files are not a refresh the installed copy stands in for.
             Err(e) if e.downcast_ref::<registry::Takeover>().is_some() => return Err(e),
             Err(e) if installed => {
-                eprintln!("note: the {id} integration could not be refreshed ({e:#}) — running the installed copy.");
+                // What failed and why, without the layers between: a request error names its URL
+                // at every one.
+                let why = match e.chain().count() {
+                    1 => e.to_string(),
+                    _ => format!("{e}: {}", e.root_cause()),
+                };
+                eprintln!("note: the {id} integration could not be refreshed ({why}) — running the installed copy.");
                 None
             }
             Err(e) => {
@@ -752,11 +756,11 @@ struct Resolved {
     created: bool,
 }
 
-/// Resolve the memory `funes add` binds. An explicitly-named memory is validated — offer to create it
-/// if it's missing on the Hub (a typo guard). With no memory, offer to set one up on the Hub when a
-/// token is present (`<user>/funes-memory`); otherwise stay local.
-async fn resolve_add_memory(raw: AddMemory) -> Result<Option<Resolved>> {
-    match baked_memory(raw) {
+/// Resolve the memory `funes add` binds. A named memory is validated — offer to create it if it's
+/// missing on the Hub (a typo guard). With none, offer to set one up on the Hub when a token is
+/// present (`<user>/funes-memory`); otherwise stay local.
+async fn resolve_add_memory(memory: Option<String>) -> Result<Option<Resolved>> {
+    match memory {
         Some(memory) => {
             let created = ensure_remote_exists(&memory).await?;
             Ok(Some(Resolved { memory, created }))
@@ -905,7 +909,13 @@ where
     // absent memory.
     if let Some(Resolved { memory, created }) = resolved {
         if memory::Memory::local().open().await.is_ok() {
-            first_push(&memory, created).await?;
+            // The integration is in place by now; only the push is owed, and it takes a terminal.
+            first_push(&memory, created).await.with_context(|| {
+                format!(
+                    "funes is added to {agent}, bound to {memory}, but the first push there did not go \
+                     through — run `funes push {memory}` at a terminal once it is reachable"
+                )
+            })?;
         } else {
             eprintln!("funes: nothing indexed yet — nothing to publish to {memory} yet.");
         }

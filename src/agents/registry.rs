@@ -185,6 +185,9 @@ pub struct Installed {
     #[serde(default)]
     pub files: Files,
     pub installed_at: String,
+    /// The memory the agent was bound to, when one was: what a bare re-run keeps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<String>,
 }
 
 impl Installed {
@@ -198,6 +201,7 @@ impl Installed {
             origin,
             files,
             installed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+            memory: None,
         }
     }
 }
@@ -545,7 +549,7 @@ pub struct Provisioned {
 
 /// Resolve `id`'s files: what `from` names, else `$FUNES_INTEGRATIONS` if set — authoritative, so
 /// a test or a fork cannot reach the network by accident — else the catalog. A directory is made
-/// absolute here: the record names it, and an update follows it, from wherever funes runs then.
+/// absolute here: the record names it, whatever directory funes ran in.
 fn source_for(id: &str, from: Option<&str>) -> Result<Source> {
     if let Some(from) = from {
         if from.starts_with("hf://") {
@@ -570,26 +574,28 @@ fn source_for(id: &str, from: Option<&str>) -> Result<Source> {
 /// Install `id`'s files into the registry, from what `from` names when it names one. Only a file
 /// that differs is rewritten, and nothing is pruned — an integration's `setup` keeps its own state
 /// beside them. The id names the directory written, so it is checked here, before anything is.
-pub async fn provision(root: &Path, id: &str, from: Option<&str>) -> Result<Provisioned> {
+/// `None` when the catalog's newest release is the one recorded as installed: nothing is fetched,
+/// and the installed copy is judged as it stands.
+pub async fn provision(root: &Path, id: &str, from: Option<&str>) -> Result<Option<Provisioned>> {
     if !spool::is_id(id) {
         bail!("{id:?} is not an integration id (lowercase [a-z0-9_-])");
     }
     match source_for(id, from)? {
         Source::Redirected(src) => {
             let files = install_from(root, id, &src)?;
-            Ok(Provisioned {
+            Ok(Some(Provisioned {
                 provenance: Provenance::Unvouched(format!("$FUNES_INTEGRATIONS ({})", src.display())),
                 origin: Origin::Directory { path: src },
                 files,
-            })
+            }))
         }
         Source::Named(src) => {
             let files = install_from(root, id, &src)?;
-            Ok(Provisioned {
+            Ok(Some(Provisioned {
                 provenance: Provenance::Unvouched(src.display().to_string()),
                 origin: Origin::Directory { path: src },
                 files,
-            })
+            }))
         }
         Source::Archive(url) => {
             let staging = tempfile::tempdir().context("creating a staging directory")?;
@@ -598,11 +604,11 @@ pub async fn provision(root: &Path, id: &str, from: Option<&str>) -> Result<Prov
             let unpacked = staging.path().join("unpacked");
             unpack(&archive, &unpacked)?;
             let files = install_from(root, id, &unpacked)?;
-            Ok(Provisioned {
+            Ok(Some(Provisioned {
                 provenance: Provenance::Unvouched(url.clone()),
                 origin: Origin::Archive { url, sha256 },
                 files,
-            })
+            }))
         }
         Source::Catalog => {
             let staging = tempfile::tempdir().context("creating a staging directory")?;
@@ -612,6 +618,9 @@ pub async fn provision(root: &Path, id: &str, from: Option<&str>) -> Result<Prov
                     "the integrations catalog lists no {id} — name where it comes from with --from"
                 ))
             })?;
+            if is_installed_release(root, id, release) {
+                return Ok(None);
+            }
             eprintln!("fetching the {id} integration {}…", release.version);
             let (archive, sha256) = fetch_archive(&release.url, staging.path()).await?;
             if sha256 != release.sha256 {
@@ -634,16 +643,31 @@ pub async fn provision(root: &Path, id: &str, from: Option<&str>) -> Result<Prov
                 );
             }
             let files = install_from(root, id, &unpacked)?;
-            Ok(Provisioned {
+            Ok(Some(Provisioned {
                 provenance: Provenance::Vouched,
                 origin: Origin::Catalog {
                     url: release.url.clone(),
                     sha256,
                 },
                 files,
-            })
+            }))
         }
     }
+}
+
+/// Whether the copy at `root/<id>` was installed from the catalog: the source consulted on every
+/// run, since its newest release is what such a copy runs.
+pub fn installed_from_catalog(root: &Path, id: &str) -> bool {
+    installed(root, id).is_some_and(|record| matches!(record.origin, Origin::Catalog { .. }))
+}
+
+/// Whether `release` is the one recorded as installed at `root/<id>`, by the digest the catalog
+/// names: a record from another source, or of another digest, is not it.
+fn is_installed_release(root: &Path, id: &str, release: &Release) -> bool {
+    installed(root, id).is_some_and(|record| match record.origin {
+        Origin::Catalog { sha256, .. } => sha256 == release.sha256,
+        Origin::Directory { .. } | Origin::Archive { .. } => false,
+    })
 }
 
 /// Copy `src` over `root/<id>` once what it declares checks out: a manifest that would be refused
@@ -1627,5 +1651,41 @@ mod tests {
         integration(root.path(), "pi", &manifest("pi", CONTRACT_VERSION), "exit 3");
         let err = open(root.path(), "pi").unwrap().add(None).unwrap_err().to_string();
         assert!(err.contains('3'), "{err}");
+    }
+
+    /// The catalog's newest release is fetched unless it is the one recorded as installed, by
+    /// digest: the same digest from another source, or another digest, is not it.
+    #[test]
+    fn the_installed_release_is_known_by_its_recorded_digest() {
+        let root = tempfile::tempdir().unwrap();
+        integration(root.path(), "pi", &manifest("pi", CONTRACT_VERSION), "true");
+        let manifest: Manifest = serde_json::from_str(&manifest("pi", CONTRACT_VERSION)).unwrap();
+        let release = Release {
+            version: "1.0.0".to_string(),
+            contract_version: CONTRACT_VERSION,
+            url: "hf://buckets/acme/funes-pi/pi/1.0.0/pi.tar.gz".to_string(),
+            sha256: "ab".repeat(32),
+        };
+        assert!(!is_installed_release(root.path(), "pi", &release), "no record");
+
+        let installed = |origin: Origin| {
+            record(root.path(), &Installed::new(&manifest, origin, Files::new())).unwrap();
+            is_installed_release(root.path(), "pi", &release)
+        };
+        assert!(installed(Origin::Catalog {
+            url: release.url.clone(),
+            sha256: release.sha256.clone(),
+        }));
+        assert!(!installed(Origin::Catalog {
+            url: release.url.clone(),
+            sha256: "cd".repeat(32),
+        }));
+        assert!(!installed(Origin::Archive {
+            url: release.url.clone(),
+            sha256: release.sha256.clone(),
+        }));
+        assert!(!installed(Origin::Directory {
+            path: root.path().join("src"),
+        }));
     }
 }
