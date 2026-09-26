@@ -91,6 +91,43 @@ tool-call `memory` overrides the memory bound when the server started; with neit
 the local memory. `mcp` is read-only: indexing and publishing remain separate commands or automation
 installed by `funes add`.
 
+### Sharing one server over HTTP
+
+Each stdio server loads its own embedding and reranking models, so every open agent session holds
+its own copy. To have sessions share one process, serve the same tools over Streamable HTTP at
+`http://127.0.0.1:1942/mcp`:
+
+```bash
+funes mcp --transport streamable-http
+```
+
+Register the running endpoint with Claude Code or Codex:
+
+```bash
+claude mcp add --transport http funes http://127.0.0.1:1942/mcp
+codex mcp add funes --url http://127.0.0.1:1942/mcp
+```
+
+Use `--bind` to change the listen address, for example `--bind '[::1]:1942'` for IPv6 or
+`--bind 127.0.0.1:0` to choose an available port. The server prints its listening URL to stderr.
+
+The server keeps no per-client sessions, so it can be restarted, by hand or by a service manager
+after a crash, without breaking the clients connected to it: their next call reaches the new
+process. It does pay the model load again on the first recall after a restart. Its memory use grows
+with the memory it reads; a service manager's memory limit should leave room for that (serving a
+remote memory of about 7.9 million chunks, one server measured about 6.5 GB).
+
+For an explicit network binding, configure any additional authorities and browser origins:
+
+```bash
+funes mcp --transport streamable-http --bind 0.0.0.0:1942 \
+  --allowed-host memory.example \
+  --allowed-origin https://client.example
+```
+
+Host and Origin restrictions do not authenticate clients; configure access control and TLS separately
+when exposing the server.
+
 ## Binding a memory
 
 The optional positional `[memory]` is the memory this agent recalls from — and, for the agents with

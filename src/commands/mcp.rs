@@ -1,6 +1,7 @@
-//! `funes mcp`: expose recall over the Model Context Protocol (stdio transport),
-//! so any MCP client (Claude Code, Cursor, …) can call funes as a first-class tool.
-//! stdout is the JSON-RPC channel — logs must go to stderr.
+//! `funes mcp`: expose recall over the Model Context Protocol, so any MCP client (Claude Code,
+//! Cursor, ...) can call funes as a first-class tool. Over stdio each agent session spawns its own
+//! server; over Streamable HTTP ([`http`]) many sessions share one process and its loaded models.
+//! On stdio, stdout is the JSON-RPC channel — logs must go to stderr.
 
 use super::recall;
 use crate::agents;
@@ -11,6 +12,9 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{Implementation, ServerCapabilities, ServerConfig};
 use rmcp::transport::stdio;
 use rmcp::{schemars, tool, tool_handler, tool_router, ServerHandler, ServiceExt};
+
+mod http;
+pub use http::run as run_http;
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct RecallRequest {
