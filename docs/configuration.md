@@ -42,7 +42,8 @@ registration and funes-owned files/entries:
 | pi | Extension and optional memory binding under `~/.funes/agents/pi/`. |
 
 Beside each integration's directory, `~/.funes/agents/<id>.json` records what `funes add`
-installed there, where the files came from, and the memory it bound.
+installed there and where the files came from; `<id>.memory` beside it notes the memory its
+setup last ran with, when one was.
 
 See [automation.md](automation.md) for how these files are merged and which events they handle.
 Hook logs sit beside the installed scripts as `funes-sync.log`.
@@ -87,7 +88,7 @@ file-grained cache design and cold-versus-warm behavior.
 | `COLUMNS` | Human-rendering width, clamped to 40–120 columns. |
 
 Bindings passed to `funes add` live in the agent's own registration or integration files, noted
-beside the install in `~/.funes/agents/<agent>.json` so a bare re-run keeps them; there is no
+beside the install in `~/.funes/agents/<agent>.memory` so a bare re-run keeps them; there is no
 hidden “active remote” in `$FUNES_HOME`. Re-run `funes add <agent> <memory>` to change one (`local`
 unbinds), or
 `funes remove <agent>` to remove that agent integration without deleting the memory.

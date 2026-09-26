@@ -185,9 +185,6 @@ pub struct Installed {
     #[serde(default)]
     pub files: Files,
     pub installed_at: String,
-    /// The memory the agent was bound to, when one was: what a bare re-run keeps.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub memory: Option<String>,
 }
 
 impl Installed {
@@ -201,7 +198,6 @@ impl Installed {
             origin,
             files,
             installed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
-            memory: None,
         }
     }
 }
@@ -254,21 +250,57 @@ pub fn installed(root: &Path, id: &str) -> Option<Installed> {
 
 /// Write `record` as `root/<id>.json`, closed to other writers whatever the umask.
 pub fn record(root: &Path, record: &Installed) -> Result<()> {
-    let path = record_path(root, &record.id);
     let mut text = serde_json::to_string_pretty(record).context("serializing the install record")?;
     text.push('\n');
-    let tmp = root.join(format!(".{}.json.funes-tmp{}", record.id, std::process::id()));
+    write_owned(root, &record_path(root, &record.id), text)
+}
+
+/// Write `text` as `path`, a file of funes's own under `root`: 0644 whatever the umask, and
+/// replaced whole.
+fn write_owned(root: &Path, path: &Path, text: String) -> Result<()> {
+    let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("record");
+    let tmp = root.join(format!(".{name}.funes-tmp{}", std::process::id()));
     let written = std::fs::write(&tmp, text)
         .with_context(|| format!("writing {}", tmp.display()))
         .and_then(|()| {
             std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644))
                 .with_context(|| format!("setting the mode of {}", tmp.display()))
         })
-        .and_then(|()| std::fs::rename(&tmp, &path).with_context(|| format!("replacing {}", path.display())));
+        .and_then(|()| std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display())));
     if written.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
     written
+}
+
+/// Where the memory `id`'s setup was last bound to is noted: `root/<id>.memory`, one line. A file
+/// of its own rather than a field of the record: a copy placed by hand has no record, and a
+/// refresh rewrites the record without having bound anything.
+fn binding_path(root: &Path, id: &str) -> PathBuf {
+    root.join(format!("{id}.memory"))
+}
+
+/// The memory `id`'s setup was last bound to, when one was. Judged as `setup` is — the user's
+/// own, writable by nobody else — since it is what `setup` is handed.
+pub fn binding(root: &Path, id: &str) -> Result<Option<String>> {
+    let path = binding_path(root, id);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(anyhow::Error::new(e).context(format!("reading {}", path.display()))),
+    };
+    owned_by_me(root, &path, 0o022)?;
+    let memory = text.trim();
+    Ok((!memory.is_empty()).then(|| memory.to_string()))
+}
+
+/// Note `memory` as what `id`'s setup was bound to, once it has run with it; `None` unbinds.
+pub fn bind(root: &Path, id: &str, memory: Option<&str>) -> Result<()> {
+    let path = binding_path(root, id);
+    match memory {
+        Some(memory) => write_owned(root, &path, format!("{memory}\n")),
+        None => super::remove_tree(&path),
+    }
 }
 
 /// The registry root, `~/.funes/agents` — fixed, not under `$FUNES_HOME`: an agent records the
@@ -824,11 +856,12 @@ fn unpack(archive: &Path, dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Delete an integration's directory, including the state its `setup` wrote there, and funes's
-/// record of it.
+/// Delete an integration's directory, including the state its `setup` wrote there, funes's record
+/// of it, and the memory it was bound to.
 pub fn discard(root: &Path, id: &str) -> Result<()> {
     super::remove_tree(&root.join(id))?;
-    super::remove_tree(&record_path(root, id))
+    super::remove_tree(&record_path(root, id))?;
+    super::remove_tree(&binding_path(root, id))
 }
 
 /// Create `dir`, and any parent missing, as funes's own: 0755 whatever the umask, since `open`
@@ -1217,6 +1250,34 @@ mod tests {
         std::fs::set_permissions(root.join("pi.json"), std::fs::Permissions::from_mode(0o666)).unwrap();
         let err = verify_installed(&root, "pi").unwrap_err().to_string();
         assert!(err.contains("writable by other users"), "{err}");
+    }
+
+    /// The memory noted beside an install is what a bare re-run binds: none until a setup ran
+    /// with one, gone when unbound, and refused — like the record — when others could write it.
+    #[test]
+    fn the_binding_is_noted_beside_the_install() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("agents");
+        integration(&root, "pi", &manifest("pi", CONTRACT_VERSION), "true");
+        assert_eq!(binding(&root, "pi").unwrap(), None);
+
+        bind(&root, "pi", Some("acme/kb")).unwrap();
+        assert_eq!(binding(&root, "pi").unwrap().as_deref(), Some("acme/kb"));
+        assert_eq!(std::fs::read_to_string(root.join("pi.memory")).unwrap(), "acme/kb\n");
+
+        bind(&root, "pi", None).unwrap();
+        assert_eq!(binding(&root, "pi").unwrap(), None);
+        assert!(!root.join("pi.memory").exists());
+
+        bind(&root, "pi", Some("acme/kb")).unwrap();
+        std::fs::set_permissions(root.join("pi.memory"), std::fs::Permissions::from_mode(0o666)).unwrap();
+        let err = binding(&root, "pi").unwrap_err().to_string();
+        assert!(err.contains("writable by other users"), "{err}");
+
+        // Discarded with the install.
+        std::fs::set_permissions(root.join("pi.memory"), std::fs::Permissions::from_mode(0o644)).unwrap();
+        discard(&root, "pi").unwrap();
+        assert!(!root.join("pi.memory").exists());
     }
 
     /// A package without its executable would leave the installed one running outside the

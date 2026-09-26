@@ -363,9 +363,9 @@ fn a_relative_source_is_recorded_absolute() {
     assert_eq!(path.canonicalize().unwrap(), elsewhere.canonicalize().unwrap());
 }
 
-/// The memory bound rides in the record, so a bare re-run keeps it, and `local` is how it is
-/// unbound. A path stands in for a remote: nothing to check on the Hub, and the first push fails
-/// after setup ran, which is when the binding is recorded.
+/// The memory bound is noted beside the install, so a bare re-run keeps it, and `local` is how it
+/// is unbound. A path stands in for a remote: nothing to check on the Hub, and the first push fails
+/// after setup ran, which is when the binding is noted.
 #[test]
 fn a_bare_re_add_keeps_the_memory_bound_and_local_unbinds() {
     let tmp = tempfile::tempdir().unwrap();
@@ -375,10 +375,8 @@ fn a_bare_re_add_keeps_the_memory_bound_and_local_unbinds() {
     bundle(&home.join("integrations/clyde"), "clyde", 1, "");
     fs::create_dir_all(home.join(".clyde")).unwrap();
     fs::write(home.join(".clyde/history.funes.jsonl"), format!("{HISTORY}\n")).unwrap();
-    let record = home.join(".funes/agents/clyde.json");
-    let bound = || -> serde_json::Value {
-        serde_json::from_str::<serde_json::Value>(&fs::read_to_string(&record).unwrap()).unwrap()["memory"].clone()
-    };
+    let binding = home.join(".funes/agents/clyde.memory");
+    let bound = || fs::read_to_string(&binding).ok().map(|text| text.trim().to_string());
     let memory = tmp.path().join("team-memory");
     let memory = memory.to_str().unwrap();
 
@@ -390,7 +388,7 @@ fn a_bare_re_add_keeps_the_memory_bound_and_local_unbinds() {
             .starts_with(&format!("add {memory}\n")),
         "{transcript}"
     );
-    assert_eq!(bound(), memory);
+    assert_eq!(bound().as_deref(), Some(memory));
 
     // Named nothing, the next run binds what the last one did.
     fs::remove_file(&log).unwrap();
@@ -402,9 +400,9 @@ fn a_bare_re_add_keeps_the_memory_bound_and_local_unbinds() {
         "{}",
         stderr(&out)
     );
-    assert_eq!(bound(), memory);
+    assert_eq!(bound().as_deref(), Some(memory));
 
-    // `local` unbinds, and the record says so.
+    // `local` unbinds, and the note goes.
     fs::remove_file(&log).unwrap();
     let out = funes(&home, &funes_home, &log, &["add", "clyde", "local"]);
     support::assert_success(&out);
@@ -413,7 +411,88 @@ fn a_bare_re_add_keeps_the_memory_bound_and_local_unbinds() {
         "{}",
         stderr(&out)
     );
-    assert!(bound().is_null(), "unbound");
+    assert!(bound().is_none(), "unbound");
+}
+
+/// A setup that fails leaves the agent bound as it was, so what is noted is the last memory a
+/// setup ran with — not the last one asked for.
+#[test]
+fn a_setup_that_failed_leaves_the_last_binding() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let funes_home = tmp.path().join("funes");
+    let log = tmp.path().join("setup.log");
+    let source = bundle(&home.join("integrations/clyde"), "clyde", 1, "");
+    fs::create_dir_all(home.join(".clyde")).unwrap();
+    fs::write(home.join(".clyde/history.funes.jsonl"), format!("{HISTORY}\n")).unwrap();
+    let binding = home.join(".funes/agents/clyde.memory");
+    let first = tmp.path().join("first-memory");
+    let first = first.to_str().unwrap();
+    let second = tmp.path().join("second-memory");
+    let second = second.to_str().unwrap();
+
+    funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde", first]);
+    assert_eq!(fs::read_to_string(&binding).unwrap().trim(), first);
+
+    // Rebound to another by a setup that exits before it changes anything.
+    let working = fs::read_to_string(source.join("setup")).unwrap();
+    fs::write(source.join("setup"), format!("{working}[ \"$1\" != add ] || exit 7\n")).unwrap();
+    fs::remove_file(&log).unwrap();
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde", second]);
+    let transcript = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !out.status.success() && transcript.contains("exit Some(7)"),
+        "{transcript}"
+    );
+    assert!(
+        fs::read_to_string(&log)
+            .unwrap()
+            .starts_with(&format!("add {second}\n")),
+        "setup ran"
+    );
+    assert_eq!(
+        fs::read_to_string(&binding).unwrap().trim(),
+        first,
+        "bound as the agent is"
+    );
+
+    // Working again, a bare re-run binds the first: the memory the agent was left with.
+    fs::write(source.join("setup"), working).unwrap();
+    fs::remove_file(&log).unwrap();
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde"]);
+    assert!(
+        fs::read_to_string(&log).unwrap().starts_with(&format!("add {first}\n")),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+/// A copy placed in the registry by hand has no record, and keeps its binding all the same.
+#[test]
+fn a_drop_in_copy_keeps_its_binding_across_runs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let funes_home = tmp.path().join("funes");
+    let log = tmp.path().join("setup.log");
+    install(&home, "clyde", 1);
+    let record = home.join(".funes/agents/clyde.json");
+    let memory = tmp.path().join("team-memory");
+    let memory = memory.to_str().unwrap();
+
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde", memory]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+    assert!(!record.exists(), "a drop-in has no record");
+
+    fs::remove_file(&log).unwrap();
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+    assert!(
+        fs::read_to_string(&log)
+            .unwrap()
+            .starts_with(&format!("add {memory}\n")),
+        "bound as before"
+    );
+    assert!(!record.exists());
 }
 
 /// Setup ran, so the install is recorded — even when a later step of the bootstrap fails: the

@@ -116,8 +116,8 @@ funes add claude local                     # back to the local memory
 ```
 
 A memory is an `<org>/<repo>` shorthand, a full `hf://…` URI, or `local`. The binding lives in the
-**agent's own config**, and funes notes it beside the install (`~/.funes/agents/<id>.json`) so a
-bare re-run keeps it — there is no hidden global default, and `local` unbinds. If you name a memory that doesn't exist on
+**agent's own config**, and funes notes it beside the install (`~/.funes/agents/<id>.memory`, once setup
+ran with it) so a bare re-run keeps it — there is no hidden global default, and `local` unbinds. If you name a memory that doesn't exist on
 the Hub yet, `funes add` offers to create it (default no, to catch typos). Dataset repositories that
 funes creates are **private by default**; changing their visibility later is an explicit action on
 the Hub. An existing repository keeps its existing visibility.

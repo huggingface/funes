@@ -559,27 +559,28 @@ async fn add_agent(id: &str, memory: AddMemory, from: Option<&str>) -> Result<()
             || std::env::var_os("FUNES_INTEGRATIONS").is_some()
             || registry::speaks_another_contract(&root, id)
             || registry::installed_from_catalog(&root, id);
-        // Read before the record is rewritten: the memory this install was last bound to.
-        let bound = registry::installed(&root, id).and_then(|record| record.memory);
+        // The memory the last setup that ran here was bound to.
+        let bound = registry::binding(&root, id)?;
         let (integration, provisioned) = prepare_agent(id, refresh, from).await?;
         let resolved = resolve_add_memory(baked_memory(memory, bound)).await?;
-        let memory = resolved.as_ref().map(|r| r.memory.clone());
         let record = provisioned.map(|(origin, files)| registry::Installed::new(&integration.manifest, origin, files));
+        let registry_root = &root;
         let install = |memory: Option<String>| async move {
             // Counted as run before it runs: a setup that fails part-way may have wired some of
             // the agent to these files, and `remove` must find them recorded to run unasked.
             ran.set(true);
             integration.add(memory.as_deref())?;
+            // Bound once setup ran with it, and not before: a setup that failed left the agent
+            // bound as it was.
+            registry::bind(registry_root, id, memory.as_deref())?;
             // Whatever an older hook asked for, this install's hooks are the ones that ask now.
             spool::forget_missing(id)
         };
         let outcome = bootstrap_add(id, resolved, install).await;
         // Recorded once setup has run, whatever came after: a first push that failed leaves the
-        // new files installed, and the record must say so — the memory bound with it. An
-        // installed copy nothing refreshed keeps the record it has, rebound.
+        // new files installed, and the record must say so.
         if ran.get() {
-            if let Some(mut record) = record.or_else(|| registry::installed(&root, id)) {
-                record.memory = memory;
+            if let Some(record) = record {
                 registry::record(&root, &record)?;
             }
         }
