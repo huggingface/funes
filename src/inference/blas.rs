@@ -9,7 +9,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
-use serde::Deserialize;
+use safetensors::tensor::Metadata;
 use tokenizers::utils::padding::pad_encodings;
 use tokenizers::{Encoding, PaddingParams, Tokenizer, TruncationParams};
 
@@ -653,15 +653,6 @@ fn local_snapshot(repo: &str) -> Option<PathBuf> {
     None
 }
 
-/// One tensor's entry in a safetensors header.
-#[derive(Deserialize)]
-struct TensorHeader {
-    dtype: safetensors::Dtype,
-    shape: Vec<usize>,
-    /// Byte range of the tensor, relative to the start of the data that follows the header.
-    data_offsets: (usize, usize),
-}
-
 /// The f32 tensors of `dir/model.safetensors`, one tensor at a time. Reading the file whole would
 /// hold its bytes and the f32 copies of them side by side — 2.2 GB for the reranker's 1.1 GB of
 /// weights, on a run that keeps 1.2 GB — so only the header is buffered and each tensor is
@@ -691,55 +682,30 @@ fn load_weights(dir: &Path) -> Result<HashMap<String, Vec<f32>>> {
     let mut head = vec![0u8; head_len as usize];
     file.read_exact(&mut head)
         .with_context(|| format!("reading the header of {}", path.display()))?;
-    let head: HashMap<String, serde_json::Value> =
+    // Deserializing `Metadata` runs safetensors' own validation: the offsets tile the data from zero
+    // and each tensor's shape and dtype account for exactly its byte range.
+    let meta: Metadata =
         serde_json::from_slice(&head).with_context(|| format!("parsing the header of {}", path.display()))?;
 
+    // The one thing the header cannot answer on its own: the data has to be as long as it accounts for.
     let data_start = 8 + head_len;
-    let data_len = size - data_start;
-    let mut entries = Vec::with_capacity(head.len());
-    for (name, entry) in head {
-        // The header carries the file's own metadata under this key, not a tensor.
-        if name == "__metadata__" {
-            continue;
-        }
-        let t: TensorHeader =
-            serde_json::from_value(entry).with_context(|| format!("reading the header entry for {name}"))?;
-        let (start, end) = t.data_offsets;
-        // What a tensor says it is has to be what its bytes can hold: `SafeTensors::deserialize`
-        // checked this, and nothing downstream would notice a tensor of the wrong length.
-        let want = t.shape.iter().try_fold(t.dtype.bitsize() / 8, |n, d| n.checked_mul(*d));
-        if end < start || want != Some(end - start) {
-            bail!(
-                "{name} claims bytes {start}..{end} for a {:?} {:?} in {}",
-                t.dtype,
-                t.shape,
-                path.display()
-            );
-        }
-        entries.push((name, t.dtype, start, end));
-    }
-    // Front to back, so the reads below never seek backwards over the file.
-    entries.sort_by_key(|(_, _, start, _)| *start);
-    // Every tensor, loaded or skipped, has to tile the data exactly — as the crate's validation had
-    // it — or an offset is naming bytes that belong to another tensor.
-    let mut tiled = 0usize;
-    for (name, _, start, end) in &entries {
-        if *start != tiled {
-            bail!("{name} starts at {start}, not {tiled}, in {}", path.display());
-        }
-        tiled = *end;
-    }
-    if tiled as u64 != data_len {
+    let accounted = meta.tensors().values().map(|i| i.data_offsets.1).max().unwrap_or(0) as u64;
+    if accounted != size - data_start {
         bail!(
-            "{} carries {data_len} bytes of tensor data, its header accounts for {tiled}",
-            path.display()
+            "{} carries {} bytes of tensor data, its header accounts for {accounted}",
+            path.display(),
+            size - data_start
         );
     }
-    let tensors: Vec<(String, usize, usize)> = entries
+
+    let mut tensors: Vec<(String, usize, usize)> = meta
+        .tensors()
         .into_iter()
-        .filter(|(_, dtype, _, _)| *dtype == safetensors::Dtype::F32)
-        .map(|(name, _, start, end)| (name, start, end))
+        .filter(|(_, i)| i.dtype == safetensors::Dtype::F32)
+        .map(|(name, i)| (name, i.data_offsets.0, i.data_offsets.1))
         .collect();
+    // Front to back, so the reads below never seek backwards over the file.
+    tensors.sort_by_key(|(_, start, _)| *start);
 
     let mut weights = HashMap::with_capacity(tensors.len());
     let mut window = vec![0u8; WINDOW];
@@ -925,7 +891,7 @@ mod tests {
     /// lists it in, a tensor of another dtype is skipped as it always was, and a byte range that
     /// reaches past the data is refused instead of read.
     #[test]
-    fn load_weights_streams_every_f32_tensor_and_refuses_a_bad_range() {
+    fn load_weights_streams_every_f32_tensor_and_refuses_a_bad_file() {
         fn file(dir: &Path, header: &str, data: &[u8]) {
             let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
             bytes.extend_from_slice(header.as_bytes());
@@ -946,27 +912,55 @@ mod tests {
         assert_eq!(w["second"], vec![1.0, -2.5]);
         assert_eq!(w["first"], vec![0.5]);
 
-        // A tensor whose shape does not match the bytes its range holds.
+        // A shape its byte range cannot hold, and a gap between two tensors: safetensors' own
+        // validation catches both while the header is deserialized. `{err:#}` to see its message
+        // under the context this adds.
         let bad = tempfile::tempdir().unwrap();
         file(
             bad.path(),
             r#"{"t":{"dtype":"F32","shape":[64],"data_offsets":[0,4]}}"#,
             &data[..4],
         );
-        let err = load_weights(bad.path()).unwrap_err().to_string();
+        let err = format!("{:#}", load_weights(bad.path()).unwrap_err());
         assert!(
-            err.contains("0..4"),
+            err.contains("invalid shape, data type, or offset"),
             "a shape its bytes cannot hold must be refused, got: {err}"
         );
 
-        // Tensors that leave a gap: an offset is then naming bytes that belong to another tensor.
         let gap = tempfile::tempdir().unwrap();
         let two = r#"{"a":{"dtype":"F32","shape":[1],"data_offsets":[0,4]},"b":{"dtype":"F32","shape":[1],"data_offsets":[8,12]}}"#;
         file(gap.path(), two, &data[..12]);
-        let err = load_weights(gap.path()).unwrap_err().to_string();
+        let err = format!("{:#}", load_weights(gap.path()).unwrap_err());
         assert!(
-            err.contains("starts at 8"),
+            err.contains("invalid offset for tensor"),
             "a gap in the data must be refused, got: {err}"
+        );
+
+        // Data the header does not account for. The header alone cannot catch this, so the loader
+        // checks it against the file's length.
+        let extra = tempfile::tempdir().unwrap();
+        file(
+            extra.path(),
+            r#"{"t":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#,
+            &data[..8],
+        );
+        let err = format!("{:#}", load_weights(extra.path()).unwrap_err());
+        assert!(
+            err.contains("8 bytes of tensor data") && err.contains("accounts for 4"),
+            "a longer data section must be refused, got: {err}"
+        );
+
+        // And a truncated one, which the same check catches from the other side.
+        let short = tempfile::tempdir().unwrap();
+        file(
+            short.path(),
+            r#"{"t":{"dtype":"F32","shape":[2],"data_offsets":[0,8]}}"#,
+            &data[..4],
+        );
+        let err = format!("{:#}", load_weights(short.path()).unwrap_err());
+        assert!(
+            err.contains("4 bytes of tensor data") && err.contains("accounts for 8"),
+            "a truncated data section must be refused, got: {err}"
         );
     }
 
