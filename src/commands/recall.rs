@@ -900,22 +900,64 @@ impl SessionFilter {
     }
 }
 
-/// The sessions of a memory that `filter` keeps, oldest first, rendered in the agent format. The
-/// prompts are read after the filter and the bound, so their cost follows the rows rendered rather
-/// than the size of the memory.
+/// The sessions of a memory that `filter` keeps, oldest first, rendered in the agent format.
 pub async fn sessions(memory: Memory, filter: SessionFilter) -> Result<String> {
-    // Zero would render nothing, which is never what a caller wants.
+    refuse_zero_limit(&filter)?;
+    list_sessions(vec![SessionPool::open(&memory).await?], filter).await
+}
+
+/// One memory's sessions, before a listing pools, filters and pages them.
+pub struct SessionPool {
+    ds: Dataset,
+    note: String,
+    label: String,
+    sessions: Vec<Session>,
+}
+
+impl SessionPool {
+    /// Open `memory` and fold its rows into sessions.
+    pub async fn open(memory: &Memory) -> Result<Self> {
+        let read = open_read(memory).await?;
+        Ok(Self {
+            sessions: scan_sessions(&read.ds).await?,
+            note: read.note.unwrap_or_default(),
+            label: read.memory_label.unwrap_or_else(|| memory.label()),
+            ds: read.ds,
+        })
+    }
+}
+
+/// Zero would render nothing, which is never what a caller wants.
+fn refuse_zero_limit(filter: &SessionFilter) -> Result<()> {
     if filter.limit == Some(0) {
         bail!("a limit of 0 would list nothing — omit it for {SESSIONS_LIMIT} rows, raise it to at most {SESSIONS_LIMIT_MAX}, and walk the rest with --offset");
     }
-    let read = open_read(&memory).await?;
-    let note = read.note.clone().unwrap_or_default();
-    let label = read.memory_label.clone().unwrap_or_else(|| memory.label());
-    let all = scan_sessions(&read.ds).await?;
+    Ok(())
+}
+
+/// The sessions of the pooled memories that `filter` keeps, oldest first, rendered in the agent
+/// format; a session several pools hold is listed from the first. The prompts are read after the
+/// filter and the bound, so their cost follows the rows rendered rather than the size of the memory.
+pub async fn list_sessions(mut pools: Vec<SessionPool>, filter: SessionFilter) -> Result<String> {
+    refuse_zero_limit(&filter)?;
+    let note: String = pools.iter().map(|p| p.note.as_str()).collect();
+    let label = pools.first().map(|p| p.label.clone()).unwrap_or_default();
+    let mut seen = HashSet::new();
+    let mut all: Vec<(usize, Session)> = Vec::new();
+    for (i, pool) in pools.iter_mut().enumerate() {
+        let sessions = std::mem::take(&mut pool.sessions);
+        all.extend(
+            sessions
+                .into_iter()
+                .filter(|s| seen.insert(s.session_id.clone()))
+                .map(|s| (i, s)),
+        );
+    }
     if all.is_empty() {
         return Ok(format!("{note}no sessions in {label}\n"));
     }
-    let matched: Vec<Session> = all.into_iter().filter(|s| filter.keeps(s)).collect();
+    all.sort_by(|(_, a), (_, b)| (&a.ts, &a.session_id).cmp(&(&b.ts, &b.session_id)));
+    let matched: Vec<(usize, Session)> = all.into_iter().filter(|(_, s)| filter.keeps(s)).collect();
     if matched.is_empty() {
         return Ok(format!("{note}no session in {label} matches\n"));
     }
@@ -925,18 +967,29 @@ pub async fn sessions(memory: Memory, filter: SessionFilter) -> Result<String> {
     let total = matched.len();
     let limit = filter.limit.unwrap_or(SESSIONS_LIMIT).min(SESSIONS_LIMIT_MAX);
     let end = total.saturating_sub(filter.offset);
-    let mut shown: Vec<Session> = matched.into_iter().take(end).skip(end.saturating_sub(limit)).collect();
+    let shown: Vec<(usize, Session)> = matched.into_iter().take(end).skip(end.saturating_sub(limit)).collect();
     if shown.is_empty() {
         return Ok(format!(
             "{note}offset {} is past the {total} session(s) in {label}\n",
             filter.offset
         ));
     }
-    let ids: Vec<String> = shown.iter().map(|s| s.session_id.clone()).collect();
-    let mut prompts = first_prompts(&read.ds, &ids).await?;
-    for s in shown.iter_mut() {
-        s.first_prompt = prompts.remove(&s.session_id).unwrap_or_default();
+    let mut prompts = HashMap::new();
+    for (i, pool) in pools.iter().enumerate() {
+        let ids: Vec<String> = shown
+            .iter()
+            .filter(|(from, _)| *from == i)
+            .map(|(_, s)| s.session_id.clone())
+            .collect();
+        prompts.extend(first_prompts(&pool.ds, &ids).await?);
     }
+    let shown: Vec<Session> = shown
+        .into_iter()
+        .map(|(_, s)| Session {
+            first_prompt: prompts.remove(&s.session_id).unwrap_or_default(),
+            ..s
+        })
+        .collect();
     Ok(crate::ui::render::sessions_agent(&note, &shown, total, filter.offset))
 }
 
