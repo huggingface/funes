@@ -159,7 +159,8 @@ const VECTOR: IndexSpec = IndexSpec {
     label: "vector index",
 };
 
-/// Best-effort: refresh `index` if `existing` lists it, else build it whole with `params`.
+/// Best-effort: refresh `index` if `existing` lists it, else build it whole with `params`. A refresh
+/// that fails also builds it whole, so the rows it left out don't stay unindexed.
 async fn refresh_or_build(
     ds: &mut Dataset,
     index: &IndexSpec,
@@ -168,8 +169,9 @@ async fn refresh_or_build(
     on_phase: impl Fn(&str),
 ) {
     if let Some(&subs) = existing.get(index.name) {
-        let _ = optimize_index(ds, index.name, subs).await;
-        return;
+        if optimize_index(ds, index.name, subs).await.is_ok() {
+            return;
+        }
     }
     on_phase(index.label);
     let _ = ds
@@ -446,6 +448,58 @@ mod tests {
         for uuid in base {
             assert!(after.iter().any(|i| i.uuid == uuid), "base index {uuid} was rebuilt");
         }
+    }
+
+    #[tokio::test]
+    async fn build_indexes_rebuilds_an_index_whole_when_its_refresh_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let uri = table_uri(&dir.path().to_string_lossy());
+        let mut ds = Dataset::write(
+            reader(embedded(&turns(0, TRAINABLE))),
+            &uri,
+            Some(WriteParams::default()),
+        )
+        .await
+        .unwrap();
+        build_indexes(&mut ds, |_| {}).await;
+        let base = ds
+            .load_indices()
+            .await
+            .unwrap()
+            .iter()
+            .find(|i| i.name == FTS_INDEX)
+            .unwrap()
+            .uuid;
+        for run in 0..COMPACT_DELTAS {
+            ds.append(reader(embedded(&turns(TRAINABLE + run, 1))), None)
+                .await
+                .unwrap();
+            build_indexes(&mut ds, |_| {}).await;
+        }
+        assert_eq!(sub_index_counts(&ds).await.unwrap()[FTS_INDEX], 1 + COMPACT_DELTAS);
+        // The next refresh merges the deltas, so it has to read this broken one.
+        let indices = ds.load_indices().await.unwrap();
+        let delta = indices
+            .iter()
+            .find(|i| i.name == FTS_INDEX && i.uuid != base)
+            .unwrap()
+            .uuid;
+        let delta_dir = std::path::Path::new(&uri).join("_indices").join(delta.to_string());
+        for file in std::fs::read_dir(&delta_dir).unwrap() {
+            std::fs::write(file.unwrap().path(), b"corrupt").unwrap();
+        }
+
+        ds.append(reader(embedded(&turns(TRAINABLE + COMPACT_DELTAS, 1))), None)
+            .await
+            .unwrap();
+        let built = std::sync::Mutex::new(Vec::new());
+        build_indexes(&mut ds, |phase| built.lock().unwrap().push(phase.to_string())).await;
+        assert_eq!(built.into_inner().unwrap(), ["text search index"]);
+        assert_eq!(
+            sub_index_counts(&ds).await.unwrap()[FTS_INDEX],
+            1,
+            "one whole index, no delta left over"
+        );
     }
 
     /// Pins the Lance behavior [`optimize_index`] relies on: `append()` adds one delta sub-index per
