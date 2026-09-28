@@ -160,14 +160,8 @@ const VECTOR: IndexSpec = IndexSpec {
     label: "vector index",
 };
 
-/// Build an index whole again once the table holds this many times the rows its base was trained
-/// over. A delta reuses the base's IVF partitions and PQ codebook, and keeps its BM25 statistics
-/// apart from the base's; doubling bounds the rebuild work over a memory's life to about twice its
-/// final size.
-const REBUILD_GROWTH: usize = 2;
-
 /// Best-effort: refresh `index` if `existing` lists it, else build it whole with `params`. A refresh
-/// that fails, or an index the table has outgrown ([`REBUILD_GROWTH`]), is also built whole.
+/// that fails also builds it whole, so the rows it left out don't stay unindexed.
 async fn refresh_or_build(
     ds: &mut Dataset,
     index: &IndexSpec,
@@ -176,10 +170,7 @@ async fn refresh_or_build(
     on_phase: impl Fn(&str),
 ) {
     if let Some(&subs) = existing.get(index.name) {
-        let outgrown = base_rows(ds, index.name)
-            .await
-            .is_ok_and(|base| table_rows(ds) >= REBUILD_GROWTH * base);
-        if !outgrown && optimize_index(ds, index.name, subs, &on_phase).await.is_ok() {
+        if optimize_index(ds, index.name, subs, &on_phase).await.is_ok() {
             return;
         }
     }
@@ -263,33 +254,6 @@ pub(crate) async fn sub_index_counts(ds: &Dataset) -> Result<BTreeMap<String, us
         *counts.entry(idx.name.clone()).or_default() += 1;
     }
     Ok(counts)
-}
-
-/// Rows the table holds, deleted ones included, as the index fragment bitmaps count them.
-fn table_rows(ds: &Dataset) -> usize {
-    ds.fragments().iter().map(|f| f.physical_rows.unwrap_or(0)).sum()
-}
-
-/// Rows under the largest of `name`'s sub-indexes: its base, the rows it was trained over.
-async fn base_rows(ds: &Dataset, name: &str) -> Result<usize> {
-    let indices = ds.load_indices().await.context("listing the indexes")?;
-    let rows: HashMap<u64, usize> = ds
-        .fragments()
-        .iter()
-        .map(|f| (f.id, f.physical_rows.unwrap_or(0)))
-        .collect();
-    Ok(indices
-        .iter()
-        .filter(|i| i.name == name)
-        .filter_map(|i| i.fragment_bitmap.as_ref())
-        .map(|frags| {
-            frags
-                .iter()
-                .map(|id| rows.get(&u64::from(id)).copied().unwrap_or(0))
-                .sum()
-        })
-        .max()
-        .unwrap_or(0))
 }
 
 /// Add a delta sub-index over the rows appended since `name` was last built, or at
@@ -600,37 +564,6 @@ mod tests {
             compactions.into_inner().unwrap(),
             [format!("compacting {FTS_INDEX} ({COMPACT_DELTAS} delta sub-indexes)")]
         );
-    }
-
-    #[tokio::test]
-    async fn build_indexes_rebuilds_both_indexes_once_the_table_doubles() {
-        let dir = tempfile::tempdir().unwrap();
-        let uri = table_uri(&dir.path().to_string_lossy());
-        let mut ds = Dataset::write(
-            reader(embedded(&turns(0, TRAINABLE))),
-            &uri,
-            Some(WriteParams::default()),
-        )
-        .await
-        .unwrap();
-        build_indexes(&mut ds, |_| {}).await;
-        let base: Vec<_> = ds.load_indices().await.unwrap().iter().map(|i| i.uuid).collect();
-
-        ds.append(reader(embedded(&turns(TRAINABLE, TRAINABLE))), None)
-            .await
-            .unwrap();
-        let built = std::sync::Mutex::new(Vec::new());
-        build_indexes(&mut ds, |phase| built.lock().unwrap().push(phase.to_string())).await;
-        assert_eq!(
-            built.into_inner().unwrap(),
-            ["building text search index", "building vector index"]
-        );
-        let rebuilt = sub_index_counts(&ds).await.unwrap();
-        assert_eq!((rebuilt[FTS_INDEX], rebuilt[VECTOR_INDEX]), (1, 1));
-        let after = ds.load_indices().await.unwrap();
-        for uuid in base {
-            assert!(after.iter().all(|i| i.uuid != uuid), "base index {uuid} was kept");
-        }
     }
 
     #[tokio::test]
