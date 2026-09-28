@@ -62,14 +62,14 @@ async fn seed_finishes_a_small_history_and_a_rerun_is_a_noop() {
     write_session(&src);
 
     // The seed `funes add` runs: budgeted, rows first. This history fits the budget, so every row
-    // lands and is embedded, and the unit is stamped as written.
+    // lands and is embedded, and the unit is stamped at the top tier.
     funes::commands::index::run_index_seed(&src).await.unwrap();
     let full = chunk_count().await;
     assert!(full > 0, "seed indexed the session");
     assert_eq!(
         state_level(home.path()),
-        "Shallow",
-        "a finished seed records the unit as written"
+        "ToolResult",
+        "a finished seed records the top tier"
     );
     assert!(
         !src.join("sess-0001.funes.jsonl").exists(),

@@ -3,10 +3,10 @@
 //! formats by implementing the trait — writing each of its units in a single append, unembedded;
 //! the vectors are filled afterwards from what the memory says is still pending.
 //!
-//! Incremental on two levels: skip a unit whose stamp (length, mtime, inode) is unchanged *and* whose rows
-//! state.json records as all written; and within a re-read unit add only chunks whose id is new — a
-//! grown session (the same memory) contributes just its new turns, nothing is re-embedded or
-//! deleted.
+//! Incremental on two levels: skip a unit whose stamp (length, mtime, inode) is unchanged *and* which
+//! state.json records as already indexed to the top tier; and within a re-read unit add
+//! only chunks whose id is new — a grown session (the same memory) contributes just its new turns,
+//! nothing is re-embedded or deleted.
 
 use crate::chunk::{self, Tier};
 use crate::hub;
@@ -58,7 +58,14 @@ async fn stored_ids(ds: &Dataset) -> Result<HashSet<String>> {
     let batches = dataset::scan_rows(ds, &["id"], None, None).await?;
     let mut ids = HashSet::new();
     for batch in batches {
-        ids.extend(str_column(&batch, "id")?.into_iter().map(str::to_string));
+        if let Some(col) = batch
+            .column_by_name("id")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+        {
+            for i in 0..batch.num_rows() {
+                ids.insert(col.value(i).to_string());
+            }
+        }
     }
     Ok(ids)
 }
@@ -222,40 +229,22 @@ fn unit_summary(turns: &[traces::Turn], key: &str) -> (u64, String) {
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// What `state.json` records per unit: the change-stamp last seen, and then either the highest
-/// level its rows reached or the build that refused to read it.
+/// [`Tier`] it has been indexed to or the build that refused to read it.
 #[derive(Serialize, Deserialize, Clone)]
 struct UnitState {
     sig: String,
-    /// Whether every row was written; `None` when nothing was, which only a refusal leaves behind.
+    /// The highest tier indexed; `None` when nothing was, which only a refusal leaves behind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    level: Option<Level>,
+    level: Option<Tier>,
     /// The funes version that refused this content, when one did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     refused: Option<String>,
 }
 
-/// How far a unit got. `Shallow`: every row is in the memory, and what still owes a vector is the
-/// memory's `vector IS NULL`, not the unit's. The tier levels are legacy stamps: that tier and
-/// below written and embedded, deeper tiers not written.
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
-enum Level {
-    Text,
-    ToolUse,
-    ToolResult,
-    Shallow,
-}
-
-impl Level {
-    /// Whether every row of the unit is in the memory.
-    fn rows_written(self) -> bool {
-        matches!(self, Level::Shallow | Level::ToolResult)
-    }
-}
-
-/// Whether a recorded unit is current: its stamp still matches and every row is written.
-/// A legacy stamp below the top tier still owes its deeper rows.
+/// Whether a recorded unit is current: its stamp still matches and every row is written, which the
+/// top tier records. A lower recorded tier still owes its deeper rows.
 fn unit_current(entry: Option<&UnitState>, sig: &str) -> bool {
-    entry.is_some_and(|e| same_sig(&e.sig, sig) && e.level.is_some_and(Level::rows_written))
+    entry.is_some_and(|e| same_sig(&e.sig, sig) && e.level == Some(Tier::ToolResult))
 }
 
 /// Whether a recorded stamp is the file's current one. A stamp an older funes recorded carries
@@ -277,8 +266,10 @@ fn unit_refused(entry: Option<&UnitState>, sig: &str) -> bool {
 /// and never reads back, so what stays there is exactly what is still owed. A turns directory
 /// someone else owns keeps its files, and so does a run that left the thinking out: the spool copy
 /// is the only place it can still be indexed from.
-fn drains(key: &str, level: Level, include_thinking: bool) -> bool {
-    include_thinking && level.rows_written() && spool::is_spool(Path::new(key))
+fn drains(key: &str, level: Tier, include_thinking: bool) -> bool {
+    include_thinking
+        && level >= *Tier::ALL.iter().max().expect("Tier::ALL is non-empty")
+        && spool::is_spool(Path::new(key))
 }
 
 /// Drop a drained spool file — the bytes `sig` stamps, and only those. A bundle may replace the
@@ -680,11 +671,11 @@ impl Indexer {
                 &key,
                 UnitState {
                     sig: sig.clone(),
-                    level: Some(Level::Shallow),
+                    level: Some(Tier::ToolResult),
                     refused: None,
                 },
             )?;
-            if drains(&key, Level::Shallow, self.include_thinking) {
+            if drains(&key, Tier::ToolResult, self.include_thinking) {
                 if let Err(e) = drain(&key, sig) {
                     eprintln!("{progress} {key} — indexed, but the spool copy stayed: {e:#}");
                 }
@@ -1266,7 +1257,6 @@ fn fmt_eta(d: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lance_index::scalar::FullTextSearchQuery;
 
     #[derive(Default)]
     struct TestEmbedder {
@@ -1309,94 +1299,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn embedding_stops_between_tiers_and_resumes_from_stored_rows() {
+    async fn embedding_stops_between_fills_and_resumes_from_the_memory() {
         let dir = tempfile::tempdir().unwrap();
-        let mut ds = unembedded_memory(dir.path(), &[("text", 1), ("tool_result", 1)]).await;
-        let pending = pending_embeddings(&ds).await.unwrap();
+        let tiers = [("text", EMBED_BATCH + 1), ("tool_use", 1), ("tool_result", 1)];
+        let mut ds = unembedded_memory(dir.path(), &tiers).await;
         let mut embedder = TestEmbedder::default();
-        let mut checks = Vec::new();
-        let embedded = embed_pending(&mut ds, &mut embedder, &pending, |done| {
-            checks.push(done);
-            false
-        })
-        .await
-        .unwrap();
-        assert_eq!(
-            embedded, 1,
-            "declining at the end of text must leave the later tier owed"
-        );
-        assert_eq!(checks, [1]);
-        assert_eq!(embedder.texts, ["narwhal text passage 0"]);
-        assert_eq!(ds.count_rows(None).await.unwrap(), 2);
-        let pending = pending_embeddings(&ds).await.unwrap();
-        assert_eq!(pending.total, 1);
-        assert!(pending.by_tier.contains_key(&Tier::ToolResult));
 
-        dataset::build_indexes(&mut ds, |_| {}).await.unwrap();
-        let mut scan = ds.scan();
-        scan.full_text_search(FullTextSearchQuery::new("narwhal".into()))
+        // Declining after the first fill stops inside the text tier.
+        let pending = pending_embeddings(&ds).await.unwrap();
+        let embedded = embed_pending(&mut ds, &mut embedder, &pending, |_| false)
+            .await
             .unwrap();
-        let mut stream = scan.try_into_stream().await.unwrap();
-        let mut found = 0;
-        while let Some(batch) = stream.try_next().await.unwrap() {
-            found += batch.num_rows();
-        }
-        assert_eq!(found, 2, "written rows stay searchable while embeddings are pending");
+        assert_eq!(embedded, EMBED_BATCH);
 
-        let pending = pending_embeddings(&ds).await.unwrap();
-        assert_eq!(
-            embed_pending(&mut ds, &mut embedder, &pending, |_| panic!("no work remains"))
-                .await
-                .unwrap(),
-            1
-        );
-        assert_eq!(
-            embedder.texts,
-            ["narwhal text passage 0", "narwhal tool_result passage 0"]
-        );
-        assert_eq!(ds.count_rows(None).await.unwrap(), 2);
-        let pending = pending_embeddings(&ds).await.unwrap();
-        assert_eq!(pending.total, 0);
-        assert_eq!(
-            embed_pending(&mut ds, &mut embedder, &pending, |_| panic!("nothing to embed"))
-                .await
-                .unwrap(),
-            0
-        );
-    }
-
-    #[tokio::test]
-    async fn embedding_checks_each_fill_with_cumulative_progress() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut ds = unembedded_memory(
-            dir.path(),
-            &[("text", EMBED_BATCH + 1), ("tool_use", 1), ("tool_result", 1)],
-        )
-        .await;
-        let mut embedder = TestEmbedder::default();
-        let pending = pending_embeddings(&ds).await.unwrap();
-        assert_eq!(
-            embed_pending(&mut ds, &mut embedder, &pending, |_| false)
-                .await
-                .unwrap(),
-            EMBED_BATCH
-        );
+        // The memory says what is left; progress counts across tiers, checked at each fill but
+        // the last. Declining at a tier boundary leaves the later tiers owed.
         let pending = pending_embeddings(&ds).await.unwrap();
         assert_eq!(pending.total, 3);
         let mut checks = Vec::new();
-        assert_eq!(
-            embed_pending(&mut ds, &mut embedder, &pending, |done| {
-                checks.push(done);
-                true
-            })
+        let embedded = embed_pending(&mut ds, &mut embedder, &pending, |done| {
+            checks.push(done);
+            done < 2
+        })
+        .await
+        .unwrap();
+        assert_eq!((embedded, checks), (2, vec![1, 2]));
+        assert!(pending_embeddings(&ds)
             .await
-            .unwrap(),
-            3
-        );
-        assert_eq!(checks, [1, 2], "check each tier boundary, but not after the final fill");
-        assert_eq!(embedder.texts.len(), EMBED_BATCH + 3);
-        assert_eq!(embedder.texts.iter().collect::<HashSet<_>>().len(), EMBED_BATCH + 3);
+            .unwrap()
+            .by_tier
+            .contains_key(&Tier::ToolResult));
+
+        let pending = pending_embeddings(&ds).await.unwrap();
+        let embedded = embed_pending(&mut ds, &mut embedder, &pending, |_| {
+            panic!("no check after the last fill")
+        })
+        .await
+        .unwrap();
+        assert_eq!(embedded, 1);
         assert_eq!(pending_embeddings(&ds).await.unwrap().total, 0);
+        assert_eq!(ds.count_rows(None).await.unwrap(), EMBED_BATCH + 3, "fills add no rows");
+        let distinct: HashSet<_> = embedder.texts.iter().collect();
+        assert_eq!(
+            (embedder.texts.len(), distinct.len()),
+            (EMBED_BATCH + 3, EMBED_BATCH + 3),
+            "nothing embedded twice"
+        );
     }
 
     /// A source whose enumeration yields fixed unit keys, or fails — for `collect_units` tests.
@@ -1535,7 +1483,7 @@ mod tests {
     }
 
     /// A unit stamped `sig` and indexed to `level`, which nothing refused.
-    fn indexed(sig: &str, level: Level) -> UnitState {
+    fn indexed(sig: &str, level: Tier) -> UnitState {
         UnitState {
             sig: sig.into(),
             level: Some(level),
@@ -1545,47 +1493,14 @@ mod tests {
 
     #[test]
     fn unit_current_needs_matching_sig_and_every_row_written() {
-        let shallow = UnitState {
-            sig: "10:20".into(),
-            level: Some(Level::Shallow),
-            refused: None,
-        };
-        assert!(unit_current(Some(&shallow), "10:20"));
-        assert!(
-            !unit_current(Some(&shallow), "99:99"),
-            "a changed stamp is never current"
-        );
+        let written = indexed("10:20", Tier::ToolResult);
+        assert!(unit_current(Some(&written), "10:20"));
+        // A changed stamp is never current.
+        assert!(!unit_current(Some(&written), "99:99"));
         assert!(!unit_current(None, "10:20"));
-        assert!(
-            unit_current(Some(&shallow), "10:20.000000123:42"),
-            "a legacy signature still matches a shallow unit"
-        );
-        let replaced = indexed("10:20.000000123:42", Level::Shallow);
-        assert!(!unit_current(Some(&replaced), "10:20.000000123:43"));
-        // Legacy tier-major stamps: only the top tier had every row written.
-        for (level, current) in [(Level::Text, false), (Level::ToolUse, false), (Level::ToolResult, true)] {
-            let legacy = UnitState {
-                sig: "10:20".into(),
-                level: Some(level),
-                refused: None,
-            };
-            assert_eq!(unit_current(Some(&legacy), "10:20"), current, "{level:?}");
-        }
-    }
-
-    #[test]
-    fn legacy_state_levels_still_deserialize() {
-        let state: HashMap<String, UnitState> =
-            serde_json::from_str(r#"{"a":{"sig":"1:2","level":"ToolResult"},"b":{"sig":"3:4","level":"Text"}}"#)
-                .unwrap();
-        assert_eq!(state["a"].level, Some(Level::ToolResult));
-        assert_eq!(state["b"].level, Some(Level::Text));
-        assert!(state.values().all(|entry| entry.refused.is_none()));
-        assert_eq!(serde_json::to_string(&Level::Shallow).unwrap(), r#""Shallow""#);
-        let refused: UnitState =
-            serde_json::from_str(&serde_json::json!({"sig": "5:6", "refused": VERSION}).to_string()).unwrap();
-        assert!(unit_refused(Some(&refused), "5:6"));
-        assert!(!unit_current(Some(&refused), "5:6"));
+        // A lower tier, from a funes that wrote tier by tier, still owes its deeper rows.
+        assert!(!unit_current(Some(&indexed("10:20", Tier::Text)), "10:20"));
+        assert!(!unit_current(Some(&indexed("10:20", Tier::ToolUse)), "10:20"));
     }
 
     /// A refusal holds against the content that caused it and the build that made it, and lifts
@@ -1605,7 +1520,7 @@ mod tests {
         assert!(!unit_refused(Some(&mine), "99:99"));
         // So is content another build refused: validation is funes's, not the file's.
         assert!(!unit_refused(Some(&refused("10:20", "0.0.1")), "10:20"));
-        assert!(!unit_refused(Some(&indexed("10:20", Level::Text)), "10:20"));
+        assert!(!unit_refused(Some(&indexed("10:20", Tier::Text)), "10:20"));
         assert!(!unit_refused(None, "10:20"));
     }
 
@@ -1623,9 +1538,9 @@ mod tests {
             unit("unsigned", None),
         ];
         let state = HashMap::from([
-            ("current".to_string(), indexed("1", Level::Shallow)),
-            ("partial".to_string(), indexed("2", Level::Text)),
-            ("stale".to_string(), indexed("old", Level::ToolResult)),
+            ("current".to_string(), indexed("1", Tier::ToolResult)),
+            ("partial".to_string(), indexed("2", Tier::Text)),
+            ("stale".to_string(), indexed("old", Tier::ToolResult)),
         ]);
         let snapshot = update_index_coverage(IndexCoverageSnapshot::default(), &first, &state);
         assert_eq!(

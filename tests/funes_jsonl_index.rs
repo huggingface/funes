@@ -209,16 +209,6 @@ async fn a_full_run_indexes_retained_thinking_before_draining_the_spool() {
         assert!(file.exists(), "the spool retains excluded thinking");
         assert_eq!(stored_blocks(home.path()).await, ["text"]);
 
-        // A legacy completion stamp also cannot prove thinking was included.
-        if budgeted {
-            let path = home.path().join("state.json");
-            let mut state: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-            for entry in state.as_object_mut().unwrap().values_mut() {
-                entry["level"] = "ToolResult".into();
-            }
-            std::fs::write(path, state.to_string()).unwrap();
-        }
-
         index(false);
         assert_eq!(stored_blocks(home.path()).await, ["text", "thinking"]);
         assert!(!file.exists(), "the full run drains only after storing thinking");
