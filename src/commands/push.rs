@@ -542,7 +542,7 @@ pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm, ses
             &rev,
             message,
             &extra,
-            |phase| eprintln!("building {phase}…"),
+            |phase| eprintln!("{phase}…"),
         )
         .await?;
         let Some(oid) = oid else {

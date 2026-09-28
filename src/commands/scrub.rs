@@ -132,7 +132,7 @@ pub async fn run() -> Result<()> {
         }),
     )
     .await?;
-    dataset::build_indexes(&mut ds, |phase| eprintln!("building {phase}…")).await;
+    dataset::build_indexes(&mut ds, |phase| eprintln!("{phase}…")).await;
 
     let mut msg = format!(
         "scrubbed {total} rows: redacted {} secret(s) in {redacted_blocks} block(s)",

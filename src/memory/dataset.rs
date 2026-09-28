@@ -125,9 +125,9 @@ pub(crate) const VECTOR_INDEX: &str = "vector_idx";
 /// dataset already has ([`optimize_index`]: milliseconds, against ~30 s for a full rebuild). A small
 /// corpus can't train IVF (lance needs ~256 rows) — that's fine, recall falls back to brute force.
 ///
-/// `on_phase` is called with a human label before an index is built whole, so a caller can report
-/// progress around these opaque (no incremental hook), potentially slow Lance calls. Pass `|_| {}`
-/// to stay silent.
+/// `on_phase` is called with a human label ("building …", "compacting …") before an index is built
+/// whole or its deltas are merged, so a caller can report progress around these opaque (no
+/// incremental hook), potentially slow Lance calls. Pass `|_| {}` to stay silent.
 pub async fn build_indexes(ds: &mut Dataset, on_phase: impl Fn(&str)) {
     sweep_shuffle_leftovers(&std::env::temp_dir());
     let existing = sub_index_counts(ds).await.unwrap_or_default();
@@ -178,11 +178,11 @@ async fn refresh_or_build(
         let outgrown = base_rows(ds, index.name)
             .await
             .is_ok_and(|base| table_rows(ds) >= REBUILD_GROWTH * base);
-        if !outgrown && optimize_index(ds, index.name, subs).await.is_ok() {
+        if !outgrown && optimize_index(ds, index.name, subs, &on_phase).await.is_ok() {
             return;
         }
     }
-    on_phase(index.label);
+    on_phase(&format!("building {}", index.label));
     let _ = ds
         .create_index(
             &[index.column],
@@ -294,18 +294,19 @@ async fn base_rows(ds: &Dataset, name: &str) -> Result<usize> {
 
 /// Add a delta sub-index over the rows appended since `name` was last built, or at
 /// [`COMPACT_DELTAS`] deltas merge them into one, sparing the base. `subs` is base + deltas.
-/// Returns the deltas folded.
-pub(crate) async fn optimize_index(ds: &mut Dataset, name: &str, subs: usize) -> Result<usize> {
+/// `on_phase` is called with a human label before a merge.
+pub(crate) async fn optimize_index(ds: &mut Dataset, name: &str, subs: usize, on_phase: impl Fn(&str)) -> Result<()> {
     let deltas = subs.saturating_sub(1);
-    let (opts, folded) = if deltas >= COMPACT_DELTAS {
-        (OptimizeOptions::merge(deltas), deltas)
+    let opts = if deltas >= COMPACT_DELTAS {
+        on_phase(&format!("compacting {name} ({deltas} delta sub-indexes)"));
+        OptimizeOptions::merge(deltas)
     } else {
-        (OptimizeOptions::append(), 0)
+        OptimizeOptions::append()
     };
     ds.optimize_indices(&opts.index_names(vec![name.to_string()]))
         .await
         .with_context(|| format!("optimizing {name}"))?;
-    Ok(folded)
+    Ok(())
 }
 
 /// IVF_PQ parameters sized from the `vector` column's dimension (matching lancedb's defaults).
@@ -505,7 +506,10 @@ mod tests {
             .unwrap();
         let built = std::sync::Mutex::new(Vec::new());
         build_indexes(&mut ds, |phase| built.lock().unwrap().push(phase.to_string())).await;
-        assert_eq!(built.into_inner().unwrap(), ["text search index", "vector index"]);
+        assert_eq!(
+            built.into_inner().unwrap(),
+            ["building text search index", "building vector index"]
+        );
         let rebuilt = sub_index_counts(&ds).await.unwrap();
         assert_eq!((rebuilt[FTS_INDEX], rebuilt[VECTOR_INDEX]), (1, 1));
         let after = ds.load_indices().await.unwrap();
@@ -558,7 +562,14 @@ mod tests {
             .unwrap();
         let built = std::sync::Mutex::new(Vec::new());
         build_indexes(&mut ds, |phase| built.lock().unwrap().push(phase.to_string())).await;
-        assert_eq!(built.into_inner().unwrap(), ["text search index"]);
+        assert_eq!(
+            built.into_inner().unwrap(),
+            [
+                format!("compacting {FTS_INDEX} ({COMPACT_DELTAS} delta sub-indexes)"),
+                "building text search index".to_string(),
+                format!("compacting {VECTOR_INDEX} ({COMPACT_DELTAS} delta sub-indexes)"),
+            ]
+        );
         assert_eq!(
             sub_index_counts(&ds).await.unwrap()[FTS_INDEX],
             1,

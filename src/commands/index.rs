@@ -747,7 +747,7 @@ impl Indexer {
         // version churn.
         if self.n_chunks > 0 {
             if let Some(d) = &mut self.ds {
-                dataset::build_indexes(d, |phase| eprintln!("building {phase}…")).await;
+                dataset::build_indexes(d, |phase| eprintln!("{phase}…")).await;
 
                 // Reap superseded versions — best-effort; on failure the reap waits for next run.
                 match d.cleanup_old_versions(chrono::Duration::minutes(10), None, None).await {

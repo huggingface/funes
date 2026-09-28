@@ -198,12 +198,9 @@ pub(crate) async fn reindex(
     let (mut ds, wrapper) = open_capturing(dataset_uri, storage_options).await?;
 
     for (name, subs) in dataset::sub_index_counts(&ds).await? {
-        let folded = dataset::optimize_index(&mut ds, &name, subs)
+        dataset::optimize_index(&mut ds, &name, subs, |phase| eprintln!("  {phase}…"))
             .await
             .context("optimizing the remote index")?;
-        if folded > 0 {
-            eprintln!("  compacted {name} ({folded} delta sub-indexes)");
-        }
     }
 
     let files = captured_files(&wrapper);
