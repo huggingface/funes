@@ -420,9 +420,6 @@ pub async fn recall_hits(
     }
     let where_clause = build_where(block_type.as_deref(), &harness);
 
-    // Hybrid retrieval: a vector ANN scan and a BM25 scan, fused by reciprocal rank. The FTS index
-    // can be absent (it's best-effort at index time), so the FTS leg is skipped when it errors —
-    // recall then falls back to vector-only.
     let hits = hybrid_candidates(ds, &qv, &query, candidates, where_clause.as_deref()).await?;
     if hits.is_empty() {
         return Ok((note, read.memory_label.clone(), Vec::new()));
@@ -462,8 +459,7 @@ pub async fn recall_hits(
     Ok((note, read.memory_label.clone(), top))
 }
 
-/// Vector ANN + BM25 candidates fused by reciprocal rank, top `candidates`. The FTS leg is
-/// best-effort: a memory with no FTS index makes that scan error, and we fall back to vector-only.
+/// Vector ANN + BM25 candidates fused by reciprocal rank, top `candidates`.
 async fn hybrid_candidates(
     ds: &Dataset,
     qv: &[f32],
@@ -472,7 +468,7 @@ async fn hybrid_candidates(
     filter: Option<&str>,
 ) -> Result<Vec<Hit>> {
     let vector = vector_candidates(ds, qv, candidates, filter).await?;
-    let fts = fts_candidates(ds, query, candidates, filter).await.unwrap_or_default();
+    let fts = fts_candidates(ds, query, candidates, filter).await?;
     Ok(rrf_fuse(vector, fts, candidates))
 }
 
@@ -1421,6 +1417,22 @@ mod tests {
         let batch = dataset::build_batch(&chunks, Some(&vectors)).unwrap();
         let reader = RecordBatchIterator::new(vec![Ok(batch)], dataset::schema());
         Dataset::write(reader, dir.to_str().unwrap(), None).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn recall_requires_fts_even_when_vector_candidates_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let ds = memory_of(
+            &[text_turn("session", 0, "user", "A narwhal parses transcripts.")],
+            dir.path(),
+        )
+        .await;
+        let qv = vec![1.0; dataset::DIM as usize];
+        assert_eq!(vector_candidates(&ds, &qv, 5, None).await.unwrap().len(), 1);
+        assert!(
+            hybrid_candidates(&ds, &qv, "narwhal", 5, None).await.is_err(),
+            "a missing FTS index must fail recall even when vector search finds a candidate"
+        );
     }
 
     fn text_turn(session: &str, seq: i64, role: &str, text: &str) -> Turn {

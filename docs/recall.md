@@ -13,6 +13,9 @@ Retrieval is one pipeline: hybrid search (vector + BM25, fused by reciprocal ran
 rerank → recency reweight → neighbor expansion. What comes back is the **actual passage from the
 actual turn**, not a summary written about it.
 
+Passages are searchable by their words as soon as their text is indexed, even while embeddings
+are pending. If text search fails, recall reports an error.
+
 `funes recall` prints one stable, parseable layout — the **agent format** — everywhere, terminal or
 pipe. It's shaped for an agent to read, but it's the raw evidence for you too. If you want an
 *answer* rather than ranked passages, [`funes ask`](ask.md) borrows an agent to read the memory and
