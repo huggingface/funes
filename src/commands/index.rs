@@ -491,7 +491,7 @@ impl Indexer {
         // stale one would silently skip every unit against the empty memory.
         let state_path = dir.join("state.json");
         let coverage_path = dir.join("index-coverage.json");
-        let state = if first_index {
+        let mut state: HashMap<String, UnitState> = if first_index {
             HashMap::new()
         } else {
             std::fs::read_to_string(&state_path)
@@ -509,6 +509,16 @@ impl Indexer {
         };
 
         let units = collect_units(&sources)?;
+        if !no_thinking {
+            // A retained spool's completion stamp may have omitted thinking.
+            for (_, unit) in &units {
+                if state.get(&unit.key).is_some_and(|entry| entry.refused.is_none())
+                    && spool::is_spool(Path::new(&unit.key))
+                {
+                    state.remove(&unit.key);
+                }
+            }
+        }
         // A unit can be deleted between sweeps.
         retire_vanished_units(&coverage_path, &sources)?;
         write_index_coverage(&coverage_path, &sources, &units, &state)?;
@@ -568,12 +578,7 @@ impl Indexer {
         write_index_coverage(&self.coverage_path, &self.sources, &self.units, &self.state)
     }
 
-    /// Read unit `i`, or `None` when its rows are already written (a done unit still in the
-    /// spool is drained) or
-    /// refused at its stamp; a signature-less (bulk) unit is never skipped — it is re-read every
-    /// run, and its chunk-id dedup makes that a no-op. A unit a best-effort source cannot read is
-    /// reported and, when signed, its refusal recorded; a fatal source aborts rather than silently
-    /// dropping data.
+    /// Read a unit unless its signed state is current or refused.
     fn read_unit(&mut self, i: usize, progress: &str) -> Result<Option<Vec<traces::Turn>>> {
         let (src_i, key, sig) = {
             let (si, unit) = &self.units[i];
@@ -583,12 +588,6 @@ impl Indexer {
         if let Some(sig) = &sig {
             let entry = self.state.get(&key);
             if unit_current(entry, sig) || unit_refused(entry, sig) {
-                // Recorded as done, still in the spool: a run that stopped between the two.
-                if unit_current(entry, sig) && drains(&key, Level::Shallow, self.include_thinking) {
-                    if let Err(e) = drain(&key, sig) {
-                        eprintln!("{progress} {key} — indexed, but the spool copy stayed: {e:#}");
-                    }
-                }
                 self.n_skipped += 1;
                 return Ok(None);
             }

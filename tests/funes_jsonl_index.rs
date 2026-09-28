@@ -5,6 +5,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use arrow_array::{Array, StringArray};
 use funes::memory::dataset;
@@ -154,4 +155,72 @@ async fn turns_files_are_indexed_and_invalid_ones_rejected() {
         stored_sessions().await,
         BTreeSet::from(["b3f2e0c4".to_string(), "gh/huggingface/transformers#31234".to_string(),])
     );
+}
+
+async fn stored_blocks(home: &Path) -> Vec<String> {
+    let uri = dataset::table_uri(&home.join("memory").to_string_lossy());
+    let ds = dataset::open(&uri, Default::default()).await.unwrap();
+    let mut blocks = Vec::new();
+    for batch in dataset::scan_rows(&ds, &["block_type"], None, None).await.unwrap() {
+        let col = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+        blocks.extend((0..col.len()).map(|i| col.value(i).to_string()));
+    }
+    blocks.sort();
+    blocks
+}
+
+#[tokio::test]
+async fn a_full_run_indexes_retained_thinking_before_draining_the_spool() {
+    for budgeted in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let spool = home.path().join("spool/review");
+        std::fs::create_dir_all(&spool).unwrap();
+        let file = spool.join("thinking.funes.jsonl");
+        let turn = serde_json::json!({
+            "format": 1,
+            "session_id": "retained-thinking",
+            "turn_uuid": "turn-1",
+            "seq": 0,
+            "ts": "2026-01-01T00:00:00Z",
+            "role": "assistant",
+            "harness": "review",
+            "blocks": [
+                {"block_type": "text", "text": "Ordinary visible project content retained for indexing."},
+                {"block_type": "thinking", "text": "Deferred reasoning content must survive the later full sweep."}
+            ]
+        });
+        std::fs::write(&file, format!("{turn}\n")).unwrap();
+        let index = |no_thinking| {
+            let mut cmd = Command::new(env!("CARGO_BIN_EXE_funes"));
+            cmd.arg("index").arg("--yes").env("FUNES_HOME", home.path());
+            if budgeted {
+                cmd.args(["--harness", "review"]);
+            } else {
+                cmd.arg(&spool);
+            }
+            if no_thinking {
+                cmd.arg("--no-thinking");
+            }
+            let out = cmd.output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        };
+
+        index(true);
+        assert!(file.exists(), "the spool retains excluded thinking");
+        assert_eq!(stored_blocks(home.path()).await, ["text"]);
+
+        // A legacy completion stamp also cannot prove thinking was included.
+        if budgeted {
+            let path = home.path().join("state.json");
+            let mut state: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            for entry in state.as_object_mut().unwrap().values_mut() {
+                entry["level"] = "ToolResult".into();
+            }
+            std::fs::write(path, state.to_string()).unwrap();
+        }
+
+        index(false);
+        assert_eq!(stored_blocks(home.path()).await, ["text", "thinking"]);
+        assert!(!file.exists(), "the full run drains only after storing thinking");
+    }
 }
