@@ -151,7 +151,7 @@ pub(crate) async fn first_publish(
     let mut ds = Dataset::write(reader, &table_uri, Some(WriteParams::default()))
         .await
         .context("building the dataset for first publish")?;
-    dataset::build_indexes(&mut ds, on_phase).await;
+    dataset::build_indexes(&mut ds, on_phase).await?;
 
     let mut ops = Vec::new();
     for entry in walkdir::WalkDir::new(&db_dir).into_iter().filter_map(|e| e.ok()) {

@@ -15,7 +15,7 @@ use futures::TryStreamExt;
 use lance::dataset::builder::DatasetBuilder;
 use lance::dataset::{Dataset, MergeInsertBuilder, MergeInsertWriteMode, WhenMatched, WhenNotMatched};
 use lance::index::vector::VectorIndexParams;
-use lance::index::DatasetIndexExt;
+use lance::index::{DatasetIndexExt, DatasetIndexInternalExt};
 use lance_index::optimize::OptimizeOptions;
 use lance_index::scalar::InvertedIndexParams;
 use lance_index::vector::ivf::IvfBuildParams;
@@ -121,18 +121,32 @@ pub async fn scan_rows(
 pub(crate) const FTS_INDEX: &str = "text_idx";
 pub(crate) const VECTOR_INDEX: &str = "vector_idx";
 
-/// Best-effort: build or refresh the FTS index on `text` and the IVF_PQ index on `vector`. Below
-/// ~256 rows lance can't train IVF, and recall falls back to brute force.
+/// Build or refresh the required FTS index on `text` and a best-effort IVF_PQ index on `vector`.
+/// Below 256 embedded rows IVF can't train, and recall falls back to brute force.
 ///
 /// `on_phase` gets a human label before each potentially slow Lance call. Pass `|_| {}` to stay
 /// silent.
-pub async fn build_indexes(ds: &mut Dataset, on_phase: impl Fn(&str)) {
+pub async fn build_indexes(ds: &mut Dataset, on_phase: impl Fn(&str)) -> Result<()> {
     sweep_shuffle_leftovers(&std::env::temp_dir());
-    let existing = sub_index_counts(ds).await.unwrap_or_default();
-    refresh_or_build(ds, &FTS, &existing, &InvertedIndexParams::default(), &on_phase).await;
+    let existing = sub_index_counts(ds).await?;
+    refresh_or_build(ds, &FTS, &existing, &InvertedIndexParams::default(), &on_phase).await?;
     if let Some(ivf_pq) = ivf_pq_params(ds) {
-        refresh_or_build(ds, &VECTOR, &existing, &ivf_pq, &on_phase).await;
+        let result: Result<()> = async {
+            let embedded = ds
+                .count_rows(Some("vector IS NOT NULL".into()))
+                .await
+                .context("counting embedded rows for the vector index")?;
+            if embedded < 256 {
+                return Ok(());
+            }
+            refresh_or_build(ds, &VECTOR, &existing, &ivf_pq, &on_phase).await
+        }
+        .await;
+        if let Err(e) = result {
+            eprintln!("note: vector index skipped — {e:#}");
+        }
     }
+    Ok(())
 }
 
 /// One of the two indexes a memory carries.
@@ -157,30 +171,41 @@ const VECTOR: IndexSpec = IndexSpec {
     label: "vector index",
 };
 
-/// Best-effort: refresh `index` if `existing` lists it, else build it whole with `params`. A refresh
-/// that fails also builds it whole, so the rows it left out don't stay unindexed.
+/// Refresh `index` if `existing` lists it, else build it whole with `params`. A refresh that fails
+/// also builds it whole, so the rows it left out don't stay unindexed.
 async fn refresh_or_build(
     ds: &mut Dataset,
     index: &IndexSpec,
     existing: &BTreeMap<String, usize>,
     params: &dyn IndexParams,
     on_phase: impl Fn(&str),
-) {
+) -> Result<()> {
     if let Some(&subs) = existing.get(index.name) {
         if optimize_index(ds, index.name, subs, &on_phase).await.is_ok() {
-            return;
+            return Ok(());
         }
     }
     on_phase(&format!("building {}", index.label));
-    let _ = ds
-        .create_index(
-            &[index.column],
-            index.index_type,
-            Some(index.name.to_string()),
-            params,
-            true,
-        )
-        .await;
+    ds.create_index(
+        &[index.column],
+        index.index_type,
+        Some(index.name.to_string()),
+        params,
+        true,
+    )
+    .await
+    .with_context(|| format!("building the {}", index.label))?;
+    Ok(())
+}
+
+/// A failed finalization can leave written rows outside FTS even when the next run writes nothing.
+/// Read only index metadata; an absent index leaves every fragment unindexed.
+pub(crate) async fn fts_needs_refresh(ds: &Dataset) -> Result<bool> {
+    Ok(!ds
+        .unindexed_fragments(FTS_INDEX)
+        .await
+        .context("checking text search index coverage")?
+        .is_empty())
 }
 
 /// The files a lance IVF shuffle directory holds, and nothing else.
@@ -441,11 +466,9 @@ mod tests {
     }
 
     /// Pseudo-random vectors: IVF_PQ can't train on identical ones.
-    fn embedded(turns: &[Turn]) -> RecordBatch {
-        let chunks = chunk::chunks_from_turns(turns, &chunk::Tier::ALL, true);
+    fn vectors(n: usize) -> Vec<Vec<f32>> {
         let mut seed = 0x9e37_79b9u32;
-        let vectors: Vec<Vec<f32>> = chunks
-            .iter()
+        (0..n)
             .map(|_| {
                 (0..DIM)
                     .map(|_| {
@@ -454,8 +477,12 @@ mod tests {
                     })
                     .collect()
             })
-            .collect();
-        build_batch(&chunks, Some(&vectors)).unwrap()
+            .collect()
+    }
+
+    fn embedded(turns: &[Turn]) -> RecordBatch {
+        let chunks = chunk::chunks_from_turns(turns, &chunk::Tier::ALL, true);
+        build_batch(&chunks, Some(&vectors(chunks.len()))).unwrap()
     }
 
     fn reader(batch: RecordBatch) -> impl arrow_array::RecordBatchReader + Send + 'static {
@@ -464,6 +491,80 @@ mod tests {
 
     /// Enough rows to train IVF_PQ (lance wants 256 per PQ codebook).
     const TRAINABLE: usize = 300;
+
+    #[tokio::test]
+    async fn build_indexes_reports_an_fts_creation_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let uri = table_uri(&dir.path().to_string_lossy());
+        let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Int64, false)]));
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![1]))]).unwrap();
+        let mut ds = Dataset::write(RecordBatchIterator::new([Ok(batch)], schema), &uri, None)
+            .await
+            .unwrap();
+
+        let err = build_indexes(&mut ds, |_| {}).await.unwrap_err();
+        assert!(err.to_string().contains("building the text search index"), "{err:#}");
+        assert!(sub_index_counts(&ds).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn fts_coverage_detects_rows_left_by_an_unfinished_finalization() {
+        let dir = tempfile::tempdir().unwrap();
+        let uri = table_uri(&dir.path().to_string_lossy());
+        let chunks = chunk::chunks_from_turns(&turns(0, 2), &chunk::Tier::ALL, true);
+        let mut ds = Dataset::write(reader(build_batch(&chunks[..1], None).unwrap()), &uri, None)
+            .await
+            .unwrap();
+        assert!(fts_needs_refresh(&ds).await.unwrap(), "no FTS index was committed");
+        build_indexes(&mut ds, |_| {}).await.unwrap();
+        assert!(!fts_needs_refresh(&ds).await.unwrap());
+
+        ds.append(reader(build_batch(&chunks[1..], None).unwrap()), None)
+            .await
+            .unwrap();
+        assert!(
+            fts_needs_refresh(&ds).await.unwrap(),
+            "the appended row still needs FTS"
+        );
+        build_indexes(&mut ds, |_| {}).await.unwrap();
+        assert!(!fts_needs_refresh(&ds).await.unwrap());
+
+        let version = ds.version().version;
+        build_indexes(&mut ds, |_| panic!("a current index must not be rebuilt"))
+            .await
+            .unwrap();
+        assert_eq!(ds.version().version, version, "a current index adds no version");
+    }
+
+    #[tokio::test]
+    async fn vector_training_threshold_counts_embedded_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let uri = table_uri(&dir.path().to_string_lossy());
+        let mut ds = Dataset::write(reader(embedded(&turns(0, 255))), &uri, None)
+            .await
+            .unwrap();
+        let pending = chunk::chunks_from_turns(&turns(255, 3), &chunk::Tier::ALL, true);
+        ds.append(reader(build_batch(&pending, None).unwrap()), None)
+            .await
+            .unwrap();
+
+        build_indexes(&mut ds, |phase| assert_ne!(phase, "building vector index"))
+            .await
+            .unwrap();
+        let indexes = sub_index_counts(&ds).await.unwrap();
+        assert_eq!(indexes[FTS_INDEX], 1);
+        assert!(
+            !indexes.contains_key(VECTOR_INDEX),
+            "258 total rows include only 255 vectors"
+        );
+
+        let vector = vectors(256).pop().unwrap();
+        ds = fill_vectors(&ds, &[pending[0].id.as_str()], &[vector]).await.unwrap();
+        build_indexes(&mut ds, |_| {}).await.unwrap();
+        assert_eq!(ds.count_rows(Some("vector IS NOT NULL".into())).await.unwrap(), 256);
+        assert_eq!(ds.count_rows(Some("vector IS NULL".into())).await.unwrap(), 2);
+        assert_eq!(sub_index_counts(&ds).await.unwrap()[VECTOR_INDEX], 1);
+    }
 
     #[tokio::test]
     async fn build_indexes_refreshes_an_existing_index_instead_of_rebuilding_it() {
@@ -476,14 +577,14 @@ mod tests {
         )
         .await
         .unwrap();
-        build_indexes(&mut ds, |_| {}).await;
+        build_indexes(&mut ds, |_| {}).await.unwrap();
         let built = sub_index_counts(&ds).await.unwrap();
         assert_eq!(built[FTS_INDEX], 1);
         assert_eq!(built[VECTOR_INDEX], 1, "300 rows train an IVF_PQ index");
         let base: Vec<_> = ds.load_indices().await.unwrap().iter().map(|i| i.uuid).collect();
         assert_eq!(base.len(), 2);
 
-        let appended = embedded(&turns(TRAINABLE, 5));
+        let appended = embedded(&turns(TRAINABLE, 4));
         let probe = appended
             .column_by_name("vector")
             .unwrap()
@@ -492,7 +593,13 @@ mod tests {
             .unwrap()
             .value(0);
         ds.append(reader(appended), None).await.unwrap();
-        build_indexes(&mut ds, |phase| panic!("{phase} instead of refreshing")).await;
+        let pending = chunk::chunks_from_turns(&turns(TRAINABLE + 4, 1), &chunk::Tier::ALL, true);
+        ds.append(reader(build_batch(&pending, None).unwrap()), None)
+            .await
+            .unwrap();
+        build_indexes(&mut ds, |phase| panic!("{phase} instead of refreshing"))
+            .await
+            .unwrap();
         let refreshed = sub_index_counts(&ds).await.unwrap();
         assert_eq!(refreshed[FTS_INDEX], 2, "one delta over the appended rows");
         assert_eq!(refreshed[VECTOR_INDEX], 2);
@@ -516,6 +623,36 @@ mod tests {
         assert!(
             turn_uuids(ann).await.contains(&first),
             "the vector index misses the appended rows"
+        );
+
+        let text_indexes: Vec<_> = after
+            .iter()
+            .filter(|i| i.name == FTS_INDEX)
+            .map(|i| (i.uuid, i.fragment_bitmap.clone()))
+            .collect();
+        assert!(ds.unindexed_fragments(VECTOR_INDEX).await.unwrap().is_empty());
+        ds = fill_vectors(&ds, &[pending[0].id.as_str()], &[vec![0.5; DIM as usize]])
+            .await
+            .unwrap();
+        assert_eq!(ds.count_rows(None).await.unwrap(), TRAINABLE + 5, "a fill adds no rows");
+        assert!(!fts_needs_refresh(&ds).await.unwrap(), "filling vectors preserves FTS");
+        assert_eq!(ds.unindexed_fragments(VECTOR_INDEX).await.unwrap().len(), 1);
+
+        build_indexes(&mut ds, |phase| panic!("{phase} after only filling vectors"))
+            .await
+            .unwrap();
+        assert!(ds.unindexed_fragments(VECTOR_INDEX).await.unwrap().is_empty());
+        let refreshed_text: Vec<_> = ds
+            .load_indices()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|i| i.name == FTS_INDEX)
+            .map(|i| (i.uuid, i.fragment_bitmap.clone()))
+            .collect();
+        assert_eq!(
+            refreshed_text, text_indexes,
+            "filling vectors preserves every FTS segment"
         );
     }
 
@@ -619,7 +756,7 @@ mod tests {
         )
         .await
         .unwrap();
-        build_indexes(&mut ds, |_| {}).await;
+        build_indexes(&mut ds, |_| {}).await.unwrap();
         let base = ds
             .load_indices()
             .await
@@ -632,7 +769,7 @@ mod tests {
             ds.append(reader(embedded(&turns(TRAINABLE + run, 1))), None)
                 .await
                 .unwrap();
-            build_indexes(&mut ds, |_| {}).await;
+            build_indexes(&mut ds, |_| {}).await.unwrap();
         }
         assert_eq!(sub_index_counts(&ds).await.unwrap()[FTS_INDEX], 1 + COMPACT_DELTAS);
         // The next refresh merges the deltas, so it has to read this broken one.
@@ -651,7 +788,9 @@ mod tests {
             .await
             .unwrap();
         let built = std::sync::Mutex::new(Vec::new());
-        build_indexes(&mut ds, |phase| built.lock().unwrap().push(phase.to_string())).await;
+        build_indexes(&mut ds, |phase| built.lock().unwrap().push(phase.to_string()))
+            .await
+            .unwrap();
         assert_eq!(
             built.into_inner().unwrap(),
             [

@@ -35,7 +35,7 @@ fn a_settled_shuffle_dir_is_reclaimed_by_the_next_build() {
         let mut ds = write_dataset(&tmp.path().join("memory.lance")).await;
 
         let before = tmp_dirs(tmp.path());
-        funes::memory::dataset::build_indexes(&mut ds, |_| {}).await;
+        funes::memory::dataset::build_indexes(&mut ds, |_| {}).await.unwrap();
         let leaked: Vec<PathBuf> = tmp_dirs(tmp.path())
             .difference(&before)
             .filter(|d| holds_only_shuffle_files(d))
@@ -53,7 +53,7 @@ fn a_settled_shuffle_dir_is_reclaimed_by_the_next_build() {
             std::fs::File::open(dir).unwrap().set_modified(settled).unwrap();
         }
 
-        funes::memory::dataset::build_indexes(&mut ds, |_| {}).await;
+        funes::memory::dataset::build_indexes(&mut ds, |_| {}).await.unwrap();
         let kept: Vec<&PathBuf> = leaked.iter().filter(|d| d.exists()).collect();
         assert!(kept.is_empty(), "the next build left {kept:?} behind");
     });
