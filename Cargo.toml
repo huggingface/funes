@@ -25,7 +25,9 @@ object_store = "=0.13.2"         # the ObjectStore trait the capture wrapper imp
 async-trait = "0.1"              # for the ObjectStore impl in src/memory/capture_store.rs
 bytes = "1"                      # captured write payloads
 chrono = "0.4"                   # recency weighting
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "sync"] }  # sync: OnceCell/Mutex cache the recall models
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "sync", "net", "signal"] }  # sync: OnceCell/Mutex cache the recall models; net/signal: the HTTP server's listener and shutdown
+tokio-util = "0.7"               # one token stops the listener and cancels in-flight HTTP requests together
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }  # serve the SDK's Streamable HTTP service
 futures = "0.3"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
@@ -36,7 +38,7 @@ sha1 = "0.10"                    # chunk id = sha1(...)[:16]
 sha2 = "0.10"                    # verify release binaries before the installer/updater executes them
 hex = "0.4"
 walkdir = "2"                    # recursive *.jsonl walk
-rmcp = { version = "3", features = ["server", "macros", "transport-io", "schemars"] }  # MCP stdio server
+rmcp = { version = "3.4", default-features = false, features = ["server", "macros", "transport-io", "schemars", "transport-streamable-http-server"] }  # MCP server; 3.4 can enforce Origin validation
 tempfile = "3"                   # temp dir for the pre-publish secret scan; temp files/dirs in tests
 hf-hub = { version = "1.0.0-rc.1", features = ["rustls-tls", "blocking"] }  # native create_commit + parent_commit CAS + Xet upload; blocking: model download in the blas backend
 # Optional handle on the transitively-pulled openssl-sys (native-tls, via lance).
@@ -63,6 +65,11 @@ blas = ["dep:tokenizers", "dep:safetensors", "dep:faer", "dep:multiversion"]
 # ONNX inference backend (fastembed/ort). When both backends are compiled in, `blas` is the one
 # funes runs; the ONNX types are the reference backend for bench_backends.
 onnx = ["dep:fastembed"]
+
+[dev-dependencies]
+rmcp = { version = "3.4", default-features = false, features = ["client", "transport-streamable-http-client-reqwest"] }  # drive the HTTP server as a real client
+tokio = { version = "1", features = ["process"] }
+reqwest = { version = "0.13", default-features = false, features = ["json"] }  # requests an SDK client never sends: a foreign Host or Origin
 
 # Benchmarks live under benchmark/ alongside their README; run via `cargo run --example <name>`.
 [[example]]
