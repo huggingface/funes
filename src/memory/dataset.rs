@@ -329,15 +329,17 @@ pub(crate) fn schema() -> Arc<Schema> {
     ))
 }
 
-pub(crate) fn build_batch(chunks: &[chunk::Chunk], vectors: &[Vec<f32>]) -> Result<RecordBatch> {
+/// `None` writes every row with a null `vector`.
+pub(crate) fn build_batch(chunks: &[chunk::Chunk], vectors: Option<&[Vec<f32>]>) -> Result<RecordBatch> {
     let s = |f: &dyn Fn(&chunk::Chunk) -> Option<String>| -> StringArray { chunks.iter().map(f).collect() };
     let i = |f: &dyn Fn(&chunk::Chunk) -> i64| -> Int64Array { chunks.iter().map(|c| Some(f(c))).collect() };
-    let vector = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
-        vectors
-            .iter()
-            .map(|v| Some(v.iter().map(|&x| Some(x)).collect::<Vec<_>>())),
-        DIM,
-    );
+    let vector = match vectors {
+        Some(vectors) => vector_array(vectors),
+        None => FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
+            chunks.iter().map(|_| None::<Vec<Option<f32>>>),
+            DIM,
+        ),
+    };
     Ok(RecordBatch::try_new(
         schema(),
         vec![
@@ -360,6 +362,15 @@ pub(crate) fn build_batch(chunks: &[chunk::Chunk], vectors: &[Vec<f32>]) -> Resu
             Arc::new(s(&|c| Some(c.repo.clone()))),
         ],
     )?)
+}
+
+fn vector_array(vectors: &[Vec<f32>]) -> FixedSizeListArray {
+    FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
+        vectors
+            .iter()
+            .map(|v| Some(v.iter().map(|&x| Some(x)).collect::<Vec<_>>())),
+        DIM,
+    )
 }
 
 #[cfg(test)]
@@ -410,7 +421,7 @@ mod tests {
                     .collect()
             })
             .collect();
-        build_batch(&chunks, &vectors).unwrap()
+        build_batch(&chunks, Some(&vectors)).unwrap()
     }
 
     fn reader(batch: RecordBatch) -> impl arrow_array::RecordBatchReader + Send + 'static {
@@ -694,6 +705,22 @@ mod tests {
         assert!(!stale.exists(), "a settled shuffle dir must be reclaimed");
         for kept in [&writing, &fresh, &foreign, &empty, &named] {
             assert!(kept.exists(), "{} must be left alone", kept.display());
+        }
+    }
+
+    #[test]
+    fn build_batch_preserves_rows_without_embeddings() {
+        let chunks = chunk::chunks_from_turns(&turns(0, 3), &chunk::Tier::ALL, true);
+        let pending = build_batch(&chunks, None).unwrap();
+        let embedded = embedded(&turns(0, 3));
+        assert_eq!(pending.num_rows(), 3);
+        for (i, field) in pending.schema().fields().iter().enumerate() {
+            if field.name() == "vector" {
+                assert_eq!(pending.column(i).null_count(), 3);
+                assert_eq!(embedded.column(i).null_count(), 0);
+            } else {
+                assert_eq!(pending.column(i), embedded.column(i), "{} changed", field.name());
+            }
         }
     }
 

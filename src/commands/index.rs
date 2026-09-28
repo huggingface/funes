@@ -724,7 +724,7 @@ impl Indexer {
             t0.elapsed().as_secs_f64()
         );
 
-        let batch = build_batch(new_chunks, &vectors)?;
+        let batch = build_batch(new_chunks, Some(&vectors))?;
         let reader = RecordBatchIterator::new(vec![Ok(batch)], schema());
         let uri = self.uri.clone();
         match &mut self.ds {

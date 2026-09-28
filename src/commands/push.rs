@@ -857,7 +857,7 @@ mod tests {
     fn batch(turns: &[Turn]) -> (RecordBatch, Vec<chunk::Chunk>) {
         let chunks = chunk::chunks_from_turns(turns, &chunk::Tier::ALL, true);
         let vectors = vec![vec![0.0f32; dataset::DIM as usize]; chunks.len()];
-        (dataset::build_batch(&chunks, &vectors).unwrap(), chunks)
+        (dataset::build_batch(&chunks, Some(&vectors)).unwrap(), chunks)
     }
 
     #[test]
