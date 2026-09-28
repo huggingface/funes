@@ -12,8 +12,9 @@ funes recall "..." --memory <user|org>/funes-memory   # read it back from anywhe
 
 ## `funes push`
 
-`funes push <memory>` uploads the chunks your local memory has that the remote doesn't. The memory is an
-`<org>/<repo>` shorthand or a full `hf://…` URI.
+`funes push <memory>` uploads the embedded chunks your local memory has that the remote doesn't.
+Chunks awaiting embedding stay local; after indexing fills their vectors, the next push includes
+them. The memory is an `<org>/<repo>` shorthand or a full `hf://…` URI.
 
 On its **first publish**, push also writes the repo's dataset card — what a funes memory is, how to
 recall from it, live stats — tagged [`funes`](https://huggingface.co/datasets?other=funes) so every
@@ -44,10 +45,11 @@ first pass is best-effort: local indexing still works without the scanner becaus
 has not crossed a publication boundary. It prints a warning that index-time redaction is disabled.
 
 Push is the hard boundary. A separate, **always-on, fail-closed gate** requires TruffleHog and scans
-the rows about to leave the machine. It reconstructs complete content blocks before scanning, so a
-secret split across chunks cannot evade detection. If any chunk of a block contains a secret, every
-chunk of that block is held back; unrelated clean rows still publish with a warning. Only when that
-leaves *nothing* to publish does push exit non-zero (code `2`):
+the complete local content blocks of the rows about to leave the machine. This includes sibling
+chunks still awaiting embedding or already published, so a secret split across chunks cannot evade
+detection. If a block contains a secret, every chunk of that block being published is held back;
+unrelated clean rows still publish with a warning. Only when that leaves *nothing* to publish does
+push exit non-zero (code `2`):
 
 ```console
 $ funes push <user|org>/funes-memory
@@ -93,17 +95,18 @@ automate remote deletion.
 
 ## Publishing a selection: `--sessions`
 
-A push ships every local chunk the remote doesn't have. To publish a *selection* instead, name the
-sessions:
+A push ships every embedded local chunk the remote doesn't have. To publish a *selection* instead,
+name the sessions:
 
 ```bash
 funes push <memory> --sessions <session> --sessions <session>
 ```
 
-Those sessions' chunks are exactly what ships. The list **is** the decision — funes keeps no record
-of what you meant to publish, so a selection is made where it takes effect, and an unrecognized
-session id fails the push rather than quietly publishing the rest. `funes sessions` lists the ids,
-and a session is published whole: naming it publishes every chunk it holds.
+The list selects which sessions can publish — funes keeps no record of what you meant to publish,
+so a selection is made where it takes effect. An unrecognized session id fails the push rather than
+quietly publishing the rest; `funes sessions` lists the ids. A session whose chunks are still
+awaiting embedding is a valid selection, but has nothing to upload yet. Repeat the selection after
+indexing to publish its newly embedded chunks. The secret gate applies to every selection.
 
 The remote is append-only, so a selection is a pre-publication gate and not a remote undo. Nothing
 retracts a session once it is up.

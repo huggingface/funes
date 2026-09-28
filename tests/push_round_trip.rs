@@ -6,6 +6,8 @@
 //! Also covers the no-overlap confirmation gate against the live remote: declining a first publish
 //! (the local index shares nothing with the empty remote) must abort and upload nothing, while an
 //! append to a memory that already shares chunks must not be prompted at all.
+//! Mixed shallow/embedded memories publish only embedded rows, including named selections; filling
+//! the remaining vectors makes those same rows publishable exactly once on the next push.
 //!
 //! Skipped unless `HF_FUNES_TEST_TOKEN` is set (it provides `HF_TOKEN` for `Memory::open` / the
 //! hf-hub client) AND `trufflehog` is on PATH (push's pre-publish gate is fail-closed). Needs a
@@ -18,11 +20,15 @@
 use std::io::Write;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use anyhow::{ensure, Result};
+use arrow_array::{FixedSizeListArray, RecordBatch, RecordBatchIterator, StringArray};
 use funes::commands::push::Confirm;
 use funes::memory::Memory;
 use hf_hub::{HFClient, HFError, HFRepository, RepoTypeDataset};
+use lance::dataset::{MergeInsertBuilder, MergeInsertWriteMode, WhenMatched, WhenNotMatched};
 
 const OWNER: &str = "optimum-internal-testing";
 const NAME: &str = "funes-test";
@@ -50,14 +56,188 @@ async fn remote_rows_and_ids(uri: &str) -> (usize, usize) {
 
 /// Write a turns file with the given (uuid, text) user turns.
 fn write_session(source: &std::path::Path, turns: &[(&str, &str)]) {
-    let mut f = std::fs::File::create(source.join("sess.funes.jsonl")).unwrap();
+    write_named_session(source, "sess", turns);
+}
+
+fn write_named_session(source: &std::path::Path, session: &str, turns: &[(&str, &str)]) {
+    let mut f = std::fs::File::create(source.join(format!("{session}.funes.jsonl"))).unwrap();
     for (i, (uuid, text)) in turns.iter().enumerate() {
         writeln!(
             f,
-            r#"{{"format":1,"session_id":"sess","cwd":"/synctest/proj","turn_uuid":"{uuid}","seq":{i},"ts":"2026-02-01T00:00:{i:02}Z","role":"user","blocks":[{{"block_type":"text","text":"{text}"}}],"harness":"claude"}}"#
+            r#"{{"format":1,"session_id":"{session}","cwd":"/synctest/proj","turn_uuid":"{uuid}","seq":{i},"ts":"2026-02-01T00:00:{i:02}Z","role":"user","blocks":[{{"block_type":"text","text":"{text}"}}],"harness":"claude"}}"#
         )
         .unwrap();
     }
+}
+
+/// Replace the vector column of local rows matched by ID.
+async fn replace_local_vectors(batches: Vec<RecordBatch>) -> Result<()> {
+    let expected: usize = batches.iter().map(RecordBatch::num_rows).sum();
+    let schema = batches[0].schema();
+    let reader = RecordBatchIterator::new(batches.into_iter().map(Ok), schema);
+    let local = Memory::local().open().await?;
+    let (_, stats) = MergeInsertBuilder::try_new(Arc::new(local), vec!["id".to_string()])?
+        .when_matched(WhenMatched::UpdateAll)
+        .when_not_matched(WhenNotMatched::DoNothing)
+        .write_mode(MergeInsertWriteMode::RewriteColumns)
+        .try_build()?
+        .execute_reader(reader)
+        .await?;
+    ensure!(
+        stats.num_updated_rows == expected as u64,
+        "every pending vector must be updated"
+    );
+    Ok(())
+}
+
+fn without_vectors(batches: &[RecordBatch]) -> Result<Vec<RecordBatch>> {
+    batches
+        .iter()
+        .map(|batch| {
+            let vectors = FixedSizeListArray::from_iter_primitive::<arrow_array::types::Float32Type, _, _>(
+                (0..batch.num_rows()).map(|_| None::<Vec<Option<f32>>>),
+                funes::memory::dataset::DIM,
+            );
+            Ok(RecordBatch::try_new(
+                batch.schema(),
+                vec![batch.column(0).clone(), Arc::new(vectors)],
+            )?)
+        })
+        .collect()
+}
+
+async fn expect_remote_turns(uri: &str, expected: &[&str]) -> Result<()> {
+    let ds = Memory::parse(uri).open().await?;
+    ensure!(
+        ds.count_rows(Some("vector IS NULL".into())).await? == 0,
+        "shallow rows must never reach {uri}"
+    );
+    let batches = funes::memory::dataset::scan_rows(&ds, &["id", "turn_uuid"], None, None).await?;
+    let mut ids = std::collections::HashSet::new();
+    let mut turns = std::collections::HashSet::new();
+    let mut rows = 0;
+    for batch in batches {
+        rows += batch.num_rows();
+        let batch_ids = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+        let batch_turns = batch.column(1).as_any().downcast_ref::<StringArray>().unwrap();
+        for i in 0..batch.num_rows() {
+            ids.insert(batch_ids.value(i).to_string());
+            turns.insert(batch_turns.value(i).to_string());
+        }
+    }
+    ensure!(
+        rows == expected.len(),
+        "{uri}: expected {} rows, found {rows}",
+        expected.len()
+    );
+    ensure!(ids.len() == rows, "{uri}: each chunk must be published exactly once");
+    ensure!(
+        turns == expected.iter().map(|s| s.to_string()).collect(),
+        "{uri}: wrong published turns: {turns:?}"
+    );
+    Ok(())
+}
+
+/// Publish mixed shallow/embedded sessions and verify remote rows and local receipts.
+async fn shallow_push_round_trip(uri: &str) -> Result<()> {
+    let db_dir = tempfile::tempdir()?;
+    let src = tempfile::tempdir()?;
+    std::env::set_var("FUNES_HOME", db_dir.path());
+    for (session, ready, pending) in [
+        ("selected", "ready-selected", "pending-selected"),
+        ("other", "ready-other", "pending-other"),
+    ] {
+        write_named_session(
+            src.path(),
+            session,
+            &[
+                (ready, "SHALLOWSMOKE this turn already has its embedding"),
+                (pending, "SHALLOWSMOKE this turn waits for its embedding"),
+            ],
+        );
+    }
+    funes::commands::index::run_index(src.path(), false, None).await?;
+    let local = Memory::local().open().await?;
+    let embedded = funes::memory::dataset::scan_rows(
+        &local,
+        &["id", "vector"],
+        Some("turn_uuid IN ('pending-selected', 'pending-other')"),
+        None,
+    )
+    .await?;
+    ensure!(embedded.iter().map(RecordBatch::num_rows).sum::<usize>() == 2);
+    replace_local_vectors(without_vectors(&embedded)?).await?;
+
+    let cases = [
+        (
+            format!("{uri}/shallow-all/lancedb"),
+            vec![],
+            vec!["ready-selected", "ready-other"],
+            vec!["ready-selected", "ready-other", "pending-selected", "pending-other"],
+        ),
+        (
+            format!("{uri}/shallow-selected/lancedb"),
+            vec!["selected".to_string()],
+            vec!["ready-selected"],
+            vec!["ready-selected", "pending-selected"],
+        ),
+    ];
+    for (uri, sessions, before, _) in &cases {
+        let pushed = funes::commands::push::run_push(Memory::parse(uri), false, Confirm::Yes, sessions).await?;
+        ensure!(
+            pushed.report.contains(&format!("pushed {} chunks", before.len())),
+            "first publish should count only embedded rows: {}",
+            pushed.report
+        );
+        expect_remote_turns(uri, before).await?;
+    }
+
+    // Only locally shallow rows overlap the remote; rebuild receipts from that overlap.
+    let already_remote = funes::memory::dataset::scan_rows(
+        &local,
+        &["id", "vector"],
+        Some("turn_uuid IN ('ready-selected', 'ready-other')"),
+        None,
+    )
+    .await?;
+    replace_local_vectors(without_vectors(&already_remote)?).await?;
+    for entry in std::fs::read_dir(db_dir.path().join("pushed"))? {
+        let entry = entry?;
+        if entry.file_type()?.is_file() {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    replace_local_vectors(embedded).await?;
+    for (uri, sessions, before, after) in &cases {
+        let prompts_before = PROMPTS.load(Ordering::SeqCst);
+        let pushed =
+            funes::commands::push::run_push(Memory::parse(uri), false, Confirm::Ask(decline), sessions).await?;
+        ensure!(
+            PROMPTS.load(Ordering::SeqCst) == prompts_before,
+            "overlap with a locally shallow row must prevent the wrong-memory prompt"
+        );
+        ensure!(
+            pushed
+                .report
+                .contains(&format!("pushed {} chunks", after.len() - before.len())),
+            "filling vectors should publish only the remaining selected rows: {}",
+            pushed.report
+        );
+        expect_remote_turns(uri, after).await?;
+        let repeated = funes::commands::push::run_push(Memory::parse(uri), false, Confirm::Yes, sessions).await?;
+        ensure!(
+            repeated.report.contains("up to date"),
+            "a repeated push must have nothing left to publish: {}",
+            repeated.report
+        );
+        expect_remote_turns(uri, after).await?;
+    }
+    let status = funes::commands::recall::status(Memory::parse(&cases[0].0)).await?;
+    ensure!(
+        status.contains("local push: up to date (2 sessions)"),
+        "the receipt must include locally shallow rows observed remotely: {status}"
+    );
+    Ok(())
 }
 
 fn tool_ok(bin: &str, arg: &str) -> bool {
@@ -103,8 +283,29 @@ fn accept(_label: &str, chunks: usize) -> bool {
     true
 }
 
-#[tokio::test]
-async fn push_round_trip_create_append_recall() {
+/// The body runs on its own thread with a roomy stack. The test's async chain nests deep (index
+/// → push → first publish → index build, one level deeper again in the shallow phase) and holds
+/// two pushes at once, and in a debug-profile build the inlined future of every await site rides
+/// the thread's stack for the whole run — together they tip libtest's default test-thread stack.
+/// Each production path alone fits a default stack (the phases before the shallow one run at the
+/// same depth they always did); it is their accumulation in one body that needs the room.
+#[test]
+fn push_round_trip_create_append_recall() {
+    std::thread::Builder::new()
+        .stack_size(16 << 20)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("building the test runtime")
+                .block_on(push_round_trip_create_append_recall_body())
+        })
+        .expect("spawning the test thread")
+        .join()
+        .expect("the test thread panicked");
+}
+
+async fn push_round_trip_create_append_recall_body() {
     let token = std::env::var("HF_FUNES_TEST_TOKEN")
         .unwrap_or_default()
         .trim()
@@ -195,6 +396,7 @@ async fn push_round_trip_create_append_recall() {
     );
     let (remote_rows, remote_ids) = remote_rows_and_ids(&uri).await;
 
+    let shallow = shallow_push_round_trip(&format!("hf://datasets/{OWNER}/{NAME}/{prefix}")).await;
     let readme_after = root_readme(&repo).await;
     // The model id must travel with the memory (stamped in the schema metadata, uploaded by push).
     let remote_model = match Memory::parse(&uri).open().await {
@@ -210,6 +412,7 @@ async fn push_round_trip_create_append_recall() {
         .send()
         .await;
 
+    shallow.expect("mixed shallow/embedded pushes");
     // Gate: declining a first publish aborts and leaves the remote empty (nothing was uploaded).
     let declined = match declined {
         Ok(p) => panic!(

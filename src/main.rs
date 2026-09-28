@@ -174,7 +174,7 @@ enum Cmd {
         #[arg(value_name = "MEMORY")]
         memory: Option<String>,
     },
-    /// Publish your local memory's new chunks to a remote memory on the HF Hub.
+    /// Publish your local memory's new embedded chunks to a remote memory on the HF Hub.
     Push {
         /// Memory to publish to: `<org>/<repo>` or a full `hf://…` URI.
         #[arg(value_name = "MEMORY")]
@@ -186,8 +186,8 @@ enum Cmd {
         /// backlog is below the auto-reindex threshold. With nothing new to push, reindex only.
         #[arg(long)]
         force_reindex: bool,
-        /// Publish exactly these sessions. Omit to publish everything the remote does not already
-        /// hold.
+        /// Publish embedded chunks from these sessions. Omit to publish every embedded chunk the
+        /// remote does not already hold.
         #[arg(long, value_name = "SESSION")]
         sessions: Vec<String>,
     },
