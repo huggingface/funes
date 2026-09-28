@@ -121,15 +121,34 @@ pub async fn scan_rows(
 pub(crate) const FTS_INDEX: &str = "text_idx";
 pub(crate) const VECTOR_INDEX: &str = "vector_idx";
 
-/// Build or refresh the required FTS index on `text` and a best-effort IVF_PQ index on `vector`.
-/// Below 256 embedded rows IVF can't train, and recall falls back to brute force.
-///
-/// `on_phase` gets a human label before each potentially slow Lance call. Pass `|_| {}` to stay
-/// silent.
+/// Progress from an index build, and a failure of its optional vector index.
+#[derive(Debug)]
+pub enum IndexBuildEvent {
+    Building(&'static str),
+    Compacting { index: String, deltas: usize },
+    VectorIndexFailed(anyhow::Error),
+}
+
+/// Build indexes, reporting phases and printing a vector-index failure.
 pub async fn build_indexes(ds: &mut Dataset, on_phase: impl Fn(&str)) -> Result<()> {
+    build_indexes_reporting(ds, |event| match event {
+        IndexBuildEvent::Building(index) => on_phase(&format!("building {index}")),
+        IndexBuildEvent::Compacting { index, deltas } => {
+            on_phase(&format!("compacting {index} ({deltas} delta sub-indexes)"))
+        }
+        IndexBuildEvent::VectorIndexFailed(error) => {
+            eprintln!("note: vector index skipped — {error:#}");
+        }
+    })
+    .await
+}
+
+/// Build or refresh the required text index and optional vector index.
+/// Fewer than 256 non-null vectors cannot train IVF_PQ and use brute-force search.
+pub async fn build_indexes_reporting(ds: &mut Dataset, on_event: impl Fn(IndexBuildEvent)) -> Result<()> {
     sweep_shuffle_leftovers(&std::env::temp_dir());
     let existing = sub_index_counts(ds).await?;
-    refresh_or_build(ds, &FTS, &existing, &InvertedIndexParams::default(), &on_phase).await?;
+    refresh_or_build(ds, &FTS, &existing, &InvertedIndexParams::default(), &on_event).await?;
     if let Some(ivf_pq) = ivf_pq_params(ds) {
         let result: Result<()> = async {
             let embedded = ds
@@ -139,11 +158,11 @@ pub async fn build_indexes(ds: &mut Dataset, on_phase: impl Fn(&str)) -> Result<
             if embedded < 256 {
                 return Ok(());
             }
-            refresh_or_build(ds, &VECTOR, &existing, &ivf_pq, &on_phase).await
+            refresh_or_build(ds, &VECTOR, &existing, &ivf_pq, &on_event).await
         }
         .await;
-        if let Err(e) = result {
-            eprintln!("note: vector index skipped — {e:#}");
+        if let Err(error) = result {
+            on_event(IndexBuildEvent::VectorIndexFailed(error));
         }
     }
     Ok(())
@@ -178,14 +197,14 @@ async fn refresh_or_build(
     index: &IndexSpec,
     existing: &BTreeMap<String, usize>,
     params: &dyn IndexParams,
-    on_phase: impl Fn(&str),
+    on_event: impl Fn(IndexBuildEvent),
 ) -> Result<()> {
     if let Some(&subs) = existing.get(index.name) {
-        if optimize_index(ds, index.name, subs, &on_phase).await.is_ok() {
+        if optimize_index(ds, index.name, subs, &on_event).await.is_ok() {
             return Ok(());
         }
     }
-    on_phase(&format!("building {}", index.label));
+    on_event(IndexBuildEvent::Building(index.label));
     ds.create_index(
         &[index.column],
         index.index_type,
@@ -198,8 +217,7 @@ async fn refresh_or_build(
     Ok(())
 }
 
-/// A failed finalization can leave written rows outside FTS even when the next run writes nothing.
-/// Read only index metadata; an absent index leaves every fragment unindexed.
+/// Whether any fragments lack text-search index coverage.
 pub(crate) async fn fts_needs_refresh(ds: &Dataset) -> Result<bool> {
     Ok(!ds
         .unindexed_fragments(FTS_INDEX)
@@ -280,11 +298,19 @@ pub(crate) async fn sub_index_counts(ds: &Dataset) -> Result<BTreeMap<String, us
 
 /// Add a delta sub-index over the rows appended since `name` was last built, or at
 /// [`COMPACT_DELTAS`] deltas merge them into one, sparing the base. `subs` is base + deltas.
-/// `on_phase` is called with a human label before a merge.
-pub(crate) async fn optimize_index(ds: &mut Dataset, name: &str, subs: usize, on_phase: impl Fn(&str)) -> Result<()> {
+/// `on_event` gets [`IndexBuildEvent::Compacting`] before a merge.
+pub(crate) async fn optimize_index(
+    ds: &mut Dataset,
+    name: &str,
+    subs: usize,
+    on_event: impl Fn(IndexBuildEvent),
+) -> Result<()> {
     let deltas = subs.saturating_sub(1);
     let opts = if deltas >= COMPACT_DELTAS {
-        on_phase(&format!("compacting {name} ({deltas} delta sub-indexes)"));
+        on_event(IndexBuildEvent::Compacting {
+            index: name.to_string(),
+            deltas,
+        });
         OptimizeOptions::merge(deltas)
     } else {
         OptimizeOptions::append()
@@ -439,6 +465,7 @@ mod tests {
     use arrow_array::RecordBatchIterator;
     use lance::dataset::WriteParams;
     use lance_index::scalar::FullTextSearchQuery;
+    use std::cell::RefCell;
 
     /// `n` one-block turns with distinct text, so each is its own chunk.
     fn turns(from: usize, n: usize) -> Vec<Turn> {
@@ -548,9 +575,14 @@ mod tests {
             .await
             .unwrap();
 
-        build_indexes(&mut ds, |phase| assert_ne!(phase, "building vector index"))
+        let events = RefCell::new(Vec::new());
+        build_indexes_reporting(&mut ds, |event| events.borrow_mut().push(event))
             .await
             .unwrap();
+        assert!(matches!(
+            events.borrow().as_slice(),
+            [IndexBuildEvent::Building("text search index")]
+        ));
         let indexes = sub_index_counts(&ds).await.unwrap();
         assert_eq!(indexes[FTS_INDEX], 1);
         assert!(
@@ -726,8 +758,10 @@ mod tests {
             }
             ds.append(batch(&format!("charlie delta {i}")), None).await.unwrap();
             let subs = sub_index_counts(&ds).await.unwrap()[FTS_INDEX];
-            optimize_index(&mut ds, FTS_INDEX, subs, |phase| {
-                compactions.lock().unwrap().push(phase.to_string())
+            optimize_index(&mut ds, FTS_INDEX, subs, |event| {
+                if let IndexBuildEvent::Compacting { index, deltas } = event {
+                    compactions.lock().unwrap().push((index, deltas));
+                }
             })
             .await
             .unwrap();
@@ -741,7 +775,7 @@ mod tests {
         );
         assert_eq!(
             compactions.into_inner().unwrap(),
-            [format!("compacting {FTS_INDEX} ({COMPACT_DELTAS} delta sub-indexes)")]
+            [(FTS_INDEX.to_string(), COMPACT_DELTAS)]
         );
     }
 

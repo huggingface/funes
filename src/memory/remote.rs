@@ -55,7 +55,7 @@ use lance_io::object_store::WrappingObjectStore;
 use object_store::ObjectStore as OSObjectStore;
 
 use super::capture_store::{CaptureStore, Captured};
-use super::dataset;
+use super::dataset::{self, IndexBuildEvent};
 use super::fetch_store::{FetchStore, FileFetcher};
 use crate::hub;
 
@@ -196,9 +196,13 @@ pub(crate) async fn reindex(
     let (mut ds, wrapper) = open_capturing(dataset_uri, storage_options).await?;
 
     for (name, subs) in dataset::sub_index_counts(&ds).await? {
-        dataset::optimize_index(&mut ds, &name, subs, |phase| eprintln!("  {phase}…"))
-            .await
-            .context("optimizing the remote index")?;
+        dataset::optimize_index(&mut ds, &name, subs, |event| {
+            if let IndexBuildEvent::Compacting { index, deltas } = event {
+                eprintln!("  compacting {index} ({deltas} delta sub-indexes)…");
+            }
+        })
+        .await
+        .context("optimizing the remote index")?;
     }
 
     let files = captured_files(&wrapper);
