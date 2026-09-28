@@ -27,7 +27,7 @@ use crate::memory::remote::{self, Appended, Reindexed};
 use crate::memory::{Memory, MemoryState};
 use crate::{chunk, scan, ui};
 use anyhow::{bail, Context, Result};
-use arrow_array::{BooleanArray, Int64Array, RecordBatch, StringArray, UInt64Array};
+use arrow_array::{BooleanArray, RecordBatch, StringArray, UInt64Array};
 use arrow_select::filter::filter_record_batch;
 use bytes::Bytes;
 use chrono::Utc;
@@ -208,7 +208,7 @@ async fn held_among(local: &Dataset, pending: &HashSet<String>) -> Option<Skippe
         return None;
     }
     let rows = rows_with_ids(local, pending).await.ok()?;
-    let (_, skipped) = drop_secret_rows_from(local, rows).await.ok()?;
+    let (_, skipped) = drop_secret_rows(rows).ok()?;
     (skipped.rows > 0).then_some(skipped)
 }
 
@@ -232,14 +232,22 @@ async fn all_rows(local: &Dataset) -> Result<Vec<RecordBatch>> {
     dataset::scan_rows(local, &[], Some("vector IS NOT NULL"), None).await
 }
 
-/// Load embedded rows by ID without an unbounded SQL predicate.
+/// The ids of the local chunks that carry a vector — the only ones a push may publish.
+async fn embedded_ids(local: &Dataset) -> Result<HashSet<String>> {
+    Ok(ids_in_batches(
+        &dataset::scan_rows(local, &["id"], Some("vector IS NOT NULL"), None).await?,
+    ))
+}
+
+/// Don't make this a scan filter. On a memory that hasn't been pushed in a while, that filter lists
+/// every pending id. Lance copies the whole filter into every fragment before it reads a row. RAM
+/// use climbs with both the size of the backlog and the number of fragments.
 async fn rows_with_ids(local: &Dataset, ids: &HashSet<String>) -> Result<Vec<RecordBatch>> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }
     let mut scan = local.scan();
     scan.project(&["id"])?;
-    scan.filter("vector IS NOT NULL")?;
     scan.with_row_id();
     let mut stream = scan.try_into_stream().await?;
     let mut selected = Vec::new();
@@ -300,8 +308,8 @@ impl Confirm {
 
 /// Whether a push must be confirmed first: there are rows to publish and the local index shares
 /// no chunk with the remote — a first publish, a new host of yours, or the wrong memory.
-fn must_confirm(overlap: usize, to_push: usize) -> bool {
-    to_push > 0 && overlap == 0
+fn must_confirm(local: usize, to_push: usize) -> bool {
+    to_push > 0 && to_push == local
 }
 
 /// A memory URI as one path-safe filename — the push receipt's key.
@@ -357,29 +365,6 @@ fn named_ids(by_session: &HashMap<String, Vec<String>>, sessions: &[String]) -> 
         );
     }
     Ok(sessions.iter().flat_map(|s| by_session[s].iter().cloned()).collect())
-}
-
-/// Local selection for overlap and receipts, and its embedded subset eligible for publication.
-#[derive(Debug)]
-struct Candidates {
-    local: HashSet<String>,
-    embedded: HashSet<String>,
-}
-
-/// Resolve session names before filtering, so a session awaiting embedding is still a valid name.
-async fn candidates(local: &Dataset, sessions: &[String]) -> Result<Candidates> {
-    let selected = if sessions.is_empty() {
-        all_ids(local).await?
-    } else {
-        named_ids(&ids_by_session(local).await?, sessions)?
-    };
-    let batches = dataset::scan_rows(local, &["id"], Some("vector IS NOT NULL"), None).await?;
-    let mut embedded = ids_in_batches(&batches);
-    embedded.retain(|id| selected.contains(id));
-    Ok(Candidates {
-        local: selected,
-        embedded,
-    })
 }
 
 /// Publish the local memory's new embedded chunks to `target` (a remote memory on the HF Hub). With
@@ -443,17 +428,22 @@ pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm, ses
     };
     let first_publish = remote.is_none();
 
-    // Only embedded rows in the local selection are eligible to publish.
-    if !sessions.is_empty() {
+    // 2. The local side. Named sessions are the selection outright: the caller has said what to
+    // publish. Otherwise everything local is a candidate, and the remote's own ids decide what of
+    // it is new.
+    let candidates = if sessions.is_empty() {
+        all_ids(&local).await?
+    } else {
         eprintln!("publishing {} named session(s)", sessions.len());
-    }
-    let candidates = candidates(&local, sessions).await?;
-    let to_push: HashSet<String> = candidates.embedded.difference(&remote_ids).cloned().collect();
-    let overlap = candidates.local.intersection(&remote_ids);
+        named_ids(&ids_by_session(&local).await?, sessions)?
+    };
+    let publishable: HashSet<String> = candidates.intersection(&embedded_ids(&local).await?).cloned().collect();
+    let to_push: HashSet<String> = publishable.difference(&remote_ids).cloned().collect();
 
-    // Remote IDs establish receipts even when their local rows still lack vectors.
+    // Bootstrap/refresh the local receipt from facts the push comparison has already established.
+    // This makes a no-op push enough to initialize status for a legacy remote, with no extra scan.
     if remote.is_some() {
-        record_pushed(&uri, overlap.clone())?;
+        record_pushed(&uri, candidates.intersection(&remote_ids))?;
     }
 
     // Nothing to push => done (no token needed), unless this is a forced reindex of an existing
@@ -469,7 +459,7 @@ pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm, ses
     let token = hub::hf_token().context("no HF token (set HF_TOKEN) — required to push")?;
 
     // When required, ask for confirmation before publishing.
-    if must_confirm(overlap.count(), to_push.len()) && !confirm.proceed(&target.label(), to_push.len()) {
+    if must_confirm(publishable.len(), to_push.len()) && !confirm.proceed(&target.label(), to_push.len()) {
         bail!("push aborted");
     }
 
@@ -506,7 +496,7 @@ pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm, ses
     // whole push. `funes scrub` redacts it in the local memory; the next push then ships it.
     let n_scanning: usize = batches.iter().map(|b| b.num_rows()).sum();
     eprintln!("scanning {n_scanning} chunk(s) for secrets…");
-    let (batches, skipped) = drop_secret_rows_from(&local, batches).await?;
+    let (batches, skipped) = drop_secret_rows(batches)?;
     let n_chunks: usize = batches.iter().map(|b| b.num_rows()).sum();
     if n_chunks == 0 {
         // Everything was held back: nothing reached the Hub. Mark `blocked` so the CLI exits non-zero
@@ -669,78 +659,33 @@ impl Skipped {
     }
 }
 
-fn block_key(c: &chunk::Chunk) -> (&str, &str, i64) {
-    (&c.session_id, &c.turn_uuid, c.block_idx)
-}
-
-/// Hold back candidate rows with secrets anywhere in their complete local blocks.
-async fn drop_secret_rows_from(local: &Dataset, batches: Vec<RecordBatch>) -> Result<(Vec<RecordBatch>, Skipped)> {
-    let candidates = chunk::chunks_from_batches(&batches);
-    let wanted: HashSet<_> = candidates.iter().map(block_key).collect();
-    let mut context = Vec::new();
-    if !wanted.is_empty() {
-        let mut scan = local.scan();
-        scan.project(&["session_id", "turn_uuid", "block_idx"])?;
-        scan.with_row_id();
-        let projection = local
-            .schema()
-            .project(&["text", "session_id", "turn_uuid", "block_idx", "split_idx"])?;
-        let mut stream = scan.try_into_stream().await?;
-        while let Some(batch) = stream.try_next().await? {
-            let row_ids = batch
-                .column_by_name(ROW_ID)
-                .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
-                .context("selecting push scan blocks: missing or non-u64 row ids")?;
-            let sessions = batch
-                .column_by_name("session_id")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-                .context("selecting push scan blocks: missing or non-string session ids")?;
-            let turns = batch
-                .column_by_name("turn_uuid")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-                .context("selecting push scan blocks: missing or non-string turn ids")?;
-            let blocks = batch
-                .column_by_name("block_idx")
-                .and_then(|c| c.as_any().downcast_ref::<Int64Array>())
-                .context("selecting push scan blocks: missing or non-i64 block indices")?;
-            let matching: Vec<u64> = (0..batch.num_rows())
-                .filter(|&i| wanted.contains(&(sessions.value(i), turns.value(i), blocks.value(i))))
-                .map(|i| row_ids.value(i))
-                .collect();
-            if !matching.is_empty() {
-                let rows = local.take_rows(&matching, projection.clone()).await?;
-                context.extend(chunk::chunks_from_batches(&[rows]));
-            }
-        }
-    }
-    drop_secret_rows_in_context(batches, &context)
-}
-
-/// Scan full block context, counting and removing only dirty candidate rows.
-fn drop_secret_rows_in_context(
-    batches: Vec<RecordBatch>,
-    context: &[chunk::Chunk],
-) -> Result<(Vec<RecordBatch>, Skipped)> {
+/// Scan the to-push `batches` and hold back every row of any *block* that holds a secret, returning
+/// the clean batches and what was held back. Detection works at block granularity: a block's chunks
+/// are reconstructed into their contiguous text (so a secret `split` cut across chunks is whole and
+/// detectable), scanned in one pass, and the scanner says which block each finding came from — never
+/// the secret's value, which fails on text stored with escaped or quoted bytes. If any
+/// chunk of a block is dirty, the whole block is held back (its other chunks carry the rest of the
+/// secret). Fail-closed on the scanner — a push must scan before it uploads.
+fn drop_secret_rows(batches: Vec<RecordBatch>) -> Result<(Vec<RecordBatch>, Skipped)> {
     let scanner = scan::Trufflehog::find()?;
-    let blocks = chunk::reconstruct_blocks(context);
+    // Row order across batches matches `chunks_from_batches`, so a chunk's index is its global row.
+    let chunks = chunk::chunks_from_batches(&batches);
+    let blocks = chunk::reconstruct_blocks(&chunks);
     let texts: Vec<&str> = blocks.iter().map(|(_, text)| text.as_str()).collect();
     let found = scan::scan_blocks(&texts, &scanner)?;
 
-    let mut dirty_blocks = HashSet::new();
+    let mut dirty = vec![false; chunks.len()];
     let mut detectors: Vec<String> = Vec::new();
     for ((idxs, _), findings) in blocks.iter().zip(&found) {
         if findings.is_empty() {
             continue;
         }
-        dirty_blocks.insert(block_key(&context[idxs[0]]));
+        for &i in idxs {
+            dirty[i] = true;
+        }
         // One tally per (block, distinct detector), so the warning reads "PrivateKey×<blocks>".
         detectors.extend(scan::detectors(findings));
     }
-    // Row order across batches matches `chunks_from_batches`, so a chunk's index is its global row.
-    let dirty: Vec<bool> = chunk::chunks_from_batches(&batches)
-        .iter()
-        .map(|c| dirty_blocks.contains(&block_key(c)))
-        .collect();
     let dropped = dirty.iter().filter(|&&d| d).count();
     if dropped == 0 {
         return Ok((
@@ -762,12 +707,6 @@ fn drop_secret_rows_in_context(
     }
     let summary = scan::summary(detectors.iter().map(String::as_str));
     Ok((clean, Skipped { rows: dropped, summary }))
-}
-
-#[cfg(test)]
-fn drop_secret_rows(batches: Vec<RecordBatch>) -> Result<(Vec<RecordBatch>, Skipped)> {
-    let context = chunk::chunks_from_batches(&batches);
-    drop_secret_rows_in_context(batches, &context)
 }
 
 /// Forced reindex: ask [`remote::reindex`] to refresh and commit, retrying on a head-moved
@@ -809,18 +748,16 @@ async fn reindex_auto(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow_array::{types::Float32Type, FixedSizeListArray, RecordBatchIterator};
-    use arrow_schema::{DataType, Field, Schema};
+    use arrow_array::RecordBatchIterator;
     use lance::dataset::WriteParams;
 
     #[test]
     fn must_confirm_only_when_overlap_is_empty_and_there_is_work() {
         // First publish / fully disjoint (every local chunk is new to the remote) → confirm.
-        assert!(must_confirm(0, 5));
-        assert!(must_confirm(0, 1));
-        // Any shared id, including one shallow locally, identifies a memory you already add to.
-        assert!(!must_confirm(2, 3));
-        assert!(!must_confirm(1, 1));
+        assert!(must_confirm(5, 5));
+        assert!(must_confirm(1, 1));
+        // Some overlap (fewer to push than the local total) → no prompt, it's a memory you add to.
+        assert!(!must_confirm(5, 3));
         // Nothing to push (up to date, or a reindex-only run) → never prompt, even with 0 overlap.
         assert!(!must_confirm(5, 0));
         assert!(!must_confirm(0, 0));
@@ -1015,49 +952,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_partial_embedding_keeps_the_whole_block_in_the_push_secret_scan() {
-        if scan::Trufflehog::find().is_err() {
-            eprintln!("skip: trufflehog not found");
-            return;
-        }
-        let Some(key) = keygen(&["-t", "rsa", "-b", "4096"]) else {
-            eprintln!("skip: ssh-keygen unavailable");
-            return;
-        };
-        let turns = [turn(0, "clean note"), turn(1, &key), turn(2, &key)];
-        let chunks = chunk::chunks_from_turns(&turns, &chunk::Tier::ALL, true);
-        assert!(chunks.iter().filter(|c| c.seq == 1).count() > 1, "the key spans chunks");
-        let vectors = vec![vec![0.0; dataset::DIM as usize]];
-        let dir = tempfile::tempdir().unwrap();
-        let uri = dataset::table_uri(&dir.path().to_string_lossy());
-        let mut ds: Option<Dataset> = None;
-        for (i, c) in chunks.iter().enumerate() {
-            // Embed the clean row and one secret split; the other key stays wholly pending.
-            let row = dataset::build_batch(std::slice::from_ref(c), (i < 2).then_some(vectors.as_slice())).unwrap();
-            let reader = RecordBatchIterator::new(vec![Ok(row)], dataset::schema());
-            match &mut ds {
-                Some(ds) => ds.append(reader, None).await.unwrap(),
-                None => ds = Some(Dataset::write(reader, &uri, None).await.unwrap()),
-            }
-        }
-        let ds = ds.unwrap();
-        let eligible: HashSet<_> = chunks[..2].iter().map(|c| c.id.clone()).collect();
-        let rows = rows_with_ids(&ds, &eligible).await.unwrap();
-        assert_eq!(ids_in_batches(&rows), eligible);
-        let (clean, held) = drop_secret_rows_from(&ds, rows).await.unwrap();
-        assert_eq!(held.rows, 1, "only the embedded secret split is counted as held");
-        assert_eq!(held.summary, "PrivateKey×1", "only the candidate block is scanned");
-        assert_eq!(ids_in_batches(&clean), HashSet::from([chunks[0].id.clone()]));
-
-        // A later append may select just one split too, after its siblings were already published.
-        let one_split = HashSet::from([chunks[1].id.clone()]);
-        let rows = rows_with_ids(&ds, &one_split).await.unwrap();
-        let (clean, held) = drop_secret_rows_from(&ds, rows).await.unwrap();
-        assert_eq!(held.rows, 1);
-        assert!(ids_in_batches(&clean).is_empty());
-    }
-
     /// A two-session local dataset for the selection tests.
     async fn two_session_ds(dir: &std::path::Path) -> Dataset {
         let (b, _) = batch(&[
@@ -1084,58 +978,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shallow_rows_wait_for_embedding_before_they_can_publish() {
+    async fn only_embedded_rows_can_publish() {
         let dir = tempfile::tempdir().unwrap();
         let chunks = chunk::chunks_from_turns(
             &[
-                turn_sess("mixed", 0, "ready after the first fill"),
-                turn_sess("mixed", 1, "ready after the second fill"),
-                turn_sess("shallow", 2, "still awaiting embedding"),
+                turn_sess("s", 0, "embedded"),
+                turn_sess("s", 1, "still awaiting embedding"),
             ],
             &chunk::Tier::ALL,
             true,
         );
-        assert_eq!(chunks.len(), 3);
-        let unembedded = dataset::build_batch(&chunks, None).unwrap();
+        let reader = RecordBatchIterator::new(
+            vec![Ok(dataset::build_batch(&chunks, None).unwrap())],
+            dataset::schema(),
+        );
         let uri = dataset::table_uri(&dir.path().to_string_lossy());
-        let mut ds = Dataset::write(
-            RecordBatchIterator::new(vec![Ok(unembedded)], dataset::schema()),
-            &uri,
-            None,
-        )
-        .await
-        .unwrap();
-        let all = all_ids(&ds).await.unwrap();
-        assert_eq!(all.len(), 3, "unembedded rows remain in the memory");
-        let selected = candidates(&ds, &[]).await.unwrap();
-        assert_eq!(selected.local, all);
-        assert!(selected.embedded.is_empty());
-        assert!(candidates(&ds, &["shallow".into()]).await.unwrap().embedded.is_empty());
-        assert!(all_rows(&ds).await.unwrap().iter().all(|b| b.num_rows() == 0));
-        assert!(rows_with_ids(&ds, &all).await.unwrap().is_empty());
-        let err = candidates(&ds, &["shallow".into(), "typo".into()]).await.unwrap_err();
-        assert!(err.to_string().contains("typo"));
-
-        ds = dataset::fill_vectors(&ds, &[&chunks[0].id], &[vec![1.0; dataset::DIM as usize]])
+        let ds = Dataset::write(reader, &uri, None).await.unwrap();
+        let ds = dataset::fill_vectors(&ds, &[&chunks[0].id], &[vec![1.0; dataset::DIM as usize]])
             .await
             .unwrap();
-        let ready = HashSet::from([chunks[0].id.clone()]);
-        assert_eq!(candidates(&ds, &[]).await.unwrap().embedded, ready);
-        let mixed = candidates(&ds, &["mixed".into()]).await.unwrap();
-        assert_eq!(mixed.local, HashSet::from([chunks[0].id.clone(), chunks[1].id.clone()]));
-        assert_eq!(mixed.embedded, ready);
-        assert!(candidates(&ds, &["shallow".into()]).await.unwrap().embedded.is_empty());
-        assert_eq!(ids_in_batches(&all_rows(&ds).await.unwrap()), ready);
-        assert_eq!(ids_in_batches(&rows_with_ids(&ds, &all).await.unwrap()), ready);
 
-        ds = dataset::fill_vectors(&ds, &[&chunks[1].id], &[vec![2.0; dataset::DIM as usize]])
-            .await
-            .unwrap();
-        let selected = candidates(&ds, &["mixed".into()]).await.unwrap();
-        let to_push: HashSet<_> = selected.embedded.difference(&ready).cloned().collect();
-        assert_eq!(to_push, HashSet::from([chunks[1].id.clone()]));
-        assert_eq!(ids_in_batches(&rows_with_ids(&ds, &to_push).await.unwrap()), to_push);
-        assert_eq!(ds.count_rows(None).await.unwrap(), 3);
+        let embedded = HashSet::from([chunks[0].id.clone()]);
+        assert_eq!(embedded_ids(&ds).await.unwrap(), embedded);
+        assert_eq!(
+            ids_in_batches(&all_rows(&ds).await.unwrap()),
+            embedded,
+            "a first publish ships no nulls"
+        );
     }
 
     #[tokio::test]
@@ -1286,6 +1155,8 @@ mod tests {
 
     #[tokio::test]
     async fn large_selection_across_many_fragments_preserves_rows() {
+        use arrow_schema::{DataType, Field, Schema};
+
         // Many fragments and many ids: the shape whose `id IN (…)` filter blew up, so the selection
         // must stay correct where it matters most.
         let dir = tempfile::tempdir().unwrap();
@@ -1293,11 +1164,6 @@ mod tests {
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("payload", DataType::UInt64, false),
-            Field::new(
-                "vector",
-                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), 1),
-                true,
-            ),
         ]));
         let fragments = 256;
         let per_fragment = 512;
@@ -1308,11 +1174,7 @@ mod tests {
                     Arc::new(StringArray::from_iter_values(
                         range.clone().map(|n| format!("{n:016x}")),
                     )),
-                    Arc::new(UInt64Array::from_iter_values(range.clone())),
-                    Arc::new(FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
-                        range.map(|_| Some(vec![Some(1.0)])),
-                        1,
-                    )),
+                    Arc::new(UInt64Array::from_iter_values(range)),
                 ],
             )
             .unwrap();

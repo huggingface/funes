@@ -45,11 +45,10 @@ first pass is best-effort: local indexing still works without the scanner becaus
 has not crossed a publication boundary. It prints a warning that index-time redaction is disabled.
 
 Push is the hard boundary. A separate, **always-on, fail-closed gate** requires TruffleHog and scans
-the complete local content blocks of the rows about to leave the machine. This includes sibling
-chunks still awaiting embedding or already published, so a secret split across chunks cannot evade
-detection. If a block contains a secret, every chunk of that block being published is held back;
-unrelated clean rows still publish with a warning. Only when that leaves *nothing* to publish does
-push exit non-zero (code `2`):
+the rows about to leave the machine. It reconstructs complete content blocks before scanning, so a
+secret split across chunks cannot evade detection. If any chunk of a block contains a secret, every
+chunk of that block is held back; unrelated clean rows still publish with a warning. Only when that
+leaves *nothing* to publish does push exit non-zero (code `2`):
 
 ```console
 $ funes push <user|org>/funes-memory
@@ -102,11 +101,10 @@ name the sessions:
 funes push <memory> --sessions <session> --sessions <session>
 ```
 
-The list selects which sessions can publish — funes keeps no record of what you meant to publish,
-so a selection is made where it takes effect. An unrecognized session id fails the push rather than
-quietly publishing the rest; `funes sessions` lists the ids. A session whose chunks are still
-awaiting embedding is a valid selection, but has nothing to upload yet. Repeat the selection after
-indexing to publish its newly embedded chunks. The secret gate applies to every selection.
+Those sessions' embedded chunks are exactly what ships. The list **is** the decision — funes keeps
+no record of what you meant to publish, so a selection is made where it takes effect, and an
+unrecognized session id fails the push rather than quietly publishing the rest. `funes sessions`
+lists the ids, and naming a session publishes every embedded chunk it holds.
 
 The remote is append-only, so a selection is a pre-publication gate and not a remote undo. Nothing
 retracts a session once it is up.
