@@ -121,14 +121,11 @@ pub async fn scan_rows(
 pub(crate) const FTS_INDEX: &str = "text_idx";
 pub(crate) const VECTOR_INDEX: &str = "vector_idx";
 
-/// Best-effort: build the FTS index on `text` and the IVF_PQ index on `vector`, or refresh one the
-/// dataset already has ([`optimize_index`]), at a cost that follows the rows added rather than the
-/// table. A small corpus can't train IVF (lance needs ~256 rows) — that's fine, recall falls back to
-/// brute force.
+/// Best-effort: build or refresh the FTS index on `text` and the IVF_PQ index on `vector`. Below
+/// ~256 rows lance can't train IVF, and recall falls back to brute force.
 ///
-/// `on_phase` is called with a human label ("building …", "compacting …") before an index is built
-/// whole or its deltas are merged, so a caller can report progress around these opaque (no
-/// incremental hook), potentially slow Lance calls. Pass `|_| {}` to stay silent.
+/// `on_phase` gets a human label before each potentially slow Lance call. Pass `|_| {}` to stay
+/// silent.
 pub async fn build_indexes(ds: &mut Dataset, on_phase: impl Fn(&str)) {
     sweep_shuffle_leftovers(&std::env::temp_dir());
     let existing = sub_index_counts(ds).await.unwrap_or_default();
