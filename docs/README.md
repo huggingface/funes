@@ -7,8 +7,7 @@ This directory contains the user guides and design notes for
 
 - [Adding and removing funes](add.md) — install or remove the tools and automation for Claude Code,
   Codex, pi, or Hermes.
-- [Building the memory](index.md) — index session transcripts and understand the indexing
-  pipeline.
+- [Building the memory](index.md) — index session transcripts and resume unfinished work.
 - [Recalling](recall.md) — retrieve passages and drill into their surrounding turns.
 - [Browsing sessions](sessions.md) — list what a memory holds, digest a session, scan one for a
   literal.

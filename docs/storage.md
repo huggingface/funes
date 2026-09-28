@@ -3,8 +3,8 @@
 How big does a funes memory get, and how does it grow? This document builds a
 per-chunk cost model from two real memories and projects it forward.
 
-Figures were measured on 2026-07-22 with funes 1.2.0+dev, the current schema,
-and bge-small-en-v1.5 (`DIM = 384`). Sizes use decimal MB/GB and count only
+Figures were measured on 2026-07-22 with funes 1.2.0+dev and bge-small-en-v1.5
+(`DIM = 384`), on fully embedded memories. Sizes use decimal MB/GB and count only
 files referenced by the current Lance manifest. They exclude manifest and
 transaction history, superseded generations awaiting cleanup, and Hub Git/Xet
 history. Coefficients vary with chunk content, vocabulary, schema, and Lance
@@ -36,6 +36,8 @@ A memory is a single Lance dataset (`chunks.lance`) with these parts:
 | `_indices/` | BM25 + vector index | chunks (sublinear) |
 | `_versions/` | one manifest per committed version | number of index/push commits |
 | `_transactions/` | transaction records | negligible |
+
+Rows are stored before their embeddings; a null vector means the chunk is awaiting embedding.
 
 Current local breakdown (`data/` plus the index IDs named by the manifest):
 

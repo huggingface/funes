@@ -138,8 +138,8 @@ The per-turn indexing and session-boundary publishing the hooks run are detailed
 
 `funes add` runs one loop: **index** what you've done, **recall** it when it matters — and index what
 you just did, so it's recallable next time. Both halves are one deterministic pipeline: each source
-is parsed into a generic turn/block shape, chunked, embedded with a pinned local model, and written to
-a local Lance dataset; recall fuses vector + BM25 search, reranks, and reweights by recency.
+is parsed into a generic turn/block shape, chunked, written to a local Lance dataset, and embedded
+with a pinned local model; recall fuses vector + BM25 search, reranks, and reweights by recency.
 Integrations convert each agent's transcripts into the shared [turns format](docs/funes-jsonl.md).
 Adding an agent means publishing an [integration](CONTRIBUTING.md#writing-an-integration) of your
 own; the indexing and query pipeline already reads that format.
@@ -149,7 +149,7 @@ an agent: `funes ask` recalls from the memory and answers grounded in what it fi
 nothing. `funes recall` prints the raw ranked passages behind an answer, and `funes get` reassembles
 any cited turn in full.
 
-- [docs/index.md](docs/index.md) — the indexing pipeline, tiers, and incremental behavior.
+- [docs/index.md](docs/index.md) — sources, progress, and incremental indexing.
 - [docs/recall.md](docs/recall.md) — retrieval, drill-down with `get`, and reading a shared memory.
 - [docs/sessions.md](docs/sessions.md) — browsing a memory by session: `sessions`, `sketch`, `scan`.
 - [docs/ask.md](docs/ask.md) — borrow an agent for a grounded answer, nothing installed.

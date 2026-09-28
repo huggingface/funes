@@ -17,12 +17,10 @@ funes index --check ./exports/            # validate everything, write nothing
 
 A file is one unit: it is read whole and written in one append. A directory is one unit per file.
 
-A file you name is *signature-less* — it is re-read on every `funes index` that names it and never
-recorded in `state.json`; chunk-id dedup makes the re-read a no-op. A directory is a store funes
-revisits, so each file in it carries a change stamp (length, mtime, inode) and a recorded tier: an unchanged one is
-skipped, a changed one is read again. Keep files bounded, and ship an update either as a new file or
-by rewriting the one it belongs to — a rewritten file changes its stamp, so it is read again and
-dedup drops what is already stored. `--harness` is refused on both shapes: the facet is in the data.
+A file you name is re-read on every `funes index` that names it; chunk-id dedup prevents duplicate
+rows. In a directory, unchanged files are skipped and changed files are read again. Keep files
+bounded, and ship an update either as a new file or by rewriting the one it belongs to; dedup drops
+what is already stored. `--harness` is refused on both shapes: the facet is in the data.
 
 **Write into a directory funes indexes by renaming into place**: write a temporary name in that same
 directory, then `mv` it over the final one. funes may index the directory while you are writing, and
@@ -61,9 +59,8 @@ Any field not listed above is rejected, on either object — funes expects its p
 aligned on this contract, and would rather refuse a file than silently drop what it does not
 understand. The funes-owned fields (`source_path`, `workdir`, `repo`, chunk ids) must not appear.
 
-**Tool output is a `tool_result` block, whatever the turn's role.** Tiers key on `block_type`, never
-on `role`: a `role: "tool"` turn whose output sits in a `text` block is indexed as text — first, not
-deferred.
+**Tool output is a `tool_result` block, whatever the turn's role.** funes keys on `block_type`,
+never on `role`: a `role: "tool"` turn whose output sits in a `text` block is indexed as text.
 
 **A turn's rows are a function of the turn alone.** funes renders and splits each block from that
 turn's own fields — never from another turn, another file, or an earlier run — so re-emitting an
@@ -135,8 +132,6 @@ Behaviour, not contract — it may evolve; the identity rule above will not.
   `tool_result` as `[tool_result <tool_name>] <text>` (`[tool_result] <text>` without a name).
 - **Splits** long rendered text into overlapping pieces; `split_idx` numbers them and `get` stitches
   them back.
-- **Indexes by tier**: `text` and `thinking` first, then `tool_use`, then `tool_result`. A budgeted run
-  may leave later tiers pending; `funes status` says so.
 - **Stamps** `source_path` with the file's path and derives `workdir` and `repo` from `cwd`.
 - **Lists** a session in `sessions` by its opening text — the first `user` text block, else the first
   text block; `sketch` uses `user` / `assistant` turns where they exist.
@@ -151,7 +146,7 @@ unknown field is rejected rather than dropped — so a file is either understood
 ## Examples
 
 An agent conversation, OpenAI-style, with the tool result in its own turn (a producer may just as well
-place it inside the assistant's turn — tiers follow `block_type`):
+place it inside the assistant's turn):
 
 ```json
 {"format":1,"session_id":"b3f2e0c4","turn_uuid":"t-0001","seq":0,"ts":"2026-09-18T09:41:07Z","role":"user","harness":"opencode","cwd":"/home/me/dev/x","blocks":[{"block_type":"text","text":"why does the build fail on arm64?"}]}
@@ -170,4 +165,4 @@ local clone so the `repo` facet resolves.
 ```
 
 A PR's diff fits the tool vocabulary honestly — a `tool_use` block `gh pr diff 31234` followed by a
-`tool_result` holding it — and lands in the last tier, indexed after the discussion.
+`tool_result` holding it.

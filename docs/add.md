@@ -254,8 +254,9 @@ session and runs `funes index --harness <id>`, plus a session-boundary `funes pu
 is bound. None of that is required of an integration — one may register the read tools alone — and
 funes does not ask which kind it is running: the bootstrap around `setup` is the same for every
 integration, and each step is a no-op when there is nothing for it. A first add asks before
-indexing, the seed indexes what the spool holds, and the first push publishes what was indexed; an
-integration that converts nothing gets a note at each step and nothing else.
+indexing, the seed indexes what the spool holds, and the first push follows the usual
+[publishing rules](push.md). An integration that converts nothing gets a note at each step and
+nothing else.
 
 ### Converting by hand
 

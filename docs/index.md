@@ -40,8 +40,7 @@ funes reads no agent's own transcripts: each integration converts its sessions i
 path holding transcripts that are not turns files is refused with a pointer at the format
 ([funes-jsonl.md](funes-jsonl.md)) and at `funes add <agent>`. A session no integration has
 converted is not indexed — install it, and its history is converted at install.
-funes owns the spool and drains it as it goes: a file is deleted once the whole of it is in the
-memory (see [add.md](add.md)), which is why a memory is rebuilt by re-running `funes add <agent>`.
+To rebuild a memory from an agent's history, re-run [`funes add <agent>`](add.md).
 
 Inline `data:` URI payloads are elided to `data:image/png;base64,[elided]` before a block is
 scanned or stored: a pasted screenshot is megabytes of base64 with nothing recallable in it.
@@ -129,27 +128,6 @@ already made. Explicit imports have no time limit.
 | `--limit <N>` | Index only the most recent N sessions per source. Omit to index all. A Hub repo ignores it and indexes every shard. |
 | `--no-thinking` | Exclude thinking blocks. |
 | `--yes` | Don't ask: a budgeted (no-path) run finishes all remaining work; an explicit path skips the first-index size confirmation. |
-
-## The pipeline
-
-Indexing and recall are one deterministic pipeline:
-
-```
-~/.funes/spool/<id>      (each integration converts its agent's sessions into its own)
-   (or a .parquet trace, or a .funes.jsonl turns file)
-   │  parse        deterministic — turns (text / thinking / tool_use / tool_result), tagged by agent
-   │  chunk        one chunk per content block, tight provenance
-   │  embed        pinned local model (BAAI/bge-small-en-v1.5)
-   ▼  store        a local Lance dataset (vector + BM25)
-```
-
-The embedding model is **pinned and stamped into the memory**; querying with a different one is
-refused. To change it, rebuild from the transcripts — the memory is a disposable derived artifact, and
-the raw text is retained in every row.
-
-Each source is a `TraceSource` that reads its format into a generic turn/block shape; everything
-downstream is source-agnostic. A memory runs ~2.3 KB/chunk and grows ~6 MB on a heavy day — see
-[storage.md](storage.md).
 
 ## See also
 

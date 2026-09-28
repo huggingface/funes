@@ -16,22 +16,18 @@ it behaves; you rarely need to touch any of it by hand.
 `funes add <agent>` installs, beyond the read tools:
 
 - **Per-turn indexing.** A per-turn hook converts the session that just changed and runs
-  `funes index` after every completed turn, so your local memory tracks the session as it grows — a
-  session killed mid-flight is already indexed up to its last completed turn. The same hook converts
-  any other session changed since it last ran, so one whose own hook never fired — untrusted, timed
-  out, a host that died mid-turn — is captured at the next turn. Each run is time-boxed (text first,
-  ~60s), so a large backlog fills in a bounded step per turn instead of one long sweep.
+  `funes index` after every completed turn, so your local memory tracks the session as it grows.
+  The same hook converts any other session changed since it last ran, so one whose own hook never
+  fired — untrusted, timed out, a host that died mid-turn — is captured at the next turn.
+  Unfinished indexing [continues on later turns](index.md#progress-and-resuming).
 - **Publishing at session boundaries.** Bind a shared memory — `funes add <agent> <org>/<repo>` — and
   session-boundary hooks run `funes push` to publish there. Without a memory, indexing is local-only
   and nothing is published.
 
 It also performs the one-time bootstrap steps, so nothing is left to run by hand after it:
 
-- **Builds your first index** (from that agent's sessions) if you don't have one yet — a fast,
-  text-first pass that gets recall working in about a minute, after asking. Deeper content and older
-  sessions backfill on later turns. The hooks alone would also fill a cold memory, one bounded step
-  per turn; `funes add` builds the most valuable part upfront so recall works from your first
-  session.
+- **Builds your first index** from that agent's sessions if you don't have one yet, after asking;
+  see [the setup steps](add.md#what-a-run-does).
 - **Does the first push** to a freshly-bound memory. The push hook can't: a first publish to a memory
   your local memory shares no chunks with is refused off a terminal (the wrong-memory guard, below),
   so it must be interactive — `funes add` handles it.
@@ -42,10 +38,8 @@ it clears and when to remove first.
 
 ## How it's wired
 
-Indexing per turn produces **exactly the same chunks** as indexing once at the end: a chunk's id
-derives from `(session, turn, block, split)`, so a completed turn's chunks are identical no matter
-when they're indexed, and `funes index` re-embeds nothing already written. Keeping the network step
-(the push) off the per-turn path is what lets indexing run every turn cheaply.
+[Incremental indexing](index.md#incremental-by-construction) makes it cheap to run after each turn.
+Publishing runs separately, at session boundaries.
 
 How an integration is wired into its agent — what it installs, which of the agent's events it
 hooks, what it needs on the box, and what a re-run clears — is the integration's own to describe.
@@ -91,6 +85,5 @@ validates a producer's output without writing anything, so run it before wiring 
   push, a new host, or the wrong memory) is refused off a terminal. `funes add` clears it by doing
   that first push interactively — so on a new host, re-run `funes add <agent> <org>/<repo>` there
   once, as soon as that host has an index of its own to push.
-- **The remaining gap.** A session's last turns publish no later than the next session's start; a
-  machine retired without starting another session keeps its last unpushed turns local. Run `funes
-  push <org>/<repo>` by hand before stepping away if that matters.
+- **Before retiring a machine.** [Finish indexing](index.md#progress-and-resuming), then run
+  `funes push <org>/<repo>` by hand to publish any remaining work.
