@@ -5,7 +5,7 @@
 use crate::inference::{self, embed_batched, Embedder};
 use crate::memory::dataset::{self, build_batch, schema};
 use crate::memory::lock;
-use crate::{chunk, scan};
+use crate::{chunk, scan, ui};
 use anyhow::Result;
 use arrow_array::{BooleanArray, RecordBatch, RecordBatchIterator};
 use arrow_select::filter::filter_record_batch;
@@ -132,7 +132,7 @@ pub async fn run() -> Result<()> {
         }),
     )
     .await?;
-    dataset::build_indexes(&mut ds, |phase| eprintln!("{phase}…")).await?;
+    dataset::build_indexes(&mut ds, ui::index_progress).await?;
 
     let mut msg = format!(
         "scrubbed {total} rows: redacted {} secret(s) in {redacted_blocks} block(s)",

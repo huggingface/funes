@@ -136,7 +136,7 @@ pub(crate) async fn first_publish(
     rev: &str,
     message: String,
     extra_files: &BTreeMap<String, Bytes>,
-    on_phase: impl Fn(&str),
+    on_event: impl Fn(IndexBuildEvent),
 ) -> Result<Option<String>> {
     let staging = tempfile::tempdir()?;
     // Empty prefix = dataset at the repo root; joining "" would leave a stray trailing separator.
@@ -151,7 +151,7 @@ pub(crate) async fn first_publish(
     let mut ds = Dataset::write(reader, &table_uri, Some(WriteParams::default()))
         .await
         .context("building the dataset for first publish")?;
-    dataset::build_indexes(&mut ds, on_phase).await?;
+    dataset::build_indexes(&mut ds, on_event).await?;
 
     let mut ops = Vec::new();
     for entry in walkdir::WalkDir::new(&db_dir).into_iter().filter_map(|e| e.ok()) {

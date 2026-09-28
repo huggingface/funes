@@ -129,23 +129,9 @@ pub enum IndexBuildEvent {
     VectorIndexFailed(anyhow::Error),
 }
 
-/// Build indexes, reporting phases and printing a vector-index failure.
-pub async fn build_indexes(ds: &mut Dataset, on_phase: impl Fn(&str)) -> Result<()> {
-    build_indexes_reporting(ds, |event| match event {
-        IndexBuildEvent::Building(index) => on_phase(&format!("building {index}")),
-        IndexBuildEvent::Compacting { index, deltas } => {
-            on_phase(&format!("compacting {index} ({deltas} delta sub-indexes)"))
-        }
-        IndexBuildEvent::VectorIndexFailed(error) => {
-            eprintln!("note: vector index skipped — {error:#}");
-        }
-    })
-    .await
-}
-
 /// Build or refresh the required text index and optional vector index.
 /// Fewer than 256 non-null vectors cannot train IVF_PQ and use brute-force search.
-pub async fn build_indexes_reporting(ds: &mut Dataset, on_event: impl Fn(IndexBuildEvent)) -> Result<()> {
+pub async fn build_indexes(ds: &mut Dataset, on_event: impl Fn(IndexBuildEvent)) -> Result<()> {
     sweep_shuffle_leftovers(&std::env::temp_dir());
     let existing = sub_index_counts(ds).await?;
     refresh_or_build(ds, &FTS, &existing, &InvertedIndexParams::default(), &on_event).await?;
@@ -557,9 +543,14 @@ mod tests {
         assert!(!fts_needs_refresh(&ds).await.unwrap());
 
         let version = ds.version().version;
-        build_indexes(&mut ds, |_| panic!("a current index must not be rebuilt"))
-            .await
-            .unwrap();
+        build_indexes(&mut ds, |event| {
+            assert!(
+                !matches!(event, IndexBuildEvent::Building(_)),
+                "a current index must not be rebuilt"
+            );
+        })
+        .await
+        .unwrap();
         assert_eq!(ds.version().version, version, "a current index adds no version");
     }
 
@@ -576,7 +567,7 @@ mod tests {
             .unwrap();
 
         let events = RefCell::new(Vec::new());
-        build_indexes_reporting(&mut ds, |event| events.borrow_mut().push(event))
+        build_indexes(&mut ds, |event| events.borrow_mut().push(event))
             .await
             .unwrap();
         assert!(matches!(
@@ -629,9 +620,13 @@ mod tests {
         ds.append(reader(build_batch(&pending, None).unwrap()), None)
             .await
             .unwrap();
-        build_indexes(&mut ds, |phase| panic!("{phase} instead of refreshing"))
-            .await
-            .unwrap();
+        build_indexes(&mut ds, |event| {
+            if let IndexBuildEvent::Building(phase) = event {
+                panic!("built {phase} whole instead of refreshing it");
+            }
+        })
+        .await
+        .unwrap();
         let refreshed = sub_index_counts(&ds).await.unwrap();
         assert_eq!(refreshed[FTS_INDEX], 2, "one delta over the appended rows");
         assert_eq!(refreshed[VECTOR_INDEX], 2);
@@ -670,9 +665,13 @@ mod tests {
         assert!(!fts_needs_refresh(&ds).await.unwrap(), "filling vectors preserves FTS");
         assert_eq!(ds.unindexed_fragments(VECTOR_INDEX).await.unwrap().len(), 1);
 
-        build_indexes(&mut ds, |phase| panic!("{phase} after only filling vectors"))
-            .await
-            .unwrap();
+        build_indexes(&mut ds, |event| {
+            if let IndexBuildEvent::Building(phase) = event {
+                panic!("built {phase} whole after only filling vectors");
+            }
+        })
+        .await
+        .unwrap();
         assert!(ds.unindexed_fragments(VECTOR_INDEX).await.unwrap().is_empty());
         let refreshed_text: Vec<_> = ds
             .load_indices()
@@ -822,17 +821,17 @@ mod tests {
             .await
             .unwrap();
         let built = std::sync::Mutex::new(Vec::new());
-        build_indexes(&mut ds, |phase| built.lock().unwrap().push(phase.to_string()))
+        build_indexes(&mut ds, |event| built.lock().unwrap().push(event))
             .await
             .unwrap();
-        assert_eq!(
-            built.into_inner().unwrap(),
+        assert!(matches!(
+            built.into_inner().unwrap().as_slice(),
             [
-                format!("compacting {FTS_INDEX} ({COMPACT_DELTAS} delta sub-indexes)"),
-                "building text search index".to_string(),
-                format!("compacting {VECTOR_INDEX} ({COMPACT_DELTAS} delta sub-indexes)"),
-            ]
-        );
+                IndexBuildEvent::Compacting { index: fts, deltas: COMPACT_DELTAS },
+                IndexBuildEvent::Building("text search index"),
+                IndexBuildEvent::Compacting { index: vector, deltas: COMPACT_DELTAS },
+            ] if fts == FTS_INDEX && vector == VECTOR_INDEX
+        ));
         assert_eq!(
             sub_index_counts(&ds).await.unwrap()[FTS_INDEX],
             1,

@@ -25,7 +25,7 @@ use crate::memory::dataset;
 use crate::memory::lock;
 use crate::memory::remote::{self, Appended, Reindexed};
 use crate::memory::{Memory, MemoryState};
-use crate::{chunk, scan};
+use crate::{chunk, scan, ui};
 use anyhow::{bail, Context, Result};
 use arrow_array::{BooleanArray, Int64Array, RecordBatch, StringArray, UInt64Array};
 use arrow_select::filter::filter_record_batch;
@@ -560,7 +560,7 @@ pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm, ses
             &rev,
             message,
             &extra,
-            |phase| eprintln!("{phase}…"),
+            ui::index_progress,
         )
         .await?;
         let Some(oid) = oid else {

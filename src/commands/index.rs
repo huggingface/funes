@@ -16,6 +16,7 @@ use crate::memory::lock;
 use crate::scan;
 use crate::traces::spool;
 use crate::traces::{self, repo, source};
+use crate::ui;
 use anyhow::{anyhow, Context, Result};
 use arrow_array::{Array, RecordBatchIterator, StringArray, UInt64Array};
 use futures::TryStreamExt;
@@ -799,10 +800,9 @@ impl Indexer {
     /// Consumes the indexer, releasing the memory lock.
     async fn finalize(mut self) -> Result<()> {
         if let Some(d) = &mut self.ds {
-            // A prior run may have recorded or drained every unit before its FTS build failed.
-            // Retry from the memory's coverage even when this run wrote nothing.
+            // Retry incomplete FTS coverage even when no rows or vectors were written.
             if self.n_chunks > 0 || self.n_embedded > 0 || dataset::fts_needs_refresh(d).await? {
-                dataset::build_indexes(d, |phase| eprintln!("{phase}…")).await?;
+                dataset::build_indexes(d, ui::index_progress).await?;
 
                 // Reap superseded versions — best-effort; on failure the reap waits for next run.
                 match d.cleanup_old_versions(chrono::Duration::minutes(10), None, None).await {
