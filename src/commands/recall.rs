@@ -1235,6 +1235,18 @@ async fn session_count(ds: &Dataset) -> Option<usize> {
     Some(sessions.len())
 }
 
+async fn pending_embeddings_line(ds: &Dataset) -> Result<String> {
+    let n = ds
+        .count_rows(Some("vector IS NULL".into()))
+        .await
+        .context("counting chunks awaiting embedding")?;
+    Ok(if n == 0 {
+        String::new()
+    } else {
+        format!("{n} chunk{} awaiting embedding\n", if n == 1 { "" } else { "s" })
+    })
+}
+
 fn index_coverage_line() -> Option<String> {
     let coverage = super::index::local_index_coverage()?;
     (coverage.pending > 0).then(|| {
@@ -1246,13 +1258,13 @@ fn index_coverage_line() -> Option<String> {
     })
 }
 
-/// The indexation lines of a local memory: how many sessions it holds and when it was last
-/// written to (an `index` or `scrub` run). A version with no recorded timestamp is omitted.
-async fn index_lines(ds: &Dataset, now: DateTime<Utc>) -> String {
+/// Local index progress and its last write time. A version with no recorded timestamp is omitted.
+async fn index_lines(ds: &Dataset, now: DateTime<Utc>) -> Result<String> {
     let mut out = String::new();
     if let Some(n) = session_count(ds).await {
         let _ = writeln!(out, "sessions: {n}");
     }
+    out.push_str(&pending_embeddings_line(ds).await?);
     if let Some(line) = index_coverage_line() {
         out.push_str(&line);
     }
@@ -1260,7 +1272,7 @@ async fn index_lines(ds: &Dataset, now: DateTime<Utc>) -> String {
     if t.timestamp() > 0 {
         let _ = writeln!(out, "last indexed: {}", stamp(t, now));
     }
-    out
+    Ok(out)
 }
 
 pub async fn status(memory: Memory) -> Result<String> {
@@ -1270,7 +1282,7 @@ pub async fn status(memory: Memory) -> Result<String> {
             let rows = ds.count_rows(None).await?;
             let mut out = format!("memory: {}\nchunks: {rows}\n", memory.label());
             match &memory {
-                Memory::Local { .. } => out.push_str(&index_lines(&ds, now).await),
+                Memory::Local { .. } => out.push_str(&index_lines(&ds, now).await?),
                 Memory::Remote { uri } => {
                     // Every write to a remote memory is a `funes push` (data or reindex commit),
                     // so the head version's timestamp is when it was last pushed to.
@@ -1298,6 +1310,7 @@ pub async fn status(memory: Memory) -> Result<String> {
                         if let Some(n) = local_sessions {
                             let _ = writeln!(out, "sessions: {n}");
                         }
+                        out.push_str(&pending_embeddings_line(&local).await?);
                         if let Some(line) = index_coverage_line() {
                             out.push_str(&line);
                         }
@@ -1433,6 +1446,37 @@ mod tests {
             hybrid_candidates(&ds, &qv, "narwhal", 5, None).await.is_err(),
             "a missing FTS index must fail recall even when vector search finds a candidate"
         );
+    }
+
+    #[tokio::test]
+    async fn status_counts_pending_embeddings_until_they_are_filled() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::parse(&dir.path().to_string_lossy());
+        let turns = [
+            text_turn("session", 0, "user", "A narwhal parses transcripts."),
+            text_turn("session", 1, "assistant", "Each line becomes a typed turn."),
+        ];
+        let chunks = chunk::chunks_from_turns(&turns, &chunk::Tier::ALL, true);
+        let batch = dataset::build_batch(&chunks, None).unwrap();
+        let reader = RecordBatchIterator::new([Ok(batch)], dataset::schema());
+        let mut ds = Dataset::write(reader, &dataset::table_uri(&memory.label()), None)
+            .await
+            .unwrap();
+        let prefix = format!("memory: {}\nchunks: 2\nsessions: 1\n", memory.label());
+
+        for (chunk, line) in chunks
+            .iter()
+            .zip(["2 chunks awaiting embedding\n", "1 chunk awaiting embedding\n"])
+        {
+            let out = status(memory.clone()).await.unwrap();
+            assert!(out.starts_with(&format!("{prefix}{line}")), "{out}");
+            ds = dataset::fill_vectors(&ds, &[chunk.id.as_str()], &[vec![0.0; dataset::DIM as usize]])
+                .await
+                .unwrap();
+        }
+        let out = status(memory).await.unwrap();
+        assert!(out.starts_with(&prefix), "{out}");
+        assert!(!out.contains("awaiting embedding"), "{out}");
     }
 
     fn text_turn(session: &str, seq: i64, role: &str, text: &str) -> Turn {

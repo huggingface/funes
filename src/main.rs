@@ -167,7 +167,7 @@ enum Cmd {
         #[command(flatten)]
         memory: MemoryOpts,
     },
-    /// Show index statistics.
+    /// Show index statistics, pending embeddings, and push coverage.
     Status {
         /// Memory to inspect — an `<org>/<repo>` shorthand, an `hf://…` URI, a local path, or
         /// `local`. Defaults to your local memory.

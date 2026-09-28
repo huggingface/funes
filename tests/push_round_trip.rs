@@ -233,6 +233,13 @@ async fn shallow_push_round_trip(uri: &str) -> Result<()> {
         expect_remote_turns(uri, after).await?;
     }
     let status = funes::commands::recall::status(Memory::parse(&cases[0].0)).await?;
+    let (remote_status, local_status) = status
+        .split_once("\nlocal index: ")
+        .expect("remote status includes the local index");
+    ensure!(
+        !remote_status.contains("awaiting embedding") && local_status.contains("\n2 chunks awaiting embedding\n"),
+        "embedding backlog belongs to the local index: {status}"
+    );
     ensure!(
         status.contains("local push: up to date (2 sessions)"),
         "the receipt must include locally shallow rows observed remotely: {status}"

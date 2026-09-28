@@ -379,9 +379,7 @@ fn write_index_coverage(
     write_snapshot(path, &snapshot)
 }
 
-/// Native sessions that the most recent indexing sweep found short of a complete index. `None`
-/// means no sweep has written a readable snapshot yet; status omits the line rather than doing an
-/// unbounded recursive transcript scan.
+/// Source sessions with rows still owed, as recorded by the last indexing sweep.
 pub(crate) fn local_index_coverage() -> Option<IndexCoverage> {
     let path = dataset::funes_dir().join("index-coverage.json");
     path.is_file().then(|| IndexCoverage {
