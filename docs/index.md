@@ -2,20 +2,20 @@
 
 `funes index` builds or updates your local memory from what the integrations convert and from the
 turns files you point it at. [`funes add`](add.md) runs it for you on every turn; run it by hand to
-catch a spool up, to finish the deeper passes a budgeted run left, or to fold in a turns file, a
+catch a spool up, to finish the embeddings a budgeted run left, or to fold in a turns file, a
 directory of them, a `.parquet` export, or a Hub trace repo. To index an agent's history from a
 machine that never ran the automation, convert it first —
 [add.md](add.md#converting-by-hand) says how.
 
 ```bash
-funes index      # a fast, text-first pass over every spool, into one memory
+funes index      # a budgeted pass over every spool, into one memory
 ```
 
 ## What it indexes
 
 With **no argument**, in a terminal, `funes index` sweeps every spool under `~/.funes/spool/` — each
 integration converts its agent's sessions into its own, `~/.funes/spool/<id>`, which is what funes
-reads — into one memory, then offers to finish any deeper work left. Scope it to one integration's
+reads — into one memory, then offers to finish any work left. Scope it to one integration's
 spool with `--harness <id>`:
 
 ```bash
@@ -42,6 +42,9 @@ path holding transcripts that are not turns files is refused with a pointer at t
 converted is not indexed — install it, and its history is converted at install.
 funes owns the spool and drains it as it goes: a file is deleted once the whole of it is in the
 memory (see [add.md](add.md)), which is why a memory is rebuilt by re-running `funes add <agent>`.
+
+Inline `data:` URI payloads are elided to `data:image/png;base64,[elided]` before a block is
+scanned or stored: a pasted screenshot is megabytes of base64 with nothing recallable in it.
 
 ### Parquet trace format
 
@@ -104,34 +107,18 @@ validation. What `funes index` does with one:
 ## Incremental by construction
 
 A chunk's id derives from `(session, turn, block, split)`, so a completed turn produces **exactly the
-same chunks** no matter when it's indexed — and re-running embeds nothing already written. That is
+same chunks** no matter when it's indexed — and re-running embeds nothing already embedded. That is
 what makes it cheap to re-run as you work, and what lets the per-turn hook do the same job as one
 sweep at the end.
 
-A no-path refresh is **budgeted and text-first**: it does a fast text pass and offers to backfill the
-deeper content, so a large backlog fills in a bounded step at a time rather than one long stall. An
-explicit path or Hub repo is indexed in full.
+## Progress and resuming
 
-## Tiers and ordering
+Without a path, `funes index` works through the backlog in bounded steps. Indexed content can be
+recalled while embeddings are still pending. Later turns or another `funes index` continue the work;
+`funes status` shows what remains.
 
-Blocks are indexed in three tiers, cheapest-and-highest-value first:
-
-| Tier | Blocks | Why first |
-| --- | --- | --- |
-| L1 `text` | user and assistant prose, thinking | the decisions and rationale — where recall pays off |
-| L2 `tool_use` | tool calls | context for what was done |
-| L3 `tool_result` | tool output | bulky, lowest value per byte |
-
-A budgeted (no-path) run drains these **tier-major**: it indexes *every* owed session at `text`
-first — newest session first, subagents last — then every session at `tool_use`, then at
-`tool_result`, checking a ~60s wall-clock budget at each whole-session boundary and stopping at the
-first one past it. So the whole memory becomes recallable at the decision/rationale level within
-about a minute, and the bulky tool output backfills on later runs (the per-turn hook, or a rerun) a
-bounded step at a time. `--no-thinking` drops thinking blocks from the `text` tier; an explicit path
-or Hub repo skips the budget and indexes all tiers in one pass.
-
-Inline `data:` URI payloads are elided to `data:image/png;base64,[elided]` before a block is
-scanned or stored: a pasted screenshot is megabytes of base64 with nothing recallable in it.
+In a terminal, funes may offer to finish the remaining work. You can decline and keep the progress
+already made. Explicit imports have no time limit.
 
 ## Flags
 

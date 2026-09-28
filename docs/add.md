@@ -139,12 +139,11 @@ integration that never publishes, does not need it.
 
 `funes add` runs the one-time bootstrap the hooks can't do unattended:
 
-1. **Asks** before your first index, about a minute of work. Declining aborts the add; nothing is
-   installed.
+1. **Asks** before your first index. Declining aborts the add; nothing is installed.
 2. **Installs the hooks and registers the MCP server** (baking in the bound memory). This is where
    the integration converts the agent's existing sessions into its spool.
-3. **Builds your first index** from that spool if you don't have one — a fast, text-first pass.
-   Deeper content and older sessions backfill on later turns.
+3. **Builds your first index** from that spool if you don't have one. Indexed content is ready
+   to recall; [unfinished work continues on later turns](index.md#progress-and-resuming).
 4. **Does the first push** to a freshly-bound memory — the publish the hook refuses to do off a
    terminal (the wrong-memory guard; see [automation.md](automation.md)).
 
@@ -157,10 +156,8 @@ there. The id names the spool; the
 `harness` each turn carries is the integration's own to choose (the maintained four use their id,
 by convention), and `recall --harness` filters on what the turns carry, whatever is installed.
 
-The directory is funes's. A bundle only ever writes into it, and funes deletes a file once the whole
-of it is in the memory, so what is left on disk is exactly the backlog still owed: the whole history
-right after the seed, nothing once the per-turn drip has caught up. A file funes could not read
-stays, so a broken converter is visible rather than silent.
+The directory is funes's. A bundle only ever writes into it; funes deletes each file after storing
+its content. A file funes cannot read stays, so converter failures remain visible.
 
 That leaves the memory as the only copy of the converted turns. Rebuilding one from scratch is
 `funes add <agent>` again: its seed re-converts the agent's own history.

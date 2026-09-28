@@ -3,6 +3,8 @@
 //! from a source that still holds the session. Own test binary so its `$FUNES_HOME` can't race the
 //! other integration tests'.
 
+use funes::commands::recall;
+use funes::memory::Memory;
 use funes::traces::spool;
 use std::io::Write;
 
@@ -72,6 +74,15 @@ async fn seed_finishes_a_small_history_and_a_rerun_is_a_noop() {
     assert!(
         !src.join("sess-0001.funes.jsonl").exists(),
         "funes drains a spool file once all its rows are written"
+    );
+    let ds = Memory::local().open().await.unwrap();
+    assert_eq!(ds.count_rows(Some("vector IS NULL".into())).await.unwrap(), 0);
+    let recalled = recall::recall(Memory::local(), "parse transcripts".into(), 5, 30, 0.0, 0, None, None)
+        .await
+        .unwrap();
+    assert!(
+        recalled.contains("sess-0001"),
+        "the first seed is recallable: {recalled}"
     );
 
     // The budgeted no-path run (the per-turn hook): nothing owed, nothing added.

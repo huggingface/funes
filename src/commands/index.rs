@@ -744,54 +744,18 @@ impl Indexer {
         }
     }
 
-    /// Embed `tier`'s pending rows session by session, filling their vectors in place in fills of
-    /// about [`EMBED_BATCH`] rows cut at session boundaries. `keep_going(embedded)` is asked after
-    /// each fill that leaves rows; `false` stops. Returns the rows embedded.
-    async fn embed_tier(
+    async fn embed_pending(
         &mut self,
-        tier: Tier,
-        sessions: &[(String, Vec<u64>)],
-        mut keep_going: impl FnMut(usize) -> bool,
+        pending: &PendingEmbeddings,
+        keep_going: impl FnMut(usize) -> bool,
     ) -> Result<usize> {
-        let total: usize = sessions.iter().map(|(_, rows)| rows.len()).sum();
-        let mut embedded = 0;
-        let mut fill = Vec::new();
-        let t0 = Instant::now();
-        for (n, (_, rows)) in sessions.iter().enumerate() {
-            fill.extend(rows);
-            if fill.len() < EMBED_BATCH && n + 1 < sessions.len() {
-                continue;
-            }
-            self.fill(&fill).await?;
-            embedded += fill.len();
-            fill.clear();
-            eprintln!(
-                "\r    {}: embedded {embedded}/{total}  ({:.0}/s)        ",
-                tier.label(),
-                embedded as f64 / t0.elapsed().as_secs_f64().max(0.001)
-            );
-            if embedded < total && !keep_going(embedded) {
-                break;
-            }
+        if pending.total == 0 {
+            return Ok(0);
         }
+        let ds = self.ds.as_mut().context("embedding rows before any was written")?;
+        let embedded = embed_pending(ds, self.embedder.as_mut(), pending, keep_going).await?;
+        self.n_embedded += embedded as u64;
         Ok(embedded)
-    }
-
-    /// Embed the rows at `row_ids` from their stored text and fill their vectors in place.
-    async fn fill(&mut self, row_ids: &[u64]) -> Result<()> {
-        let ds = self.ds.as_ref().context("embedding rows before any was written")?;
-        let rows = ds.take_rows(row_ids, ds.schema().project(&["id", "text"])?).await?;
-        let ids = str_column(&rows, "id")?;
-        let texts = str_column(&rows, "text")?;
-        let n = texts.len();
-        let vectors = embed_batched(self.embedder.as_mut(), &texts, |done| {
-            eprint!("\r    embedding {done}/{n}   ");
-            let _ = std::io::stderr().flush();
-        })?;
-        let filled = dataset::fill_vectors(ds, &ids, &vectors).await?;
-        self.ds = Some(filled);
-        self.n_embedded += n as u64;
-        Ok(())
     }
 
     /// Consumes the indexer, releasing the memory lock.
@@ -861,12 +825,54 @@ struct PendingEmbeddings {
     total: usize,
 }
 
-impl PendingEmbeddings {
-    fn tier_total(&self, tier: Tier) -> usize {
-        self.by_tier
-            .get(&tier)
-            .map_or(0, |sessions| sessions.iter().map(|(_, rows)| rows.len()).sum())
+/// Embed pending rows in tier order, stopping between fills when `keep_going` declines.
+/// Progress is cumulative across tiers; a completed pass needs no continuation decision.
+async fn embed_pending(
+    ds: &mut Dataset,
+    embedder: &mut dyn Embedder,
+    pending: &PendingEmbeddings,
+    mut keep_going: impl FnMut(usize) -> bool,
+) -> Result<usize> {
+    let mut embedded = 0;
+    for (&tier, sessions) in &pending.by_tier {
+        let total: usize = sessions.iter().map(|(_, rows)| rows.len()).sum();
+        let before = embedded;
+        let mut rows_to_fill = Vec::new();
+        let t0 = Instant::now();
+        for (n, (_, rows)) in sessions.iter().enumerate() {
+            rows_to_fill.extend(rows);
+            if rows_to_fill.len() < EMBED_BATCH && n + 1 < sessions.len() {
+                continue;
+            }
+            fill(ds, embedder, &rows_to_fill).await?;
+            embedded += rows_to_fill.len();
+            rows_to_fill.clear();
+            let tier_done = embedded - before;
+            eprintln!(
+                "\r    {}: embedded {tier_done}/{total}  ({:.0}/s)        ",
+                tier.label(),
+                tier_done as f64 / t0.elapsed().as_secs_f64().max(0.001)
+            );
+            if embedded < pending.total && !keep_going(embedded) {
+                return Ok(embedded);
+            }
+        }
     }
+    Ok(embedded)
+}
+
+/// Embed stored text and fill the vectors at `row_ids` in place.
+async fn fill(ds: &mut Dataset, embedder: &mut dyn Embedder, row_ids: &[u64]) -> Result<()> {
+    let rows = ds.take_rows(row_ids, ds.schema().project(&["id", "text"])?).await?;
+    let ids = str_column(&rows, "id")?;
+    let texts = str_column(&rows, "text")?;
+    let n = texts.len();
+    let vectors = embed_batched(embedder, &texts, |done| {
+        eprint!("\r    embedding {done}/{n}   ");
+        let _ = std::io::stderr().flush();
+    })?;
+    *ds = dataset::fill_vectors(ds, &ids, &vectors).await?;
+    Ok(())
 }
 
 async fn pending_embeddings(ds: &Dataset) -> Result<PendingEmbeddings> {
@@ -960,9 +966,8 @@ pub async fn run_index_budgeted(
     run_budgeted(sources, no_thinking, finish).await
 }
 
-/// The `funes add` first index over `spool`: the budgeted drain with no finish prompt — the add
-/// flow already asked, and the per-turn drip owns whatever the budget defers. Rows land first,
-/// so recall answers from full-text search within the minute; embeddings follow, text first.
+/// Index a spool for initial setup, stopping at the budget boundary without a finish prompt.
+/// Written rows stay searchable; later runs fill any embeddings left pending.
 pub async fn run_index_seed(spool: &Path) -> Result<()> {
     let sources = vec![source::open(spool, None)?];
     run_budgeted(sources, false, Finish::Stop).await
@@ -1004,16 +1009,21 @@ async fn run_budgeted(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: b
     let mut done = 0usize;
     while done < owed.len() {
         done += idx.write_units(&owed[done..], done, owed.len()).await?;
-        if capped && start.elapsed() >= budget {
+        if done == owed.len() {
+            pending = idx.pending_embeddings().await?;
+        }
+        if capped && start.elapsed() >= budget && (done < owed.len() || pending.total > 0) {
             if !go_on(
                 finish,
                 interactive,
                 estimate_remaining(start.elapsed(), done, owed.len()),
             ) {
-                eprintln!(
-                    "{} session(s) left to write — per-turn indexing (or a `funes index` rerun) picks them up",
-                    owed.len() - done
-                );
+                let (remaining, work) = if done < owed.len() {
+                    (owed.len() - done, "session(s) left to write")
+                } else {
+                    (pending.total, "chunk(s) left to embed")
+                };
+                eprintln!("{remaining} {work} — per-turn indexing (or a `funes index` rerun) picks them up");
                 idx.work_remaining = true;
                 return idx.finalize().await;
             }
@@ -1021,35 +1031,23 @@ async fn run_budgeted(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: b
         }
     }
 
-    // The rows just written are pending too.
-    if done > 0 {
-        pending = idx.pending_embeddings().await?;
-    }
     let embed_start = Instant::now();
-    let mut before = 0usize;
-    for tier in Tier::ALL {
-        let Some(sessions) = pending.by_tier.get(&tier) else {
-            continue;
-        };
-        let embedded = idx
-            .embed_tier(tier, sessions, |embedded| {
-                if !capped || start.elapsed() < budget {
-                    return true;
-                }
-                let remaining = estimate_remaining(embed_start.elapsed(), before + embedded, pending.total);
-                capped = !go_on(finish, interactive, remaining);
-                !capped
-            })
-            .await?;
-        if embedded < pending.tier_total(tier) {
-            eprintln!(
-                "{} chunk(s) left to embed — per-turn indexing (or a `funes index` rerun) picks them up",
-                pending.total - before - embedded
-            );
-            idx.work_remaining = true;
-            break;
-        }
-        before += embedded;
+    let embedded = idx
+        .embed_pending(&pending, |embedded| {
+            if !capped || start.elapsed() < budget {
+                return true;
+            }
+            let remaining = estimate_remaining(embed_start.elapsed(), embedded, pending.total);
+            capped = !go_on(finish, interactive, remaining);
+            !capped
+        })
+        .await?;
+    if embedded < pending.total {
+        eprintln!(
+            "{} chunk(s) left to embed — per-turn indexing (or a `funes index` rerun) picks them up",
+            pending.total - embedded
+        );
+        idx.work_remaining = true;
     }
     idx.finalize().await
 }
@@ -1085,36 +1083,26 @@ async fn index_sources(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: 
         done += indexer.write_units(&all[done..], done, total).await?;
     }
 
-    // First interactive index: the rows are in and searchable; estimate the embedding run from the
-    // first fill and — if it looks long — ask whether to continue or stop here (a rerun resumes).
     let pending = indexer.pending_embeddings().await?;
     let mut probe = indexer.first_index && !yes && interactive;
     let t0 = Instant::now();
-    let mut before = 0usize;
-    for tier in Tier::ALL {
-        let Some(sessions) = pending.by_tier.get(&tier) else {
-            continue;
-        };
-        let embedded = indexer
-            .embed_tier(tier, sessions, |embedded| {
-                if !probe {
-                    return true;
-                }
-                probe = false;
-                let est = t0.elapsed().mul_f64(pending.total as f64 / (before + embedded) as f64);
-                est < Duration::from_secs(FIRST_INDEX_PROMPT_SECS) || confirm_full_index(pending.total, est)
-            })
-            .await?;
-        if embedded < pending.tier_total(tier) {
-            eprintln!(
-                "stopped with {} chunk(s) unembedded (kept — the index is searchable and resumable). \
-                 Re-run `funes index` to embed the rest.",
-                pending.total - before - embedded
-            );
-            indexer.work_remaining = true;
-            break;
-        }
-        before += embedded;
+    let embedded = indexer
+        .embed_pending(&pending, |embedded| {
+            if !probe {
+                return true;
+            }
+            probe = false;
+            let est = t0.elapsed().mul_f64(pending.total as f64 / embedded as f64);
+            est < Duration::from_secs(FIRST_INDEX_PROMPT_SECS) || confirm_full_index(pending.total, est)
+        })
+        .await?;
+    if embedded < pending.total {
+        eprintln!(
+            "stopped with {} chunk(s) unembedded (kept — the index is searchable and resumable). \
+             Re-run `funes index` to embed the rest.",
+            pending.total - embedded
+        );
+        indexer.work_remaining = true;
     }
 
     indexer.finalize().await
@@ -1243,11 +1231,13 @@ fn confirm_full_index(chunks: usize, est: Duration) -> bool {
 /// After a budgeted pass leaves work unfinished, ask whether to finish the rest now; default yes.
 /// `remaining` is a rough estimate of the time left.
 fn confirm_continue(remaining: Duration) -> bool {
+    let estimate = if remaining.is_zero() {
+        String::new()
+    } else {
+        format!(" (~{} left, rough)", fmt_eta(remaining))
+    };
     confirm(
-        &format!(
-            "more to index (~{} left, rough). Finish it now? [Y/n]  (or let per-turn indexing catch up)",
-            fmt_eta(remaining)
-        ),
+        &format!("more to index{estimate}. Finish it now? [Y/n]  (or let per-turn indexing catch up)"),
         true,
     )
 }
@@ -1276,6 +1266,138 @@ fn fmt_eta(d: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lance_index::scalar::FullTextSearchQuery;
+
+    #[derive(Default)]
+    struct TestEmbedder {
+        texts: Vec<String>,
+    }
+
+    impl Embedder for TestEmbedder {
+        fn embed(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+            self.texts.extend(texts.iter().map(|text| text.to_string()));
+            Ok(vec![vec![1.0; dataset::DIM as usize]; texts.len()])
+        }
+    }
+
+    async fn unembedded_memory(path: &Path, tiers: &[(&str, usize)]) -> Dataset {
+        let chunks: Vec<chunk::Chunk> = tiers
+            .iter()
+            .flat_map(|&(kind, count)| {
+                (0..count).map(move |i| chunk::Chunk {
+                    id: format!("{kind}-{i}"),
+                    text: format!("narwhal {kind} passage {i}"),
+                    session_id: format!("session-{i}"),
+                    workdir: String::new(),
+                    turn_uuid: format!("{kind}-{i}"),
+                    parent_uuid: None,
+                    seq: i as i64,
+                    ts: "2026-01-01T00:00:00Z".into(),
+                    role: "assistant".into(),
+                    block_type: kind.into(),
+                    tool_name: None,
+                    source_path: String::new(),
+                    block_idx: 0,
+                    split_idx: 0,
+                    harness: "test".into(),
+                    repo: String::new(),
+                })
+            })
+            .collect();
+        let reader = RecordBatchIterator::new([Ok(build_batch(&chunks, None).unwrap())], schema());
+        Dataset::write(reader, path.to_str().unwrap(), None).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn embedding_stops_between_tiers_and_resumes_from_stored_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ds = unembedded_memory(dir.path(), &[("text", 1), ("tool_result", 1)]).await;
+        let pending = pending_embeddings(&ds).await.unwrap();
+        let mut embedder = TestEmbedder::default();
+        let mut checks = Vec::new();
+        let embedded = embed_pending(&mut ds, &mut embedder, &pending, |done| {
+            checks.push(done);
+            false
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            embedded, 1,
+            "declining at the end of text must leave the later tier owed"
+        );
+        assert_eq!(checks, [1]);
+        assert_eq!(embedder.texts, ["narwhal text passage 0"]);
+        assert_eq!(ds.count_rows(None).await.unwrap(), 2);
+        let pending = pending_embeddings(&ds).await.unwrap();
+        assert_eq!(pending.total, 1);
+        assert!(pending.by_tier.contains_key(&Tier::ToolResult));
+
+        dataset::build_indexes(&mut ds, |_| {}).await.unwrap();
+        let mut scan = ds.scan();
+        scan.full_text_search(FullTextSearchQuery::new("narwhal".into()))
+            .unwrap();
+        let mut stream = scan.try_into_stream().await.unwrap();
+        let mut found = 0;
+        while let Some(batch) = stream.try_next().await.unwrap() {
+            found += batch.num_rows();
+        }
+        assert_eq!(found, 2, "written rows stay searchable while embeddings are pending");
+
+        let pending = pending_embeddings(&ds).await.unwrap();
+        assert_eq!(
+            embed_pending(&mut ds, &mut embedder, &pending, |_| panic!("no work remains"))
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            embedder.texts,
+            ["narwhal text passage 0", "narwhal tool_result passage 0"]
+        );
+        assert_eq!(ds.count_rows(None).await.unwrap(), 2);
+        let pending = pending_embeddings(&ds).await.unwrap();
+        assert_eq!(pending.total, 0);
+        assert_eq!(
+            embed_pending(&mut ds, &mut embedder, &pending, |_| panic!("nothing to embed"))
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn embedding_checks_each_fill_with_cumulative_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ds = unembedded_memory(
+            dir.path(),
+            &[("text", EMBED_BATCH + 1), ("tool_use", 1), ("tool_result", 1)],
+        )
+        .await;
+        let mut embedder = TestEmbedder::default();
+        let pending = pending_embeddings(&ds).await.unwrap();
+        assert_eq!(
+            embed_pending(&mut ds, &mut embedder, &pending, |_| false)
+                .await
+                .unwrap(),
+            EMBED_BATCH
+        );
+        let pending = pending_embeddings(&ds).await.unwrap();
+        assert_eq!(pending.total, 3);
+        let mut checks = Vec::new();
+        assert_eq!(
+            embed_pending(&mut ds, &mut embedder, &pending, |done| {
+                checks.push(done);
+                true
+            })
+            .await
+            .unwrap(),
+            3
+        );
+        assert_eq!(checks, [1, 2], "check each tier boundary, but not after the final fill");
+        assert_eq!(embedder.texts.len(), EMBED_BATCH + 3);
+        assert_eq!(embedder.texts.iter().collect::<HashSet<_>>().len(), EMBED_BATCH + 3);
+        assert_eq!(pending_embeddings(&ds).await.unwrap().total, 0);
+    }
 
     /// A source whose enumeration yields fixed unit keys, or fails — for `collect_units` tests.
     struct MockSource {
