@@ -185,8 +185,9 @@ pub(crate) async fn first_publish(
 /// Refresh the remote dataset's indexes and land the delta in one `create_commit` on branch `rev`,
 /// guarded by the current head. The backlog is appended as a delta sub-index — merging it into the
 /// existing index would re-read the whole index over the network — until
-/// [`dataset::COMPACT_DELTAS`] pile up and the deltas are folded back into one. [`Reindexed::AlreadyCurrent`] if there was nothing
-/// to optimize, [`Reindexed::Conflict`] if the head moved first (retry against the new head).
+/// [`dataset::COMPACT_DELTAS`] pile up and the deltas are folded back into one.
+/// [`Reindexed::AlreadyCurrent`] if there was nothing to optimize, [`Reindexed::Conflict`] if the
+/// head moved first (retry against the new head).
 pub(crate) async fn reindex(
     repo: &HFRepository<RepoTypeDataset>,
     dataset_uri: &str,

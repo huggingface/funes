@@ -122,8 +122,9 @@ pub(crate) const FTS_INDEX: &str = "text_idx";
 pub(crate) const VECTOR_INDEX: &str = "vector_idx";
 
 /// Best-effort: build the FTS index on `text` and the IVF_PQ index on `vector`, or refresh one the
-/// dataset already has ([`optimize_index`]: milliseconds, against ~30 s for a full rebuild). A small
-/// corpus can't train IVF (lance needs ~256 rows) — that's fine, recall falls back to brute force.
+/// dataset already has ([`optimize_index`]), at a cost that follows the rows added rather than the
+/// table. A small corpus can't train IVF (lance needs ~256 rows) — that's fine, recall falls back to
+/// brute force.
 ///
 /// `on_phase` is called with a human label ("building …", "compacting …") before an index is built
 /// whole or its deltas are merged, so a caller can report progress around these opaque (no
@@ -254,8 +255,7 @@ fn holds_only_shuffle_files(dir: &std::path::Path) -> bool {
 pub(crate) const COMPACT_DELTAS: usize = 8;
 
 /// Sub-index count per index name (the base plus its deltas, which share the index's name), from
-/// the index metadata — not `index_statistics`, which can write a stats migration through a remote's
-/// capture wrapper.
+/// the index metadata alone: `index_statistics` can write a stats migration.
 pub(crate) async fn sub_index_counts(ds: &Dataset) -> Result<BTreeMap<String, usize>> {
     let indices = ds.load_indices().await.context("listing the indexes")?;
     let mut counts = BTreeMap::new();

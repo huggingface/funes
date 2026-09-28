@@ -738,12 +738,13 @@ impl Indexer {
         Ok(n as u64)
     }
 
-    /// Build the FTS + IVF_PQ indexes (best-effort), reap superseded versions, and print the run
-    /// summary. Consumes the indexer, releasing the memory lock. The vector index bounds how much a
-    /// query reads — what makes recall over a remote (hf://) tier lazy rather than a full scan; lance
-    /// enforces its own training minimum (256 rows) and skips below it, falling back to brute force.
+    /// Build or refresh the FTS + IVF_PQ indexes (best-effort), reap superseded versions, and print
+    /// the run summary. Consumes the indexer, releasing the memory lock. The vector index bounds how
+    /// much a query reads — what makes recall over a remote (hf://) tier lazy rather than a full scan;
+    /// lance enforces its own training minimum (256 rows) and skips below it, falling back to brute
+    /// force.
     async fn finalize(mut self) -> Result<()> {
-        // Nothing written → the memory is unchanged since it opened; skip the rebuild and its
+        // Nothing written → the memory is unchanged since it opened; skip the index work and its
         // version churn.
         if self.n_chunks > 0 {
             if let Some(d) = &mut self.ds {
