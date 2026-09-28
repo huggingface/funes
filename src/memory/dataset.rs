@@ -20,7 +20,7 @@ use lance_index::optimize::OptimizeOptions;
 use lance_index::scalar::InvertedIndexParams;
 use lance_index::vector::ivf::IvfBuildParams;
 use lance_index::vector::pq::PQBuildParams;
-use lance_index::IndexType;
+use lance_index::{IndexParams, IndexType};
 use lance_io::object_store::{ObjectStoreParams, WrappingObjectStore};
 use lance_linalg::distance::MetricType;
 
@@ -131,42 +131,56 @@ pub(crate) const VECTOR_INDEX: &str = "vector_idx";
 pub async fn build_indexes(ds: &mut Dataset, on_phase: impl Fn(&str)) {
     sweep_shuffle_leftovers(&std::env::temp_dir());
     let existing = sub_index_counts(ds).await.unwrap_or_default();
-    match existing.get(FTS_INDEX) {
-        Some(&subs) => {
-            let _ = optimize_index(ds, FTS_INDEX, subs).await;
-        }
-        None => {
-            on_phase("text search index");
-            let _ = ds
-                .create_index(
-                    &["text"],
-                    IndexType::Inverted,
-                    Some(FTS_INDEX.to_string()),
-                    &InvertedIndexParams::default(),
-                    true,
-                )
-                .await;
-        }
+    refresh_or_build(ds, &FTS, &existing, &InvertedIndexParams::default(), &on_phase).await;
+    if let Some(ivf_pq) = ivf_pq_params(ds) {
+        refresh_or_build(ds, &VECTOR, &existing, &ivf_pq, &on_phase).await;
     }
-    if let Some(params) = ivf_pq_params(ds) {
-        match existing.get(VECTOR_INDEX) {
-            Some(&subs) => {
-                let _ = optimize_index(ds, VECTOR_INDEX, subs).await;
-            }
-            None => {
-                on_phase("vector index");
-                let _ = ds
-                    .create_index(
-                        &["vector"],
-                        IndexType::Vector,
-                        Some(VECTOR_INDEX.to_string()),
-                        &params,
-                        true,
-                    )
-                    .await;
-            }
-        }
+}
+
+/// One of the two indexes a memory carries.
+struct IndexSpec {
+    name: &'static str,
+    column: &'static str,
+    index_type: IndexType,
+    label: &'static str,
+}
+
+const FTS: IndexSpec = IndexSpec {
+    name: FTS_INDEX,
+    column: "text",
+    index_type: IndexType::Inverted,
+    label: "text search index",
+};
+
+const VECTOR: IndexSpec = IndexSpec {
+    name: VECTOR_INDEX,
+    column: "vector",
+    index_type: IndexType::Vector,
+    label: "vector index",
+};
+
+/// Best-effort: refresh `index` if `existing` lists it, else build it whole with `params`.
+async fn refresh_or_build(
+    ds: &mut Dataset,
+    index: &IndexSpec,
+    existing: &BTreeMap<String, usize>,
+    params: &dyn IndexParams,
+    on_phase: impl Fn(&str),
+) {
+    if let Some(&subs) = existing.get(index.name) {
+        let _ = optimize_index(ds, index.name, subs).await;
+        return;
     }
+    on_phase(index.label);
+    let _ = ds
+        .create_index(
+            &[index.column],
+            index.index_type,
+            Some(index.name.to_string()),
+            params,
+            true,
+        )
+        .await;
 }
 
 /// The files a lance IVF shuffle directory holds, and nothing else.
