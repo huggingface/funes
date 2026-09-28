@@ -407,6 +407,7 @@ mod tests {
     use crate::traces::{Block, Turn, FORMAT_VERSION};
     use arrow_array::RecordBatchIterator;
     use lance::dataset::WriteParams;
+    use lance_index::scalar::FullTextSearchQuery;
 
     /// `n` one-block turns with distinct text, so each is its own chunk.
     fn turns(from: usize, n: usize) -> Vec<Turn> {
@@ -476,8 +477,16 @@ mod tests {
         let base: Vec<_> = ds.load_indices().await.unwrap().iter().map(|i| i.uuid).collect();
         assert_eq!(base.len(), 2);
 
-        ds.append(reader(embedded(&turns(TRAINABLE, 5))), None).await.unwrap();
-        build_indexes(&mut ds, |phase| panic!("built {phase} whole instead of refreshing it")).await;
+        let appended = embedded(&turns(TRAINABLE, 5));
+        let probe = appended
+            .column_by_name("vector")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<FixedSizeListArray>()
+            .unwrap()
+            .value(0);
+        ds.append(reader(appended), None).await.unwrap();
+        build_indexes(&mut ds, |phase| panic!("{phase} instead of refreshing")).await;
         let refreshed = sub_index_counts(&ds).await.unwrap();
         assert_eq!(refreshed[FTS_INDEX], 2, "one delta over the appended rows");
         assert_eq!(refreshed[VECTOR_INDEX], 2);
@@ -485,6 +494,112 @@ mod tests {
         for uuid in base {
             assert!(after.iter().any(|i| i.uuid == uuid), "base index {uuid} was rebuilt");
         }
+
+        // fast_search reads the indexes alone, so a hit proves the delta covers the appended rows.
+        let first = format!("turn{TRAINABLE}");
+        let mut fts = ds.scan();
+        fts.full_text_search(FullTextSearchQuery::new(TRAINABLE.to_string()))
+            .unwrap()
+            .fast_search();
+        assert!(turn_uuids(fts).await.contains(&first), "FTS misses the appended rows");
+        let mut ann = ds.scan();
+        ann.nearest("vector", probe.as_ref(), 10)
+            .unwrap()
+            .refine(10)
+            .fast_search();
+        assert!(
+            turn_uuids(ann).await.contains(&first),
+            "the vector index misses the appended rows"
+        );
+    }
+
+    async fn turn_uuids(mut scan: lance::dataset::scanner::Scanner) -> Vec<String> {
+        scan.project(&["turn_uuid"]).unwrap();
+        let batches: Vec<RecordBatch> = scan.try_into_stream().await.unwrap().try_collect().await.unwrap();
+        batches
+            .iter()
+            .flat_map(|b| {
+                let col = b
+                    .column_by_name("turn_uuid")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap();
+                col.iter().flatten().map(str::to_string).collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn optimize_index_merges_only_its_own_deltas_once_they_reach_the_threshold() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("text", DataType::Utf8, false),
+            Field::new("tag", DataType::Utf8, false),
+        ]));
+        let batch = |text: &str| {
+            let cols: Vec<Arc<dyn arrow_array::Array>> = vec![
+                Arc::new(StringArray::from(vec![text])),
+                Arc::new(StringArray::from(vec!["t"])),
+            ];
+            RecordBatchIterator::new([RecordBatch::try_new(schema.clone(), cols)], schema.clone())
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let uri = dir.path().join("t.lance");
+        let mut ds = Dataset::write(batch("alpha bravo"), uri.to_str().unwrap(), None)
+            .await
+            .unwrap();
+        ds.create_index(
+            &["text"],
+            IndexType::Inverted,
+            Some(FTS_INDEX.to_string()),
+            &InvertedIndexParams::default(),
+            true,
+        )
+        .await
+        .unwrap();
+        ds.create_index(
+            &["tag"],
+            IndexType::BTree,
+            Some("tag_idx".to_string()),
+            &lance_index::scalar::ScalarIndexParams::default(),
+            true,
+        )
+        .await
+        .unwrap();
+        let base = ds
+            .load_indices()
+            .await
+            .unwrap()
+            .iter()
+            .find(|i| i.name == FTS_INDEX)
+            .unwrap()
+            .uuid;
+
+        let compactions = std::sync::Mutex::new(Vec::new());
+        for i in 0..=COMPACT_DELTAS {
+            if i == COMPACT_DELTAS {
+                assert_eq!(sub_index_counts(&ds).await.unwrap()[FTS_INDEX], 1 + COMPACT_DELTAS);
+                assert!(compactions.lock().unwrap().is_empty(), "merged below the threshold");
+            }
+            ds.append(batch(&format!("charlie delta {i}")), None).await.unwrap();
+            let subs = sub_index_counts(&ds).await.unwrap()[FTS_INDEX];
+            optimize_index(&mut ds, FTS_INDEX, subs, |phase| {
+                compactions.lock().unwrap().push(phase.to_string())
+            })
+            .await
+            .unwrap();
+        }
+        let counts = sub_index_counts(&ds).await.unwrap();
+        assert_eq!(counts[FTS_INDEX], 2, "the base and one merged delta");
+        assert_eq!(counts["tag_idx"], 1, "another index was optimized too");
+        assert!(
+            ds.load_indices().await.unwrap().iter().any(|i| i.uuid == base),
+            "the base was rewritten"
+        );
+        assert_eq!(
+            compactions.into_inner().unwrap(),
+            [format!("compacting {FTS_INDEX} ({COMPACT_DELTAS} delta sub-indexes)")]
+        );
     }
 
     #[tokio::test]
