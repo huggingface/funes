@@ -20,6 +20,7 @@ use tokio::sync::{Mutex, OnceCell};
 
 /// Columns a [`Hit`] needs from a search scan.
 const HIT_COLS: &[&str] = &[
+    "id",
     "text",
     "session_id",
     "workdir",
@@ -46,6 +47,8 @@ pub struct Neighbor {
 
 /// One candidate row carried from retrieval through rerank to display.
 pub struct Hit {
+    /// The chunk id, the same in every memory holding the row.
+    pub id: String,
     pub text: String,
     pub session_id: String,
     pub workdir: String,
@@ -55,6 +58,11 @@ pub struct Hit {
     pub block_type: String,
     pub harness: String,
     pub neighbors: Vec<Neighbor>,
+    /// Label of the memory the hit was read from, which its `→ get` names.
+    pub memory: String,
+    /// Reciprocal-rank fusion score within its memory: what orders pooled candidates for the cut
+    /// to those the rerank scores.
+    pub fused: f32,
 }
 
 /// Matching blocks `scan` lists before it stops. What the cap dropped is always reported.
@@ -356,7 +364,7 @@ pub async fn recall(
     block_type: Option<String>,
     harness: Option<String>,
 ) -> Result<String> {
-    let (note, memory_label, hits) = recall_hits(
+    let (note, hits) = recall_hits(
         memory,
         query,
         k,
@@ -368,21 +376,21 @@ pub async fn recall(
         &|_| (),
     )
     .await?;
+    Ok(rendered(&note, &hits))
+}
+
+/// Recall results in the agent format, or the note and `no results` when nothing matched.
+pub fn rendered(note: &str, hits: &[(Hit, f64)]) -> String {
     if hits.is_empty() {
-        return Ok(format!("{note}no results"));
+        return format!("{note}no results");
     }
-    Ok(crate::ui::render::recall_agent(
-        &note,
-        &memory_hint(memory_label.as_deref()),
-        &hits,
-    ))
+    crate::ui::render::recall_agent(note, hits)
 }
 
 /// Run the recall pipeline over one memory: hybrid retrieval → rerank → recency reweight →
-/// neighbor expansion. Returns the degradation note (empty when the memory opened normally), the
-/// label of the memory actually read, and the scored hits, best
-/// first — rendering is the caller's choice. `progress` hears a short label as each slow phase
-/// starts (model load, search, rerank); pass a no-op to run silently.
+/// neighbor expansion. Returns the degradation note (empty when the memory opened normally) and
+/// the scored hits, best first — rendering is the caller's choice. `progress` hears a short label
+/// as each slow phase starts (model load, search, rerank); pass a no-op to run silently.
 #[allow(clippy::too_many_arguments)]
 pub async fn recall_hits(
     memory: Memory,
@@ -394,69 +402,163 @@ pub async fn recall_hits(
     block_type: Option<String>,
     harness: Option<String>,
     progress: &(dyn Fn(&str) + Sync),
-) -> Result<(String, Option<String>, Vec<(Hit, f64)>)> {
-    let harness = harness.map(harness_spellings).unwrap_or_default();
+) -> Result<(String, Vec<(Hit, f64)>)> {
+    let search = Search::new(query, candidates, block_type, harness, progress).await?;
+    let pool = search.candidates(&memory, progress).await?;
+    search.rank(vec![pool], k, half_life, neighbors, progress).await
+}
 
-    progress("loading model…");
-    let mut guard = models().await?.lock().await;
-    let Models { embedder, reranker } = &mut *guard;
+/// One query, embedded once, and the filters every memory's search applies. A recall is
+/// [`Search::candidates`] from one or more memories, pooled into a single [`Search::rank`].
+pub struct Search {
+    query: String,
+    qv: Vec<f32>,
+    candidates: usize,
+    harness_filtered: bool,
+    where_clause: Option<String>,
+}
 
-    let qv: Vec<f32> = embedder
-        .embed(&[query.as_str()])?
-        .into_iter()
-        .next()
-        .context("empty embedding")?;
+/// One memory's candidates for a [`Search`], before the rerank.
+pub struct Candidates {
+    ds: Dataset,
+    note: String,
+    hits: Vec<Hit>,
+}
 
-    progress(&format!("searching {}…", memory.label()));
-    let read = open_read(&memory).await?;
-    let note = read.note.clone().unwrap_or_default();
-    let ds = &read.ds;
-    // A `--harness` filter needs the column; on an un-migrated memory it would fail deep inside Lance
-    // with an opaque schema error, so refuse with a clear message instead.
-    if !harness.is_empty() && !has_harness_col(ds) {
-        return Err(anyhow!(
-            "this memory predates the harness facet — reindex it, or drop --harness"
-        ));
-    }
-    let where_clause = build_where(block_type.as_deref(), &harness);
-
-    let hits = hybrid_candidates(ds, &qv, &query, candidates, where_clause.as_deref()).await?;
-    if hits.is_empty() {
-        return Ok((note, read.memory_label.clone(), Vec::new()));
-    }
-
-    let docs: Vec<&str> = hits.iter().map(|h| h.text.as_str()).collect();
-    progress(&format!("reranking {} candidates…", docs.len()));
-    let scores = reranker.rerank(query.as_str(), &docs)?;
-
-    let now = Utc::now();
-    let mut scored: Vec<(usize, f64)> = scores
-        .iter()
-        .enumerate()
-        .map(|(i, &s)| {
-            let relevance = 1.0 / (1.0 + (-(s as f64)).exp());
-            (i, relevance * recency_weight(&hits[i].ts, now, half_life))
+impl Search {
+    /// Embed `query` for searching up to `candidates` rows per memory, filtered by block type and
+    /// harness.
+    pub async fn new(
+        query: String,
+        candidates: usize,
+        block_type: Option<String>,
+        harness: Option<String>,
+        progress: &(dyn Fn(&str) + Sync),
+    ) -> Result<Self> {
+        let harness = harness.map(harness_spellings).unwrap_or_default();
+        progress("loading model…");
+        let qv: Vec<f32> = models()
+            .await?
+            .lock()
+            .await
+            .embedder
+            .embed(&[query.as_str()])?
+            .into_iter()
+            .next()
+            .context("empty embedding")?;
+        Ok(Self {
+            where_clause: build_where(block_type.as_deref(), &harness),
+            harness_filtered: !harness.is_empty(),
+            query,
+            qv,
+            candidates,
         })
-        .collect();
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    scored.truncate(k);
+    }
 
-    // Keep only the top-k hits, in scored order, carrying their score along.
-    let mut top: Vec<(Hit, f64)> = Vec::with_capacity(scored.len());
-    let mut taken: Vec<Option<Hit>> = hits.into_iter().map(Some).collect();
-    for (idx, score) in &scored {
-        if let Some(h) = taken[*idx].take() {
-            top.push((h, *score));
+    /// Hybrid retrieval over one memory: a vector ANN scan and a BM25 scan, fused by reciprocal
+    /// rank.
+    pub async fn candidates(&self, memory: &Memory, progress: &(dyn Fn(&str) + Sync)) -> Result<Candidates> {
+        progress(&format!("searching {}…", memory.label()));
+        let read = open_read(memory).await?;
+        // A `--harness` filter needs the column; on an un-migrated memory it would fail deep inside
+        // Lance with an opaque schema error, so refuse with a clear message instead.
+        if self.harness_filtered && !has_harness_col(&read.ds) {
+            return Err(anyhow!(
+                "this memory predates the harness facet — reindex it, or drop --harness"
+            ));
         }
+        let mut hits = hybrid_candidates(
+            &read.ds,
+            &self.qv,
+            &self.query,
+            self.candidates,
+            self.where_clause.as_deref(),
+        )
+        .await?;
+        let label = read.memory_label.unwrap_or_default();
+        for h in &mut hits {
+            h.memory = label.clone();
+        }
+        Ok(Candidates {
+            ds: read.ds,
+            note: read.note.unwrap_or_default(),
+            hits,
+        })
     }
 
-    if neighbors > 0 {
-        progress("expanding neighbors…");
-        let mut refs: Vec<&mut Hit> = top.iter_mut().map(|(h, _)| h).collect();
-        attach_neighbors(ds, &mut refs, neighbors).await?;
-    }
+    /// Rerank the pooled candidates, a row several memories hold counted once, reweight by
+    /// recency, keep the top `k` and attach `neighbors` from the memory each hit came from.
+    /// However many pools there are, the rerank scores at most `candidates` of them, the best by
+    /// fused score: it costs per candidate, and dominates a recall. Returns the pools'
+    /// degradation notes and the scored hits, best first.
+    pub async fn rank(
+        &self,
+        pools: Vec<Candidates>,
+        k: usize,
+        half_life: f64,
+        neighbors: i64,
+        progress: &(dyn Fn(&str) + Sync),
+    ) -> Result<(String, Vec<(Hit, f64)>)> {
+        let note: String = pools.iter().map(|p| p.note.as_str()).collect();
+        let mut seen = HashSet::new();
+        let mut hits: Vec<(usize, Hit)> = Vec::new();
+        let mut sources = Vec::with_capacity(pools.len());
+        for (i, pool) in pools.into_iter().enumerate() {
+            hits.extend(
+                pool.hits
+                    .into_iter()
+                    .filter(|h| seen.insert(h.id.clone()))
+                    .map(|h| (i, h)),
+            );
+            sources.push(pool.ds);
+        }
+        // Stable, so equal scores keep their memory's order and the earlier pool's rows.
+        hits.sort_by(|(_, a), (_, b)| b.fused.partial_cmp(&a.fused).unwrap_or(std::cmp::Ordering::Equal));
+        hits.truncate(self.candidates);
+        if hits.is_empty() {
+            return Ok((note, Vec::new()));
+        }
 
-    Ok((note, read.memory_label.clone(), top))
+        let docs: Vec<&str> = hits.iter().map(|(_, h)| h.text.as_str()).collect();
+        progress(&format!("reranking {} candidates…", docs.len()));
+        let scores = models()
+            .await?
+            .lock()
+            .await
+            .reranker
+            .rerank(self.query.as_str(), &docs)?;
+
+        let now = Utc::now();
+        let mut scored: Vec<(usize, f64)> = scores
+            .iter()
+            .enumerate()
+            .map(|(i, &s)| {
+                let relevance = 1.0 / (1.0 + (-(s as f64)).exp());
+                (i, relevance * recency_weight(&hits[i].1.ts, now, half_life))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(k);
+
+        // Keep only the top-k hits, in scored order, carrying their score and source along.
+        let mut top: Vec<(usize, Hit, f64)> = Vec::with_capacity(scored.len());
+        let mut taken: Vec<Option<(usize, Hit)>> = hits.into_iter().map(Some).collect();
+        for (idx, score) in &scored {
+            if let Some((source, h)) = taken[*idx].take() {
+                top.push((source, h, *score));
+            }
+        }
+
+        if neighbors > 0 {
+            progress("expanding neighbors…");
+            for (i, ds) in sources.iter().enumerate() {
+                let mut refs: Vec<&mut Hit> = top.iter_mut().filter(|t| t.0 == i).map(|t| &mut t.1).collect();
+                attach_neighbors(ds, &mut refs, neighbors).await?;
+            }
+        }
+
+        Ok((note, top.into_iter().map(|(_, h, score)| (h, score)).collect()))
+    }
 }
 
 /// Vector ANN + BM25 candidates fused by reciprocal rank, top `candidates`.
@@ -534,7 +636,8 @@ async fn collect_hits(scan: lance::dataset::scanner::Scanner) -> Result<Vec<(u64
         let rowid = batch
             .column_by_name(ROW_ID)
             .and_then(|c| c.as_any().downcast_ref::<UInt64Array>());
-        let (text, sess, proj, turn, ts, bt) = (
+        let (chunk_id, text, sess, proj, turn, ts, bt) = (
+            scol(&batch, "id"),
             scol(&batch, "text"),
             scol(&batch, "session_id"),
             scol(&batch, "workdir"),
@@ -549,6 +652,7 @@ async fn collect_hits(scan: lance::dataset::scanner::Scanner) -> Result<Vec<(u64
             out.push((
                 id,
                 Hit {
+                    id: sval(chunk_id, i),
                     text: sval(text, i),
                     session_id: sval(sess, i),
                     workdir: sval(proj, i),
@@ -558,6 +662,8 @@ async fn collect_hits(scan: lance::dataset::scanner::Scanner) -> Result<Vec<(u64
                     block_type: sval(bt, i),
                     harness: sval(harness, i),
                     neighbors: Vec::new(),
+                    memory: String::new(),
+                    fused: 0.0,
                 },
             ));
         }
@@ -566,7 +672,7 @@ async fn collect_hits(scan: lance::dataset::scanner::Scanner) -> Result<Vec<(u64
 }
 
 /// Reciprocal-rank fusion (k=60): each list contributes `1/(rank + 60)` to a row's score; return
-/// the top `limit` rows by fused score, deduped by `_rowid`.
+/// the top `limit` rows by fused score, deduped by `_rowid`, each carrying its score.
 fn rrf_fuse(vector: Vec<(u64, Hit)>, fts: Vec<(u64, Hit)>, limit: usize) -> Vec<Hit> {
     const K: f32 = 60.0;
     let mut scores: HashMap<u64, f32> = HashMap::new();
@@ -585,7 +691,10 @@ fn rrf_fuse(vector: Vec<(u64, Hit)>, fts: Vec<(u64, Hit)>, limit: usize) -> Vec<
             .then(a.0.cmp(&b.0))
     });
     ranked.truncate(limit);
-    ranked.into_iter().filter_map(|(id, _)| rows.remove(&id)).collect()
+    ranked
+        .into_iter()
+        .filter_map(|(id, fused)| rows.remove(&id).map(|h| Hit { fused, ..h }))
+        .collect()
 }
 
 /// For each hit, pull chunks in the same session within `window` of its seq (excluding the
@@ -1530,6 +1639,7 @@ mod tests {
     #[test]
     fn rrf_fuse_settles_ties_by_row_id() {
         let hit = |id: u64| Hit {
+            id: id.to_string(),
             text: id.to_string(),
             session_id: String::new(),
             workdir: String::new(),
@@ -1539,6 +1649,8 @@ mod tests {
             block_type: String::new(),
             harness: String::new(),
             neighbors: Vec::new(),
+            memory: String::new(),
+            fused: 0.0,
         };
         // Disjoint lists: vector row 2i and FTS row 2i+1 both sit at rank i, so every rank ties.
         let lists = || {

@@ -13,7 +13,7 @@ use serde_json::Value;
 use std::io::{BufRead, BufReader, IsTerminal, Read};
 use std::process::{Command, ExitStatus, Stdio};
 
-use super::recall::{check_readable, memory_hint, recall_hits};
+use super::recall::{check_readable, recall_hits};
 use crate::memory::Memory;
 use crate::ui::banner::{accent, band_width, Banner};
 use crate::ui::render;
@@ -116,7 +116,7 @@ pub async fn codex(question: String, memory: Memory) -> Result<()> {
 /// rather than silently answer from another corpus.
 pub async fn grounding(memory: Memory, question: &str, progress: &(dyn Fn(&str) + Sync)) -> Result<String> {
     check_readable(&memory).await?;
-    let (note, label, hits) = recall_hits(
+    let (note, hits) = recall_hits(
         memory,
         question.to_string(),
         K,
@@ -135,7 +135,7 @@ pub async fn grounding(memory: Memory, question: &str, progress: &(dyn Fn(&str) 
     if hits.is_empty() {
         bail!("nothing recalled for that question — no passages to ground an answer in");
     }
-    let passages = render::recall_agent("", &memory_hint(label.as_deref()), &hits);
+    let passages = render::recall_agent("", &hits);
     Ok(grounded_prompt(question, &passages))
 }
 

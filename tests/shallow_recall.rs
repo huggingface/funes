@@ -61,7 +61,7 @@ async fn shallow_recall_returns_ranked_passages_and_neighbors() {
     assert_eq!(ds.count_rows(None).await.unwrap(), 3);
     assert_eq!(ds.count_rows(Some("vector IS NOT NULL".into())).await.unwrap(), 0);
 
-    let (_, _, hits) = recall::recall_hits(
+    let (_, hits) = recall::recall_hits(
         Memory::parse(&memory),
         "narwhal".into(),
         5,

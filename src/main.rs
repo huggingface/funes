@@ -9,7 +9,6 @@ use funes::commands::{ask, index, mcp, push, recall, scrub, sketch, update};
 use funes::hub;
 use funes::memory;
 use funes::traces::spool;
-use funes::ui::render;
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -334,19 +333,12 @@ async fn main() -> Result<()> {
                     s.set(label);
                 }
             };
-            let (note, memory_label, hits) = recall::recall_hits(
+            let (note, hits) = recall::recall_hits(
                 memory, query, k, candidates, half_life, neighbors, block_type, harness, &progress,
             )
             .await?;
             drop(spinner);
-            if hits.is_empty() {
-                print!("{note}no results");
-            } else {
-                print!(
-                    "{}",
-                    render::recall_agent(&note, &recall::memory_hint(memory_label.as_deref()), &hits)
-                );
-            }
+            print!("{}", recall::rendered(&note, &hits));
             Ok(())
         }
         Cmd::Scan {
