@@ -690,11 +690,11 @@ fn load_weights(dir: &Path) -> Result<HashMap<String, Vec<f32>>> {
     // The one thing the header cannot answer on its own: the data has to be as long as it accounts for.
     let data_start = 8 + head_len;
     let accounted = meta.tensors().values().map(|i| i.data_offsets.1).max().unwrap_or(0) as u64;
-    if accounted != size - data_start {
+    let data_len = size - data_start;
+    if accounted != data_len {
         bail!(
-            "{} carries {} bytes of tensor data, its header accounts for {accounted}",
-            path.display(),
-            size - data_start
+            "{} carries {data_len} bytes of tensor data, its header accounts for {accounted}",
+            path.display()
         );
     }
 
@@ -888,8 +888,8 @@ mod tests {
     use super::*;
 
     /// A hand-built safetensors file: every f32 tensor comes back whole whatever order the header
-    /// lists it in, a tensor of another dtype is skipped as it always was, and a byte range that
-    /// reaches past the data is refused instead of read.
+    /// lists it in, a tensor of another dtype is skipped, and a file whose header and data disagree
+    /// is refused instead of read.
     #[test]
     fn load_weights_streams_every_f32_tensor_and_refuses_a_bad_file() {
         fn file(dir: &Path, header: &str, data: &[u8]) {
