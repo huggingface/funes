@@ -938,7 +938,7 @@ enum Finish {
     All,
 }
 
-/// Build/update the local index from spools, budgeted and rung-major: every owed unit
+/// Build/update the local index from spools, budgeted and rows first: every owed unit
 /// is written first, then the pending embeddings text → tool_use → tool_result, stopping at the
 /// first unit-batch or embed-fill boundary past the budget. The no-path `funes index` advances the
 /// backfill one bounded step per run; an interactive run offers to finish the rest; `yes` finishes it
@@ -973,7 +973,7 @@ fn go_on(finish: Finish, interactive: bool, remaining: Duration) -> bool {
     }
 }
 
-/// Drive `sources` rung-major — every owed unit's rows, then the pending embeddings tier by tier —
+/// Drive `sources` rows first — every owed unit's rows, then the pending embeddings tier by tier —
 /// checking the budget after each unit batch and each fill; `finish` says what to do when it
 /// expires with work left. The owed units come from state alone (no reading) and the pending rows
 /// from the memory, so the plan reflects what this run actually owes.
