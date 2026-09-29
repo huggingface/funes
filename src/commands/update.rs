@@ -39,7 +39,7 @@ const ASSET: Option<&str> = if cfg!(all(target_os = "linux", target_arch = "x86_
 
 /// `funes update`: fetch the latest release binary for this platform and replace the running
 /// executable in place. Idempotent — with `force`, reinstalls even when already up to date. The
-/// path replaced, when it was.
+/// executable it replaced, or `None` when it was up to date.
 pub async fn run(force: bool) -> Result<Option<PathBuf>> {
     let asset = ASSET.ok_or_else(|| {
         anyhow!(
