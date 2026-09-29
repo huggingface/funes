@@ -197,7 +197,7 @@ enum Cmd {
     /// does NOT scrub an already-published remote, which the push gate can only stop adding to.
     Scrub,
     /// Update funes in place: download the latest release binary for this platform and replace the
-    /// running executable, then update the agent integrations installed from the catalog.
+    /// running executable, then bring the installed agent integrations to their newest release.
     /// Idempotent — `--force` reinstalls the binary even when already up to date.
     Update {
         /// Reinstall the latest binary even if this build is already up to date.
