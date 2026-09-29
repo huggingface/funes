@@ -105,6 +105,11 @@ tool-call `memory` overrides the memory bound when the server started; with neit
 the local memory. `mcp` is read-only: indexing and publishing remain separate commands or automation
 installed by `funes add`.
 
+A call that reads the bound memory also reads what this host has indexed but not pushed to it yet.
+The hooks publish at session boundaries, so without this, a turn another local session just indexed
+would stay out of reach until a session opens or ends. Such turns come back with a `→ get` naming the
+local memory. A call naming its memory, the bound one included, reads exactly what that memory holds.
+
 ## Binding a memory
 
 The optional positional `[memory]` is the memory this agent recalls from — and, for the agents with

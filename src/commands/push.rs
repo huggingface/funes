@@ -112,7 +112,9 @@ fn load_pushed_from(path: &Path) -> Option<HashSet<String>> {
     )
 }
 
-fn load_pushed(memory_uri: &str) -> Option<HashSet<String>> {
+/// The chunk ids this host has seen on `memory_uri`, or `None` if it never pushed there. A local row
+/// missing from it is one the memory lacks: a bare push ships it once it is embedded.
+pub(crate) fn load_pushed(memory_uri: &str) -> Option<HashSet<String>> {
     load_pushed_from(&pushed_path(memory_uri))
 }
 

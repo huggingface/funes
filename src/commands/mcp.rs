@@ -2,7 +2,7 @@
 //! so any MCP client (Claude Code, Cursor, …) can call funes as a first-class tool.
 //! stdout is the JSON-RPC channel — logs must go to stderr.
 
-use super::recall;
+use super::{push, recall};
 use crate::agents;
 use crate::memory::Memory;
 use anyhow::Result;
@@ -35,7 +35,7 @@ pub struct RecallRequest {
     )]
     pub harness: Option<String>,
     #[schemars(
-        description = "Memory to read for this call — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Defaults to the server's memory."
+        description = "Memory to read for this call — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Defaults to the server's memory, with this host's turns not yet pushed to it."
     )]
     pub memory: Option<String>,
 }
@@ -187,20 +187,37 @@ impl Funes {
             memory,
         }): Parameters<RecallRequest>,
     ) -> String {
+        let own = own(&memory);
+        let memory = self.memory(memory);
+        let quiet = |_: &str| ();
+        let recalled = async {
+            let candidates = candidates.unwrap_or(recall::DEFAULT_CANDIDATES);
+            let search = recall::Search::new(query, candidates, block_type, harness, &quiet).await?;
+            // The server's own memory, as it will be after this host's next push. The local search
+            // runs while the remote one waits on the network.
+            let (read, owed) = tokio::join!(search.candidates(&memory, &quiet), async {
+                if own {
+                    unpushed(&search, &memory).await
+                } else {
+                    Ok(None)
+                }
+            });
+            let mut pools = vec![read?];
+            pools.extend(owed?);
+            let (note, hits) = search
+                .rank(
+                    pools,
+                    k.unwrap_or(recall::DEFAULT_K),
+                    half_life.unwrap_or(recall::DEFAULT_HALF_LIFE),
+                    neighbors.unwrap_or(recall::DEFAULT_NEIGHBORS),
+                    &quiet,
+                )
+                .await?;
+            anyhow::Ok(recall::rendered(&note, &hits))
+        };
         noted(
             self.memory.as_deref(),
-            match recall::recall(
-                self.memory(memory),
-                query,
-                k.unwrap_or(recall::DEFAULT_K),
-                candidates.unwrap_or(recall::DEFAULT_CANDIDATES),
-                half_life.unwrap_or(recall::DEFAULT_HALF_LIFE),
-                neighbors.unwrap_or(recall::DEFAULT_NEIGHBORS),
-                block_type,
-                harness,
-            )
-            .await
-            {
+            match recalled.await {
                 Ok(s) if !s.is_empty() => s,
                 Ok(_) => "no results".to_string(),
                 Err(e) => format!("recall error: {e}"),
@@ -334,6 +351,26 @@ impl Funes {
                 .unwrap_or_else(|e| format!("status error: {e}")),
         )
     }
+}
+
+/// Whether a call reads the server's own memory — it names none of its own.
+fn own(spec: &Option<String>) -> bool {
+    spec.as_deref().is_none_or(|s| s.trim().is_empty())
+}
+
+/// This host's turns not yet pushed to `memory`: the local memory's candidates for `search`, kept
+/// to the rows missing from this host's receipt for it. `None` unless this host has pushed to
+/// `memory`, a remote.
+pub async fn unpushed(search: &recall::Search, memory: &Memory) -> Result<Option<recall::Candidates>> {
+    let Memory::Remote { uri } = memory else {
+        return Ok(None);
+    };
+    let Some(pushed) = push::load_pushed(uri) else {
+        return Ok(None);
+    };
+    let mut pool = search.candidates(&Memory::local(), &|_| ()).await?;
+    pool.retain(|h| !pushed.contains(&h.id));
+    Ok(Some(pool))
 }
 
 #[tool_handler]

@@ -35,9 +35,10 @@ Each hit carries its provenance and a ready-to-run drill-down line:
 ---
 ```
 
-The `→ get` line carries exactly the arguments `get` wants, including the memory the hits were read
-from. `no results` prints when nothing matched. The exact shape is stable — a contract, not a
-presentation; don't parse it loosely.
+The `→ get` line carries exactly the arguments `get` wants, including the memory the hit was read
+from — the local one for a turn an agent's bound memory is still owed (see
+[add.md](add.md#other-mcp-clients)). `no results` prints when nothing matched. The exact shape is
+stable — a contract, not a presentation; don't parse it loosely.
 
 ## `recall` flags
 

@@ -204,7 +204,8 @@ enum Cmd {
     /// Run as an MCP server over stdio (for Claude Code, Cursor, …).
     Mcp {
         /// Memory to serve — an `<org>/<repo>` shorthand, an `hf://…` URI, a local path, or `local`.
-        /// Defaults to your local memory.
+        /// Defaults to your local memory. A remote is served with this host's turns not yet pushed
+        /// to it; a call naming its own memory reads exactly that one.
         #[arg(value_name = "MEMORY")]
         memory: Option<String>,
     },

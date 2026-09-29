@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use funes::commands::push::Confirm;
+use funes::commands::recall;
 use funes::memory::Memory;
 use hf_hub::{HFClient, HFError, HFRepository, RepoTypeDataset};
 
@@ -76,6 +77,18 @@ async fn root_readme(repo: &HFRepository<RepoTypeDataset>) -> Option<String> {
         Err(HFError::EntryNotFound { .. }) => None,
         Err(e) => panic!("querying the repo-root README: {e}"),
     }
+}
+
+/// A recall of `uri` pooled with this host's turns not yet pushed to it, as the MCP server runs one
+/// for its own memory.
+async fn recall_with_unpushed(uri: &str, query: &str) -> String {
+    let memory = Memory::parse(uri);
+    let quiet = |_: &str| ();
+    let search = recall::Search::new(query.into(), 30, None, None, &quiet).await.unwrap();
+    let mut pools = vec![search.candidates(&memory, &quiet).await.unwrap()];
+    pools.extend(funes::commands::mcp::unpushed(&search, &memory).await.unwrap());
+    let (note, hits) = search.rank(pools, 5, 0.0, 0, &quiet).await.unwrap();
+    recall::rendered(&note, &hits)
 }
 
 async fn recall_remote(uri: &str, query: &str) -> String {
@@ -194,6 +207,22 @@ async fn push_round_trip_create_append_recall() {
         funes::commands::push::run_push(Memory::parse(&uri), false, Confirm::Yes, &[]),
     );
     let (remote_rows, remote_ids) = remote_rows_and_ids(&uri).await;
+    // A turn indexed after the last push: pooling this host's unpushed turns recalls it from the
+    // local memory, an exact read of the remote does not.
+    write_session(
+        src.path(),
+        &[
+            ("s1", "SYNCSMOKE parsing transcripts into turns"),
+            ("s2", "SYNCSMOKE2 the continuation adds only this new turn"),
+            ("s3", "SYNCSMOKE3 the turn two pushes race to publish"),
+            ("s4", "SYNCSMOKE4 indexed here but not yet pushed"),
+        ],
+    );
+    funes::commands::index::run_index(src.path(), false, None)
+        .await
+        .unwrap();
+    let recall_pooled = recall_with_unpushed(&uri, "SYNCSMOKE4 not yet pushed").await;
+    let recall_exact = recall_remote(&uri, "SYNCSMOKE4 not yet pushed").await;
 
     let readme_after = root_readme(&repo).await;
     // The model id must travel with the memory (stamped in the schema metadata, uploaded by push).
@@ -275,6 +304,23 @@ async fn push_round_trip_create_append_recall() {
     assert_eq!(
         remote_rows, remote_ids,
         "two pushes racing must not leave duplicate rows on the remote"
+    );
+    let unpushed_hit = recall_pooled
+        .split("---")
+        .find(|hit| hit.contains("SYNCSMOKE4"))
+        .unwrap_or_else(|| panic!("pooling should surface the unpushed turn: {recall_pooled}"));
+    assert!(
+        unpushed_hit.contains(&format!("--memory {}", Memory::local().label())),
+        "an unpushed hit's `→ get` should name the local memory: {unpushed_hit}"
+    );
+    assert_eq!(
+        recall_pooled.matches("SYNCSMOKE3 the turn").count(),
+        1,
+        "a pushed turn should come back once, not once per memory: {recall_pooled}"
+    );
+    assert!(
+        !recall_exact.contains("SYNCSMOKE4"),
+        "an exact read of the remote must not see the unpushed turn: {recall_exact}"
     );
     assert_eq!(
         remote_model.as_deref(),

@@ -425,6 +425,13 @@ pub struct Candidates {
     hits: Vec<Hit>,
 }
 
+impl Candidates {
+    /// Keep only the candidates `keep` accepts.
+    pub fn retain(&mut self, keep: impl Fn(&Hit) -> bool) {
+        self.hits.retain(keep);
+    }
+}
+
 impl Search {
     /// Embed `query` for searching up to `candidates` rows per memory, filtered by block type and
     /// harness.
