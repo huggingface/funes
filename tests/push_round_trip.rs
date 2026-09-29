@@ -223,6 +223,25 @@ async fn push_round_trip_create_append_recall() {
         .unwrap();
     let recall_pooled = recall_with_unpushed(&uri, "SYNCSMOKE4 not yet pushed").await;
     let recall_exact = recall_remote(&uri, "SYNCSMOKE4 not yet pushed").await;
+    // The session it grew is owed, so the server's own memory lists and reads it from the local
+    // memory, whole; an exact read sees the remote's shorter copy.
+    let all_sessions = || recall::SessionFilter {
+        repo: None,
+        since: None,
+        until: None,
+        limit: None,
+        offset: 0,
+    };
+    let pools = funes::commands::mcp::session_pools(&Memory::parse(&uri)).await.unwrap();
+    let sessions_pooled = recall::list_sessions(pools, all_sessions()).await.unwrap();
+    let sessions_exact = recall::sessions(Memory::parse(&uri), all_sessions()).await.unwrap();
+    let whole = recall::TurnRange { from: None, to: None };
+    let holder = funes::commands::mcp::session_memory(Memory::parse(&uri), "sess")
+        .await
+        .unwrap();
+    let get_pooled = recall::get(holder, "sess".into(), whole).await.unwrap();
+    let whole = recall::TurnRange { from: None, to: None };
+    let get_exact = recall::get(Memory::parse(&uri), "sess".into(), whole).await.unwrap();
 
     let readme_after = root_readme(&repo).await;
     // The model id must travel with the memory (stamped in the schema metadata, uploaded by push).
@@ -321,6 +340,22 @@ async fn push_round_trip_create_append_recall() {
     assert!(
         !recall_exact.contains("SYNCSMOKE4"),
         "an exact read of the remote must not see the unpushed turn: {recall_exact}"
+    );
+    assert!(
+        sessions_pooled.contains(" 4 turns sess") && !sessions_pooled.contains(" 3 turns sess"),
+        "the owed session should be listed once, from the local memory: {sessions_pooled}"
+    );
+    assert!(
+        sessions_exact.contains(" 3 turns sess"),
+        "an exact listing should show the remote's copy: {sessions_exact}"
+    );
+    assert!(
+        get_pooled.contains("SYNCSMOKE4"),
+        "the owed session should be read from the local memory: {get_pooled}"
+    );
+    assert!(
+        !get_exact.contains("SYNCSMOKE4"),
+        "an exact read of the remote must not see the unpushed turn: {get_exact}"
     );
     assert_eq!(
         remote_model.as_deref(),

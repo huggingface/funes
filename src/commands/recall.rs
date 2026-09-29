@@ -173,7 +173,7 @@ fn ival(a: Option<&Int64Array>, i: usize) -> i64 {
 }
 
 /// Escape a value for inlining into a Lance SQL filter string.
-fn esc(s: &str) -> String {
+pub(crate) fn esc(s: &str) -> String {
     s.replace('\'', "''")
 }
 
@@ -915,6 +915,11 @@ pub struct SessionPool {
 }
 
 impl SessionPool {
+    /// Keep only the sessions `keep` accepts.
+    pub fn retain(&mut self, keep: impl Fn(&Session) -> bool) {
+        self.sessions.retain(keep);
+    }
+
     /// Open `memory` and fold its rows into sessions.
     pub async fn open(memory: &Memory) -> Result<Self> {
         let read = open_read(memory).await?;

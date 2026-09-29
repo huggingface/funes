@@ -53,7 +53,7 @@ pub struct GetRequest {
     )]
     pub to: Option<i64>,
     #[schemars(
-        description = "Memory to read for this call — the one the recall hit's `→ get` line names. Defaults to the server's memory."
+        description = "Memory to read for this call — the one the recall hit's `→ get` line names. Defaults to the server's memory, where a session this host has not finished pushing is read from the local memory."
     )]
     pub memory: Option<String>,
 }
@@ -75,7 +75,7 @@ pub struct SessionsRequest {
     )]
     pub offset: Option<usize>,
     #[schemars(
-        description = "Memory to list — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Defaults to the server's memory."
+        description = "Memory to list — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Defaults to the server's memory, with the sessions this host has not finished pushing listed from the local memory."
     )]
     pub memory: Option<String>,
 }
@@ -99,7 +99,7 @@ pub struct ScanRequest {
     #[schemars(description = "Characters of surrounding text shown on each side of a match")]
     pub context: Option<usize>,
     #[schemars(
-        description = "Memory to scan — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Defaults to the server's memory."
+        description = "Memory to scan — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Defaults to the server's memory, where a session this host has not finished pushing is read from the local memory."
     )]
     pub memory: Option<String>,
 }
@@ -123,7 +123,7 @@ pub struct SketchRequest {
     #[schemars(description = "Last turn to digest, as the session's own seq.")]
     pub to: Option<i64>,
     #[schemars(
-        description = "Memory to read for this call — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Defaults to the server's memory."
+        description = "Memory to read for this call — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Defaults to the server's memory, where a session this host has not finished pushing is read from the local memory."
     )]
     pub memory: Option<String>,
 }
@@ -169,6 +169,17 @@ impl Funes {
     /// else the local memory.
     fn memory(&self, spec: Option<String>) -> Memory {
         Memory::resolve(spec.filter(|s| !s.trim().is_empty()).or_else(|| self.memory.clone()))
+    }
+
+    /// The memory a session verb reads: a call on the server's own memory reads a session this
+    /// host still owes it from the local memory, which holds all of it.
+    async fn memory_for_session(&self, spec: Option<String>, session_id: &str) -> Result<Memory> {
+        let own = own(&spec);
+        let memory = self.memory(spec);
+        if own {
+            return session_memory(memory, session_id).await;
+        }
+        Ok(memory)
     }
 
     #[tool(
@@ -240,7 +251,12 @@ impl Funes {
         let range = recall::TurnRange { from, to };
         noted(
             self.memory.as_deref(),
-            match recall::get(self.memory(memory), session_id, range).await {
+            match async {
+                let memory = self.memory_for_session(memory, &session_id).await?;
+                recall::get(memory, session_id, range).await
+            }
+            .await
+            {
                 Ok(s) if !s.is_empty() => s,
                 Ok(_) => "no results".to_string(),
                 Err(e) => format!("get error: {e}"),
@@ -271,7 +287,15 @@ impl Funes {
         };
         noted(
             self.memory.as_deref(),
-            match recall::sessions(self.memory(memory), filter).await {
+            match async {
+                if own(&memory) {
+                    recall::list_sessions(session_pools(&self.memory(memory)).await?, filter).await
+                } else {
+                    recall::sessions(self.memory(memory), filter).await
+                }
+            }
+            .await
+            {
                 Ok(s) if !s.is_empty() => s,
                 Ok(_) => "no results".to_string(),
                 Err(e) => format!("sessions error: {e}"),
@@ -296,15 +320,18 @@ impl Funes {
     ) -> String {
         noted(
             self.memory.as_deref(),
-            match recall::scan(
-                self.memory(memory),
-                needle,
-                session_id,
-                from,
-                to,
-                ignore_case.unwrap_or(false),
-                context.unwrap_or(recall::DEFAULT_CONTEXT),
-            )
+            match async {
+                recall::scan(
+                    self.memory_for_session(memory, &session_id).await?,
+                    needle,
+                    session_id,
+                    from,
+                    to,
+                    ignore_case.unwrap_or(false),
+                    context.unwrap_or(recall::DEFAULT_CONTEXT),
+                )
+                .await
+            }
             .await
             {
                 Ok(s) if !s.is_empty() => s,
@@ -330,7 +357,12 @@ impl Funes {
     ) -> String {
         noted(
             self.memory.as_deref(),
-            match super::sketch::run(self.memory(memory), session_id, from, to, units, max_chars).await {
+            match async {
+                let memory = self.memory_for_session(memory, &session_id).await?;
+                super::sketch::run(memory, session_id, from, to, units, max_chars).await
+            }
+            .await
+            {
                 Ok(s) if !s.is_empty() => s,
                 Ok(_) => "no results".to_string(),
                 Err(e) => format!("sketch error: {e}"),
@@ -371,6 +403,41 @@ pub async fn unpushed(search: &recall::Search, memory: &Memory) -> Result<Option
     let mut pool = search.candidates(&Memory::local(), &|_| ()).await?;
     pool.retain(|h| !pushed.contains(&h.id));
     Ok(Some(pool))
+}
+
+/// The sessions of `memory` as it will be after this host's next push: its own, except those this
+/// host still owes rows, which come from the local memory whole. The local side is read while the
+/// remote one waits on the network.
+pub async fn session_pools(memory: &Memory) -> Result<Vec<recall::SessionPool>> {
+    let Memory::Remote { uri } = memory else {
+        return Ok(vec![recall::SessionPool::open(memory).await?]);
+    };
+    let (pool, owed) = tokio::join!(recall::SessionPool::open(memory), async {
+        let owed = push::owed_sessions(uri).await?;
+        if owed.is_empty() {
+            return Ok(None);
+        }
+        let mut local = recall::SessionPool::open(&Memory::local()).await?;
+        local.retain(|s| owed.contains(&s.session_id));
+        anyhow::Ok(Some((local, owed)))
+    });
+    let mut pool = pool?;
+    let Some((local, owed)) = owed? else {
+        return Ok(vec![pool]);
+    };
+    pool.retain(|s| !owed.contains(&s.session_id));
+    Ok(vec![pool, local])
+}
+
+/// Where `memory`, as it will be after this host's next push, holds `session_id`: the local memory
+/// when this host still owes the session rows, else `memory` itself.
+pub async fn session_memory(memory: Memory, session_id: &str) -> Result<Memory> {
+    if let Memory::Remote { uri } = &memory {
+        if push::owes_session(uri, session_id).await? {
+            return Ok(Memory::local());
+        }
+    }
+    Ok(memory)
 }
 
 #[tool_handler]

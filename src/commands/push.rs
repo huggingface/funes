@@ -204,6 +204,44 @@ pub(crate) async fn local_push_coverage(local: &Dataset, memory_uri: &str) -> Op
     Some(coverage)
 }
 
+/// The local sessions holding rows `memory_uri` lacks, by this host's receipt.
+/// Empty when nothing is owed, including when this host never pushed there or has nothing indexed.
+pub(crate) async fn owed_sessions(memory_uri: &str) -> Result<HashSet<String>> {
+    let Some(pushed_ids) = load_pushed(memory_uri) else {
+        return Ok(HashSet::new());
+    };
+    let MemoryState::Ready(local) = Memory::local().state().await? else {
+        return Ok(HashSet::new());
+    };
+    let mut owed = HashSet::new();
+    for batch in dataset::scan_rows(&local, &["id", "session_id"], None, None).await? {
+        let column = |name| batch.column_by_name(name)?.as_any().downcast_ref::<StringArray>();
+        let (Some(ids), Some(sessions)) = (column("id"), column("session_id")) else {
+            continue;
+        };
+        for i in 0..batch.num_rows() {
+            if !pushed_ids.contains(ids.value(i)) {
+                owed.insert(sessions.value(i).to_string());
+            }
+        }
+    }
+    Ok(owed)
+}
+
+/// Whether this host still owes `memory_uri` rows of `session_id` — reads that one session's ids,
+/// not the whole local memory.
+pub(crate) async fn owes_session(memory_uri: &str, session_id: &str) -> Result<bool> {
+    let Some(pushed_ids) = load_pushed(memory_uri) else {
+        return Ok(false);
+    };
+    let MemoryState::Ready(local) = Memory::local().state().await? else {
+        return Ok(false);
+    };
+    let filter = format!("session_id = '{}'", crate::commands::recall::esc(session_id));
+    let batches = dataset::scan_rows(&local, &["id"], Some(&filter), None).await?;
+    Ok(!ids_in_batches(&batches).is_subset(&pushed_ids))
+}
+
 /// What the secret gate would hold back of the `pending` rows, scanned exactly as a push would.
 async fn held_among(local: &Dataset, pending: &HashSet<String>) -> Option<Skipped> {
     if pending.is_empty() {
