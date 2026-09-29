@@ -111,6 +111,11 @@ would stay out of reach until a session opens or ends. Such turns come back with
 local memory, and a session holding them is listed and read from the local memory, which holds all of
 it. A call naming its memory, the bound one included, reads exactly what that memory holds.
 
+What counts as not pushed is what this host's push receipt for the memory lacks, and a receipt only
+exists once this host has pushed there (`funes add` does the first push). A memory this host only
+reads, such as a team memory bound by hand, is read as it stands: your local sessions are never
+mixed into it.
+
 ## Binding a memory
 
 The optional positional `[memory]` is the memory this agent recalls from — and, for the agents with
