@@ -1,7 +1,7 @@
 //! Gated live test: the read-through cache behind remote reads. A first recall over `hf://`
 //! downloads the fixture's files (index + touched fragments) into an isolated HF cache; a second
-//! recall at the same head commit is served from that cache and downloads nothing. Skipped unless
-//! `HF_FUNES_TEST_TOKEN` is in the environment — to run it:
+//! recall is served from that cache and downloads nothing. Skipped unless `HF_FUNES_TEST_TOKEN` is
+//! in the environment — to run it:
 //!
 //!   export HF_FUNES_TEST_TOKEN=<your HF token>   # or a CI secret
 //!   cargo test --test remote_cache -- --nocapture
@@ -15,8 +15,7 @@ use funes::memory::Memory;
 const FIXTURE_URI: &str = "hf://datasets/optimum-internal-testing/funes-test/fixture/lancedb";
 const MARKER: &str = "UNIQUEMARKERXYZZY";
 
-/// (entry count, total bytes) under `dir`, recursively. A download grows both; a cache hit grows
-/// neither — so comparing this across two recalls detects whether the second one fetched anything.
+/// (entry count, total bytes) under `dir`, recursively.
 fn cache_footprint(dir: &Path) -> (usize, u64) {
     let (mut entries, mut bytes) = (0usize, 0u64);
     let mut stack = vec![dir.to_path_buf()];
@@ -71,12 +70,12 @@ async fn warm_recall_is_served_from_cache_without_downloading() {
         "cold recall must populate the cache, got {after_cold:?}"
     );
 
-    // Warm: same head commit ⇒ every file is already cached ⇒ nothing is downloaded.
+    // Warm: every blob is cached ⇒ no new bytes, though a moved head re-links them as new entries.
     let warm = recall(MARKER).await;
     assert!(warm.contains(MARKER), "warm recall should surface the marker: {warm}");
     let after_warm = cache_footprint(cache.path());
     assert_eq!(
-        after_warm, after_cold,
+        after_warm.1, after_cold.1,
         "warm recall must download nothing — cache changed: cold={after_cold:?} warm={after_warm:?}"
     );
 }
