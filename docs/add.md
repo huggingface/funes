@@ -21,7 +21,12 @@ preserves unrelated agent hooks and configuration. It does **not** delete your l
 original session transcripts, model/Hub caches, or any published memory. The
 command is idempotent, so an already-absent integration is a successful no-op.
 
-**Updating an install you already have: `funes add` again.** Re-running it is idempotent: it
+**`funes update` brings your installs forward with the binary.** After the binary, replaced or not,
+it takes each installed integration to what its source now holds, by the rules below, and re-runs
+its setup, bound as it was, only when that changed its files — none of an add's one-time steps, no
+first index or first push. An install named with `--from` stays as it is, and the update says so.
+
+**Updating one install: `funes add` again.** Re-running it is idempotent: it
 keeps the memory bound — or rebinds to the one you name, `local` included — and re-runs the
 integration's setup, which clears what an older funes put where the current one no longer looks. An integration the catalog installed is brought to its
 newest release for this funes first, when there is one; one installed with `--from` stays at what

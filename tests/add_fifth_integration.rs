@@ -96,6 +96,37 @@ fi
     dir
 }
 
+/// Declare `version` as the release of the bundle at `dir`.
+fn release(dir: &Path, version: &str) {
+    let manifest = dir.join("manifest.json");
+    let text = fs::read_to_string(&manifest)
+        .unwrap()
+        .replace(r#""version":"1.0.0""#, &format!(r#""version":"{version}""#));
+    fs::write(manifest, text).unwrap();
+}
+
+/// `funes update` against `home` with the Hub out of reach, so the binary step fails before it
+/// could replace the binary under test; at a terminal answering yes when `terminal`.
+fn update(home: &Path, funes_home: &Path, log: &Path, integrations: Option<&Path>, terminal: bool) -> Output {
+    let script = home.join("answers.exp");
+    let script_arg = script.to_str().unwrap().to_string();
+    let mut argv = Vec::new();
+    if terminal {
+        fs::write(&script, ANSWER_YES).unwrap();
+        argv.extend(["expect", "-f", &script_arg, "--"]);
+    }
+    argv.extend([
+        "env",
+        "HF_ENDPOINT=http://127.0.0.1:9",
+        env!("CARGO_BIN_EXE_funes"),
+        "update",
+    ]);
+    let out = run_with(&argv, home, funes_home, log, integrations, None);
+    let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), stderr(&out));
+    assert!(said.contains("checking the latest funes version"), "{said}");
+    out
+}
+
 /// `funes <args>` against `home`, off a terminal.
 fn funes(home: &Path, funes_home: &Path, log: &Path, args: &[&str]) -> Output {
     let mut argv = vec![env!("CARGO_BIN_EXE_funes")];
@@ -852,4 +883,96 @@ fn an_invalid_installed_integration_fails_before_anything_runs() {
     assert!(!err.contains("Trust it?"), "refused before the confirmation: {err}");
     assert!(!log.exists(), "setup did not run");
     assert!(!funes_home.exists(), "no memory bootstrap started");
+}
+
+/// `funes update` re-runs an integration's setup only when its source holds other files, bound to
+/// the memory it was.
+#[test]
+fn update_runs_setup_only_for_changed_files_and_keeps_the_binding() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let funes_home = tmp.path().join("funes");
+    let log = tmp.path().join("setup.log");
+    let source = bundle(&home.join("integrations/clyde"), "clyde", 1, "v1");
+    let memory = tmp.path().join("team-memory");
+    let memory = memory.to_str().unwrap();
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde", memory]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+
+    fs::remove_file(&log).unwrap();
+    let integrations = home.join("integrations");
+    let out = update(&home, &funes_home, &log, Some(&integrations), false);
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(said.contains("The clyde integration is up to date."), "{said}");
+    assert!(!stderr(&out).contains("could not be updated"), "{}", stderr(&out));
+    assert!(!log.exists(), "setup did not run");
+
+    bundle(&source, "clyde", 1, "v2");
+    release(&source, "1.1.0");
+    let out = update(&home, &funes_home, &log, Some(&integrations), true);
+    let transcript = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        transcript.contains("Updated the clyde integration to 1.1.0."),
+        "{transcript}"
+    );
+    assert!(fs::read_to_string(&log)
+        .unwrap()
+        .starts_with(&format!("v2\nadd {memory}\n")));
+    let recorded: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(home.join(".funes/agents/clyde.json")).unwrap()).unwrap();
+    assert_eq!(recorded["version"], "1.1.0");
+}
+
+/// An integration whose update is refused stays as installed, and the others still update.
+#[test]
+fn a_refused_integration_update_leaves_it_as_installed_and_the_others_to_theirs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let funes_home = tmp.path().join("funes");
+    let log = tmp.path().join("setup.log");
+    let clyde = bundle(&home.join("integrations/clyde"), "clyde", 1, "");
+    bundle(&home.join("integrations/dotty"), "dotty", 1, "");
+    for id in ["clyde", "dotty"] {
+        let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", id]);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+    }
+
+    release(&clyde, "1.1.0");
+    fs::remove_file(&log).unwrap();
+    let out = update(&home, &funes_home, &log, Some(&home.join("integrations")), false);
+    let err = stderr(&out);
+    assert!(err.contains("the clyde integration could not be updated"), "{err}");
+    assert!(err.contains("run this in a terminal"), "{err}");
+    assert!(!log.exists(), "setup did not run");
+    let manifest = fs::read_to_string(home.join(".funes/agents/clyde/manifest.json")).unwrap();
+    assert!(manifest.contains(r#""version":"1.0.0""#), "{manifest}");
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(said.contains("The dotty integration is up to date."), "{said}");
+}
+
+/// An integration named with `--from` stays as named through `funes update`.
+#[test]
+fn update_leaves_an_integration_named_with_from_as_installed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let funes_home = tmp.path().join("funes");
+    let log = tmp.path().join("setup.log");
+    fs::create_dir_all(&home).unwrap();
+    let elsewhere = bundle(&tmp.path().join("elsewhere/clyde"), "clyde", 1, "named");
+    let from = elsewhere.to_str().unwrap();
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde", "--from", from]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+
+    bundle(&elsewhere, "clyde", 1, "changed");
+    fs::remove_file(&log).unwrap();
+    let out = update(&home, &funes_home, &log, None, false);
+    assert!(!stderr(&out).contains("could not be updated"), "{}", stderr(&out));
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        said.contains(&format!(
+            "The clyde integration stays as installed from {from} until `funes add clyde --from` names its source again."
+        )),
+        "{said}"
+    );
+    assert!(!log.exists(), "setup did not run");
 }

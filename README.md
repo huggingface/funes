@@ -61,8 +61,9 @@ The checksum detects corrupt, truncated, or mismatched release downloads. Becaus
 checksum share the same bucket, it does not authenticate the bucket itself.
 
 Already installed? **`funes update`** replaces the binary in place with the latest build for your
-platform (`--force` reinstalls the current one); `funes status` tells you when a newer release is
-out. To build it yourself, see [Building from source](#building-from-source).
+platform (`--force` reinstalls the current one), then brings your agent integrations to their newest
+release; `funes status` tells you when a newer release is out. To build it yourself, see
+[Building from source](#building-from-source).
 
 ## Works across your agents (and models)
 
@@ -129,7 +130,7 @@ workflow-oriented [documentation index](docs/README.md) for the complete guides.
 | `funes sessions` / `funes sketch …` / `funes scan …` | [docs/sessions.md](docs/sessions.md) — list sessions, digest one, find a literal in one |
 | `funes ask <agent> "…"` | [docs/ask.md](docs/ask.md) — borrow an agent for a grounded answer |
 | `funes push <memory>` (+ `scrub`, `status`) | [docs/push.md](docs/push.md) — publish and share a memory |
-| `funes update` | [installation and updating](#get-funes) — replace the installed binary with a verified release |
+| `funes update` | [installation and updating](#get-funes) — replace the installed binary with a verified release, and update the agent integrations |
 
 The per-turn indexing and session-boundary publishing the hooks run are detailed in
 [docs/automation.md](docs/automation.md).

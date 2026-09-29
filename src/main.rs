@@ -13,7 +13,9 @@ use funes::traces::spool;
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use std::io::{IsTerminal, Write};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -195,7 +197,8 @@ enum Cmd {
     /// does NOT scrub an already-published remote, which the push gate can only stop adding to.
     Scrub,
     /// Update funes in place: download the latest release binary for this platform and replace the
-    /// running executable. Idempotent — `--force` reinstalls even when already up to date.
+    /// running executable, then update the agent integrations installed from the catalog.
+    /// Idempotent — `--force` reinstalls the binary even when already up to date.
     Update {
         /// Reinstall the latest binary even if this build is already up to date.
         #[arg(short, long)]
@@ -518,7 +521,7 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Scrub => scrub::run().await,
-        Cmd::Update { force } => update::run(force).await,
+        Cmd::Update { force } => update_funes(force).await,
         Cmd::Mcp { memory } => mcp::run(memory).await,
         // `add` bootstraps the local pipeline: build the first index and do the first push — the
         // two one-time steps the automation can't do unattended — so nothing is left to run by hand.
@@ -735,6 +738,86 @@ async fn remove_agent(id: &str) -> Result<()> {
     // The hooks that asked for the spool are gone with the integration, so the refusals they left
     // must not outlive it: `remove` takes the spool too, which would show them again.
     spool::forget_missing(id)
+}
+
+/// `funes update`: the binary, then every installed integration. A replaced binary is run to update
+/// them, since its contract decides which releases they take; one this host cannot replace does not
+/// hold them back.
+async fn update_funes(force: bool) -> Result<()> {
+    let binary = update::run(force).await;
+    if let Ok(Some(exe)) = &binary {
+        let e = Command::new(exe).arg("update").exec();
+        return Err(anyhow::Error::new(e).context(format!("running {} to update the integrations", exe.display())));
+    }
+    let agents = update_agents().await;
+    binary.and(agents)
+}
+
+/// Bring every installed integration forward.
+async fn update_agents() -> Result<()> {
+    let root = registry::default_root()?;
+    let mut failed = Vec::new();
+    for id in registry::registered_ids(&root)
+        .into_iter()
+        .filter(|id| spool::is_id(id))
+    {
+        match update_agent(&root, &id).await {
+            Ok(done) => println!("{done}"),
+            Err(e) => {
+                eprintln!("the {id} integration could not be updated: {e:#}");
+                failed.push(id);
+            }
+        }
+    }
+    if !failed.is_empty() {
+        bail!("not updated: {}", failed.join(", "));
+    }
+    Ok(())
+}
+
+/// Bring `id`'s install to what its source holds now and re-run its setup, bound as it was — only
+/// when that changed its files. What it did, as a line to print.
+async fn update_agent(root: &Path, id: &str) -> Result<String> {
+    if !registry::refreshes_on_every_run(root, id) {
+        return Ok(match registry::installed(root, id) {
+            Some(record) => format!(
+                "The {id} integration stays as installed from {} until `funes add {id} --from` names its source again.",
+                record.origin
+            ),
+            None => format!("The {id} integration stays as placed: funes has no record of installing it."),
+        });
+    }
+    let previous = registry::installed_manifest(root, id);
+    let ran = std::cell::Cell::new(false);
+    let result: Result<String> = async {
+        let fetched = registry::provision(root, id, None).await?;
+        let Some(provisioned) = fetched.filter(|p| !registry::is_recorded(root, id, &p.origin, &p.files)) else {
+            return Ok(format!("The {id} integration is up to date."));
+        };
+        let integration = registry::open(root, id)?;
+        confirm_trust(&integration, provisioned.provenance)?;
+        let record = registry::Installed::new(&integration.manifest, provisioned.origin, provisioned.files);
+        let bound = registry::binding(root, id)?;
+        ran.set(true);
+        let outcome = setup_add(root, &integration, bound.as_deref());
+        // Recorded however setup ended: `remove` must run what a failed setup may have wired in.
+        registry::record(root, &record)?;
+        outcome?;
+        let to = integration
+            .manifest
+            .version
+            .as_ref()
+            .map(|v| format!(" to {v}"))
+            .unwrap_or_default();
+        Ok(format!("Updated the {id} integration{to}."))
+    }
+    .await;
+    if !ran.get() {
+        if let Some(previous) = previous {
+            registry::restore_manifest(root, id, &previous)?;
+        }
+    }
+    result
 }
 
 /// A resolved memory binding: the memory spec, and whether funes just created the repo this run — the
