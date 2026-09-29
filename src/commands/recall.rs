@@ -47,7 +47,6 @@ pub struct Neighbor {
 
 /// One candidate row carried from retrieval through rerank to display.
 pub struct Hit {
-    /// The chunk id, the same in every memory holding the row.
     pub id: String,
     pub text: String,
     pub session_id: String,
@@ -58,10 +57,7 @@ pub struct Hit {
     pub block_type: String,
     pub harness: String,
     pub neighbors: Vec<Neighbor>,
-    /// Label of the memory the hit was read from, which its `→ get` names.
     pub memory: String,
-    /// Reciprocal-rank fusion score within its memory: what orders pooled candidates for the cut
-    /// to those the rerank scores.
     pub fused: f32,
 }
 
