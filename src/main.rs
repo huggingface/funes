@@ -543,14 +543,7 @@ async fn add_agent(id: &str, memory: AddMemory, from: Option<&str>) -> Result<()
     let installed = std::cell::Cell::new(false);
     let ran = &installed;
     let result = async {
-        // The catalog's newest release is what a catalog install runs, so it is consulted on
-        // every run; a directory or an archive named once stays until named again. Files named
-        // now, and a copy this funes cannot run, are refreshed whatever is there.
-        let refresh = fresh
-            || from.is_some()
-            || std::env::var_os("FUNES_INTEGRATIONS").is_some()
-            || registry::speaks_another_contract(&root, id)
-            || registry::installed_from_catalog(&root, id);
+        let refresh = fresh || from.is_some() || registry::refreshes_on_every_run(&root, id);
         // The memory the last setup that ran here was bound to.
         let bound = registry::binding(&root, id)?;
         let (integration, provisioned) = prepare_agent(id, refresh, from).await?;
@@ -561,12 +554,7 @@ async fn add_agent(id: &str, memory: AddMemory, from: Option<&str>) -> Result<()
             // Counted as run before it runs: a setup that fails part-way may have wired some of
             // the agent to these files, and `remove` must find them recorded to run unasked.
             ran.set(true);
-            integration.add(memory.as_deref())?;
-            // Bound once setup ran with it, and not before: a setup that failed left the agent
-            // bound as it was.
-            registry::bind(registry_root, id, memory.as_deref())?;
-            // Whatever an older hook asked for, this install's hooks are the ones that ask now.
-            spool::forget_missing(id)
+            setup_add(registry_root, &integration, memory.as_deref())
         };
         let outcome = bootstrap_add(id, resolved, install).await;
         // Recorded once setup has run, whatever came after: a first push that failed leaves the
@@ -587,6 +575,16 @@ async fn add_agent(id: &str, memory: AddMemory, from: Option<&str>) -> Result<()
         }
     }
     result
+}
+
+/// Run `integration`'s `setup add`, bound to `memory`, and note what it ran with.
+fn setup_add(root: &Path, integration: &registry::Integration, memory: Option<&str>) -> Result<()> {
+    let id = &integration.manifest.id;
+    integration.add(memory)?;
+    // Bound only once setup ran with it: a failed setup left the agent bound as it was.
+    registry::bind(root, id, memory)?;
+    // Whatever an older hook asked for, this install's hooks are the ones that ask now.
+    spool::forget_missing(id)
 }
 
 /// Resolve `id`'s integration for a run and confirm it when funes can't vouch for it — all before
@@ -614,9 +612,7 @@ async fn prepare_agent(
             })) => {
                 // Files confirmed once, from the same source, unchanged since: confirmed still.
                 let provenance = match provenance {
-                    registry::Provenance::Unvouched(_)
-                        if registry::installed(&root, id).is_some_and(|r| r.origin == origin && r.files == files) =>
-                    {
+                    registry::Provenance::Unvouched(_) if registry::is_recorded(&root, id, &origin, &files) => {
                         registry::Provenance::Vouched
                     }
                     provenance => provenance,

@@ -248,6 +248,11 @@ pub fn installed(root: &Path, id: &str) -> Option<Installed> {
     serde_json::from_str(&text).ok()
 }
 
+/// Whether `root/<id>` is recorded as installed from `origin`, with `files`.
+pub fn is_recorded(root: &Path, id: &str, origin: &Origin, files: &Files) -> bool {
+    installed(root, id).is_some_and(|record| record.origin == *origin && record.files == *files)
+}
+
 /// Write `record` as `root/<id>.json`, closed to other writers whatever the umask.
 pub fn record(root: &Path, record: &Installed) -> Result<()> {
     let mut text = serde_json::to_string_pretty(record).context("serializing the install record")?;
@@ -687,10 +692,12 @@ pub async fn provision(root: &Path, id: &str, from: Option<&str>) -> Result<Opti
     }
 }
 
-/// Whether the copy at `root/<id>` was installed from the catalog: the source consulted on every
-/// run, since its newest release is what such a copy runs.
-pub fn installed_from_catalog(root: &Path, id: &str) -> bool {
-    installed(root, id).is_some_and(|record| matches!(record.origin, Origin::Catalog { .. }))
+/// Whether the copy at `root/<id>` is refreshed without being named again: a catalog install runs
+/// the catalog's newest release, and a copy this funes cannot run is replaced whatever its source.
+pub fn refreshes_on_every_run(root: &Path, id: &str) -> bool {
+    std::env::var_os("FUNES_INTEGRATIONS").is_some()
+        || speaks_another_contract(root, id)
+        || installed(root, id).is_some_and(|record| matches!(record.origin, Origin::Catalog { .. }))
 }
 
 /// Whether `release` is the one recorded as installed at `root/<id>`, by the digest the catalog
