@@ -26,8 +26,9 @@ you wrote yourself is never touched.
 | `-y`, `--yes` | Skip the wrong-memory confirmation (below). |
 | `--force-reindex` | Refresh the remote index after pushing even if the backlog is below the auto-reindex threshold; with nothing new to push, reindex only. |
 
-**The wrong-memory guard.** A first push to a memory your local memory shares no chunks with — a first
-push, a new host, or genuinely the wrong memory — asks before uploading. Off a terminal it refuses
+**The wrong-memory guard.** A push to a memory that holds none of the chunks it would publish — a
+first push, a new host, sessions named with `--sessions` that it lacks, or genuinely the wrong memory —
+asks before uploading. Off a terminal it refuses
 rather than guess; `--yes` overrides. ([`funes add`](add.md) clears this for you by doing the first
 push interactively — once that machine has an index of its own to push.)
 

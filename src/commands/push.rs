@@ -327,7 +327,7 @@ impl From<String> for Pushed {
     }
 }
 
-/// How a push handles a target the local index shares no chunks with.
+/// How a push handles a target that holds none of the chunks it would publish.
 pub enum Confirm {
     /// Proceed without asking (`--yes`, or a caller that has already established intent, e.g. tests).
     Yes,
@@ -345,8 +345,8 @@ impl Confirm {
     }
 }
 
-/// Whether a push must be confirmed first: there are rows to publish and the local index shares
-/// no chunk with the remote — a first publish, a new host of yours, or the wrong memory.
+/// Whether a push must be confirmed first: there are rows to publish and the remote holds none of
+/// them — a first publish, a new host of yours, sessions it lacks, or the wrong memory.
 fn must_confirm(local: usize, to_push: usize) -> bool {
     to_push > 0 && to_push == local
 }
@@ -409,7 +409,7 @@ fn named_ids(by_session: &HashMap<String, Vec<String>>, sessions: &[String]) -> 
 /// Publish the local memory's new embedded chunks to `target` (a remote memory on the HF Hub). With
 /// `force_reindex`, refresh the remote index after the data commit (retrying until it lands) even
 /// if the unindexed backlog is below [`REINDEX_THRESHOLD`]; with no new chunks pending it's a pure
-/// index refresh. `confirm` gates a publish to a memory the local index shares no chunks with.
+/// index refresh. `confirm` gates a publish to a memory holding none of the chunks to publish.
 ///
 /// `sessions`, when non-empty, restricts candidates to those sessions' embedded chunks.
 /// Empty publishes all embedded chunks the local memory holds that the remote does not.

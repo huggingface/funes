@@ -180,7 +180,7 @@ enum Cmd {
         /// Memory to publish to: `<org>/<repo>` or a full `hf://…` URI.
         #[arg(value_name = "MEMORY")]
         memory: String,
-        /// Skip the confirmation when the target shares no chunks with your local memory.
+        /// Skip the confirmation when the target holds none of the chunks to publish.
         #[arg(short, long)]
         yes: bool,
         /// Refresh the remote index after pushing (retrying on conflict) even if the unindexed
@@ -1015,7 +1015,7 @@ async fn seed_local_index(agent: &str) {
 
 /// The one-time first publish `add` performs when a memory is bound (the push hook can't, off a
 /// terminal — the overlap guard fails closed there). The guard prompts before publishing to a memory
-/// this host shares no chunks with — unless funes just `created` the memory this run, which is
+/// that holds none of this host's chunks — unless funes just `created` the memory this run, which is
 /// plainly the user's own empty repo, so the push proceeds without re-asking. Errors that aren't
 /// fatal to the install (a read-only token, held-back secrets) are reported without failing `add`.
 async fn first_push(remote: &str, created: bool) -> Result<()> {
@@ -1098,20 +1098,20 @@ impl Drop for Spinner {
     }
 }
 
-/// The push confirmation for a memory the local index shares no chunks with. Fails closed (returns
+/// The push confirmation for a target holding none of the chunks to publish. Fails closed (returns
 /// false) off a terminal, so an unattended push can't silently publish to the wrong memory — there it
 /// must be re-run with `--yes`.
 fn prompt_new_memory(label: &str, chunks: usize) -> bool {
     if !std::io::stdin().is_terminal() {
         eprintln!(
-            "refusing to push {chunks} chunk(s) to {label}: your local memory shares no chunks with it \
-             (a first push, a new host, or the wrong memory) — re-run with `--yes` to confirm."
+            "refusing to push {chunks} chunk(s) to {label}: it holds none of them \
+             (a first push, a new host, sessions it lacks, or the wrong memory) — re-run with `--yes` to confirm."
         );
         return false;
     }
     eprint!(
-        "{label}: your local memory shares no chunks with it — a first push here, a new host of yours, \
-         or the wrong memory. Publish {chunks} chunk(s) anyway? [y/N] "
+        "{label} holds none of the {chunks} chunk(s) to publish — a first push here, a new host of yours, \
+         sessions it lacks, or the wrong memory. Publish anyway? [y/N] "
     );
     let _ = std::io::stderr().flush();
     let mut answer = String::new();
