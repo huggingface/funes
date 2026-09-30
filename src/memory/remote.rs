@@ -1,6 +1,7 @@
 //! The remote side of a memory: how its Lance dataset is read from and written to a Hub repo.
 //!
-//! [`append`] adds rows; [`reindex`] folds the unindexed backlog into the FTS/IVF indexes. Each
+//! [`append`] adds rows; [`reindex`] folds the unindexed backlog into the FTS/IVF indexes, building
+//! any the dataset lacks. Each
 //! runs a native Lance op and lands the result in one `create_commit` on the branch, guarded by a
 //! `parent_commit` against the head it read — atomic. Each is a single attempt: if the head moved
 //! first it reports a conflict ([`Appended::Conflict`] / [`Reindexed::Conflict`]) and the caller
@@ -182,28 +183,24 @@ pub(crate) async fn first_publish(
     Ok(Some(info.commit_oid.unwrap_or_else(|| "?".to_string())))
 }
 
-/// Refresh the remote dataset's indexes and land the delta in one `create_commit` on branch `rev`,
-/// guarded by the current head. [`Reindexed::AlreadyCurrent`] if there was nothing to optimize,
-/// [`Reindexed::Conflict`] if the head moved first (retry against the new head).
+/// Refresh the remote dataset's indexes, building any it lacks, and land the delta in one
+/// `create_commit` on branch `rev`, guarded by the current head. [`Reindexed::AlreadyCurrent`] if
+/// there was nothing to refresh or build, [`Reindexed::Conflict`] if the head moved first (retry
+/// against the new head).
 pub(crate) async fn reindex(
     repo: &HFRepository<RepoTypeDataset>,
     dataset_uri: &str,
     storage_options: HashMap<String, String>,
     rev: &str,
     message: String,
+    on_event: impl Fn(IndexBuildEvent),
 ) -> Result<Reindexed> {
     let parent = head_oid(repo, rev).await?;
     let (mut ds, wrapper) = open_capturing(dataset_uri, storage_options).await?;
 
-    for (name, subs) in dataset::sub_index_counts(&ds).await? {
-        dataset::optimize_index(&mut ds, &name, subs, |event| {
-            if let IndexBuildEvent::Compacting { index, deltas } = event {
-                eprintln!("  compacting {index} ({deltas} delta sub-indexes)…");
-            }
-        })
+    dataset::build_indexes(&mut ds, on_event)
         .await
-        .context("optimizing the remote index")?;
-    }
+        .context("refreshing the remote indexes")?;
 
     let files = captured_files(&wrapper);
     if files.is_empty() {

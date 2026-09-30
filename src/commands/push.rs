@@ -756,7 +756,16 @@ async fn reindex_forced(
     rev: &str,
 ) -> Result<String> {
     for _ in 0..=MAX_COMMIT_RETRIES {
-        match remote::reindex(repo, dataset_uri, opts.clone(), rev, "funes push: reindex".to_string()).await? {
+        match remote::reindex(
+            repo,
+            dataset_uri,
+            opts.clone(),
+            rev,
+            "funes push: reindex".to_string(),
+            ui::index_progress,
+        )
+        .await?
+        {
             Reindexed::Committed(oid) => return Ok(format!("  reindexed (commit {oid})\n")),
             Reindexed::AlreadyCurrent => return Ok("  index already current\n".to_string()),
             Reindexed::Conflict => continue,
@@ -773,7 +782,16 @@ async fn reindex_auto(
     opts: &HashMap<String, String>,
     rev: &str,
 ) -> String {
-    match remote::reindex(repo, dataset_uri, opts.clone(), rev, "funes push: reindex".to_string()).await {
+    match remote::reindex(
+        repo,
+        dataset_uri,
+        opts.clone(),
+        rev,
+        "funes push: reindex".to_string(),
+        ui::index_progress,
+    )
+    .await
+    {
         Ok(Reindexed::Committed(oid)) => format!("  reindexed (commit {oid})\n"),
         Ok(Reindexed::AlreadyCurrent) => String::new(),
         Ok(Reindexed::Conflict) => {
