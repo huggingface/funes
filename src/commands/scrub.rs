@@ -34,6 +34,7 @@ pub async fn run() -> Result<()> {
     let chunks = chunk::chunks_from_batches(&batches);
     let total = chunks.len();
     if total == 0 {
+        sweep(&ds).await?;
         println!("memory is empty");
         return Ok(());
     }
@@ -76,6 +77,7 @@ pub async fn run() -> Result<()> {
         }
     }
     if !remove.iter().any(|&r| r) {
+        sweep(&ds).await?;
         println!("memory is already clean ({total} chunks)");
         return Ok(());
     }
@@ -133,13 +135,7 @@ pub async fn run() -> Result<()> {
     )
     .await?;
     dataset::build_indexes(&mut ds, ui::index_progress).await?;
-
-    // Actually delete the superseded data fragments from disk so the pre-redaction
-    // secrets don't linger as readable residue. `delete_unverified = true` ensures
-    // the just-orphaned fragment is scrubbed without waiting for a 7-day safety window.
-    eprintln!("sweeping old fragments…");
-    ds.cleanup_old_versions(chrono::Duration::zero(), Some(true), None)
-        .await?;
+    sweep(&ds).await?;
 
     let mut msg = format!(
         "scrubbed {total} rows: redacted {} secret(s) in {redacted_blocks} block(s)",
@@ -154,4 +150,10 @@ pub async fn run() -> Result<()> {
     }
     println!("{msg}");
     Ok(())
+}
+
+/// Leave no pre-scrub row readable on disk.
+async fn sweep(ds: &Dataset) -> Result<()> {
+    eprintln!("deleting old versions…");
+    dataset::delete_old_versions(ds).await
 }

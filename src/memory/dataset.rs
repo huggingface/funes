@@ -307,6 +307,15 @@ pub(crate) async fn optimize_index(
     Ok(())
 }
 
+/// Delete every version but the current one, and the files no version references. Needs the memory
+/// lock: without it, those files may belong to a write still in progress.
+pub(crate) async fn delete_old_versions(ds: &Dataset) -> Result<()> {
+    ds.cleanup_old_versions(chrono::Duration::zero(), Some(true), None)
+        .await
+        .context("deleting the old versions")?;
+    Ok(())
+}
+
 /// IVF_PQ parameters sized from the `vector` column's dimension (matching lancedb's defaults).
 /// `None` if there is no fixed-size `vector` column.
 fn ivf_pq_params(ds: &Dataset) -> Option<VectorIndexParams> {
