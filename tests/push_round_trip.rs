@@ -242,6 +242,10 @@ async fn push_round_trip_create_append_recall() {
     let get_pooled = recall::get(holder, "sess".into(), whole).await.unwrap();
     let whole = recall::TurnRange { from: None, to: None };
     let get_exact = recall::get(Memory::parse(&uri), "sess".into(), whole).await.unwrap();
+    // This host holds a receipt for the remote either way. Only a memory an agent here is bound to
+    // is one it pushes to, so only that one reports what is pending.
+    let status_bound = recall::status(Memory::parse(&uri), true).await.unwrap();
+    let status_unbound = recall::status(Memory::parse(&uri), false).await.unwrap();
 
     let readme_after = root_readme(&repo).await;
     // The model id must travel with the memory (stamped in the schema metadata, uploaded by push).
@@ -356,6 +360,14 @@ async fn push_round_trip_create_append_recall() {
     assert!(
         !get_exact.contains("SYNCSMOKE4"),
         "an exact read of the remote must not see the unpushed turn: {get_exact}"
+    );
+    assert!(
+        status_bound.contains(&format!("local push: 1 of 1 session pending — run `funes push {uri}`")),
+        "a bound memory should report the owed session: {status_bound}"
+    );
+    assert!(
+        !status_unbound.contains("local push"),
+        "a memory no agent here is bound to should report no push coverage: {status_unbound}"
     );
     assert_eq!(
         remote_model.as_deref(),

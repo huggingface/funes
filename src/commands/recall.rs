@@ -1464,20 +1464,17 @@ async fn remote_lines(ds: &Dataset, now: DateTime<Utc>) -> String {
     out
 }
 
-/// What this host has yet to push to `memory`, from the receipt `push` keeps: a shared remote's
-/// total says nothing about this host's backlog. Without a receipt, a memory this host is `bound`
-/// to says how to start one; any other says nothing, since coverage is a question only for a
-/// memory this host pushes to.
-async fn push_coverage_lines(local: &Dataset, memory: &Memory, uri: &str, bound: bool) -> String {
+/// What this host has yet to push to `memory`, a memory an agent here is bound to, from the receipt
+/// `push` keeps: a shared remote's total says nothing about this host's backlog. Without a receipt,
+/// how to start one.
+async fn push_coverage_lines(local: &Dataset, memory: &Memory, uri: &str) -> String {
     let mut out = String::new();
     let Some(coverage) = super::push::local_push_coverage(local, uri).await else {
-        if bound {
-            let _ = writeln!(
-                out,
-                "local push coverage: unknown — run `funes push {}` once",
-                memory.label()
-            );
-        }
+        let _ = writeln!(
+            out,
+            "local push coverage: unknown — run `funes push {}` once",
+            memory.label()
+        );
         return out;
     };
     let plural = if coverage.total == 1 { "" } else { "s" };
@@ -1502,7 +1499,9 @@ async fn push_coverage_lines(local: &Dataset, memory: &Memory, uri: &str, bound:
     out
 }
 
-pub async fn status(memory: Memory) -> Result<String> {
+/// `memory`'s status. A remote reports this host's push coverage only when an agent here is `bound`
+/// to it: coverage is a question only for a memory this host pushes to.
+pub async fn status(memory: Memory, bound: bool) -> Result<String> {
     match open_for_read(&memory).await? {
         ReadOutcome::Ready(ds) => {
             let now = Utc::now();
@@ -1522,7 +1521,9 @@ pub async fn status(memory: Memory) -> Result<String> {
                             Memory::local().label()
                         );
                         out.push_str(&index_lines(&local, now).await?);
-                        out.push_str(&push_coverage_lines(&local, &memory, uri, false).await);
+                        if bound {
+                            out.push_str(&push_coverage_lines(&local, &memory, uri).await);
+                        }
                     }
                 }
             }
@@ -1530,7 +1531,7 @@ pub async fn status(memory: Memory) -> Result<String> {
         }
         // An unreachable remote shows the local index's status instead, like the read commands.
         ReadOutcome::Offline => {
-            let body = Box::pin(status(Memory::local())).await?;
+            let body = Box::pin(status(Memory::local(), false)).await?;
             Ok(format!(
                 "remote {} unreachable — showing your local memory instead\n{body}",
                 memory.label()
@@ -1548,7 +1549,7 @@ pub async fn status(memory: Memory) -> Result<String> {
 /// This host's status: the local memory, then each memory its integrations are bound to — `bound`
 /// pairs a memory spec with the ids bound to it — and the ids installed with no memory recorded.
 pub async fn host_status(bound: &[(String, Vec<String>)], unrecorded: &[String]) -> Result<String> {
-    let mut out = status(Memory::local()).await?;
+    let mut out = status(Memory::local(), false).await?;
     let local = Memory::local().open().await.ok();
     let now = Utc::now();
     for (spec, ids) in bound {
@@ -1569,7 +1570,7 @@ pub async fn host_status(bound: &[(String, Vec<String>)], unrecorded: &[String])
         let _ = writeln!(out, "chunks: {}", ds.count_rows(None).await?);
         out.push_str(&remote_lines(&ds, now).await);
         if let (Some(local), Memory::Remote { uri }) = (&local, &memory) {
-            out.push_str(&push_coverage_lines(local, &memory, uri, true).await);
+            out.push_str(&push_coverage_lines(local, &memory, uri).await);
         }
     }
     if !unrecorded.is_empty() {
@@ -1675,13 +1676,13 @@ mod tests {
             .iter()
             .zip(["2 chunks awaiting embedding\n", "1 chunk awaiting embedding\n"])
         {
-            let out = status(memory.clone()).await.unwrap();
+            let out = status(memory.clone(), false).await.unwrap();
             assert!(out.starts_with(&format!("{prefix}{line}")), "{out}");
             ds = dataset::fill_vectors(&ds, &[chunk.id.as_str()], &[vec![0.0; dataset::DIM as usize]])
                 .await
                 .unwrap();
         }
-        let out = status(memory).await.unwrap();
+        let out = status(memory, false).await.unwrap();
         assert!(out.starts_with(&prefix), "{out}");
         assert!(!out.contains("awaiting embedding"), "{out}");
     }

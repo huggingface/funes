@@ -36,7 +36,7 @@ async fn index_then_read_surface() {
         .unwrap();
 
     // status: non-empty chunk count.
-    let status = funes::commands::recall::status(funes::memory::Memory::local())
+    let status = funes::commands::recall::status(funes::memory::Memory::local(), false)
         .await
         .unwrap();
     assert!(status.contains("chunks:"), "status missing chunk count: {status}");

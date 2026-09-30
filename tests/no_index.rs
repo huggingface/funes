@@ -27,7 +27,7 @@ async fn recall_without_an_index_guides_to_funes_add() {
     assert!(err.contains("funes add"), "recall should point at funes add: {err}");
 
     // status: informational — reports no index and points at the onboarding command (does not error).
-    let status = funes::commands::recall::status(Memory::local()).await.unwrap();
+    let status = funes::commands::recall::status(Memory::local(), false).await.unwrap();
     assert!(
         status.contains("no index yet"),
         "status should report no index: {status}"

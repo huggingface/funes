@@ -3,7 +3,7 @@
 //! stdout is the JSON-RPC channel — logs must go to stderr.
 
 use super::{push, recall};
-use crate::agents;
+use crate::agents::{self, registry};
 use crate::memory::Memory;
 use anyhow::Result;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -376,13 +376,25 @@ impl Funes {
     async fn status(&self, Parameters(StatusRequest { memory }): Parameters<StatusRequest>) -> String {
         // No update check here: it needs the network, and the "update available" notice belongs
         // on the human-facing CLI `funes status`, not on this hot, otherwise-local tool path.
+        let memory = self.memory(memory);
         noted(
             self.memory.as_deref(),
-            recall::status(self.memory(memory))
-                .await
-                .unwrap_or_else(|e| format!("status error: {e}")),
+            async {
+                let (bound, _) = registry::bindings(&registry::default_root()?)?;
+                let bound = is_bound(&bound, &memory);
+                recall::status(memory, bound).await
+            }
+            .await
+            .unwrap_or_else(|e| format!("status error: {e}")),
         )
     }
+}
+
+/// Whether `memory` is one of the `bound` memories, in whichever spelling its binding was given.
+fn is_bound(bound: &[(String, Vec<String>)], memory: &Memory) -> bool {
+    bound
+        .iter()
+        .any(|(spec, _)| Memory::parse(spec).label() == memory.label())
 }
 
 /// Whether a call reads the server's own memory — it names none of its own.
@@ -464,4 +476,20 @@ pub async fn run(memory: Option<String>) -> Result<()> {
     let service = Funes::new(memory).serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `funes add` records a binding as typed, a shorthand most often, while a call names its
+    /// memory as a `→ get` line prints it.
+    #[test]
+    fn a_binding_matches_its_memory_in_either_spelling() {
+        let bound = vec![("acme/kb".to_string(), vec!["claude".to_string()])];
+        assert!(is_bound(&bound, &Memory::parse("acme/kb")));
+        assert!(is_bound(&bound, &Memory::parse("hf://datasets/acme/kb")));
+        assert!(!is_bound(&bound, &Memory::parse("acme/other")));
+        assert!(!is_bound(&[], &Memory::parse("acme/kb")));
+    }
 }
