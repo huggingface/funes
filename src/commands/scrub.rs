@@ -138,7 +138,8 @@ pub async fn run() -> Result<()> {
     // secrets don't linger as readable residue. `delete_unverified = true` ensures
     // the just-orphaned fragment is scrubbed without waiting for a 7-day safety window.
     eprintln!("sweeping old fragments…");
-    ds.cleanup_old_versions(chrono::Duration::zero(), Some(true), None).await?;
+    ds.cleanup_old_versions(chrono::Duration::zero(), Some(true), None)
+        .await?;
 
     let mut msg = format!(
         "scrubbed {total} rows: redacted {} secret(s) in {redacted_blocks} block(s)",
