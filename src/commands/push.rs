@@ -347,8 +347,8 @@ impl Confirm {
 
 /// Whether a push must be confirmed first: there are rows to publish and the remote holds none of
 /// them — a first publish, a new host of yours, sessions it lacks, or the wrong memory.
-fn must_confirm(local: usize, to_push: usize) -> bool {
-    to_push > 0 && to_push == local
+fn must_confirm(publishable: usize, to_push: usize) -> bool {
+    to_push > 0 && to_push == publishable
 }
 
 /// A memory URI as one path-safe filename — the push receipt's key.
@@ -815,10 +815,10 @@ mod tests {
 
     #[test]
     fn must_confirm_only_when_overlap_is_empty_and_there_is_work() {
-        // First publish / fully disjoint (every local chunk is new to the remote) → confirm.
+        // First publish / fully disjoint (every chunk to publish is new to the remote) → confirm.
         assert!(must_confirm(5, 5));
         assert!(must_confirm(1, 1));
-        // Some overlap (fewer to push than the local total) → no prompt, it's a memory you add to.
+        // Some overlap (fewer to push than there are to publish) → no prompt, it's a memory you add to.
         assert!(!must_confirm(5, 3));
         // Nothing to push (up to date, or a reindex-only run) → never prompt, even with 0 overlap.
         assert!(!must_confirm(5, 0));
