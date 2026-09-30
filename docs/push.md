@@ -84,6 +84,10 @@ block, then makes one replacement commit:
 - Clean rows retain their existing embeddings. The vector and full-text indexes are rebuilt after
   the replacement.
 
+Scrub then deletes every older version of the memory from disk, so the pre-scrub rows can't be read
+back from the dataset's files. It does this even when it finds nothing to redact, so rerunning scrub
+also removes the old versions an earlier scrub left.
+
 The source transcripts are never modified. Scrub reports how many secrets and blocks it redacted and
 how many rows it had to drop. A completed scrub leaves a memory that scans clean, so the next
 `funes push <memory>` has nothing left to hold back; the repaired local rows pass through the

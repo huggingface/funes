@@ -118,9 +118,11 @@ Re-indexing commits a new version rather than overwriting, so superseded index
 generations — and, after row-rewriting ops like `scrub`, orphaned data
 fragments — would otherwise accumulate. funes reaps them after each local re-index
 (past a short grace window, so a concurrent read isn't cut off), keeping
-on-disk size close to the live figures above. The remote push path optimizes
-indexes incrementally but does not yet reap, so a published memory can run
-above the live-generation estimate.
+on-disk size close to the live figures above. `scrub` reaps every old version
+itself as it finishes, with no grace window, so no pre-scrub row stays readable
+on disk. A recall reading an old version at that moment can fail once. The
+remote push path optimizes indexes incrementally but does not yet reap, so a
+published memory can run above the live-generation estimate.
 
 ## Fit against HF Hub storage
 
