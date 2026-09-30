@@ -1568,9 +1568,11 @@ pub async fn host_status(bound: &[(String, Vec<String>)], unrecorded: &[String])
             }
         };
         let _ = writeln!(out, "chunks: {}", ds.count_rows(None).await?);
-        out.push_str(&remote_lines(&ds, now).await);
-        if let (Some(local), Memory::Remote { uri }) = (&local, &memory) {
-            out.push_str(&push_coverage_lines(local, &memory, uri).await);
+        if let Memory::Remote { uri } = &memory {
+            out.push_str(&remote_lines(&ds, now).await);
+            if let Some(local) = &local {
+                out.push_str(&push_coverage_lines(local, &memory, uri).await);
+            }
         }
     }
     if !unrecorded.is_empty() {
