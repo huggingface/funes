@@ -5,6 +5,8 @@
 //! args and exits 0, so the scan finds nothing and the secret is stored unredacted (simulating a
 //! memory built before redaction existed). Then scrub runs with the real scanner and cleans it.
 
+mod support;
+
 use std::io::Write;
 use std::process::Command;
 
@@ -72,6 +74,11 @@ async fn scrub_redacts_an_existing_secret_in_place() {
         dirty.contains(&key_body),
         "setup: the key should be in the memory before scrub"
     );
+    let memdir = home.path().join("memory");
+    assert!(
+        !support::files_containing(&memdir, &key_body).is_empty(),
+        "setup: the key should be on disk before scrub"
+    );
 
     // Scrub with the real scanner: it must redact the key in place.
     std::env::remove_var("FUNES_TRUFFLEHOG");
@@ -88,4 +95,6 @@ async fn scrub_redacts_an_existing_secret_in_place() {
         "expected a redaction marker after scrub: {clean}"
     );
     assert!(!clean.contains(&key_body), "key body survived scrub: {clean}");
+    let residue = support::files_containing(&memdir, &key_body);
+    assert!(residue.is_empty(), "key body still on disk after scrub: {residue:?}");
 }
