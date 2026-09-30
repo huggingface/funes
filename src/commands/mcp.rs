@@ -371,7 +371,7 @@ impl Funes {
     }
 
     #[tool(
-        description = "Health and size of a memory: indexed chunks, local chunks awaiting embedding, source sessions awaiting indexing, and for a remote what this host has yet to push. Call it when a read comes back empty or thinner than expected — it says whether the memory is the problem rather than the call."
+        description = "Health and size of a memory: indexed chunks, local chunks awaiting embedding, source sessions awaiting indexing, and for a remote this host pushes to what it has yet to push. Call it when a read comes back empty or thinner than expected — it says whether the memory is the problem rather than the call."
     )]
     async fn status(&self, Parameters(StatusRequest { memory }): Parameters<StatusRequest>) -> String {
         // No update check here: it needs the network, and the "update available" notice belongs

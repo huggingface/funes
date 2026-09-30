@@ -1445,6 +1445,63 @@ async fn index_lines(ds: &Dataset, now: DateTime<Utc>) -> Result<String> {
     Ok(out)
 }
 
+/// A remote memory's published state: when it was last pushed to and its unindexed backlog.
+async fn remote_lines(ds: &Dataset, now: DateTime<Utc>) -> String {
+    let mut out = String::new();
+    // Every write to a remote memory is a `funes push` (data or reindex commit), so the head
+    // version's timestamp is when it was last pushed to.
+    let t = ds.version().timestamp;
+    if t.timestamp() > 0 {
+        let _ = writeln!(out, "last push: {}", stamp(t, now));
+    }
+    let unindexed = crate::memory::remote::max_unindexed_rows(ds).await;
+    if unindexed > 0 {
+        let _ = writeln!(
+            out,
+            "unindexed: {unindexed} chunks (searched brute-force until a push reindexes)"
+        );
+    }
+    out
+}
+
+/// What this host has yet to push to `memory`, from the receipt `push` keeps: a shared remote's
+/// total says nothing about this host's backlog. Without a receipt, a memory this host is `bound`
+/// to says how to start one; any other says nothing, since coverage is a question only for a
+/// memory this host pushes to.
+async fn push_coverage_lines(local: &Dataset, memory: &Memory, uri: &str, bound: bool) -> String {
+    let mut out = String::new();
+    let Some(coverage) = super::push::local_push_coverage(local, uri).await else {
+        if bound {
+            let _ = writeln!(
+                out,
+                "local push coverage: unknown — run `funes push {}` once",
+                memory.label()
+            );
+        }
+        return out;
+    };
+    let plural = if coverage.total == 1 { "" } else { "s" };
+    if coverage.pending == 0 {
+        let _ = writeln!(out, "local push: up to date ({} session{plural})", coverage.total);
+        return out;
+    }
+    let _ = writeln!(
+        out,
+        "local push: {} of {} session{plural} pending — run `funes push {}`",
+        coverage.pending,
+        coverage.total,
+        memory.label()
+    );
+    if let Some(held) = &coverage.held {
+        let _ = writeln!(
+            out,
+            "  {} pending row(s) hold secrets ({}) — run `funes scrub` first",
+            held.rows, held.summary
+        );
+    }
+    out
+}
+
 pub async fn status(memory: Memory) -> Result<String> {
     match open_for_read(&memory).await? {
         ReadOutcome::Ready(ds) => {
@@ -1454,19 +1511,7 @@ pub async fn status(memory: Memory) -> Result<String> {
             match &memory {
                 Memory::Local { .. } => out.push_str(&index_lines(&ds, now).await?),
                 Memory::Remote { uri } => {
-                    // Every write to a remote memory is a `funes push` (data or reindex commit),
-                    // so the head version's timestamp is when it was last pushed to.
-                    let t = ds.version().timestamp;
-                    if t.timestamp() > 0 {
-                        let _ = writeln!(out, "last push: {}", stamp(t, now));
-                    }
-                    let unindexed = crate::memory::remote::max_unindexed_rows(&ds).await;
-                    if unindexed > 0 {
-                        let _ = writeln!(
-                            out,
-                            "unindexed: {unindexed} chunks (searched brute-force until a push reindexes)"
-                        );
-                    }
+                    out.push_str(&remote_lines(&ds, now).await);
                     // The local index is what pushes here — show it alongside, so one status
                     // answers both "what's published" and "what's indexed on this machine".
                     if let Ok(local) = Memory::local().open().await {
@@ -1476,53 +1521,8 @@ pub async fn status(memory: Memory) -> Result<String> {
                             "\nlocal index: {}\nchunks: {local_rows}",
                             Memory::local().label()
                         );
-                        let local_sessions = session_count(&local).await;
-                        if let Some(n) = local_sessions {
-                            let _ = writeln!(out, "sessions: {n}");
-                        }
-                        out.push_str(&pending_embeddings_line(&local).await?);
-                        if let Some(line) = index_coverage_line() {
-                            out.push_str(&line);
-                        }
-                        // A shared remote's total says nothing about this host's backlog, so the
-                        // local receipt push maintains is what reports it.
-                        if let Some(coverage) = super::push::local_push_coverage(&local, uri).await
-                        {
-                            if coverage.pending == 0 {
-                                let _ = writeln!(
-                                    out,
-                                    "local push: up to date ({} session{})",
-                                    coverage.total,
-                                    if coverage.total == 1 { "" } else { "s" }
-                                );
-                            } else {
-                                let _ = writeln!(
-                                    out,
-                                    "local push: {} of {} session{} pending — run `funes push {}`",
-                                    coverage.pending,
-                                    coverage.total,
-                                    if coverage.total == 1 { "" } else { "s" },
-                                    memory.label()
-                                );
-                                if let Some(held) = &coverage.held {
-                                    let _ = writeln!(
-                                        out,
-                                        "  {} pending row(s) hold secrets ({}) — run `funes scrub` first",
-                                        held.rows, held.summary
-                                    );
-                                }
-                            }
-                        } else {
-                            let _ = writeln!(
-                                out,
-                                "local push coverage: unknown — run `funes push {}` once",
-                                memory.label()
-                            );
-                        }
-                        let t = local.version().timestamp;
-                        if t.timestamp() > 0 {
-                            let _ = writeln!(out, "last indexed: {}", stamp(t, now));
-                        }
+                        out.push_str(&index_lines(&local, now).await?);
+                        out.push_str(&push_coverage_lines(&local, &memory, uri, false).await);
                     }
                 }
             }
@@ -1543,6 +1543,43 @@ pub async fn status(memory: Memory) -> Result<String> {
             memory.label(),
         )),
     }
+}
+
+/// This host's status: the local memory, then each memory its integrations are bound to — `bound`
+/// pairs a memory spec with the ids bound to it — and the ids installed with no memory recorded.
+pub async fn host_status(bound: &[(String, Vec<String>)], unrecorded: &[String]) -> Result<String> {
+    let mut out = status(Memory::local()).await?;
+    let local = Memory::local().open().await.ok();
+    let now = Utc::now();
+    for (spec, ids) in bound {
+        let memory = Memory::parse(spec);
+        let _ = writeln!(out, "\nmemory: {} (bound: {})", memory.label(), ids.join(", "));
+        let ds = match open_for_read(&memory).await {
+            Ok(ReadOutcome::Ready(ds)) => ds,
+            Ok(ReadOutcome::Offline) => {
+                out.push_str("unreachable\n");
+                continue;
+            }
+            Ok(ReadOutcome::NoIndex) => continue,
+            Err(e) => {
+                let _ = writeln!(out, "{e:#}");
+                continue;
+            }
+        };
+        let _ = writeln!(out, "chunks: {}", ds.count_rows(None).await?);
+        out.push_str(&remote_lines(&ds, now).await);
+        if let (Some(local), Memory::Remote { uri }) = (&local, &memory) {
+            out.push_str(&push_coverage_lines(local, &memory, uri, true).await);
+        }
+    }
+    if !unrecorded.is_empty() {
+        let _ = writeln!(
+            out,
+            "\ninstalled with no memory recorded: {} — if one publishes, `funes add <agent> <memory>` records where",
+            unrecorded.join(", ")
+        );
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

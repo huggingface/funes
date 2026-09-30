@@ -308,6 +308,25 @@ pub fn bind(root: &Path, id: &str, memory: Option<&str>) -> Result<()> {
     }
 }
 
+/// Memories, each with the ids of the integrations bound to it.
+pub type Bound = Vec<(String, Vec<String>)>;
+
+/// Each memory the installed integrations are bound to, with the ids bound to it, and the ids
+/// installed with neither an install record nor a binding: placed by hand or by a funes older than
+/// both, so funes cannot say where, if anywhere, they publish.
+pub fn bindings(root: &Path) -> Result<(Bound, Vec<String>)> {
+    let mut bound: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut unrecorded = Vec::new();
+    for id in registered_ids(root) {
+        match binding(root, &id)? {
+            Some(memory) => bound.entry(memory).or_default().push(id),
+            None if installed(root, &id).is_none() => unrecorded.push(id),
+            None => {}
+        }
+    }
+    Ok((bound.into_iter().collect(), unrecorded))
+}
+
 /// The registry root, `~/.funes/agents` — fixed, not under `$FUNES_HOME`: an agent records the
 /// install path it is handed, so these files must outlive any one home.
 pub fn default_root() -> Result<PathBuf> {
@@ -1285,6 +1304,34 @@ mod tests {
         std::fs::set_permissions(root.join("pi.memory"), std::fs::Permissions::from_mode(0o644)).unwrap();
         discard(&root, "pi").unwrap();
         assert!(!root.join("pi.memory").exists());
+    }
+
+    /// Integrations bound to one memory are listed under it; a recorded install with no binding is
+    /// local-only and listed nowhere; an install funes has no record of is named as unrecorded.
+    #[test]
+    fn bindings_group_the_bound_and_name_the_unrecorded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("agents");
+        for id in ["claude", "codex", "hermes", "pi"] {
+            integration(&root, id, &manifest(id, CONTRACT_VERSION), "true");
+        }
+        bind(&root, "claude", Some("acme/kb")).unwrap();
+        bind(&root, "pi", Some("acme/kb")).unwrap();
+        let rec = Installed::new(
+            &open(&root, "hermes").unwrap().manifest,
+            Origin::Directory {
+                path: tmp.path().join("src"),
+            },
+            Files::new(),
+        );
+        record(&root, &rec).unwrap();
+
+        let (bound, unrecorded) = bindings(&root).unwrap();
+        assert_eq!(
+            bound,
+            vec![("acme/kb".to_string(), vec!["claude".to_string(), "pi".to_string()])]
+        );
+        assert_eq!(unrecorded, vec!["codex".to_string()]);
     }
 
     /// A package without its executable would leave the installed one running outside the

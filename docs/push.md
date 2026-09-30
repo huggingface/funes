@@ -59,8 +59,8 @@ $ echo $?
 2
 ```
 
-A hold-back is easy to miss when the hooks push in the background, so `funes status <memory>`
-scans this host's pending rows the same way and reports what a push would hold back, until a
+A hold-back is easy to miss when the hooks push in the background, so `funes status` scans this
+host's pending rows for each bound memory the same way and reports what a push would hold back, until a
 scrub lets them publish.
 
 `funes push` and `funes scrub` refuse to run unscanned when TruffleHog is unavailable. See the
@@ -115,19 +115,16 @@ against your criteria and reports them, and the person publishing passes that li
 
 ## Inspecting a memory: `status`
 
-`funes status` takes an optional memory (an `<org>/<repo>`, an `hf://…` URI, a local path, or
-`local`); with none it acts on your local memory.
-
-```bash
-funes status                 # memory label, chunk/session counts, last indexed (and an update check)
-funes status <org>/<repo>    # …and what this host has or has not pushed there
-```
+`funes status` shows your local memory, then each memory your agents are bound to (by
+[`funes add <agent> <memory>`](add.md)), naming the agents bound to it, and an update check. An
+agent installed with no memory recorded — placed by hand, or by a funes older than 1.4.0 — is named
+at the end; if it publishes somewhere, `funes add <agent> <memory>` records where.
 
 `funes status` tells you whether recall is reading your own memory yet, and whether a newer funes
 release is out. Its local-index sections distinguish chunks awaiting embedding from source
 sessions not yet indexed. Run `funes index` to continue either.
 
-For a personal remote memory, one `local push` line says either that this host is up to date or how many
+For each bound memory, one `local push` line says either that this host is up to date or how many
 local sessions are pending. This comes from a per-remote receipt kept on this host, so sessions
 contributed by other hosts do not distort the result and status never scans the remote to compute
 it. Run `funes push <memory>` once to initialize the receipt for an existing memory.

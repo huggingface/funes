@@ -168,13 +168,9 @@ enum Cmd {
         #[command(flatten)]
         memory: MemoryOpts,
     },
-    /// Show index statistics, pending embeddings, and push coverage.
-    Status {
-        /// Memory to inspect — an `<org>/<repo>` shorthand, an `hf://…` URI, a local path, or
-        /// `local`. Defaults to your local memory.
-        #[arg(value_name = "MEMORY")]
-        memory: Option<String>,
-    },
+    /// Show the local index, and each memory your agents are bound to with what this host has yet
+    /// to push there.
+    Status,
     /// Publish your local memory's new embedded chunks to a remote memory on the HF Hub.
     Push {
         /// Memory to publish to: `<org>/<repo>` or a full `hf://…` URI.
@@ -310,7 +306,7 @@ async fn main() -> Result<()> {
             | Cmd::Sessions { .. }
             | Cmd::Scan { .. }
             | Cmd::Sketch { .. }
-            | Cmd::Status { .. }
+            | Cmd::Status
             | Cmd::Ask { .. }
     ) {
         if let Some(note) = agents::stale_install_notice(None) {
@@ -484,8 +480,9 @@ async fn main() -> Result<()> {
                 index::run_index_roots(&roots, no_thinking, limit, yes).await
             }
         }
-        Cmd::Status { memory } => {
-            print!("{}", recall::status(memory::Memory::resolve(memory)).await?);
+        Cmd::Status => {
+            let (bound, unrecorded) = registry::bindings(&registry::default_root()?)?;
+            print!("{}", recall::host_status(&bound, &unrecorded).await?);
             // Show the status body before the (bounded, best-effort) update check, so a slow or
             // offline Hub can't delay the useful output.
             std::io::stdout().flush().ok();
