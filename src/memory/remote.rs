@@ -62,8 +62,13 @@ use crate::hub;
 
 /// Outcome of an [`append`] commit.
 pub(crate) enum Appended {
-    /// The data was committed; carries the new commit oid and the resulting unindexed-row backlog.
-    Committed { oid: String, unindexed: u64 },
+    /// The data was committed; carries the new commit oid, the resulting unindexed-row backlog, and
+    /// whether the dataset has a text index at all.
+    Committed {
+        oid: String,
+        unindexed: u64,
+        text_indexed: bool,
+    },
     /// The branch head moved before our commit; the caller may retry against the new head.
     Conflict,
 }
@@ -83,10 +88,10 @@ pub(crate) enum Reindexed {
 /// writes only data — a new fragment, manifest, and transaction — and leaves the new rows
 /// unindexed (refresh the index separately with [`reindex`]). `extra_files` (repo path → bytes,
 /// e.g. the dataset card) ride the same guarded commit; cloned per attempt, so a conflict retry
-/// re-attaches them. Returns [`Appended::Committed`] with the new commit oid and the resulting
-/// unindexed-row backlog (the largest across the dataset's indexes — what `push` thresholds on),
-/// or [`Appended::Conflict`] if the head moved first — a single attempt against the head it read,
-/// so the caller drives the retry.
+/// re-attaches them. Returns [`Appended::Committed`] with the new commit oid, the resulting
+/// unindexed-row backlog (the largest across the dataset's indexes — what `push` thresholds on) and
+/// whether a text index exists, or [`Appended::Conflict`] if the head moved first — a single
+/// attempt against the head it read, so the caller drives the retry.
 #[allow(clippy::too_many_arguments)] // internal orchestration, one call site (`push`)
 pub(crate) async fn append(
     repo: &HFRepository<RepoTypeDataset>,
@@ -110,6 +115,7 @@ pub(crate) async fn append(
     // migration through the same wrapper, and that must not leak into the data commit.
     let mut files = captured_files(&wrapper);
     let unindexed = max_unindexed_rows(&ds).await;
+    let text_indexed = dataset::sub_index_counts(&ds).await?.contains_key(dataset::FTS_INDEX);
     for (path, body) in extra_files {
         files.insert(path.clone(), body.clone());
     }
@@ -119,6 +125,7 @@ pub(crate) async fn append(
         Ok(info) => Ok(Appended::Committed {
             oid: info.commit_oid.unwrap_or_else(|| "?".to_string()),
             unindexed,
+            text_indexed,
         }),
         Err(e) if head_moved(&e) => Ok(Appended::Conflict),
         Err(e) => Err(anyhow::Error::new(e).context("data commit failed")),

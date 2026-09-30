@@ -13,8 +13,9 @@
 //!   rows are left unindexed (a query still finds them by brute force).
 //! - **Reindex:** a *separate* guarded commit ([`remote::reindex`]), kept off the data commit so
 //!   the data commit stays small. `push` runs it after the data commit when the unindexed backlog
-//!   crosses [`REINDEX_THRESHOLD`] (best-effort: a head-moved conflict is a warning, the next push
-//!   retries), or eagerly with `--force-reindex` (retried until it lands).
+//!   crosses [`REINDEX_THRESHOLD`] or the remote has no text index (best-effort: a head-moved
+//!   conflict is a warning, the next push retries), or eagerly with `--force-reindex` (retried until
+//!   it lands).
 //!
 //! What a push ships is the embedded chunks the remote doesn't hold, optionally restricted to the
 //! sessions named with `--sessions`. Rows awaiting embedding stay local until a later push.
@@ -607,7 +608,7 @@ pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm, ses
     // (each attempt re-appends onto the new manifest — the data commit is small, so this is cheap).
     eprintln!("uploading {n_chunks} chunk(s) to {}…", target.label());
     let mut attempts = 0u32;
-    let (oid, unindexed) = loop {
+    let (oid, unindexed, text_indexed) = loop {
         let attempt = remote::append(
             &repo,
             &dataset_uri,
@@ -620,7 +621,11 @@ pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm, ses
         )
         .await?;
         match attempt {
-            Appended::Committed { oid, unindexed } => break (oid, unindexed),
+            Appended::Committed {
+                oid,
+                unindexed,
+                text_indexed,
+            } => break (oid, unindexed, text_indexed),
             Appended::Conflict => {
                 attempts += 1;
                 if attempts > MAX_COMMIT_RETRIES {
@@ -633,12 +638,13 @@ pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm, ses
     let mut out = format!("{}: pushed {n_chunks} chunks (commit {oid})\n", target.label());
     out.push_str(&card_note);
 
-    // 7. Reindex as a separate commit: forced (retried until it lands) or, past the threshold,
-    // best-effort (one shot, warn on a conflict — the next push retries).
+    // 7. Reindex as a separate commit: forced (retried until it lands), or best-effort (one shot,
+    // warn on a conflict — the next push retries) past the threshold or when the remote has no text
+    // index, which recall cannot do without.
     if force_reindex {
         eprintln!("refreshing the remote index…");
         out.push_str(&reindex_forced(&repo, &dataset_uri, &opts, &rev).await?);
-    } else if unindexed > REINDEX_THRESHOLD {
+    } else if unindexed > REINDEX_THRESHOLD || !text_indexed {
         eprintln!("refreshing the remote index…");
         out.push_str(&reindex_auto(&repo, &dataset_uri, &opts, &rev).await);
     }
