@@ -74,6 +74,23 @@ jobs:
       - name: Unit tests
         run: cargo test --lib --profile ci
 
+  # install.sh ships to Linux and macOS and is plain POSIX sh, so it gets a runner of
+  # each: the test fakes the platform detection, but not the BSD vs GNU utilities
+  # underneath it. No toolchain here — the script is all this job needs.
+  installer-test:
+    name: Installer (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-14 is the runner release.yml builds the darwin asset on.
+        os: [ubuntu-latest, macos-14]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
       - name: Installer tests
         run: sh scripts/test-install.sh
 
