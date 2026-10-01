@@ -1,9 +1,8 @@
 # Benchmarks
 
-Three runnable examples, each `cargo run --release --example <name>`:
+Two runnable examples, each `cargo run --release --example <name>`:
 
 - **`bench_recall`** — `recall()` latency, local vs remote, cold vs warm.
-- **`bench_index`** — `index` build time, throughput, and memory compactness.
 - **`bench_backends`** — latency and output agreement between the BLAS and ONNX inference backends.
 
 ## `bench_recall` — recall latency
@@ -85,29 +84,6 @@ moves with the CPU and the inference backend. What the benchmark measures is the
   terms) for a sturdier picture.
 - For a private dataset, a token must be available (`HF_TOKEN` or the cached login) — the same one
   recall uses.
-
-## `bench_index` — index build
-
-`bench_index.rs` times an `index` build into a throwaway `$FUNES_HOME` (your real memory and config
-are untouched; no remote is attached there, so nothing is pushed) and reports build time, embedding
-throughput, and how compact the resulting memory is.
-
-`--sessions <N>` caps how many sessions are indexed (default **500**) so the build doesn't run long
-over a big tree or the full parquet — raise it for a longer, steadier measurement.
-
-```sh
-cargo run --release --example bench_index -- path/to/traces.parquet                 # first 500 sessions
-cargo run --release --example bench_index -- ~/.claude/projects --sessions 100       # a JSONL tree, capped
-cargo run --release --example bench_index -- path/to/traces.parquet --sessions 5000  # longer run
-```
-
-The report lists the source, the elapsed time, the sessions and chunks indexed, the throughput in
-chunks per second, the memory's size on disk and its Lance fragment count. The three counts are
-distinct granularities: sessions chunk into chunks, and each indexed unit is appended once, as one
-Lance fragment. A parquet file is one unit however many sessions it holds, so a parquet build should
-report one fragment; more would mean the bulk-import path regressed to per-session appends. A
-directory of session files is one unit per session, so there the count equals the sessions. Elapsed
-includes the one-time embedding-model load, so throughput is a slight under-estimate on small inputs.
 
 ## `bench_backends` — inference backend comparison
 

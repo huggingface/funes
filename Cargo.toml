@@ -69,10 +69,6 @@ onnx = ["dep:fastembed"]
 name = "bench_recall"
 path = "benchmark/bench_recall.rs"
 
-[[example]]
-name = "bench_index"
-path = "benchmark/bench_index.rs"
-
 # A/B the inference backends (BLAS vs ONNX as reference). Needs both compiled in:
 #   cargo run --release --features onnx --example bench_backends
 [[example]]
