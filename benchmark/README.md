@@ -2,8 +2,8 @@
 
 Three runnable examples, each `cargo run --release --example <name>`:
 
-- **`bench_recall`** — `recall()` latency, local vs remote, cold vs warm (below).
-- **`bench_index`** — `index` build time, throughput, and memory compactness (at the end).
+- **`bench_recall`** — `recall()` latency, local vs remote, cold vs warm.
+- **`bench_index`** — `index` build time, throughput, and memory compactness.
 - **`bench_backends`** — latency and output agreement between the BLAS and ONNX inference backends.
 
 ## `bench_recall` — recall latency
@@ -41,7 +41,7 @@ For each memory the harness reports a single **cold** call followed by the min /
 Build in release (a debug build is far slower and not representative):
 
 ```sh
-cargo run --release --example bench_recall -- "<query>" --remote dacorvo/funes-Glint-Research-Fable-5 --iters 5 --cold
+cargo run --release --example bench_recall -- "<query>" --remote huggingface/funes-memory --iters 5 --cold
 ```
 
 The bench downloads `--remote` (through the hf-hub crate, using the token from your environment for a
@@ -53,7 +53,7 @@ both legs run identical data, so the gap is the I/O path, not the corpus.
 | flag | default | meaning |
 |------|---------|---------|
 | `<query>` (positional) | `"how does recall rerank candidates"` | the text to recall |
-| `--remote <spec>` | `dacorvo/funes-Glint-Research-Fable-5` | dataset to benchmark (`org/repo` or `hf://…`), used for both legs |
+| `--remote <spec>` | `huggingface/funes-memory` | dataset to benchmark (`org/repo` or `hf://…`), used for both legs |
 | `--iters <N>` | `5` | warm iterations timed per memory (after the one cold call) |
 | `--cold` | off | give the remote leg a throwaway `HF_HUB_CACHE` temp dir so its cold call is a true download (your real cache is left untouched) |
 | `--k <N>` | `8` | results returned |
@@ -98,28 +98,6 @@ second (local ≈ remote-warm ≈ ~1.9 s). The floor moves with the hardware; th
   terms) for a sturdier picture.
 - For a private dataset, a token must be available (`HF_TOKEN` or the cached login) — the same one
   recall uses.
-
-## Building a benchmark memory
-
-The remote target above was built from a public agent-trace dataset with funes' parquet indexer:
-
-```sh
-# 1. fetch the auto-converted parquet (one row per session)
-hf download Glint-Research/Fable-5-traces --repo-type dataset \
-  --revision refs/convert/parquet --include "pi_agent/train/0000.parquet" --local-dir ./traces
-
-# 2. (optional) slice to ~N sessions to hit a target chunk count, then index into an isolated home
-FUNES_HOME=./bench-home funes index ./traces/pi_agent/train/0000.parquet
-
-# 3. publish to a Hub dataset repo you own (create it first; funes won't), which re-materializes a
-#    clean, compact dataset on the remote (--yes accepts the first push to an empty repo)
-hf repo create <org>/<repo> --repo-type dataset
-FUNES_HOME=./bench-home funes push <org>/<repo> --yes
-```
-
-`funes index <file>.parquet` indexes the whole file as a bulk import (one append, so the memory stays
-compact); see `src/traces/parquet.rs`. The push gate redacts/holds back any rows containing secrets before
-upload.
 
 ## `bench_index` — index build
 

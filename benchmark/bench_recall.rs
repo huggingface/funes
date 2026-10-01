@@ -8,7 +8,7 @@
 //!
 //! ```text
 //! cargo run --release --example bench_recall -- "your query" \
-//!     --remote dacorvo/funes-Glint-Research-Fable-5 --iters 5 --cold
+//!     --remote huggingface/funes-memory --iters 5 --cold
 //! ```
 //!
 //! `--cold` points the hf-hub file cache (`HF_HUB_CACHE`) at a throwaway temp dir so the remote cold
@@ -33,7 +33,7 @@ struct Args {
     #[arg(default_value = "how does recall rerank candidates")]
     query: String,
     /// Dataset to benchmark (`org/repo` or `hf://…`), used for BOTH legs.
-    #[arg(long, default_value = "dacorvo/funes-Glint-Research-Fable-5")]
+    #[arg(long, default_value = "huggingface/funes-memory")]
     remote: String,
     /// Warm iterations timed per memory (after the one cold call).
     #[arg(long, default_value_t = 5)]
