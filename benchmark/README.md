@@ -67,29 +67,16 @@ both legs run identical data, so the gap is the I/O path, not the corpus.
 
 ## Reading the output
 
-```
-dataset: dacorvo/funes-Glint-Research-Fable-5   query: "how does recall rerank candidates"   k=8 candidates=30 neighbors=1   warm iters=5
+A header repeats the dataset, the query and the knobs. Then one row per memory: `cold(ms)` is the
+single cold call, `warm_lo` / `warm_med` / `warm_hi` the min / median / max over the `--iters` warm
+calls, and `hits` the results returned, equal on both rows when both legs did the same work. A last
+line gives the remote-to-local ratios: cold, warm median and warm best-case. `warm_lo` is the most
+stable of the three, and `warm_hi` spikes are page-cache noise at low `--iters`.
 
-memory    cold(ms)   warm_lo  warm_med   warm_hi  hits
-local       5455.9    5682.6    5956.0    6093.4     8
-remote     10663.1    6504.0    6589.1    6668.6     8
-
-remote vs local:  2.0× slower cold,  1.1× slower warm (median),  1.1× warm best-case
-```
-
-_Captured on a Mac M2 (24 GB), release build._
-
-Both legs run the same ≈21.6k-chunk dataset (`hits` matches, confirming equal work). Remote **cold**
-pays a one-time download of the index + touched Lance fragments into the hf-hub file cache (the
-premium over warm). Every **warm** call is then served from that local cache, so warm remote lands at
-**≈ local** (1.1×) — the per-call `hf://` I/O is gone. `warm best-case` (`warm_lo`) is the most stable
-factor; `warm_hi` spikes are page-cache/GC noise at low `--iters`.
-
-**Absolute numbers are host-dependent — read the ratio, not the floor.** Recall is dominated by the
-cross-encoder rerank (`--candidates` query/passage pairs), identical work on both legs: the Mac M2
-above reranks ~5–6 s for 30 candidates on CPU, whereas a Linux box with a GPU does it in well under a
-second (local ≈ remote-warm ≈ ~1.9 s). The floor moves with the hardware; the remote-vs-local
-**ratio** — warm ≈ local, cold a one-time download — is what the benchmark measures.
+**Absolute numbers are host-dependent, so read the ratio, not the floor.** Recall is dominated by the
+cross-encoder rerank (`--candidates` query/passage pairs), identical work on both legs, and that floor
+moves with the CPU and the inference backend. What the benchmark measures is the remote-vs-local
+**ratio**: warm close to local, cold a one-time download.
 
 ## Caveats
 
@@ -114,25 +101,13 @@ cargo run --release --example bench_index -- ~/.claude/projects --sessions 100  
 cargo run --release --example bench_index -- path/to/traces.parquet --sessions 5000  # longer run
 ```
 
-Example output:
-
-```
-=== index benchmark ===
-source:           Fable-5-traces.parquet
-elapsed:          385.0s  (incl. model load)
-sessions:         4665
-chunks:           21767
-throughput:       57 chunks/s
-memory size:      53 MB
-lance fragments:  1
-```
-
-The three counts are deliberately distinct granularities: **4665 sessions** chunk into **21767
-chunks**, all written into **1 Lance fragment** (a physical data file). `lance fragments: 1` confirms
-the bulk-import path stayed compact — a regression to per-session appends would show one fragment per
-session and a much larger memory. (That run indexed the whole file; pass a large `--sessions` to do
-likewise — the default 500 builds far faster.) Elapsed includes the one-time embedding-model load,
-so throughput is a slight under-estimate on small inputs.
+The report lists the source, the elapsed time, the sessions and chunks indexed, the throughput in
+chunks per second, the memory's size on disk and its Lance fragment count. The three counts are
+distinct granularities: sessions chunk into chunks, and each indexed unit is appended once, as one
+Lance fragment. A parquet file is one unit however many sessions it holds, so a parquet build should
+report one fragment; more would mean the bulk-import path regressed to per-session appends. A
+directory of session files is one unit per session, so there the count equals the sessions. Elapsed
+includes the one-time embedding-model load, so throughput is a slight under-estimate on small inputs.
 
 ## `bench_backends` — inference backend comparison
 
