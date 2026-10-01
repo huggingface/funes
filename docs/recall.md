@@ -49,10 +49,12 @@ stable — a contract, not a presentation; don't parse it loosely.
 | `--neighbors` | 1 | adjacent chunks (by seq) attached per hit; 0 disables |
 | `--type` | — | restrict to `text \| thinking \| tool_use \| tool_result` |
 | `--harness` | — | restrict to one harness facet, as the turns carry it (`claude` also matches the older `claude_code`) |
+| `--since` / `--until` | — | restrict to turns on or after / on or before a `YYYY-MM-DD` |
 | `--memory` | local | the memory to read (see below) |
 
 The MCP `recall` tool takes the same parameters and defaults, so an agent can widen a search —
-more `candidates` when a topic is rare.
+more `candidates` when a topic is rare — or bound it in time. Ranking weighs relevance, not age:
+for the latest word on a topic, pass `since`.
 
 ## Reading turns with `get`
 

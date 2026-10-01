@@ -30,6 +30,10 @@ pub struct RecallRequest {
         description = "Restrict to a harness facet, as the turns carry it (`claude` also matches the older `claude_code`)"
     )]
     pub harness: Option<String>,
+    #[schemars(description = "Restrict to turns on or after this date, `YYYY-MM-DD`")]
+    pub since: Option<String>,
+    #[schemars(description = "Restrict to turns on or before this date, `YYYY-MM-DD`")]
+    pub until: Option<String>,
     #[schemars(
         description = "Memory to read for this call — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Defaults to the server's memory, with this host's turns not yet pushed to it."
     )]
@@ -179,7 +183,7 @@ impl Funes {
     }
 
     #[tool(
-        description = "Semantic search over the user's past AI agent sessions: describe what you are after, get back the verbatim passages — what was decided, tried, measured or investigated. Call it when they refer to earlier work, or when you are about to re-derive something a session may already have settled. Call it too before claiming that something was never built, was dropped, or was never discussed: the code cannot show that, only the sessions can. Ranked top-k, so it gives you a foothold on a topic, not every session touching it."
+        description = "Semantic search over the user's past AI agent sessions: describe what you are after, get back the verbatim passages — what was decided, tried, measured or investigated. Call it when they refer to earlier work, or when you are about to re-derive something a session may already have settled. Call it too before claiming that something was never built, was dropped, or was never discussed: the code cannot show that, only the sessions can. Ranked top-k, so it gives you a foothold on a topic, not every session touching it. Ranking weighs relevance, not age: for the latest word on a topic, or one stretch of time, bound it with `since`/`until`."
     )]
     async fn recall(
         &self,
@@ -190,6 +194,8 @@ impl Funes {
             candidates,
             block_type,
             harness,
+            since,
+            until,
             memory,
         }): Parameters<RecallRequest>,
     ) -> String {
@@ -204,7 +210,8 @@ impl Funes {
                 recall::RecallFilter {
                     block_type,
                     harness,
-                    ..Default::default()
+                    since,
+                    until,
                 },
                 &quiet,
             )

@@ -49,6 +49,12 @@ enum Cmd {
         /// `claude_code`).
         #[arg(long)]
         harness: Option<String>,
+        /// Restrict to turns on or after this date (`YYYY-MM-DD`).
+        #[arg(long, value_name = "DATE")]
+        since: Option<String>,
+        /// Restrict to turns on or before this date (`YYYY-MM-DD`).
+        #[arg(long, value_name = "DATE")]
+        until: Option<String>,
         #[command(flatten)]
         memory: MemoryOpts,
     },
@@ -318,6 +324,8 @@ async fn main() -> Result<()> {
             neighbors,
             block_type,
             harness,
+            since,
+            until,
             memory,
         } => {
             let memory = memory.resolve();
@@ -337,7 +345,8 @@ async fn main() -> Result<()> {
                 recall::RecallFilter {
                     block_type,
                     harness,
-                    ..Default::default()
+                    since,
+                    until,
                 },
                 &progress,
             )
