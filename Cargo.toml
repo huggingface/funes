@@ -89,6 +89,13 @@ path = "scripts/backfill_repo.rs"
 name = "backfill_remote_repo"
 path = "scripts/backfill_remote_repo.rs"
 
+# One-off migration of a memory from before the workdir rename to today's schema (local and
+# remote, dry-run by default). Delete it, and `memory::remote::rename_column`, once every memory
+# is migrated.
+[[example]]
+name = "migrate_schema"
+path = "scripts/migrate_schema.rs"
+
 [profile.release]
 opt-level = 3
 
