@@ -1,8 +1,7 @@
 //! The read surface: `recall`, `get`, `status` over the existing index.
 //! Recall pipeline: hybrid (vector + BM25, fused by reciprocal rank) → cross-encoder rerank →
-//! recency reweight → neighbor expansion. `recall`/`get` return results rendered in the agent
-//! format; `recall_hits`/`get_turns` return the structured results for other renderings
-//! (see `render`).
+//! neighbor expansion. `recall`/`get` return results rendered in the agent format;
+//! `recall_hits`/`get_turns` return the structured results for other renderings (see `render`).
 
 use crate::chunk;
 use crate::inference::{self, Embedder, Reranker};
@@ -204,20 +203,6 @@ fn harness_spellings(h: String) -> Vec<String> {
     }
 }
 
-/// 0.5^(age/half_life): 1.0 for fresh, decaying with age. half_life <= 0 disables.
-fn recency_weight(ts: &str, now: DateTime<Utc>, half_life: f64) -> f64 {
-    if half_life <= 0.0 {
-        return 1.0;
-    }
-    match DateTime::parse_from_rfc3339(ts) {
-        Ok(t) => {
-            let age_days = (now - t.with_timezone(&Utc)).num_seconds() as f64 / 86_400.0;
-            0.5f64.powf(age_days.max(0.0) / half_life)
-        }
-        Err(_) => 1.0,
-    }
-}
-
 /// A dataset opened for reading.
 struct Read {
     ds: Dataset,
@@ -345,33 +330,19 @@ async fn models() -> Result<&'static Mutex<Models>> {
 /// A recall's defaults, owned here so the CLI and the MCP server search the same way.
 pub const DEFAULT_K: usize = 8;
 pub const DEFAULT_CANDIDATES: usize = 30;
-pub const DEFAULT_HALF_LIFE: f64 = 30.0;
 pub const DEFAULT_NEIGHBORS: i64 = 1;
 
 /// Run the recall pipeline over one memory and return the results rendered in the agent format.
-#[allow(clippy::too_many_arguments)]
 pub async fn recall(
     memory: Memory,
     query: String,
     k: usize,
     candidates: usize,
-    half_life: f64,
     neighbors: i64,
     block_type: Option<String>,
     harness: Option<String>,
 ) -> Result<String> {
-    let (note, hits) = recall_hits(
-        memory,
-        query,
-        k,
-        candidates,
-        half_life,
-        neighbors,
-        block_type,
-        harness,
-        &|_| (),
-    )
-    .await?;
+    let (note, hits) = recall_hits(memory, query, k, candidates, neighbors, block_type, harness, &|_| ()).await?;
     Ok(rendered(&note, &hits))
 }
 
@@ -383,17 +354,16 @@ pub fn rendered(note: &str, hits: &[(Hit, f64)]) -> String {
     crate::ui::render::recall_agent(note, hits)
 }
 
-/// Run the recall pipeline over one memory: hybrid retrieval → rerank → recency reweight →
-/// neighbor expansion. Returns the degradation note (empty when the memory opened normally) and
-/// the scored hits, best first — rendering is the caller's choice. `progress` hears a short label
-/// as each slow phase starts (model load, search, rerank); pass a no-op to run silently.
+/// Run the recall pipeline over one memory: hybrid retrieval → rerank → neighbor expansion.
+/// Returns the degradation note (empty when the memory opened normally) and the scored hits, best
+/// first — rendering is the caller's choice. `progress` hears a short label as each slow phase
+/// starts (model load, search, rerank); pass a no-op to run silently.
 #[allow(clippy::too_many_arguments)]
 pub async fn recall_hits(
     memory: Memory,
     query: String,
     k: usize,
     candidates: usize,
-    half_life: f64,
     neighbors: i64,
     block_type: Option<String>,
     harness: Option<String>,
@@ -401,7 +371,7 @@ pub async fn recall_hits(
 ) -> Result<(String, Vec<(Hit, f64)>)> {
     let search = Search::new(query, candidates, block_type, harness, progress).await?;
     let pool = search.candidates(&memory, progress).await?;
-    search.rank(vec![pool], k, half_life, neighbors, progress).await
+    search.rank(vec![pool], k, neighbors, progress).await
 }
 
 /// One query, embedded once, and the filters every memory's search applies. A recall is
@@ -489,16 +459,15 @@ impl Search {
         })
     }
 
-    /// Rerank the pooled candidates, a row several memories hold counted once, reweight by
-    /// recency, keep the top `k` and attach `neighbors` from the memory each hit came from.
-    /// However many pools there are, the rerank scores at most `candidates` of them, the best by
-    /// fused score: it costs per candidate, and dominates a recall. Returns the pools'
-    /// degradation notes and the scored hits, best first.
+    /// Rerank the pooled candidates, a row several memories hold counted once, keep the top `k`
+    /// and attach `neighbors` from the memory each hit came from. However many pools there are,
+    /// the rerank scores at most `candidates` of them, the best by fused score: it costs per
+    /// candidate, and dominates a recall. Returns the pools' degradation notes and the scored
+    /// hits, best first.
     pub async fn rank(
         &self,
         pools: Vec<Candidates>,
         k: usize,
-        half_life: f64,
         neighbors: i64,
         progress: &(dyn Fn(&str) + Sync),
     ) -> Result<(String, Vec<(Hit, f64)>)> {
@@ -531,14 +500,10 @@ impl Search {
             .reranker
             .rerank(self.query.as_str(), &docs)?;
 
-        let now = Utc::now();
         let mut scored: Vec<(usize, f64)> = scores
             .iter()
             .enumerate()
-            .map(|(i, &s)| {
-                let relevance = 1.0 / (1.0 + (-(s as f64)).exp());
-                (i, relevance * recency_weight(&hits[i].1.ts, now, half_life))
-            })
+            .map(|(i, &s)| (i, 1.0 / (1.0 + (-(s as f64)).exp())))
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(k);
@@ -1810,20 +1775,5 @@ mod tests {
         );
         // values are escaped against filter-string injection.
         assert_eq!(build_where(None, &one("a'b")).as_deref(), Some("harness = 'a''b'"));
-    }
-
-    #[test]
-    fn recency_weight_halves_each_half_life() {
-        let now = Utc.with_ymd_and_hms(2026, 1, 31, 0, 0, 0).unwrap();
-        // disabled
-        assert_eq!(recency_weight("2026-01-01T00:00:00Z", now, 0.0), 1.0);
-        // fresh
-        assert!((recency_weight("2026-01-31T00:00:00Z", now, 30.0) - 1.0).abs() < 1e-9);
-        // exactly one half-life (30 days) old -> 0.5
-        assert!((recency_weight("2026-01-01T00:00:00Z", now, 30.0) - 0.5).abs() < 1e-9);
-        // future timestamps clamp to fresh, not >1.
-        assert!((recency_weight("2026-02-10T00:00:00Z", now, 30.0) - 1.0).abs() < 1e-9);
-        // unparseable -> neutral 1.0
-        assert_eq!(recency_weight("not-a-date", now, 30.0), 1.0);
     }
 }

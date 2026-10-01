@@ -18,10 +18,6 @@ pub struct RecallRequest {
     pub query: String,
     #[schemars(description = "Number of results to return")]
     pub k: Option<usize>,
-    #[schemars(
-        description = "Recency half-life in days: a hit that old keeps half its score. Pass 0 to weigh every age alike, for a memory spanning months or an answer that may be old."
-    )]
-    pub half_life: Option<f64>,
     #[schemars(description = "Adjacent chunks attached to each hit for context; 0 returns the hits alone.")]
     pub neighbors: Option<i64>,
     #[schemars(
@@ -190,7 +186,6 @@ impl Funes {
         Parameters(RecallRequest {
             query,
             k,
-            half_life,
             neighbors,
             candidates,
             block_type,
@@ -219,7 +214,6 @@ impl Funes {
                 .rank(
                     pools,
                     k.unwrap_or(recall::DEFAULT_K),
-                    half_life.unwrap_or(recall::DEFAULT_HALF_LIFE),
                     neighbors.unwrap_or(recall::DEFAULT_NEIGHBORS),
                     &quiet,
                 )

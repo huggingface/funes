@@ -10,7 +10,7 @@ funes recall "why did we switch off the streaming parser"
 ```
 
 Retrieval is one pipeline: hybrid search (vector + BM25, fused by reciprocal rank) → cross-encoder
-rerank → recency reweight → neighbor expansion. What comes back is the **actual passage from the
+rerank → neighbor expansion. What comes back is the **actual passage from the
 actual turn**, not a summary written about it.
 
 Passages are searchable by their words as soon as their text is indexed, even while embeddings
@@ -46,14 +46,13 @@ stable — a contract, not a presentation; don't parse it loosely.
 | --- | --- | --- |
 | `-k` | 8 | hits returned |
 | `--candidates` | 30 | fused pool reranked before the top-k cut |
-| `--half-life` | 30 | recency decay in days (a hit this old keeps half its weight); 0 disables |
 | `--neighbors` | 1 | adjacent chunks (by seq) attached per hit; 0 disables |
 | `--type` | — | restrict to `text \| thinking \| tool_use \| tool_result` |
 | `--harness` | — | restrict to one harness facet, as the turns carry it (`claude` also matches the older `claude_code`) |
 | `--memory` | local | the memory to read (see below) |
 
 The MCP `recall` tool takes the same parameters and defaults, so an agent can widen a search —
-`half_life: 0` when the answer may be old.
+more `candidates` when a topic is rare.
 
 ## Reading turns with `get`
 

@@ -66,7 +66,6 @@ async fn shallow_recall_returns_ranked_passages_and_neighbors() {
         "narwhal".into(),
         5,
         30,
-        30.0,
         1,
         Some("text".into()),
         Some("codex".into()),
@@ -88,7 +87,7 @@ async fn shallow_recall_returns_ranked_passages_and_neighbors() {
         [texts[0], texts[2]]
     );
 
-    let empty = recall::recall(Memory::parse(&memory), "quasar".into(), 5, 30, 30.0, 1, None, None)
+    let empty = recall::recall(Memory::parse(&memory), "quasar".into(), 5, 30, 1, None, None)
         .await
         .unwrap();
     assert_eq!(empty, "no results");

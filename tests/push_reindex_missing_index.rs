@@ -25,7 +25,7 @@ const OWNER: &str = "optimum-internal-testing";
 const NAME: &str = "funes-test";
 
 async fn recall_remote(uri: &str, query: &str) -> String {
-    funes::commands::recall::recall(Memory::parse(uri), query.into(), 5, 30, 0.0, 0, None, None)
+    funes::commands::recall::recall(Memory::parse(uri), query.into(), 5, 30, 0, None, None)
         .await
         .unwrap_or_else(|e| format!("<recall error: {e}>"))
 }

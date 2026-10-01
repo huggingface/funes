@@ -39,7 +39,7 @@ Re-emit the file, or upgrade funes, and it is read again.
 | `session_id` | string | yes | the conversation this turn belongs to. **One session is one thread** — a transcript, an issue, a PR. An id input; may not contain `:`. |
 | `turn_uuid` | string | yes | the turn's identity: unique within its session, **stable across re-emits**. An id input; may not contain `:`. |
 | `seq` | integer | yes | the turn's position in its session: a **dense counter from 0**, in the order the producer emits turns, never reassigned. Positional neighbours (`seq ± window`) and `get` read by it. |
-| `ts` | string | yes | when the turn happened, RFC 3339 **in UTC, `Z` suffix** — `2026-09-18T09:41:07Z`. Recency ranking, per turn. |
+| `ts` | string | yes | when the turn happened, RFC 3339 **in UTC, `Z` suffix** — `2026-09-18T09:41:07Z`. Printed on every hit and turn; a session's earliest dates it for `sessions --since/--until`. |
 | `role` | string | yes | who speaks. One dimension per producer, no default bucket. Agents: `user` / `assistant` / `tool` / `system`. A tracker might use `member` / `contributor` / `bot`. |
 | `harness` | string | yes | the producer's id: lowercase letters, digits, `-` (preferred) or `_` — `opencode`, `cline`, `github`. A stored facet; `recall --harness` filters on it. |
 | `cwd` | string | no | the working directory the conversation ran in, *as a path on the indexing machine*. funes derives the `workdir` and `repo` facets from it (`git -C <cwd> remote -v`). Absent → no repo facet. |
@@ -92,7 +92,7 @@ follows from that.
    ids, so the edit is deduped away and never indexed. funes is append-only: give the edit its own
    identity — `turn_uuid = "<id>@<updated_at>"` with the colons dropped from the stamp
    (`…@20260603T081240Z`), `ts = updated_at` — and the next `seq` in the session (rule 4). The earlier
-   version stays; recency ranks the newer one above it. Deletions are never reflected.
+   version stays. Deletions are never reflected.
 4. **`seq` is a dense counter in emission order.** 0, 1, 2… with no gaps, assigned once and never
    reassigned: a delta file continues where the previous one stopped, and a turn discovered late takes
    the next number, not the one its `ts` would suggest. Position is order of appearance; `ts` carries

@@ -16,7 +16,6 @@ async fn recall_without_an_index_guides_to_funes_add() {
         "how do I connect funes to claude code".into(),
         5,
         30,
-        30.0,
         1,
         None,
         None,

@@ -28,8 +28,8 @@ more recent.
 memory must decide at write time what each new piece of information supersedes — and every
 wrong call loses information *silently*, by overwriting the right answer with a confident
 wrong one. funes makes no write-time decisions at all. Every passage stays, and obsolescence
-is resolved at **read time**: recency weighting, plus a reader (you, or the model) who can
-see both the old and the new passage and judge. A log also keeps what a knowledge base
+is resolved at **read time**, by a reader (you, or the model) who can see both the old and the
+new passage and judge. A log also keeps what a knowledge base
 throws away — the superseded passage is often the answer itself: *what did we try before,
 and why did we move off it?*
 

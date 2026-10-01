@@ -21,7 +21,6 @@ use crate::ui::render;
 // Recall's CLI defaults; ask exposes no tuning of its own.
 const K: usize = 8;
 const CANDIDATES: usize = 30;
-const HALF_LIFE: f64 = 30.0;
 const NEIGHBORS: i64 = 1;
 
 /// The prompt must precede the flags, which would otherwise swallow it; the empty strict MCP
@@ -121,7 +120,6 @@ pub async fn grounding(memory: Memory, question: &str, progress: &(dyn Fn(&str) 
         question.to_string(),
         K,
         CANDIDATES,
-        HALF_LIFE,
         NEIGHBORS,
         None,
         None,

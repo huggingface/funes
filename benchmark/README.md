@@ -17,7 +17,7 @@ dataset over `hf://` — both legs run identical data, so the gap is the I/O pat
 Every timed call runs the whole recall pipeline:
 
 ```
-embed query → vector ANN + BM25 FTS (fused by RRF) → cross-encoder rerank → recency → neighbors → format
+embed query → vector ANN + BM25 FTS (fused by RRF) → cross-encoder rerank → neighbors → format
 ```
 
 The CPU stages (query embed + BGE cross-encoder rerank) are identical whatever the memory, so the

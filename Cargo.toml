@@ -24,7 +24,7 @@ parquet = "58"                   # read agent-trace datasets stored as parquet (
 object_store = "=0.13.2"         # the ObjectStore trait the capture wrapper implements (matches lance-io)
 async-trait = "0.1"              # for the ObjectStore impl in src/memory/capture_store.rs
 bytes = "1"                      # captured write payloads
-chrono = "0.4"                   # recency weighting
+chrono = "0.4"                   # ts parsing, status ages, install stamps
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "sync"] }  # sync: OnceCell/Mutex cache the recall models
 futures = "0.3"
 anyhow = "1"
