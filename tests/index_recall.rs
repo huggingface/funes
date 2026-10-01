@@ -48,8 +48,7 @@ async fn index_then_read_surface() {
         5,
         30,
         1,
-        None,
-        None,
+        Default::default(),
     )
     .await
     .unwrap();
@@ -70,8 +69,10 @@ async fn index_then_read_surface() {
         5,
         30,
         0,
-        Some("tool_use".into()),
-        None,
+        funes::commands::recall::RecallFilter {
+            block_type: Some("tool_use".into()),
+            ..Default::default()
+        },
     )
     .await
     .unwrap();
@@ -278,8 +279,7 @@ async fn index_then_read_surface() {
         5,
         30,
         1,
-        None,
-        None,
+        Default::default(),
     )
     .await
     .unwrap();

@@ -62,8 +62,7 @@ async fn time_recall(memory: &Memory, a: &Args) -> Result<(f64, usize)> {
         a.k,
         a.candidates,
         a.neighbors,
-        None,
-        None,
+        Default::default(),
     )
     .await?;
     let ms = t.elapsed().as_secs_f64() * 1000.0;
@@ -164,7 +163,7 @@ async fn main() -> Result<()> {
     // Warm up the embed + rerank models once (against the local copy), so the one-time model load
     // (hundreds of ms, identical for every memory) is excluded from all timings below.
     eprintln!("loading models…");
-    let _ = recall(local.clone(), a.query.clone(), 1, 5, 0, None, None).await;
+    let _ = recall(local.clone(), a.query.clone(), 1, 5, 0, Default::default()).await;
 
     println!(
         "\ndataset: {}   query: {:?}   k={} candidates={} neighbors={}   warm iters={}\n",

@@ -77,9 +77,16 @@ async fn seed_finishes_a_small_history_and_a_rerun_is_a_noop() {
     );
     let ds = Memory::local().open().await.unwrap();
     assert_eq!(ds.count_rows(Some("vector IS NULL".into())).await.unwrap(), 0);
-    let recalled = recall::recall(Memory::local(), "parse transcripts".into(), 5, 30, 0, None, None)
-        .await
-        .unwrap();
+    let recalled = recall::recall(
+        Memory::local(),
+        "parse transcripts".into(),
+        5,
+        30,
+        0,
+        Default::default(),
+    )
+    .await
+    .unwrap();
     assert!(
         recalled.contains("sess-0001"),
         "the first seed is recallable: {recalled}"

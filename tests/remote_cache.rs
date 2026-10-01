@@ -64,7 +64,7 @@ fn cache_footprint(dir: &Path) -> (usize, u64) {
 }
 
 async fn recall(uri: &str) -> anyhow::Result<String> {
-    funes::commands::recall::recall(Memory::parse(uri), MARKER.to_string(), 5, 30, 0, None, None).await
+    funes::commands::recall::recall(Memory::parse(uri), MARKER.to_string(), 5, 30, 0, Default::default()).await
 }
 
 #[tokio::test]

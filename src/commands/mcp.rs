@@ -198,7 +198,17 @@ impl Funes {
         let quiet = |_: &str| ();
         let recalled = async {
             let candidates = candidates.unwrap_or(recall::DEFAULT_CANDIDATES);
-            let search = recall::Search::new(query, candidates, block_type, harness, &quiet).await?;
+            let search = recall::Search::new(
+                query,
+                candidates,
+                recall::RecallFilter {
+                    block_type,
+                    harness,
+                    ..Default::default()
+                },
+                &quiet,
+            )
+            .await?;
             // The server's own memory, as it will be after this host's next push. The local search
             // runs while the remote one waits on the network.
             let (read, owed) = tokio::join!(search.candidates(&memory, &quiet), async {

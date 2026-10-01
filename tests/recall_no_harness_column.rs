@@ -47,8 +47,7 @@ async fn recall_tolerates_a_memory_without_the_harness_column() {
         5,
         30,
         1,
-        None,
-        None,
+        Default::default(),
     )
     .await
     .expect("recall over a memory without the harness column");
@@ -65,8 +64,10 @@ async fn recall_tolerates_a_memory_without_the_harness_column() {
         5,
         30,
         1,
-        None,
-        Some("pi".into()),
+        funes::commands::recall::RecallFilter {
+            harness: Some("pi".into()),
+            ..Default::default()
+        },
     )
     .await
     .expect_err("--harness on a column-less memory should error");

@@ -328,8 +328,20 @@ async fn main() -> Result<()> {
                     s.set(label);
                 }
             };
-            let (note, hits) =
-                recall::recall_hits(memory, query, k, candidates, neighbors, block_type, harness, &progress).await?;
+            let (note, hits) = recall::recall_hits(
+                memory,
+                query,
+                k,
+                candidates,
+                neighbors,
+                recall::RecallFilter {
+                    block_type,
+                    harness,
+                    ..Default::default()
+                },
+                &progress,
+            )
+            .await?;
             drop(spinner);
             print!("{}", recall::rendered(&note, &hits));
             Ok(())

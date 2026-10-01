@@ -17,8 +17,7 @@ async fn recall_without_an_index_guides_to_funes_add() {
         5,
         30,
         1,
-        None,
-        None,
+        Default::default(),
     )
     .await
     .expect_err("recall with no index should error, not return canned content")

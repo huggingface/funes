@@ -13,7 +13,7 @@ use serde_json::Value;
 use std::io::{BufRead, BufReader, IsTerminal, Read};
 use std::process::{Command, ExitStatus, Stdio};
 
-use super::recall::{check_readable, recall_hits};
+use super::recall::{check_readable, recall_hits, RecallFilter};
 use crate::memory::Memory;
 use crate::ui::banner::{accent, band_width, Banner};
 use crate::ui::render;
@@ -121,8 +121,7 @@ pub async fn grounding(memory: Memory, question: &str, progress: &(dyn Fn(&str) 
         K,
         CANDIDATES,
         NEIGHBORS,
-        None,
-        None,
+        RecallFilter::default(),
         progress,
     )
     .await?;

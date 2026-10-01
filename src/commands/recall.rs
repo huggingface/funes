@@ -9,7 +9,7 @@ use crate::memory::dataset;
 use crate::memory::{Memory, MemoryState};
 use anyhow::{anyhow, bail, Context, Result};
 use arrow_array::{Float32Array, Int64Array, RecordBatch, StringArray, UInt64Array};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use futures::TryStreamExt;
 use lance::dataset::{Dataset, ROW_ID};
 use lance_index::scalar::FullTextSearchQuery;
@@ -126,7 +126,7 @@ pub struct Session {
 impl Session {
     /// The `YYYY-MM-DD` the session started.
     pub fn date(&self) -> &str {
-        self.ts.get(..10).unwrap_or(&self.ts)
+        day(&self.ts)
     }
 
     /// Best available provenance: the repo when the checkout resolved, else the working directory.
@@ -172,8 +172,48 @@ pub(crate) fn esc(s: &str) -> String {
     s.replace('\'', "''")
 }
 
-/// `block_type = '…' AND harness IN ('…')` over whichever filters are set, else None.
-fn build_where(block_type: Option<&str>, harness: &[String]) -> Option<String> {
+/// The day `ts` falls on: a `ts` is RFC 3339 in UTC, so its first ten characters.
+fn day(ts: &str) -> &str {
+    ts.get(..10).unwrap_or(ts)
+}
+
+/// A bound as the `YYYY-MM-DD` it names.
+fn parse_day(s: &str) -> Result<NaiveDate> {
+    NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|_| anyhow!("{s:?} is not a date: expected YYYY-MM-DD"))
+}
+
+/// The days from `since` through `until`, each an optional `YYYY-MM-DD`, both inclusive.
+#[derive(Default)]
+struct DayRange<'a> {
+    since: Option<&'a str>,
+    until: Option<&'a str>,
+}
+
+impl DayRange<'_> {
+    /// Whether the day `ts` falls on is in the range.
+    fn holds(&self, ts: &str) -> bool {
+        let d = day(ts);
+        self.since.is_none_or(|s| d >= s) && self.until.is_none_or(|u| d <= u)
+    }
+
+    /// The same test as Lance filter clauses on `ts`: `ts >= since` and `ts < the day after until`.
+    /// A filter cannot take a substring of `ts`, so here the bounds must parse.
+    fn clauses(&self) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        if let Some(since) = self.since {
+            out.push(format!("ts >= '{}'", parse_day(since)?));
+        }
+        if let Some(until) = self.until {
+            let next = parse_day(until)?.succ_opt().context("the day after is out of range")?;
+            out.push(format!("ts < '{next}'"));
+        }
+        Ok(out)
+    }
+}
+
+/// `block_type = '…' AND harness IN ('…') AND ts >= '…'` over whichever filters are set, else
+/// None.
+fn build_where(block_type: Option<&str>, harness: &[String], days: &DayRange) -> Result<Option<String>> {
     let mut clauses = Vec::new();
     if let Some(bt) = block_type {
         clauses.push(format!("block_type = '{}'", esc(bt)));
@@ -186,11 +226,12 @@ fn build_where(block_type: Option<&str>, harness: &[String]) -> Option<String> {
             clauses.push(format!("harness IN ({})", list.join(", ")));
         }
     }
-    if clauses.is_empty() {
+    clauses.extend(days.clauses()?);
+    Ok(if clauses.is_empty() {
         None
     } else {
         Some(clauses.join(" AND "))
-    }
+    })
 }
 
 /// The stored `harness` facets a `--harness` value names. `claude` and `claude_code` name each
@@ -339,10 +380,9 @@ pub async fn recall(
     k: usize,
     candidates: usize,
     neighbors: i64,
-    block_type: Option<String>,
-    harness: Option<String>,
+    filter: RecallFilter,
 ) -> Result<String> {
-    let (note, hits) = recall_hits(memory, query, k, candidates, neighbors, block_type, harness, &|_| ()).await?;
+    let (note, hits) = recall_hits(memory, query, k, candidates, neighbors, filter, &|_| ()).await?;
     Ok(rendered(&note, &hits))
 }
 
@@ -358,20 +398,40 @@ pub fn rendered(note: &str, hits: &[(Hit, f64)]) -> String {
 /// Returns the degradation note (empty when the memory opened normally) and the scored hits, best
 /// first — rendering is the caller's choice. `progress` hears a short label as each slow phase
 /// starts (model load, search, rerank); pass a no-op to run silently.
-#[allow(clippy::too_many_arguments)]
 pub async fn recall_hits(
     memory: Memory,
     query: String,
     k: usize,
     candidates: usize,
     neighbors: i64,
-    block_type: Option<String>,
-    harness: Option<String>,
+    filter: RecallFilter,
     progress: &(dyn Fn(&str) + Sync),
 ) -> Result<(String, Vec<(Hit, f64)>)> {
-    let search = Search::new(query, candidates, block_type, harness, progress).await?;
+    let search = Search::new(query, candidates, filter, progress).await?;
     let pool = search.candidates(&memory, progress).await?;
     search.rank(vec![pool], k, neighbors, progress).await
+}
+
+/// What narrows a search.
+#[derive(Default)]
+pub struct RecallFilter {
+    /// Keep chunks of this block type: `text`, `thinking`, `tool_use` or `tool_result`.
+    pub block_type: Option<String>,
+    /// Keep turns of this harness, as the turns carry it (`claude` also names `claude_code`).
+    pub harness: Option<String>,
+    /// Keep turns on or after this `YYYY-MM-DD`.
+    pub since: Option<String>,
+    /// Keep turns on or before this `YYYY-MM-DD`.
+    pub until: Option<String>,
+}
+
+impl RecallFilter {
+    fn days(&self) -> DayRange<'_> {
+        DayRange {
+            since: self.since.as_deref(),
+            until: self.until.as_deref(),
+        }
+    }
 }
 
 /// One query, embedded once, and the filters every memory's search applies. A recall is
@@ -399,16 +459,14 @@ impl Candidates {
 }
 
 impl Search {
-    /// Embed `query` for searching up to `candidates` rows per memory, filtered by block type and
-    /// harness.
+    /// Embed `query` for searching up to `candidates` rows per memory that `filter` keeps.
     pub async fn new(
         query: String,
         candidates: usize,
-        block_type: Option<String>,
-        harness: Option<String>,
+        filter: RecallFilter,
         progress: &(dyn Fn(&str) + Sync),
     ) -> Result<Self> {
-        let harness = harness.map(harness_spellings).unwrap_or_default();
+        let harness = filter.harness.clone().map(harness_spellings).unwrap_or_default();
         progress("loading model…");
         let qv: Vec<f32> = models()
             .await?
@@ -420,7 +478,7 @@ impl Search {
             .next()
             .context("empty embedding")?;
         Ok(Self {
-            where_clause: build_where(block_type.as_deref(), &harness),
+            where_clause: build_where(filter.block_type.as_deref(), &harness, &filter.days())?,
             harness_filtered: !harness.is_empty(),
             query,
             qv,
@@ -847,17 +905,14 @@ impl SessionFilter {
                 return false;
             }
         }
-        if let Some(since) = &self.since {
-            if s.date() < since.as_str() {
-                return false;
-            }
+        self.days().holds(&s.ts)
+    }
+
+    fn days(&self) -> DayRange<'_> {
+        DayRange {
+            since: self.since.as_deref(),
+            until: self.until.as_deref(),
         }
-        if let Some(until) = &self.until {
-            if s.date() > until.as_str() {
-                return false;
-            }
-        }
-        true
     }
 }
 
@@ -1762,18 +1817,71 @@ mod tests {
     #[test]
     fn build_where_combines_set_filters() {
         let one = |h: &str| vec![h.to_string()];
-        assert_eq!(build_where(None, &[]), None);
-        assert_eq!(build_where(Some("text"), &[]).as_deref(), Some("block_type = 'text'"));
-        assert_eq!(build_where(None, &one("codex")).as_deref(), Some("harness = 'codex'"));
+        let any = DayRange::default();
+        let w = |bt: Option<&str>, h: &[String], d: &DayRange| build_where(bt, h, d).unwrap();
+        assert_eq!(w(None, &[], &any), None);
+        assert_eq!(w(Some("text"), &[], &any).as_deref(), Some("block_type = 'text'"));
+        assert_eq!(w(None, &one("codex"), &any).as_deref(), Some("harness = 'codex'"));
         assert_eq!(
-            build_where(Some("tool_use"), &one("pi")).as_deref(),
+            w(Some("tool_use"), &one("pi"), &any).as_deref(),
             Some("block_type = 'tool_use' AND harness = 'pi'")
         );
         assert_eq!(
-            build_where(None, &harness_spellings("claude".into())).as_deref(),
+            w(None, &harness_spellings("claude".into()), &any).as_deref(),
             Some("harness IN ('claude_code', 'claude')")
         );
-        // values are escaped against filter-string injection.
-        assert_eq!(build_where(None, &one("a'b")).as_deref(), Some("harness = 'a''b'"));
+        // A day range is inclusive: the upper clause is the day after `until`, exclusive.
+        let week = DayRange {
+            since: Some("2026-09-14"),
+            until: Some("2026-09-20"),
+        };
+        assert_eq!(
+            w(Some("text"), &[], &week).as_deref(),
+            Some("block_type = 'text' AND ts >= '2026-09-14' AND ts < '2026-09-21'")
+        );
+        let year_end = DayRange {
+            since: None,
+            until: Some("2026-12-31"),
+        };
+        assert_eq!(w(None, &[], &year_end).as_deref(), Some("ts < '2027-01-01'"));
+        // values are escaped against filter-string injection; a bound that is not a date is refused.
+        assert_eq!(w(None, &one("a'b"), &any).as_deref(), Some("harness = 'a''b'"));
+        let err = build_where(
+            None,
+            &[],
+            &DayRange {
+                since: Some("x'y"),
+                until: None,
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("expected YYYY-MM-DD"), "{err}");
+    }
+
+    #[test]
+    fn day_range_is_inclusive_at_both_ends_and_open_without_a_bound() {
+        let week = DayRange {
+            since: Some("2026-09-14"),
+            until: Some("2026-09-20"),
+        };
+        assert!(week.holds("2026-09-14T00:00:00Z"));
+        assert!(week.holds("2026-09-20T23:59:59Z"));
+        assert!(!week.holds("2026-09-13T23:59:59Z"));
+        assert!(!week.holds("2026-09-21T00:00:00Z"));
+        assert!(DayRange::default().holds("1999-01-01T00:00:00Z"));
+        assert!(DayRange {
+            since: Some("2026-09-14"),
+            until: None
+        }
+        .holds("2030-01-01T00:00:00Z"));
+        // The filter clauses draw the same line: `ts >= since` and `ts < the day after until`.
+        for ts in [
+            "2026-09-13T23:59:59Z",
+            "2026-09-14T00:00:00Z",
+            "2026-09-20T23:59:59.999Z",
+            "2026-09-21T00:00:00Z",
+        ] {
+            assert_eq!(week.holds(ts), ("2026-09-14".."2026-09-21").contains(&ts), "{ts}");
+        }
     }
 }
