@@ -561,13 +561,10 @@ impl Search {
         })
     }
 
-    /// Rank the pooled candidates, a row several memories hold counted once, keep the top `k` and
-    /// attach `neighbors` from the memory each hit came from. However many pools there are, at most
-    /// `candidates` of them go on, the best by fused score. When the pool is several times `k`
-    /// ([`reranks`]), or the search asked for it, a rerank scores those with the cross-encoder, at
-    /// a cost per candidate that dominates a recall. Otherwise the fused order stands, with the
-    /// fused score as the score. Returns the pools' degradation notes and the scored hits, best
-    /// first.
+    /// Rank the pooled candidates, a row several memories hold counted once: the best `candidates`
+    /// by fused score, reranked by the cross-encoder when the pool is several times `k`
+    /// ([`reranks`]) or the search asked for it, cut to `k`, with `neighbors` attached from the
+    /// memory each hit came from. Returns the pools' degradation notes and the hits, best first.
     pub async fn rank(
         &self,
         pools: Vec<Candidates>,
