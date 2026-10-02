@@ -9,9 +9,10 @@ them on its own — but they work the same from a terminal.
 funes recall "why did we switch off the streaming parser"
 ```
 
-Retrieval is one pipeline: hybrid search (vector + BM25, fused by reciprocal rank) → cross-encoder
-rerank → neighbor expansion. What comes back is the **actual passage from the
-actual turn**, not a summary written about it.
+Retrieval is one pipeline: hybrid search (vector + BM25, fused by reciprocal rank) → neighbor
+expansion, with a cross-encoder rerank of the pool before the cut when the pool is several times
+the hits asked for. What comes back is the **actual passage from the actual turn**, not a summary
+written about it.
 
 Passages are searchable by their words as soon as their text is indexed, even while embeddings
 are pending. If text search fails, recall reports an error.
@@ -39,22 +40,28 @@ The `→ get` line carries exactly the arguments `get` wants, including the memo
 from — the local one for a turn an agent's bound memory is still owed (see
 [add.md](add.md#other-mcp-clients)). `no results` prints when nothing matched. The exact shape is
 stable — a contract, not a presentation; don't parse it loosely.
+The score is the cross-encoder's probability when the pool was reranked, the fused rank score
+otherwise (see `--candidates` below).
 
 ## `recall` flags
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `-k` | 8 | hits returned |
-| `--candidates` | 30 | fused pool reranked before the top-k cut |
+| `-k` | 8 | hits returned, each a passage to read |
+| `--candidates` | 30 | fused pool the hits are cut from, reranked by the cross-encoder before the cut at four times `-k` or more |
 | `--neighbors` | 1 | adjacent chunks (by seq) attached per hit; 0 disables |
 | `--type` | — | restrict to `text \| thinking \| tool_use \| tool_result` |
 | `--harness` | — | restrict to one harness facet, as the turns carry it (`claude` also matches the older `claude_code`) |
 | `--since` / `--until` | — | restrict to turns on or after / on or before a `YYYY-MM-DD` |
 | `--memory` | local | the memory to read (see below) |
 
-The MCP `recall` tool takes the same parameters and defaults, so an agent can widen a search —
-more `candidates` when a topic is rare — or bound it in time. Ranking weighs relevance, not age:
-for the latest word on a topic, pass `since`.
+The MCP `recall` tool takes the same parameters and defaults. Each hit is a passage to read, so
+`k` is what a call costs in tokens and `candidates` is how far it looks. Reading more hits is the
+cheap way to reach deeper. A pool four times the hits or more is a request to look that deep and
+read less: recall then reranks the pool with the cross-encoder before the cut, which costs seconds
+per call and grows with the pool. Under that line the hits are the first `k` of the fused order,
+and raising `candidates` alone changes little. Ranking weighs relevance, not age: for the latest
+word on a topic, pass `since`.
 
 ## Reading turns with `get`
 

@@ -398,6 +398,16 @@ pub const DEFAULT_K: usize = 8;
 pub const DEFAULT_CANDIDATES: usize = 30;
 pub const DEFAULT_NEIGHBORS: i64 = 1;
 
+/// How many times the hits a pool must be before a recall reranks it. Reranking a pool near `k`
+/// only reorders what the caller reads anyway, for seconds. A pool several times `k` is a request
+/// to look that deep and read less, which is what a rerank is for. The defaults sit under the line.
+pub const RERANK_RATIO: usize = 4;
+
+/// Whether a recall of `k` hits from a pool of `candidates` reranks the pool.
+pub fn reranks(k: usize, candidates: usize) -> bool {
+    candidates >= RERANK_RATIO * k
+}
+
 /// Run the recall pipeline over one memory and return the results rendered in the agent format.
 pub async fn recall(
     memory: Memory,
@@ -467,7 +477,7 @@ pub struct Search {
     candidates: usize,
     harness_filtered: bool,
     where_clause: Option<String>,
-    /// Whether `rank` reranks the pool. Unset, it does.
+    /// Whether `rank` reranks the pool. Unset, [`reranks`] decides from the pool and `k`.
     rerank: Option<bool>,
 }
 
@@ -514,7 +524,7 @@ impl Search {
         })
     }
 
-    /// Rerank the pool or not. Unset, the pool is reranked.
+    /// Rerank the pool or not, whatever the pool and `k` would decide.
     pub fn with_rerank(mut self, rerank: bool) -> Self {
         self.rerank = Some(rerank);
         self
@@ -553,10 +563,11 @@ impl Search {
 
     /// Rank the pooled candidates, a row several memories hold counted once, keep the top `k` and
     /// attach `neighbors` from the memory each hit came from. However many pools there are, at most
-    /// `candidates` of them go on, the best by fused score. A rerank scores those with the
-    /// cross-encoder, at a cost per candidate that dominates a recall; without one the fused order
-    /// stands, with the fused score as the score. Returns the pools' degradation notes and the
-    /// scored hits, best first.
+    /// `candidates` of them go on, the best by fused score. When the pool is several times `k`
+    /// ([`reranks`]), or the search asked for it, a rerank scores those with the cross-encoder, at
+    /// a cost per candidate that dominates a recall. Otherwise the fused order stands, with the
+    /// fused score as the score. Returns the pools' degradation notes and the scored hits, best
+    /// first.
     pub async fn rank(
         &self,
         pools: Vec<Candidates>,
@@ -584,7 +595,7 @@ impl Search {
             return Ok((note, Vec::new()));
         }
 
-        let mut scored: Vec<(usize, f64)> = if self.rerank.unwrap_or(true) {
+        let mut scored: Vec<(usize, f64)> = if self.rerank.unwrap_or_else(|| reranks(k, self.candidates)) {
             let docs: Vec<&str> = hits.iter().map(|(_, h)| h.text.as_str()).collect();
             progress(&format!("reranking {} candidates…", docs.len()));
             let scores = models()
@@ -1796,6 +1807,22 @@ mod tests {
     /// The `limit` cut usually lands inside a tie, and `scores` is a HashMap whose order is seeded
     /// per process, so fusion has to impose a total order of its own: same lists, same rows, same
     /// order, every run.
+    #[test]
+    fn a_pool_several_times_the_hits_is_reranked() {
+        assert_eq!(
+            RERANK_RATIO, 4,
+            "the CLI help, the MCP schema and docs/recall.md say four"
+        );
+        assert!(
+            !reranks(DEFAULT_K, DEFAULT_CANDIDATES),
+            "the defaults sit under the line"
+        );
+        assert!(!reranks(8, 31));
+        assert!(reranks(8, 32));
+        assert!(reranks(5, 30));
+        assert!(!reranks(30, 30));
+    }
+
     #[test]
     fn rrf_fuse_settles_ties_by_row_id() {
         let hit = |id: u64| Hit {

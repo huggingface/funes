@@ -16,12 +16,14 @@ use rmcp::{schemars, tool, tool_handler, tool_router, ServerHandler, ServiceExt}
 pub struct RecallRequest {
     #[schemars(description = "Natural-language description of what to recall from past sessions")]
     pub query: String,
-    #[schemars(description = "Number of results to return")]
+    #[schemars(
+        description = "Hits returned (default 8). Each is a verbatim passage of a few hundred tokens, so `k` is what a call costs to read."
+    )]
     pub k: Option<usize>,
     #[schemars(description = "Adjacent chunks attached to each hit for context; 0 returns the hits alone.")]
     pub neighbors: Option<i64>,
     #[schemars(
-        description = "How many fused candidates to rerank. Raise it when a topic is rare and the first pass may not surface it."
+        description = "Size of the fused pool the hits are cut from (default 30): how far the search looks. At four times `k` or more, the pool is reranked by the cross-encoder before the cut, which costs seconds but lets `k` stay small while the search looks deep. Under that, the hits are the first `k` of the fused order, and raising it changes little."
     )]
     pub candidates: Option<usize>,
     #[schemars(description = "Restrict to a block type: text | thinking | tool_use | tool_result")]
@@ -183,7 +185,7 @@ impl Funes {
     }
 
     #[tool(
-        description = "Semantic search over the user's past AI agent sessions: describe what you are after, get back the verbatim passages — what was decided, tried, measured or investigated. Call it when they refer to earlier work, or when you are about to re-derive something a session may already have settled. Call it too before claiming that something was never built, was dropped, or was never discussed: the code cannot show that, only the sessions can. Ranked top-k, so it gives you a foothold on a topic, not every session touching it. Ranking weighs relevance, not age: for the latest word on a topic, or one stretch of time, bound it with `since`/`until`."
+        description = "Semantic search over the user's past AI agent sessions: describe what you are after, get back the verbatim passages — what was decided, tried, measured or investigated. Call it when they refer to earlier work, or when you are about to re-derive something a session may already have settled. Call it too before claiming that something was never built, was dropped, or was never discussed: the code cannot show that, only the sessions can. Ranked top-k, so it gives you a foothold on a topic, not every session touching it. Ranking weighs relevance, not age: for the latest word on a topic, or one stretch of time, bound it with `since`/`until`. Each hit is a passage you will read: `k` is the token cost, `candidates` the reach, and a pool four times `k` or more is reranked so the reach can grow without the reading."
     )]
     async fn recall(
         &self,
