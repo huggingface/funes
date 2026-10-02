@@ -196,6 +196,14 @@ impl DayRange<'_> {
         self.since.is_none_or(|s| d >= s) && self.until.is_none_or(|u| d <= u)
     }
 
+    /// The error a bound that is not a date deserves, else nothing.
+    fn check(&self) -> Result<()> {
+        for bound in [self.since, self.until].into_iter().flatten() {
+            parse_day(bound)?;
+        }
+        Ok(())
+    }
+
     /// The same test as Lance filter clauses on `ts`: `ts >= since` and `ts < the day after until`.
     /// A filter cannot take a substring of `ts`, so here the bounds must parse.
     fn clauses(&self) -> Result<Vec<String>> {
@@ -918,7 +926,7 @@ impl SessionFilter {
 
 /// The sessions of a memory that `filter` keeps, oldest first, rendered in the agent format.
 pub async fn sessions(memory: Memory, filter: SessionFilter) -> Result<String> {
-    refuse_zero_limit(&filter)?;
+    check_filter(&filter)?;
     list_sessions(vec![SessionPool::open(&memory).await?], filter).await
 }
 
@@ -948,19 +956,20 @@ impl SessionPool {
     }
 }
 
-/// Zero would render nothing, which is never what a caller wants.
-fn refuse_zero_limit(filter: &SessionFilter) -> Result<()> {
+/// Zero would render nothing, which is never what a caller wants, and a bound that is not a date
+/// would match nothing or everything without a word.
+fn check_filter(filter: &SessionFilter) -> Result<()> {
     if filter.limit == Some(0) {
         bail!("a limit of 0 would list nothing — omit it for {SESSIONS_LIMIT} rows, raise it to at most {SESSIONS_LIMIT_MAX}, and walk the rest with --offset");
     }
-    Ok(())
+    filter.days().check()
 }
 
 /// The sessions of the pooled memories that `filter` keeps, oldest first, rendered in the agent
 /// format; a session several pools hold is listed from the first. The prompts are read after the
 /// filter and the bound, so their cost follows the rows rendered rather than the size of the memory.
 pub async fn list_sessions(mut pools: Vec<SessionPool>, filter: SessionFilter) -> Result<String> {
-    refuse_zero_limit(&filter)?;
+    check_filter(&filter)?;
     let note: String = pools.iter().map(|p| p.note.as_str()).collect();
     let label = pools.first().map(|p| p.label.clone()).unwrap_or_default();
     let mut seen = HashSet::new();
