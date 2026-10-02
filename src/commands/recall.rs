@@ -358,13 +358,24 @@ pub fn memory_hint(read: Option<&str>) -> String {
     }
 }
 
-/// The embedder + reranker, loaded once and shared. Loading them (ONNX init) is the costly part of
-/// a recall, so a long-lived process — the MCP server — pays it on the first call and reuses them
-/// after. The `Mutex` serializes recalls (both models run with `&mut`), which is fine: the work is
-/// CPU-bound and the server's calls are serial anyway.
+/// The embedder, and the reranker once a rerank has asked for it, loaded once and shared. Loading
+/// a model is the costly part of a recall, so a long-lived process (the MCP server) pays it on the
+/// first call and reuses the models after, and a search that never reranks never loads the
+/// reranker. The `Mutex` serializes recalls (both models run with `&mut`), which is fine: the work
+/// is CPU-bound and the server's calls are serial anyway.
 struct Models {
     embedder: Box<dyn Embedder>,
-    reranker: Box<dyn Reranker>,
+    reranker: Option<Box<dyn Reranker>>,
+}
+
+impl Models {
+    /// The reranker, built on its first use.
+    fn reranker(&mut self) -> Result<&mut dyn Reranker> {
+        if self.reranker.is_none() {
+            self.reranker = Some(inference::reranker()?);
+        }
+        Ok(self.reranker.as_deref_mut().expect("built above"))
+    }
 }
 
 static MODELS: OnceCell<Mutex<Models>> = OnceCell::const_new();
@@ -374,8 +385,10 @@ async fn models() -> Result<&'static Mutex<Models>> {
     MODELS
         .get_or_try_init(|| async {
             let embedder = inference::embedder()?;
-            let reranker = inference::reranker()?;
-            Ok::<_, anyhow::Error>(Mutex::new(Models { embedder, reranker }))
+            Ok::<_, anyhow::Error>(Mutex::new(Models {
+                embedder,
+                reranker: None,
+            }))
         })
         .await
 }
@@ -454,6 +467,8 @@ pub struct Search {
     candidates: usize,
     harness_filtered: bool,
     where_clause: Option<String>,
+    /// Whether `rank` reranks the pool. Unset, it does.
+    rerank: Option<bool>,
 }
 
 /// One memory's candidates for a [`Search`], before the rerank.
@@ -495,7 +510,14 @@ impl Search {
             query,
             qv,
             candidates,
+            rerank: None,
         })
+    }
+
+    /// Rerank the pool or not. Unset, the pool is reranked.
+    pub fn with_rerank(mut self, rerank: bool) -> Self {
+        self.rerank = Some(rerank);
+        self
     }
 
     /// Hybrid retrieval over one memory: a vector ANN scan and a BM25 scan, fused by reciprocal
@@ -529,11 +551,12 @@ impl Search {
         })
     }
 
-    /// Rerank the pooled candidates, a row several memories hold counted once, keep the top `k`
-    /// and attach `neighbors` from the memory each hit came from. However many pools there are,
-    /// the rerank scores at most `candidates` of them, the best by fused score: it costs per
-    /// candidate, and dominates a recall. Returns the pools' degradation notes and the scored
-    /// hits, best first.
+    /// Rank the pooled candidates, a row several memories hold counted once, keep the top `k` and
+    /// attach `neighbors` from the memory each hit came from. However many pools there are, at most
+    /// `candidates` of them go on, the best by fused score. A rerank scores those with the
+    /// cross-encoder, at a cost per candidate that dominates a recall; without one the fused order
+    /// stands, with the fused score as the score. Returns the pools' degradation notes and the
+    /// scored hits, best first.
     pub async fn rank(
         &self,
         pools: Vec<Candidates>,
@@ -561,20 +584,23 @@ impl Search {
             return Ok((note, Vec::new()));
         }
 
-        let docs: Vec<&str> = hits.iter().map(|(_, h)| h.text.as_str()).collect();
-        progress(&format!("reranking {} candidates…", docs.len()));
-        let scores = models()
-            .await?
-            .lock()
-            .await
-            .reranker
-            .rerank(self.query.as_str(), &docs)?;
-
-        let mut scored: Vec<(usize, f64)> = scores
-            .iter()
-            .enumerate()
-            .map(|(i, &s)| (i, 1.0 / (1.0 + (-(s as f64)).exp())))
-            .collect();
+        let mut scored: Vec<(usize, f64)> = if self.rerank.unwrap_or(true) {
+            let docs: Vec<&str> = hits.iter().map(|(_, h)| h.text.as_str()).collect();
+            progress(&format!("reranking {} candidates…", docs.len()));
+            let scores = models()
+                .await?
+                .lock()
+                .await
+                .reranker()?
+                .rerank(self.query.as_str(), &docs)?;
+            scores
+                .iter()
+                .enumerate()
+                .map(|(i, &s)| (i, 1.0 / (1.0 + (-(s as f64)).exp())))
+                .collect()
+        } else {
+            hits.iter().enumerate().map(|(i, (_, h))| (i, h.fused as f64)).collect()
+        };
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(k);
 
