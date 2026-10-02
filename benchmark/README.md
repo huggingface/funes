@@ -14,13 +14,16 @@ dataset over `hf://` — both legs run identical data, so the gap is the I/O pat
 
 ## What it measures
 
-Every timed call runs the whole recall pipeline:
+Every timed call runs the recall pipeline:
 
 ```
-embed query → vector ANN + BM25 FTS (fused by RRF) → cross-encoder rerank → neighbors → format
+embed query → vector ANN + BM25 FTS (fused by RRF) → [cross-encoder rerank] → neighbors → format
 ```
 
-The CPU stages (query embed + BGE cross-encoder rerank) are identical whatever the memory, so the
+The rerank runs when `--candidates` is at least four times `--k`, which the defaults (8 of 30) are
+not: a default timed call has no rerank, `--candidates 32` or more times one.
+
+The CPU stages (query embed, and the rerank when it runs) are identical whatever the memory, so the
 local↔remote gap is entirely the I/O path: opening the dataset, the ANN/FTS scans, and the neighbor
 fetch. The embed + rerank models are loaded once in a warm-up call that is **excluded** from all
 timings.
@@ -72,9 +75,9 @@ calls, and `hits` the results returned, equal on both rows when both legs did th
 line gives the remote-to-local ratios: cold, warm median and warm best-case. `warm_lo` is the most
 stable of the three, and `warm_hi` spikes are page-cache noise at low `--iters`.
 
-**Absolute numbers are host-dependent, so read the ratio, not the floor.** Recall is dominated by the
-cross-encoder rerank (`--candidates` query/passage pairs), identical work on both legs, and that floor
-moves with the CPU and the inference backend. What the benchmark measures is the remote-vs-local
+**Absolute numbers are host-dependent, so read the ratio, not the floor.** A reranked recall is
+dominated by the cross-encoder (`--candidates` query/passage pairs), identical work on both legs, and
+that floor moves with the CPU and the inference backend. What the benchmark measures is the remote-vs-local
 **ratio**: warm close to local, cold a one-time download.
 
 ## Caveats

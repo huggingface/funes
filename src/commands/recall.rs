@@ -1,6 +1,7 @@
 //! The read surface: `recall`, `get`, `status` over the existing index.
-//! Recall pipeline: hybrid (vector + BM25, fused by reciprocal rank) → cross-encoder rerank →
-//! neighbor expansion. `recall`/`get` return results rendered in the agent format;
+//! Recall pipeline: hybrid (vector + BM25, fused by reciprocal rank) → neighbor expansion, with a
+//! cross-encoder rerank of the pool before the cut when it is several times the hits ([`reranks`]).
+//! `recall`/`get` return results rendered in the agent format;
 //! `recall_hits`/`get_turns` return the structured results for other renderings (see `render`).
 
 use crate::chunk;
@@ -429,7 +430,8 @@ pub fn rendered(note: &str, hits: &[(Hit, f64)]) -> String {
     crate::ui::render::recall_agent(note, hits)
 }
 
-/// Run the recall pipeline over one memory: hybrid retrieval → rerank → neighbor expansion.
+/// Run the recall pipeline over one memory: hybrid retrieval → rank, reranked when the pool is
+/// several times `k` → neighbor expansion.
 /// Returns the degradation note (empty when the memory opened normally) and the scored hits, best
 /// first — rendering is the caller's choice. `progress` hears a short label as each slow phase
 /// starts (model load, search, rerank); pass a no-op to run silently.
