@@ -177,9 +177,13 @@ fn day(ts: &str) -> &str {
     ts.get(..10).unwrap_or(ts)
 }
 
-/// A bound as the `YYYY-MM-DD` it names.
+/// A bound as the `YYYY-MM-DD` it names, in that exact spelling: a bound is also compared as
+/// text, which `2026-9-18` would not survive.
 fn parse_day(s: &str) -> Result<NaiveDate> {
-    NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|_| anyhow!("{s:?} is not a date: expected YYYY-MM-DD"))
+    NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        .ok()
+        .filter(|d| d.to_string() == s)
+        .ok_or_else(|| anyhow!("{s:?} is not a date: expected YYYY-MM-DD"))
 }
 
 /// The days from `since` through `until`, each an optional `YYYY-MM-DD`, both inclusive.
@@ -1865,6 +1869,13 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("expected YYYY-MM-DD"), "{err}");
+        // So is a date in another spelling: the text compare on `ts` needs the zero padding.
+        let unpadded = DayRange {
+            since: Some("2026-9-14"),
+            until: None,
+        };
+        assert!(build_where(None, &[], &unpadded).is_err());
+        assert!(unpadded.check().is_err());
     }
 
     #[test]
