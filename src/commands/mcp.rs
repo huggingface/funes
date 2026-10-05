@@ -29,6 +29,10 @@ pub struct RecallRequest {
     #[schemars(description = "Restrict to a block type: text | thinking | tool_use | tool_result")]
     pub block_type: Option<String>,
     #[schemars(
+        description = "Restrict to a role, as the turns carry it (an agent's turns say user | assistant | tool | system)"
+    )]
+    pub role: Option<String>,
+    #[schemars(
         description = "Restrict to a harness facet, as the turns carry it (`claude` also matches the older `claude_code`)"
     )]
     pub harness: Option<String>,
@@ -195,6 +199,7 @@ impl Funes {
             neighbors,
             candidates,
             block_type,
+            role,
             harness,
             since,
             until,
@@ -211,7 +216,7 @@ impl Funes {
                 candidates,
                 recall::RecallFilter {
                     block_type,
-                    role: None,
+                    role,
                     harness,
                     since,
                     until,
