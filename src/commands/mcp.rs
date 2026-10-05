@@ -211,6 +211,7 @@ impl Funes {
                 candidates,
                 recall::RecallFilter {
                     block_type,
+                    role: None,
                     harness,
                     since,
                     until,

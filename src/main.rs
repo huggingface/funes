@@ -346,6 +346,7 @@ async fn main() -> Result<()> {
                 neighbors,
                 recall::RecallFilter {
                     block_type,
+                    role: None,
                     harness,
                     since,
                     until,

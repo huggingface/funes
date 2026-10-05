@@ -224,12 +224,20 @@ impl DayRange<'_> {
     }
 }
 
-/// `block_type = '…' AND harness IN ('…') AND ts >= '…'` over whichever filters are set, else
-/// None.
-fn build_where(block_type: Option<&str>, harness: &[String], days: &DayRange) -> Result<Option<String>> {
+/// `block_type = '…' AND role = '…' AND harness IN ('…') AND ts >= '…'` over whichever filters
+/// are set, else None.
+fn build_where(
+    block_type: Option<&str>,
+    role: Option<&str>,
+    harness: &[String],
+    days: &DayRange,
+) -> Result<Option<String>> {
     let mut clauses = Vec::new();
     if let Some(bt) = block_type {
         clauses.push(format!("block_type = '{}'", esc(bt)));
+    }
+    if let Some(r) = role {
+        clauses.push(format!("role = '{}'", esc(r)));
     }
     match harness {
         [] => {}
@@ -454,6 +462,8 @@ pub async fn recall_hits(
 pub struct RecallFilter {
     /// Keep chunks of this block type: `text`, `thinking`, `tool_use` or `tool_result`.
     pub block_type: Option<String>,
+    /// Keep turns of this role, as the turns carry it.
+    pub role: Option<String>,
     /// Keep turns of this harness, as the turns carry it (`claude` also names `claude_code`).
     pub harness: Option<String>,
     /// Keep turns on or after this `YYYY-MM-DD`.
@@ -517,7 +527,12 @@ impl Search {
             .next()
             .context("empty embedding")?;
         Ok(Self {
-            where_clause: build_where(filter.block_type.as_deref(), &harness, &filter.days())?,
+            where_clause: build_where(
+                filter.block_type.as_deref(),
+                filter.role.as_deref(),
+                &harness,
+                &filter.days(),
+            )?,
             harness_filtered: !harness.is_empty(),
             query,
             qv,
@@ -1883,16 +1898,21 @@ mod tests {
     fn build_where_combines_set_filters() {
         let one = |h: &str| vec![h.to_string()];
         let any = DayRange::default();
-        let w = |bt: Option<&str>, h: &[String], d: &DayRange| build_where(bt, h, d).unwrap();
-        assert_eq!(w(None, &[], &any), None);
-        assert_eq!(w(Some("text"), &[], &any).as_deref(), Some("block_type = 'text'"));
-        assert_eq!(w(None, &one("codex"), &any).as_deref(), Some("harness = 'codex'"));
+        let w = |bt: Option<&str>, r: Option<&str>, h: &[String], d: &DayRange| build_where(bt, r, h, d).unwrap();
+        assert_eq!(w(None, None, &[], &any), None);
+        assert_eq!(w(Some("text"), None, &[], &any).as_deref(), Some("block_type = 'text'"));
+        assert_eq!(w(None, Some("user"), &[], &any).as_deref(), Some("role = 'user'"));
+        assert_eq!(w(None, None, &one("codex"), &any).as_deref(), Some("harness = 'codex'"));
         assert_eq!(
-            w(Some("tool_use"), &one("pi"), &any).as_deref(),
+            w(Some("tool_use"), None, &one("pi"), &any).as_deref(),
             Some("block_type = 'tool_use' AND harness = 'pi'")
         );
         assert_eq!(
-            w(None, &harness_spellings("claude".into()), &any).as_deref(),
+            w(Some("text"), Some("user"), &one("pi"), &any).as_deref(),
+            Some("block_type = 'text' AND role = 'user' AND harness = 'pi'")
+        );
+        assert_eq!(
+            w(None, None, &harness_spellings("claude".into()), &any).as_deref(),
             Some("harness IN ('claude_code', 'claude')")
         );
         // A day range is inclusive: the upper clause is the day after `until`, exclusive.
@@ -1901,17 +1921,19 @@ mod tests {
             until: Some("2026-09-20"),
         };
         assert_eq!(
-            w(Some("text"), &[], &week).as_deref(),
+            w(Some("text"), None, &[], &week).as_deref(),
             Some("block_type = 'text' AND ts >= '2026-09-14' AND ts < '2026-09-21'")
         );
         let year_end = DayRange {
             since: None,
             until: Some("2026-12-31"),
         };
-        assert_eq!(w(None, &[], &year_end).as_deref(), Some("ts < '2027-01-01'"));
+        assert_eq!(w(None, None, &[], &year_end).as_deref(), Some("ts < '2027-01-01'"));
         // values are escaped against filter-string injection; a bound that is not a date is refused.
-        assert_eq!(w(None, &one("a'b"), &any).as_deref(), Some("harness = 'a''b'"));
+        assert_eq!(w(None, None, &one("a'b"), &any).as_deref(), Some("harness = 'a''b'"));
+        assert_eq!(w(None, Some("a'b"), &[], &any).as_deref(), Some("role = 'a''b'"));
         let err = build_where(
+            None,
             None,
             &[],
             &DayRange {
@@ -1926,7 +1948,7 @@ mod tests {
             since: Some("2026-9-14"),
             until: None,
         };
-        assert!(build_where(None, &[], &unpadded).is_err());
+        assert!(build_where(None, None, &[], &unpadded).is_err());
         assert!(unpadded.check().is_err());
     }
 
