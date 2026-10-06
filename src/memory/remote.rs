@@ -34,7 +34,7 @@
 //! the object store Lance already built (`wrap`'s `original`), so we decorate it and never reconstruct
 //! anything. It is also the non-deprecated seam.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -559,15 +559,28 @@ fn captured_files(wrapper: &CaptureWrapper) -> BTreeMap<String, Bytes> {
         .collect()
 }
 
-/// The captured deletes as commit operations: the existing files Lance removed.
+/// The captured deletes as commit operations: the existing files Lance removed. The Hub lists
+/// folders as entries too, but rejects a commit deleting one, so a delete with others under it is
+/// left out: the folder goes with its last file.
 fn captured_deletes(wrapper: &CaptureWrapper) -> Vec<CommitOperation> {
-    wrapper
+    let deleted: BTreeSet<String> = wrapper
         .captured
         .lock()
         .unwrap()
         .iter()
         .filter(|(_, b)| b.is_none())
-        .map(|(p, _)| CommitOperation::delete(p.to_string()))
+        .map(|(p, _)| p.to_string())
+        .collect();
+    deleted
+        .iter()
+        .filter(|path| {
+            let folder = format!("{path}/");
+            !deleted
+                .range(folder.clone()..)
+                .next()
+                .is_some_and(|next| next.starts_with(&folder))
+        })
+        .map(|path| CommitOperation::delete(path.clone()))
         .collect()
 }
 
@@ -1008,6 +1021,32 @@ mod tests {
 
         let txns = reindex_snapshot("refuse", &store, read).await;
         assert!(replay_onto(ds, read, &txns).await.unwrap().is_none());
+    }
+
+    #[test]
+    fn captured_deletes_leave_out_the_folders() {
+        let wrapper = CaptureWrapper {
+            captured: Captured::default(),
+        };
+        for path in [
+            "m/_indices/u",
+            "m/_indices/u/a.lance",
+            "m/_indices/u-2.lance",
+            "m/_versions/1.manifest",
+        ] {
+            wrapper.captured.lock().unwrap().insert(path.into(), None);
+        }
+        let paths: Vec<String> = captured_deletes(&wrapper)
+            .into_iter()
+            .map(|op| match op {
+                CommitOperation::Delete { path_in_repo } => path_in_repo,
+                CommitOperation::Add { .. } => unreachable!(),
+            })
+            .collect();
+        assert_eq!(
+            paths,
+            ["m/_indices/u-2.lance", "m/_indices/u/a.lance", "m/_versions/1.manifest"]
+        );
     }
 
     #[test]
