@@ -40,9 +40,9 @@ pub(crate) fn is_offline_error(e: &HFError) -> bool {
     }
 }
 
-/// Build an hf-hub client — the one place the crate does. `retries` is false only for the
-/// fail-fast reachability/status probes, where hf-hub's default backoff would drag a single
-/// offline check out for seconds.
+/// Build an hf-hub client — the one place the crate does. `retries` is false for the fail-fast
+/// reachability/status probes, where hf-hub's default backoff would drag a single offline check out
+/// for seconds, and for push, as [`reindex`](crate::memory::remote::reindex) requires.
 pub(crate) fn client(token: Option<&str>, retries: bool) -> Result<HFClient> {
     let mut builder = HFClient::builder();
     if !retries {

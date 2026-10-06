@@ -204,6 +204,8 @@ pub(crate) async fn first_publish(
 /// commits onto the head as it is by then, then deletes the old files.
 /// [`Reindexed::AlreadyCurrent`] if there was nothing to change, [`Reindexed::Conflict`] if a
 /// commit other than a push landed meanwhile (retry against the new head).
+/// The repo client must have HTTP retries disabled: retrying a successful manifest commit after a
+/// lost response can report a conflict and cause its live files to be discarded.
 pub(crate) async fn reindex(
     repo: &HFRepository<RepoTypeDataset>,
     dataset_uri: &str,

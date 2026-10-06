@@ -502,7 +502,8 @@ pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm, ses
         bail!("push aborted");
     }
 
-    let repo = hub::client(Some(token.as_str()), true)?.dataset(owner, name);
+    // No HTTP retries, as `remote::reindex` requires.
+    let repo = hub::client(Some(token.as_str()), false)?.dataset(owner, name);
     // No revision pinning: always the `main` branch head.
     let rev = "main".to_string();
     let dataset_uri = format!("{uri}/{}.lance", dataset::TABLE);
