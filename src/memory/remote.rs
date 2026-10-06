@@ -19,7 +19,7 @@
 //! A multi-file write would then be several commits — non-atomic, no CAS. So the op runs through a
 //! [`CaptureStore`](super::capture_store::CaptureStore) installed via Lance's
 //! [`WrappingObjectStore`] seam: Lance's writes are captured in memory instead of hitting the Hub,
-//! and we ship the whole set as one guarded `create_commit`. A [`reindex`] goes up in several.
+//! and we ship the whole set as one guarded `create_commit`. A [`reindex`] goes up in several commits.
 //!
 //! # Why this shape
 //!
