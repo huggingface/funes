@@ -19,7 +19,7 @@
 //! A multi-file write would then be several commits — non-atomic, no CAS. So the op runs through a
 //! [`CaptureStore`](super::capture_store::CaptureStore) installed via Lance's
 //! [`WrappingObjectStore`] seam: Lance's writes are captured in memory instead of hitting the Hub,
-//! and we ship the whole set as one guarded `create_commit`.
+//! and we ship the whole set as one guarded `create_commit`. A [`reindex`] goes up in several.
 //!
 //! # Why this shape
 //!
@@ -50,7 +50,8 @@ use hf_hub::progress::{Progress, ProgressEvent, ProgressHandler, UploadEvent};
 use hf_hub::repository::{CommitInfo, CommitOperation};
 use hf_hub::{HFError, HFRepository, RepoTypeDataset};
 use lance::dataset::builder::DatasetBuilder;
-use lance::dataset::{ColumnAlteration, Dataset, NewColumnTransform, WriteParams};
+use lance::dataset::transaction::{Operation, Transaction};
+use lance::dataset::{ColumnAlteration, CommitBuilder, Dataset, NewColumnTransform, WriteParams};
 use lance::index::DatasetIndexExt;
 use lance_io::object_store::WrappingObjectStore;
 use object_store::ObjectStore as OSObjectStore;
@@ -121,7 +122,7 @@ pub(crate) async fn append(
     }
 
     let (ops, _dir) = write_ops(&files)?;
-    match send_commit(repo, ops, parent, rev, message).await {
+    match send_commit(repo, ops, Some(parent), rev, message).await {
         Ok(info) => Ok(Appended::Committed {
             oid: info.commit_oid.unwrap_or_else(|| "?".to_string()),
             unindexed,
@@ -191,9 +192,11 @@ pub(crate) async fn first_publish(
 }
 
 /// Compact the remote dataset's fragments, refresh its indexes, building any it lacks, and delete
-/// its old versions, landing the result in one `create_commit` on branch `rev`, guarded by the
-/// current head. [`Reindexed::AlreadyCurrent`] if there was nothing to change,
-/// [`Reindexed::Conflict`] if the head moved first (retry against the new head).
+/// its old versions, on branch `rev`. The work can take minutes, so it doesn't hold the head it
+/// read: it reserves the fragment ids its compaction takes, uploads the new files, replays its
+/// commits onto the head as it is by then, then deletes the old files.
+/// [`Reindexed::AlreadyCurrent`] if there was nothing to change, [`Reindexed::Conflict`] if a
+/// commit other than a push landed meanwhile (retry against the new head).
 pub(crate) async fn reindex(
     repo: &HFRepository<RepoTypeDataset>,
     dataset_uri: &str,
@@ -202,33 +205,172 @@ pub(crate) async fn reindex(
     message: String,
     on_event: impl Fn(IndexBuildEvent),
 ) -> Result<Reindexed> {
-    let parent = head_oid(repo, rev).await?;
-    let (mut ds, wrapper) = open_capturing(dataset_uri, storage_options).await?;
-    refresh(&mut ds, on_event).await?;
+    let head = head_oid(repo, rev).await?;
+    let (mut ds, wrapper) = open_capturing(dataset_uri, pinned(&storage_options, &head)).await?;
+    let read = ds.version().version;
 
-    let files = captured_files(&wrapper);
+    // A push landing meanwhile takes the fragment ids past the reserved ones.
+    let compacted = dataset::fragments_to_compact(&ds).await?;
+    if compacted > 0 {
+        let (reserving, reserved) = open_capturing(dataset_uri, pinned(&storage_options, &head)).await?;
+        let reserve = Operation::ReserveFragments {
+            num_fragments: compacted as u32,
+        };
+        CommitBuilder::new(Arc::new(reserving))
+            .execute(Transaction::new(read, reserve, None))
+            .await
+            .context("reserving the fragment ids")?;
+        let (ops, _dir) = write_ops(&captured_files(&reserved))?;
+        match send_commit(repo, ops, Some(head), rev, message.clone()).await {
+            Ok(_) => {}
+            Err(e) if head_moved(&e) => return Ok(Reindexed::Conflict),
+            Err(e) => return Err(anyhow::Error::new(e).context("reservation commit failed")),
+        }
+    }
+
+    let txns = refresh(&mut ds, read, on_event).await?;
     let deletes = captured_deletes(&wrapper);
-    if files.is_empty() && deletes.is_empty() {
+    if txns.is_empty() && deletes.is_empty() {
         return Ok(Reindexed::AlreadyCurrent);
     }
-    let (mut ops, _dir) = write_ops(&files)?;
-    // No lock needed: a write whose files these remove fails its own guarded commit.
-    ops.extend(deletes);
-    match send_commit(repo, ops, parent, rev, message).await {
-        Ok(info) => Ok(Reindexed::Committed(info.commit_oid.unwrap_or_else(|| "?".to_string()))),
-        Err(e) if head_moved(&e) => Ok(Reindexed::Conflict),
-        Err(e) => Err(anyhow::Error::new(e).context("reindex commit failed")),
+    let mut files = captured_files(&wrapper);
+    files.retain(|path, _| !is_version_file(path));
+    let (ops, _dir) = write_ops(&files)?;
+    commit_in_parts(repo, rev, ops, &message).await?;
+
+    let mut oid = None;
+    if !txns.is_empty() {
+        match replay(repo, dataset_uri, &storage_options, rev, read, &txns, &message).await? {
+            Some(landed) => oid = Some(landed),
+            None => return Ok(Reindexed::Conflict),
+        }
     }
+    // No lock needed: a reindex whose files these remove sees the version above and gives up.
+    match commit_in_parts(repo, rev, deletes, &message).await {
+        Ok(Some(deleted)) => oid = Some(deleted),
+        Ok(None) => {}
+        // The version is in: the files left are unreferenced, so the next cleanup deletes them.
+        Err(_) if oid.is_some() => {}
+        Err(e) => return Err(e),
+    }
+    Ok(Reindexed::Committed(oid.unwrap_or_else(|| "?".to_string())))
 }
 
-/// Compact a remote dataset, refresh its indexes and delete its old versions. Compacting first
-/// keeps the rewritten fragments outside every index.
-async fn refresh(ds: &mut Dataset, on_event: impl Fn(IndexBuildEvent)) -> Result<()> {
+/// Compact a remote dataset, refresh its indexes and delete its old versions, returning the commits
+/// made after version `read`. Compacting first keeps the rewritten fragments outside every index.
+async fn refresh(ds: &mut Dataset, read: u64, on_event: impl Fn(IndexBuildEvent)) -> Result<Vec<Transaction>> {
     dataset::compact_fragments(ds).await?;
     dataset::build_indexes(ds, on_event)
         .await
         .context("refreshing the remote indexes")?;
-    dataset::delete_old_versions(ds).await
+    let txns = transactions_since(ds, read).await?;
+    dataset::delete_old_versions(ds).await?;
+    Ok(txns)
+}
+
+/// `storage_options` reading the commit `sha`, so a session sees one head however long it runs.
+fn pinned(storage_options: &HashMap<String, String>, sha: &str) -> HashMap<String, String> {
+    let mut options = storage_options.clone();
+    options.insert("hf_revision".to_string(), sha.to_string());
+    options
+}
+
+/// The commits made after version `read`, except the compaction's fragment reservation: the Hub
+/// holds the one that counts.
+async fn transactions_since(ds: &Dataset, read: u64) -> Result<Vec<Transaction>> {
+    let mut txns = Vec::new();
+    for version in read + 1..=ds.version().version {
+        let txn = ds
+            .read_transaction_by_version(version)
+            .await?
+            .context("a version without its transaction")?;
+        if !matches!(txn.operation, Operation::ReserveFragments { .. }) {
+            txns.push(txn);
+        }
+    }
+    Ok(txns)
+}
+
+/// A manifest or a transaction: what a replay writes anew.
+fn is_version_file(path: &str) -> bool {
+    path.contains("/_versions/") || path.contains("/_transactions/")
+}
+
+/// Replays tried while pushes keep landing between a head read and the commit.
+const MAX_REPLAYS: usize = 10;
+
+/// Commit `txns` onto the head of `rev` as it is now. `None` if [`replay_onto`] refuses, or past
+/// [`MAX_REPLAYS`].
+async fn replay(
+    repo: &HFRepository<RepoTypeDataset>,
+    dataset_uri: &str,
+    storage_options: &HashMap<String, String>,
+    rev: &str,
+    read: u64,
+    txns: &[Transaction],
+    message: &str,
+) -> Result<Option<String>> {
+    for _ in 0..MAX_REPLAYS {
+        let head = head_oid(repo, rev).await?;
+        let (ds, wrapper) = open_capturing(dataset_uri, pinned(storage_options, &head)).await?;
+        if replay_onto(ds, read, txns).await?.is_none() {
+            return Ok(None);
+        }
+        let (ops, _dir) = write_ops(&captured_files(&wrapper))?;
+        match send_commit(repo, ops, Some(head), rev, message.to_string()).await {
+            Ok(info) => return Ok(Some(info.commit_oid.unwrap_or_else(|| "?".to_string()))),
+            Err(e) if head_moved(&e) => continue,
+            Err(e) => return Err(anyhow::Error::new(e).context("reindex commit failed")),
+        }
+    }
+    Ok(None)
+}
+
+/// `txns` committed onto `ds`, or `None` if a commit other than a push or a fragment reservation
+/// landed after version `read`. Lance takes a compaction or an index refresh after a push.
+async fn replay_onto(mut ds: Dataset, read: u64, txns: &[Transaction]) -> Result<Option<Dataset>> {
+    for version in read + 1..=ds.version().version {
+        let landed = ds.read_transaction_by_version(version).await?;
+        if !matches!(
+            landed.map(|txn| txn.operation),
+            Some(Operation::Append { .. } | Operation::ReserveFragments { .. })
+        ) {
+            return Ok(None);
+        }
+    }
+    for txn in txns {
+        let mut txn = txn.clone();
+        txn.read_version = ds.version().version;
+        ds = CommitBuilder::new(Arc::new(ds))
+            .execute(txn)
+            .await
+            .context("replaying the reindex")?;
+    }
+    Ok(Some(ds))
+}
+
+/// Operations per Hub commit: the Hub checks each within a 60 s request timeout and advises 50 to
+/// 100.
+const MAX_COMMIT_OPS: usize = 100;
+
+/// Commit `ops` in parts of at most [`MAX_COMMIT_OPS`], unguarded: new files and deletes of
+/// unreferenced ones hold whatever landed meanwhile. The oid of the last part.
+async fn commit_in_parts(
+    repo: &HFRepository<RepoTypeDataset>,
+    rev: &str,
+    ops: Vec<CommitOperation>,
+    message: &str,
+) -> Result<Option<String>> {
+    let mut oid = None;
+    let mut ops = ops.into_iter().peekable();
+    while ops.peek().is_some() {
+        let part = ops.by_ref().take(MAX_COMMIT_OPS).collect();
+        let info = send_commit(repo, part, None, rev, message.to_string())
+            .await
+            .map_err(|e| anyhow::Error::new(e).context("reindex commit failed"))?;
+        oid = info.commit_oid;
+    }
+    Ok(oid)
 }
 
 /// Rename a column on the remote dataset in one head-guarded commit. `alter_columns` is
@@ -252,7 +394,7 @@ pub async fn rename_column(
     let files = captured_files(&wrapper);
     ensure!(!files.is_empty(), "the rename produced no files to commit");
     let (ops, _dir) = write_ops(&files)?;
-    let info = send_commit(repo, ops, parent, rev, message)
+    let info = send_commit(repo, ops, Some(parent), rev, message)
         .await
         .map_err(|e| anyhow::Error::new(e).context("rename commit failed"))?;
     Ok(info.commit_oid.unwrap_or_else(|| "?".to_string()))
@@ -280,7 +422,7 @@ pub async fn add_column(
     let files = captured_files(&wrapper);
     ensure!(!files.is_empty(), "add_columns produced no files to commit");
     let (ops, _dir) = write_ops(&files)?;
-    let info = send_commit(repo, ops, parent, rev, message)
+    let info = send_commit(repo, ops, Some(parent), rev, message)
         .await
         .map_err(|e| anyhow::Error::new(e).context("add_column commit failed"))?;
     Ok(info.commit_oid.unwrap_or_else(|| "?".to_string()))
@@ -387,19 +529,19 @@ pub(crate) async fn fetch_readme(repo: &HFRepository<RepoTypeDataset>, rev: &str
     }
 }
 
-/// One `create_commit` of `ops` on branch `rev`, guarded by `parent`. Returns the raw hf-hub
-/// result so callers can tell a head-moved [`HFError::Conflict`] from other failures.
+/// One `create_commit` of `ops` on branch `rev`, guarded by `parent` when there is one. Returns the
+/// raw hf-hub result so callers can tell a head-moved [`HFError::Conflict`] from other failures.
 async fn send_commit(
     repo: &HFRepository<RepoTypeDataset>,
     ops: Vec<CommitOperation>,
-    parent: String,
+    parent: Option<String>,
     rev: &str,
     message: String,
 ) -> std::result::Result<CommitInfo, HFError> {
     repo.create_commit()
         .operations(ops)
         .commit_message(message)
-        .parent_commit(parent)
+        .maybe_parent_commit(parent)
         .revision(rev.to_string())
         .progress(upload_progress())
         .send()
@@ -577,6 +719,9 @@ mod tests {
     use arrow_array::StringArray;
     use arrow_schema::{DataType, Field, Schema};
     use futures::TryStreamExt;
+    use lance::dataset::transaction::{Operation, Transaction};
+    use lance::dataset::CommitBuilder;
+    use lance_index::scalar::FullTextSearchQuery;
     use lance_io::object_store::ObjectStore as LanceObjectStore;
     use object_store::ObjectStoreExt;
 
@@ -609,7 +754,8 @@ mod tests {
         let before = objects(store.inner.as_ref()).await;
 
         let (mut ds, wrapper) = open_capturing(uri, HashMap::new()).await.unwrap();
-        refresh(&mut ds, |_| {}).await.unwrap();
+        let read = ds.version().version;
+        refresh(&mut ds, read, |_| {}).await.unwrap();
         assert_eq!(objects(store.inner.as_ref()).await, before, "nothing reaches the store");
 
         // Apply the captured changes as the commit would.
@@ -627,6 +773,110 @@ mod tests {
         assert_eq!(ds.get_fragments().len(), 2, "the appended fragments are merged");
         assert_eq!(ds.count_rows(None).await.unwrap(), 4);
         assert!(!dataset::fts_needs_refresh(&ds).await.unwrap());
+    }
+
+    fn text_rows(text: &str) -> impl arrow_array::RecordBatchReader + Send + 'static {
+        let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(StringArray::from(vec![text]))]).unwrap();
+        RecordBatchIterator::new([Ok(batch)], schema)
+    }
+
+    /// A Hub at `hub/` holding an indexed row and three pushed ones, and a frozen copy of it at
+    /// `snap/`, as a pinned revision reads it. Returns the store, the dataset and its version.
+    async fn hub_and_snapshot(authority: &str) -> (Arc<LanceObjectStore>, Dataset, u64) {
+        let hub_uri = format!("shared-memory://{authority}/hub/chunks.lance");
+        let (store, _) = LanceObjectStore::from_uri(&hub_uri).await.unwrap();
+        let mut ds = Dataset::write(text_rows("base"), &hub_uri, None).await.unwrap();
+        dataset::build_indexes(&mut ds, |_| {}).await.unwrap();
+        for text in ["one", "two", "three"] {
+            ds.append(text_rows(text), None).await.unwrap();
+        }
+        for (path, _) in objects(store.inner.as_ref()).await {
+            let body = store
+                .inner
+                .get(&path.as_str().into())
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap();
+            let copy = path.replacen("hub/", "snap/", 1);
+            store.inner.put(&copy.as_str().into(), body.into()).await.unwrap();
+        }
+        let read = ds.version().version;
+        (store, ds, read)
+    }
+
+    /// Reindex the copy at `snap/`, upload its new files to `hub/`, and return its commits.
+    async fn reindex_snapshot(authority: &str, store: &LanceObjectStore, read: u64) -> Vec<Transaction> {
+        let wrapper = Arc::new(CaptureWrapper {
+            captured: Captured::default(),
+        });
+        let mut session = Dataset::open(&format!("shared-memory://{authority}/snap/chunks.lance"))
+            .await
+            .unwrap()
+            .with_object_store_wrappers([wrapper.clone() as Arc<dyn WrappingObjectStore>]);
+        let txns = refresh(&mut session, read, |_| {}).await.unwrap();
+        let captured = wrapper.captured.lock().unwrap().clone();
+        for (path, body) in captured {
+            let path = path.as_ref().replacen("snap/", "hub/", 1);
+            if let Some(body) = body.filter(|_| !is_version_file(&path)) {
+                store.inner.put(&path.as_str().into(), body.into()).await.unwrap();
+            }
+        }
+        txns
+    }
+
+    #[tokio::test]
+    async fn a_reindex_replays_onto_a_push_that_landed_meanwhile() {
+        let (store, ds, read) = hub_and_snapshot("replay").await;
+        let compacted = dataset::fragments_to_compact(&ds).await.unwrap();
+        assert_eq!(compacted, 3);
+
+        // On the Hub: the reindex reserves its ids, then another host pushes.
+        let reserve = Operation::ReserveFragments {
+            num_fragments: compacted as u32,
+        };
+        let mut hub = CommitBuilder::new(Arc::new(ds))
+            .execute(Transaction::new(read, reserve, None))
+            .await
+            .unwrap();
+        hub.append(text_rows("pushed"), None).await.unwrap();
+
+        let txns = reindex_snapshot("replay", &store, read).await;
+        let head = replay_onto(hub, read, &txns)
+            .await
+            .unwrap()
+            .expect("only a push landed");
+
+        head.validate().await.unwrap();
+        assert_eq!(head.count_rows(None).await.unwrap(), 5);
+        let ids: Vec<usize> = head.get_fragments().iter().map(|f| f.id()).collect();
+        assert_eq!(ids.len(), 3, "the indexed row, the merged ones, the push: {ids:?}");
+        let mut indexed = head.scan();
+        indexed
+            .full_text_search(FullTextSearchQuery::new("two".to_string()))
+            .unwrap()
+            .fast_search();
+        assert_eq!(indexed.count_rows().await.unwrap(), 1, "the index finds a merged row");
+        let mut unindexed = head.scan();
+        unindexed
+            .full_text_search(FullTextSearchQuery::new("pushed".to_string()))
+            .unwrap();
+        assert_eq!(
+            unindexed.count_rows().await.unwrap(),
+            1,
+            "the pushed row is still found"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reindex_does_not_replay_onto_another_compaction() {
+        let (store, mut ds, read) = hub_and_snapshot("refuse").await;
+        dataset::compact_fragments(&mut ds).await.unwrap();
+
+        let txns = reindex_snapshot("refuse", &store, read).await;
+        assert!(replay_onto(ds, read, &txns).await.unwrap().is_none());
     }
 
     #[test]

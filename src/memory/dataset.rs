@@ -13,7 +13,7 @@ use arrow_array::{FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterat
 use arrow_schema::{DataType, Field, Schema};
 use futures::TryStreamExt;
 use lance::dataset::builder::DatasetBuilder;
-use lance::dataset::optimize::{compact_files, CompactionOptions};
+use lance::dataset::optimize::{compact_files, plan_compaction, CompactionOptions};
 use lance::dataset::{Dataset, MergeInsertBuilder, MergeInsertWriteMode, WhenMatched, WhenNotMatched};
 use lance::index::vector::VectorIndexParams;
 use lance::index::{DatasetIndexExt, DatasetIndexInternalExt};
@@ -320,6 +320,13 @@ const MAX_SMALL_FRAGMENTS: usize = 256;
 /// an indexed fragment rewrites every index covering it.
 pub(crate) async fn compact_fragments(ds: &mut Dataset) -> Result<()> {
     compact_fragments_past(ds, MAX_SMALL_FRAGMENTS).await
+}
+
+/// How many fragments [`compact_fragments`] would merge.
+pub(crate) async fn fragments_to_compact(ds: &Dataset) -> Result<usize> {
+    let options = compaction_options(ds, MAX_SMALL_FRAGMENTS).await?;
+    let plan = plan_compaction(ds, &options).await.context("planning the compaction")?;
+    Ok(plan.tasks.iter().map(|task| task.fragments.len()).sum())
 }
 
 /// [`compact_fragments`], rewriting every fragment past `max_small` small indexed ones.
