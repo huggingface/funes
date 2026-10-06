@@ -776,7 +776,8 @@ async fn reindex_forced(
             Reindexed::Committed(oid) => return Ok(format!("  reindexed (commit {oid})\n")),
             Reindexed::Uncleaned(oid, e) => {
                 return Ok(format!(
-                    "  reindexed (commit {oid})\n  note: old versions not deleted ({e}); re-run push --force-reindex\n"
+                    "  reindexed (commit {oid})\n  note: old versions not deleted ({e:#}); \
+                     re-run push --force-reindex\n"
                 ))
             }
             Reindexed::AlreadyCurrent => return Ok("  index already current\n".to_string()),
@@ -805,14 +806,15 @@ async fn reindex_auto(
     .await
     {
         Ok(Reindexed::Committed(oid)) => format!("  reindexed (commit {oid})\n"),
-        Ok(Reindexed::Uncleaned(oid, e)) => {
-            format!("  reindexed (commit {oid})\n  note: old versions not deleted ({e}); will retry on a later push\n")
-        }
+        Ok(Reindexed::Uncleaned(oid, e)) => format!(
+            "  reindexed (commit {oid})\n  note: old versions not deleted ({e:#}); \
+             will retry on a later push\n"
+        ),
         Ok(Reindexed::AlreadyCurrent) => String::new(),
         Ok(Reindexed::Conflict) => {
             "  note: index not refreshed (remote head moved); will retry on a later push\n".to_string()
         }
-        Err(e) => format!("  note: index not refreshed ({e}); will retry on a later push\n"),
+        Err(e) => format!("  note: index not refreshed ({e:#}); will retry on a later push\n"),
     }
 }
 
