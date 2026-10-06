@@ -114,17 +114,17 @@ use, or several years of moderate use.
 
 ## Maintenance
 
-Re-indexing commits a new version rather than overwriting, so superseded index
+Indexing commits a new version rather than overwriting, so superseded index
 generations — and, after row-rewriting ops like `scrub`, orphaned data
-fragments — would otherwise accumulate. funes reaps them after each local re-index
-(past a short grace window, so a concurrent read isn't cut off), keeping
+fragments — would otherwise accumulate. funes reaps them when it compacts the local
+memory (past a short grace window, so a concurrent read isn't cut off), keeping
 on-disk size close to the live figures above. `scrub` reaps every old version
 itself as it finishes, with no grace window, so no pre-scrub row stays readable
 on disk. A recall reading an old version at that moment can fail once.
 
-Recall time grows with the number of fragments, so each index run, and each
-compaction a push runs on a remote memory, merges the fragments written since the
-previous one. Once more than 256 small fragments are indexed, it rewrites every
+Recall time grows with the number of fragments, so each compaction, at the end of
+an index run or after a push past 500 unindexed rows on a remote memory, merges the
+fragments written since the previous one. Once more than 256 small fragments are indexed, it rewrites every
 fragment. On a remote memory the compaction also deletes the old versions, so no
 folder of the repo nears the Hub's limit of 10k files.
 

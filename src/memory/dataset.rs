@@ -127,7 +127,7 @@ pub(crate) const VECTOR_INDEX: &str = "vector_idx";
 pub enum IndexBuildEvent {
     Building(&'static str),
     MergingFragments(usize),
-    Compacting { index: String, deltas: usize },
+    MergingDeltas { index: String, deltas: usize },
     VectorIndexFailed(anyhow::Error),
 }
 
@@ -271,7 +271,7 @@ fn holds_only_shuffle_files(dir: &std::path::Path) -> bool {
 /// every delta (and per-segment BM25 stats drift), so the pile must stay bounded. Only the deltas
 /// are merged — the base is never re-read, which would be the full-index rewrite [`optimize_index`]
 /// exists to avoid.
-pub(crate) const COMPACT_DELTAS: usize = 8;
+pub(crate) const MERGE_DELTAS: usize = 8;
 
 /// Sub-index count per index name (the base plus its deltas, which share the index's name), from
 /// the index metadata alone: `index_statistics` can write a stats migration.
@@ -285,8 +285,8 @@ pub(crate) async fn sub_index_counts(ds: &Dataset) -> Result<BTreeMap<String, us
 }
 
 /// Add a delta sub-index over the rows appended since `name` was last built, or at
-/// [`COMPACT_DELTAS`] deltas merge them into one, sparing the base. `subs` is base + deltas.
-/// `on_event` gets [`IndexBuildEvent::Compacting`] before a merge.
+/// [`MERGE_DELTAS`] deltas merge them into one, sparing the base. `subs` is base + deltas.
+/// `on_event` gets [`IndexBuildEvent::MergingDeltas`] before a merge.
 pub(crate) async fn optimize_index(
     ds: &mut Dataset,
     name: &str,
@@ -294,8 +294,8 @@ pub(crate) async fn optimize_index(
     on_event: impl Fn(IndexBuildEvent),
 ) -> Result<()> {
     let deltas = subs.saturating_sub(1);
-    let opts = if deltas >= COMPACT_DELTAS {
-        on_event(IndexBuildEvent::Compacting {
+    let opts = if deltas >= MERGE_DELTAS {
+        on_event(IndexBuildEvent::MergingDeltas {
             index: name.to_string(),
             deltas,
         });
@@ -915,15 +915,15 @@ mod tests {
             .uuid;
 
         let compactions = std::sync::Mutex::new(Vec::new());
-        for i in 0..=COMPACT_DELTAS {
-            if i == COMPACT_DELTAS {
-                assert_eq!(sub_index_counts(&ds).await.unwrap()[FTS_INDEX], 1 + COMPACT_DELTAS);
+        for i in 0..=MERGE_DELTAS {
+            if i == MERGE_DELTAS {
+                assert_eq!(sub_index_counts(&ds).await.unwrap()[FTS_INDEX], 1 + MERGE_DELTAS);
                 assert!(compactions.lock().unwrap().is_empty(), "merged below the threshold");
             }
             ds.append(batch(&format!("charlie delta {i}")), None).await.unwrap();
             let subs = sub_index_counts(&ds).await.unwrap()[FTS_INDEX];
             optimize_index(&mut ds, FTS_INDEX, subs, |event| {
-                if let IndexBuildEvent::Compacting { index, deltas } = event {
+                if let IndexBuildEvent::MergingDeltas { index, deltas } = event {
                     compactions.lock().unwrap().push((index, deltas));
                 }
             })
@@ -939,7 +939,7 @@ mod tests {
         );
         assert_eq!(
             compactions.into_inner().unwrap(),
-            [(FTS_INDEX.to_string(), COMPACT_DELTAS)]
+            [(FTS_INDEX.to_string(), MERGE_DELTAS)]
         );
     }
 
@@ -963,13 +963,13 @@ mod tests {
             .find(|i| i.name == FTS_INDEX)
             .unwrap()
             .uuid;
-        for run in 0..COMPACT_DELTAS {
+        for run in 0..MERGE_DELTAS {
             ds.append(reader(embedded(&turns(TRAINABLE + run, 1))), None)
                 .await
                 .unwrap();
             build_indexes(&mut ds, |_| {}).await.unwrap();
         }
-        assert_eq!(sub_index_counts(&ds).await.unwrap()[FTS_INDEX], 1 + COMPACT_DELTAS);
+        assert_eq!(sub_index_counts(&ds).await.unwrap()[FTS_INDEX], 1 + MERGE_DELTAS);
         // The next refresh merges the deltas, so it has to read this broken one.
         let indices = ds.load_indices().await.unwrap();
         let delta = indices
@@ -982,7 +982,7 @@ mod tests {
             std::fs::write(file.unwrap().path(), b"corrupt").unwrap();
         }
 
-        ds.append(reader(embedded(&turns(TRAINABLE + COMPACT_DELTAS, 1))), None)
+        ds.append(reader(embedded(&turns(TRAINABLE + MERGE_DELTAS, 1))), None)
             .await
             .unwrap();
         let built = std::sync::Mutex::new(Vec::new());
@@ -992,9 +992,9 @@ mod tests {
         assert!(matches!(
             built.into_inner().unwrap().as_slice(),
             [
-                IndexBuildEvent::Compacting { index: fts, deltas: COMPACT_DELTAS },
+                IndexBuildEvent::MergingDeltas { index: fts, deltas: MERGE_DELTAS },
                 IndexBuildEvent::Building("text search index"),
-                IndexBuildEvent::Compacting { index: vector, deltas: COMPACT_DELTAS },
+                IndexBuildEvent::MergingDeltas { index: vector, deltas: MERGE_DELTAS },
             ] if fts == FTS_INDEX && vector == VECTOR_INDEX
         ));
         assert_eq!(

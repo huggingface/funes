@@ -11,8 +11,8 @@ pub(crate) fn index_progress(event: IndexBuildEvent) {
     match event {
         IndexBuildEvent::Building(phase) => eprintln!("building {phase}…"),
         IndexBuildEvent::MergingFragments(n) => eprintln!("merging {n} fragments…"),
-        IndexBuildEvent::Compacting { index, deltas } => {
-            eprintln!("compacting {index} ({deltas} delta sub-indexes)…");
+        IndexBuildEvent::MergingDeltas { index, deltas } => {
+            eprintln!("merging {deltas} delta sub-indexes of {index}…");
         }
         IndexBuildEvent::VectorIndexFailed(error) => {
             eprintln!("note: vector index skipped — {error:#}");

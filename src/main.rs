@@ -90,7 +90,7 @@ enum Cmd {
         #[command(subcommand)]
         agent: AskAgent,
     },
-    /// Build or update your local memory from session transcripts.
+    /// Build or update your local memory from session transcripts, then compact it.
     Index {
         /// A `.funes.jsonl` turns file (or a directory of them), a `.parquet` file, or a Hub
         /// trace repo `<org>/<repo>`. Omit — in a terminal — to index every integration's spool

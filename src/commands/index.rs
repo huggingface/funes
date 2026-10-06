@@ -759,6 +759,7 @@ impl Indexer {
                 || dataset::fts_needs_refresh(d).await?
                 || dataset::fragments_to_compact(d).await? > 0
             {
+                eprintln!("compacting the memory…");
                 dataset::compact_fragments(d, ui::index_progress).await?;
                 dataset::build_indexes(d, ui::index_progress).await?;
 

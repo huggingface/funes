@@ -119,6 +119,15 @@ recalled while embeddings are still pending. Later turns or another `funes index
 In a terminal, funes may offer to finish the remaining work. You can decline and keep the progress
 already made. Explicit imports have no time limit.
 
+## Compaction
+
+A run that writes rows or vectors ends by compacting the memory, and prints `compacting the memory…`
+when it does. It merges the small fragments no index covers yet, adds their rows to the search
+indexes, and deletes the versions older than ten minutes. Recall time grows with the number of
+fragments, so past 256 small indexed fragments a run rewrites them all. A run that writes nothing
+still compacts a memory left fragmented, or one whose text index misses rows.
+[storage.md](storage.md#maintenance) has the details.
+
 ## Flags
 
 | Flag | Meaning |
