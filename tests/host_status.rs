@@ -49,7 +49,7 @@ async fn host_status_lists_each_bound_memory_and_the_unrecorded() {
         .unwrap_or_else(|| panic!("a memory at a local path is listed: {out}"));
     assert!(at_path.starts_with("\nchunks: "), "{out}");
     assert!(
-        !at_path.contains("last push"),
+        !at_path.contains("last write"),
         "a memory at a local path is not a remote anything pushes to: {out}"
     );
     assert!(

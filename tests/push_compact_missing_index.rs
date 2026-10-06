@@ -1,7 +1,7 @@
-//! Gated live test: a push builds the indexes a remote memory lacks. Each remote is a copy of a
-//! synthetic local memory written without any index — as a hand-uploaded snapshot is — so recall
-//! refuses it until a push gives it a text index: a forced compaction with nothing new to publish,
-//! and an ordinary push of one new chunk, far below the compaction threshold.
+//! Gated live test: a compaction builds the indexes a remote memory lacks. Each remote is a copy of
+//! a synthetic local memory written without any index — as a hand-uploaded snapshot is — so recall
+//! refuses it until a compaction gives it a text index: `funes compact`, with nothing pushed, and
+//! the one an ordinary push of one new chunk runs, far below the compaction threshold.
 //!
 //! Skipped unless `HF_FUNES_TEST_TOKEN` is set AND `trufflehog` is on PATH (push's pre-publish gate
 //! is fail-closed). To run:
@@ -113,8 +113,8 @@ async fn push_builds_the_indexes_a_remote_lacks() {
 
     let before = recall_remote(&forced, "NOINDEXSMOKE").await;
 
-    // Nothing new to publish: a forced compaction only.
-    let compaction = funes::commands::push::run_push(Memory::parse(&forced), true, Confirm::Yes, &[]).await;
+    // `funes compact`, with nothing pushed.
+    let compaction = funes::commands::compact::run(Memory::parse(&forced)).await;
     let after_forced = recall_remote(&forced, "NOINDEXSMOKE").await;
 
     // One new chunk, pushed without forcing.
@@ -141,10 +141,10 @@ async fn push_builds_the_indexes_a_remote_lacks() {
         before.contains("recall error"),
         "recall should refuse a memory with no text index: {before}"
     );
-    let compaction = compaction.expect("forced compaction").report;
+    let compaction = compaction.expect("compaction");
     assert!(
         compaction.contains("compacted"),
-        "a forced compaction should build the missing indexes: {compaction}"
+        "`funes compact` should build the missing indexes: {compaction}"
     );
     assert!(
         after_forced.contains("NOINDEXSMOKE"),

@@ -512,7 +512,7 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
     // 3. Forced compaction with no new data: just compact the remote and stop.
     if to_push.is_empty() {
         eprintln!("compacting the remote…");
-        let note = compact_forced(&repo, &dataset_uri, &opts, &rev).await?;
+        let note = compact_remote(&repo, &dataset_uri, &opts, &rev, "funes push: compact").await?;
         return Ok(format!("{}: up to date ({} chunks)\n{note}", target.label(), remote_ids.len()).into());
     }
 
@@ -644,7 +644,7 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
     // index, which recall cannot do without.
     if compact {
         eprintln!("compacting the remote…");
-        out.push_str(&compact_forced(&repo, &dataset_uri, &opts, &rev).await?);
+        out.push_str(&compact_remote(&repo, &dataset_uri, &opts, &rev, "funes push: compact").await?);
     } else if unindexed > COMPACT_THRESHOLD || !text_indexed {
         eprintln!("compacting the remote…");
         out.push_str(&compact_auto(&repo, &dataset_uri, &opts, &rev).await);
@@ -754,13 +754,15 @@ fn drop_secret_rows(batches: Vec<RecordBatch>) -> Result<(Vec<RecordBatch>, Skip
     Ok((clean, Skipped { rows: dropped, summary }))
 }
 
-/// Forced compaction: ask [`remote::compact`] to compact and commit, retrying on a head-moved
-/// conflict (it re-reads the head each call) until it lands or [`MAX_COMMIT_RETRIES`] is exceeded.
-async fn compact_forced(
+/// Forced compaction: ask [`remote::compact`] to compact and commit under `message`, retrying on a
+/// head-moved conflict (it re-reads the head each call) until it lands or [`MAX_COMMIT_RETRIES`] is
+/// exceeded.
+pub(crate) async fn compact_remote(
     repo: &HFRepository<RepoTypeDataset>,
     dataset_uri: &str,
     opts: &HashMap<String, String>,
     rev: &str,
+    message: &str,
 ) -> Result<String> {
     for _ in 0..=MAX_COMMIT_RETRIES {
         match remote::compact(
@@ -768,7 +770,7 @@ async fn compact_forced(
             dataset_uri,
             opts.clone(),
             rev,
-            "funes push: compact".to_string(),
+            message.to_string(),
             ui::index_progress,
         )
         .await?
@@ -777,14 +779,14 @@ async fn compact_forced(
             Compacted::Uncleaned(oid, e) => {
                 return Ok(format!(
                     "  compacted (commit {oid})\n  note: old versions not deleted ({e:#}); \
-                     re-run push --compact\n"
+                     compact it again\n"
                 ))
             }
             Compacted::AlreadyCompact => return Ok("  already compact\n".to_string()),
             Compacted::Conflict => continue,
         }
     }
-    bail!("compaction still conflicting after {MAX_COMMIT_RETRIES} retries; re-run push --compact")
+    bail!("compaction still conflicting after {MAX_COMMIT_RETRIES} retries; compact it again")
 }
 
 /// Best-effort compaction during a normal push: one attempt, never retried. The data is already

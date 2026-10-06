@@ -1529,14 +1529,14 @@ async fn index_lines(ds: &Dataset, now: DateTime<Utc>) -> Result<String> {
     Ok(out)
 }
 
-/// A remote memory's published state: when it was last pushed to and its unindexed backlog.
+/// A remote memory's published state: when it was last written to and its unindexed backlog.
 async fn remote_lines(ds: &Dataset, now: DateTime<Utc>) -> String {
     let mut out = String::new();
-    // Every write to a remote memory is a `funes push` (data or compaction commit), so the head
-    // version's timestamp is when it was last pushed to.
+    // Every write to a remote memory is a push or a compaction, so the head version's timestamp is
+    // when it was last written to.
     let t = ds.version().timestamp;
     if t.timestamp() > 0 {
-        let _ = writeln!(out, "last push: {}", stamp(t, now));
+        let _ = writeln!(out, "last write: {}", stamp(t, now));
     }
     let unindexed = crate::memory::remote::max_unindexed_rows(ds).await;
     if unindexed > 0 {

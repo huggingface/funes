@@ -8,6 +8,7 @@
 //! only chunks whose id is new — a grown session (the same memory) contributes just its new turns,
 //! nothing is re-embedded or deleted.
 
+use super::compact;
 use crate::chunk::{self, Tier};
 use crate::hub;
 use crate::inference::{self, embed_batched, Embedder};
@@ -16,7 +17,6 @@ use crate::memory::lock;
 use crate::scan;
 use crate::traces::spool;
 use crate::traces::{self, repo, source};
-use crate::ui;
 use anyhow::{anyhow, Context, Result};
 use arrow_array::{Array, RecordBatchIterator, StringArray, UInt64Array};
 use futures::TryStreamExt;
@@ -759,20 +759,7 @@ impl Indexer {
                 || dataset::fts_needs_refresh(d).await?
                 || dataset::fragments_to_compact(d).await? > 0
             {
-                eprintln!("compacting the memory…");
-                dataset::compact_fragments(d, ui::index_progress).await?;
-                dataset::build_indexes(d, ui::index_progress).await?;
-
-                // Reap superseded versions — best-effort; on failure the reap waits for next run.
-                match d.cleanup_old_versions(chrono::Duration::minutes(10), None, None).await {
-                    Ok(stats) if stats.bytes_removed > 0 => eprintln!(
-                        "reclaimed {:.1} MB from {} old version(s)",
-                        stats.bytes_removed as f64 / 1e6,
-                        stats.old_versions
-                    ),
-                    Ok(_) => {}
-                    Err(e) => eprintln!("note: version cleanup skipped — {e}"),
-                }
+                compact::compact_local(d).await?;
             }
         }
         println!(

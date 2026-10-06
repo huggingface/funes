@@ -11,7 +11,7 @@ A verb is described in four places. A change to one is a change to all four:
 | --- | --- |
 | CLI help | the clap doc comments in `src/main.rs` |
 | The agent contract | `#[tool(description = …)]` and the `schemars` field descriptions in `src/commands/mcp.rs` — what an agent reads before it calls |
-| User docs | [docs/recall.md](docs/recall.md) (recall, get), [docs/sessions.md](docs/sessions.md) (sessions, sketch, scan), [docs/ask.md](docs/ask.md), [docs/push.md](docs/push.md) |
+| User docs | [docs/recall.md](docs/recall.md) (recall, get), [docs/sessions.md](docs/sessions.md) (sessions, sketch, scan), [docs/ask.md](docs/ask.md), [docs/push.md](docs/push.md), [docs/index.md](docs/index.md) (index, compact) |
 | Output shape | the `*_agent` renderers in `src/ui/render.rs`, pinned byte-for-byte by `tests/index_recall.rs` |
 
 Keep each surface to its own job: `--help` and the MCP schemas own flags and defaults, the docs own

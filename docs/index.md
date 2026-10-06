@@ -128,6 +128,19 @@ fragments, so past 256 small indexed fragments a run rewrites them all. A run th
 still compacts a memory left fragmented, or one whose text index misses rows.
 [storage.md](storage.md#maintenance) has the details.
 
+`funes compact` runs the same steps on demand, on any memory:
+
+```bash
+funes compact                  # your local memory
+funes compact ./other-memory   # a local memory at a path
+funes compact <org>/<repo>     # a remote memory (or a full hf://… URI)
+```
+
+On a remote memory it needs write access, and deletes every old version. A push also compacts its
+remote on its own, once 500 rows sit unindexed there. To compact a large remote, download it first
+with `hf download <org>/<repo> --repo-type dataset`: as long as nothing is pushed in between, the
+compaction then reads its files from that cache instead of fetching them one at a time.
+
 ## Flags
 
 | Flag | Meaning |

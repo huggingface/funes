@@ -5,7 +5,7 @@
 //! `$FUNES_HOME` or `~/.funes`.
 
 use funes::agents::{self, registry};
-use funes::commands::{ask, index, mcp, push, recall, scrub, sketch, update};
+use funes::commands::{ask, compact, index, mcp, push, recall, scrub, sketch, update};
 use funes::hub;
 use funes::memory;
 use funes::traces::spool;
@@ -196,6 +196,16 @@ enum Cmd {
         /// remote does not already hold.
         #[arg(long, value_name = "SESSION")]
         sessions: Vec<String>,
+    },
+    /// Compact a memory: merge its small fragments, add its unindexed rows to the search indexes, and
+    /// delete its old versions.
+    ///
+    /// `funes index` and `funes push` also compact on their own.
+    Compact {
+        /// Memory to compact: a local path, `<org>/<repo>`, or a full `hf://…` URI. Omit for your
+        /// local memory.
+        #[arg(value_name = "MEMORY")]
+        memory: Option<String>,
     },
     /// Redact secrets from your local memory in place — for rows indexed before redaction existed (or
     /// flagged by an updated ruleset); needs no source transcript. Cleans the local memory only: it
@@ -536,6 +546,20 @@ async fn main() -> Result<()> {
                 }
                 Err(e) if push::is_read_only(&e) => Err(anyhow!(
                     "{remote} is read-only for your token — recall can read it, but publishing needs write access (check your HF token)"
+                )),
+                Err(e) => Err(e),
+            }
+        }
+        Cmd::Compact { memory } => {
+            let target = memory::Memory::resolve(memory);
+            let label = target.label();
+            match compact::run(target).await {
+                Ok(report) => {
+                    print!("{report}");
+                    Ok(())
+                }
+                Err(e) if push::is_read_only(&e) => Err(anyhow!(
+                    "{label} is read-only for your token — compacting it needs write access (check your HF token)"
                 )),
                 Err(e) => Err(e),
             }

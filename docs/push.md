@@ -26,6 +26,10 @@ you wrote yourself is never touched.
 | `-y`, `--yes` | Skip the wrong-memory confirmation (below). |
 | `--compact` | Compact the remote after pushing, even if the unindexed backlog is below the threshold that triggers it. With nothing new to push, compact only. `--force-reindex` is the old name. |
 
+Once 500 pushed rows sit unindexed on the remote, a push also compacts it: it merges the small
+fragments, adds those rows to the search indexes, and deletes the old versions.
+`funes compact <memory>` does the same without pushing ([index.md](index.md#compaction)).
+
 **The wrong-memory guard.** A push to a memory that holds none of the chunks it would publish — a
 first push, a new host, sessions named with `--sessions` that it lacks, or genuinely the wrong memory —
 asks before uploading. Off a terminal it refuses
