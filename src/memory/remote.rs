@@ -37,6 +37,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use anyhow::{ensure, Context, Result};
@@ -187,7 +188,7 @@ pub(crate) async fn first_publish(
         .operations(ops)
         .commit_message(message)
         .revision(rev.to_string())
-        .progress(upload_progress())
+        .progress(upload_progress(0))
         .send()
         .await
         .map_err(|e| anyhow::Error::new(e).context("create_commit failed"))?;
@@ -281,7 +282,11 @@ async fn clean(
     let head = head_oid(repo, rev).await?;
     let (ds, wrapper) = open_pinned(dataset_uri, storage_options, &head).await?;
     delete_old_versions_keeping_uploads(&ds).await?;
-    commit_in_parts(repo, rev, captured_deletes(&wrapper), message).await
+    let deletes = captured_deletes(&wrapper);
+    if !deletes.is_empty() {
+        eprintln!("deleting {} old files…", deletes.len());
+    }
+    commit_in_parts(repo, rev, deletes, message).await
 }
 
 /// Compact a remote dataset and refresh its indexes, returning the commits made after version
@@ -653,12 +658,16 @@ async fn send_commit(
     rev: &str,
     message: String,
 ) -> std::result::Result<CommitInfo, HFError> {
+    let deletes = ops
+        .iter()
+        .filter(|op| matches!(op, CommitOperation::Delete { .. }))
+        .count();
     repo.create_commit()
         .operations(ops)
         .commit_message(message)
         .maybe_parent_commit(parent)
         .revision(rev.to_string())
-        .progress(upload_progress())
+        .progress(upload_progress(deletes))
         .send()
         .await
 }
@@ -676,8 +685,12 @@ fn head_moved(e: &HFError) -> bool {
 
 /// A live stderr byte-bar for an upload `create_commit`, redrawn in place (`\r`) as xet streams the
 /// data. Small commits skip the byte phase (no `Progress` events) — then nothing is drawn and the
-/// caller's "uploading…" line is the only trace. `Send + Sync`: hf-hub calls it off the main thread.
-struct UploadBar;
+/// caller's "uploading…" line is the only trace. A commit that deletes files says how many.
+/// `Send + Sync`: hf-hub calls it off the main thread.
+struct UploadBar {
+    files: AtomicUsize,
+    deletes: usize,
+}
 
 impl ProgressHandler for UploadBar {
     fn on_progress(&self, event: &ProgressEvent) {
@@ -706,22 +719,33 @@ impl ProgressHandler for UploadBar {
                 );
                 let _ = std::io::stderr().flush();
             }
+            UploadEvent::Start { total_files, .. } => self.files.store(*total_files, Ordering::Relaxed),
             UploadEvent::Committing => {
                 eprint!("\r    committing…                                        ");
                 let _ = std::io::stderr().flush();
             }
             UploadEvent::Complete => {
-                eprintln!("\r    upload complete                                     ");
+                if self.files.load(Ordering::Relaxed) > 0 {
+                    eprintln!("\r    upload complete                                     ");
+                }
+                if self.deletes > 0 {
+                    eprintln!(
+                        "\r    deleted {} files                                     ",
+                        self.deletes
+                    );
+                }
             }
-            UploadEvent::Start { .. } => {}
         }
     }
 }
 
-/// The upload progress handler for `create_commit`, shared by [`send_commit`] and the first-publish
-/// commit in [`crate::commands::push`]. See [`UploadBar`].
-pub(crate) fn upload_progress() -> Progress {
-    Progress::new(UploadBar)
+/// The upload progress handler for a `create_commit` deleting `deletes` files, shared by
+/// [`send_commit`] and [`first_publish`]. See [`UploadBar`].
+pub(crate) fn upload_progress(deletes: usize) -> Progress {
+    Progress::new(UploadBar {
+        files: AtomicUsize::new(0),
+        deletes,
+    })
 }
 
 /// Human-readable byte count (binary units), for the upload bar.
