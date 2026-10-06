@@ -92,10 +92,7 @@ impl OSObjectStore for CaptureStore {
     async fn get_opts(&self, location: &OPath, options: GetOptions) -> OSResult<GetResult> {
         let hit = self.captured.lock().unwrap().get(location).cloned();
         match hit {
-            Some(None) => Err(OSError::NotFound {
-                path: location.to_string(),
-                source: "deleted".into(),
-            }),
+            Some(None) => Err(deleted(location)),
             Some(Some(full)) => {
                 let total = full.len() as u64;
                 let range = match &options.range {
@@ -157,13 +154,21 @@ impl OSObjectStore for CaptureStore {
     async fn copy_opts(&self, from: &OPath, to: &OPath, _opts: CopyOptions) -> OSResult<()> {
         // The decorator never writes to the underlying store — a copy lands in the capture. The
         // source comes from the capture if present, else a read of the underlying store.
-        let hit = self.captured.lock().unwrap().get(from).cloned().flatten();
+        let hit = self.captured.lock().unwrap().get(from).cloned();
         let body = match hit {
-            Some(b) => b,
+            Some(Some(b)) => b,
+            Some(None) => return Err(deleted(from)),
             None => self.inner.get_opts(from, GetOptions::default()).await?.bytes().await?,
         };
         self.captured.lock().unwrap().insert(to.clone(), Some(body));
         Ok(())
+    }
+}
+
+fn deleted(location: &OPath) -> OSError {
+    OSError::NotFound {
+        path: location.to_string(),
+        source: "deleted".into(),
     }
 }
 
@@ -329,6 +334,12 @@ mod tests {
         assert!(store.get_opts(&old, GetOptions::default()).await.is_err());
         let listed: Vec<_> = store.list(None).collect().await;
         assert!(listed.is_empty(), "a deleted file is not listed: {listed:?}");
+        let copy = OPath::from("_versions/2.manifest");
+        assert!(store.copy_opts(&old, &copy, CopyOptions::default()).await.is_err());
+        assert!(
+            !store.captured.lock().unwrap().contains_key(&copy),
+            "a deleted file is not copied"
+        );
     }
 
     /// `list` shows both the underlying files and the captured ones, so a caller sees the version
