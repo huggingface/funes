@@ -250,7 +250,6 @@ pub(crate) async fn reindex(
             None => return Ok(Reindexed::Conflict),
         }
     }
-    // No lock needed: a reindex whose files these remove sees the version above and gives up.
     match commit_in_parts(repo, rev, deletes, &message).await {
         Ok(Some(deleted)) => oid = Some(deleted),
         Ok(None) => {}
@@ -269,8 +268,17 @@ async fn refresh(ds: &mut Dataset, read: u64, on_event: impl Fn(IndexBuildEvent)
         .await
         .context("refreshing the remote indexes")?;
     let txns = transactions_since(ds, read).await?;
-    dataset::delete_old_versions(ds).await?;
+    delete_old_versions_keeping_uploads(ds).await?;
     Ok(txns)
+}
+
+/// Delete the old versions and the files only they reference. A file no version references is kept
+/// for 7 days, as another host may have uploaded it ahead of its manifest.
+async fn delete_old_versions_keeping_uploads(ds: &Dataset) -> Result<()> {
+    ds.cleanup_old_versions(chrono::Duration::zero(), Some(false), None)
+        .await
+        .context("deleting the old versions")?;
+    Ok(())
 }
 
 /// `storage_options` reading the commit `sha`, so a session sees one head however long it runs.
@@ -738,6 +746,7 @@ mod tests {
     use lance::dataset::CommitBuilder;
     use lance_index::scalar::FullTextSearchQuery;
     use lance_io::object_store::ObjectStore as LanceObjectStore;
+    use object_store::path::Path as OPath;
     use object_store::ObjectStoreExt;
 
     /// Every object in `store`: path → size.
@@ -840,6 +849,21 @@ mod tests {
             }
         }
         txns
+    }
+
+    #[tokio::test]
+    async fn the_cleanup_spares_a_file_uploaded_ahead_of_its_manifest() {
+        let uri = "shared-memory://staged/m/chunks.lance";
+        let (store, _) = LanceObjectStore::from_uri(uri).await.unwrap();
+        let mut ds = Dataset::write(text_rows("base"), uri, None).await.unwrap();
+        let staged = OPath::from("m/chunks.lance/data/staged.lance");
+        store.inner.put(&staged, "x".into()).await.unwrap();
+        ds.append(text_rows("one"), None).await.unwrap();
+
+        delete_old_versions_keeping_uploads(&ds).await.unwrap();
+
+        assert_eq!(ds.versions().await.unwrap().len(), 1);
+        assert!(store.inner.head(&staged).await.is_ok(), "the staged file is kept");
     }
 
     #[tokio::test]
