@@ -1,11 +1,14 @@
 //! The remote side of a memory: how its Lance dataset is read from and written to a Hub repo.
 //!
-//! [`append`] adds rows; [`reindex`] folds the unindexed backlog into the FTS/IVF indexes, building
-//! any the dataset lacks, and compacts the fragments and deletes the old versions. Each
-//! runs a native Lance op and lands the result in one `create_commit` on the branch, guarded by a
-//! `parent_commit` against the head it read — atomic. Each is a single attempt: if the head moved
-//! first it reports a conflict ([`Appended::Conflict`] / [`Reindexed::Conflict`]) and the caller
-//! retries against the new head.
+//! [`append`] adds rows: it runs a native Lance op and lands the result in one `create_commit` on the
+//! branch, guarded by a `parent_commit` against the head it read, so it is atomic. It is a single
+//! attempt: if the head moved first it reports [`Appended::Conflict`] and the caller retries against
+//! the new head.
+//!
+//! [`reindex`] folds the unindexed backlog into the FTS/IVF indexes, building any the dataset lacks,
+//! compacts the fragments and deletes the old versions. It runs too long to hold the head it read,
+//! so it lands in several commits and replays its own onto the head as it is by then. It reports
+//! [`Reindexed::Conflict`] when more than a push landed meanwhile.
 //!
 //! The result goes up as a *single* `create_commit` because Lance, left to write straight to
 //! `hf://`, would commit each file on its own: that store is OpenDAL's HuggingFace service, where
