@@ -53,6 +53,7 @@ use lance::dataset::builder::DatasetBuilder;
 use lance::dataset::transaction::{Operation, Transaction};
 use lance::dataset::{ColumnAlteration, CommitBuilder, Dataset, NewColumnTransform, WriteParams};
 use lance::index::DatasetIndexExt;
+use lance::Error as LanceError;
 use lance_io::object_store::WrappingObjectStore;
 use object_store::ObjectStore as OSObjectStore;
 
@@ -345,7 +346,12 @@ async fn replay(
 /// refresh after a push.
 async fn replay_onto(mut ds: Dataset, read: u64, txns: &[Transaction]) -> Result<Option<Dataset>> {
     for version in read + 1..=ds.version().version {
-        let landed = ds.read_transaction_by_version(version).await?;
+        let landed = match ds.read_transaction_by_version(version).await {
+            Ok(landed) => landed,
+            // Only a reindex deletes versions, once its own landed.
+            Err(e) if matches!(e, LanceError::DatasetNotFound { .. }) || e.is_not_found() => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
         if !matches!(
             landed.map(|txn| txn.operation),
             Some(Operation::Append { .. } | Operation::ReserveFragments { .. })
@@ -895,6 +901,19 @@ mod tests {
             1,
             "the pushed row is still found"
         );
+    }
+
+    #[tokio::test]
+    async fn a_reindex_does_not_replay_over_deleted_history() {
+        let (store, mut hub, read) = hub_and_snapshot("history").await;
+        hub.append(text_rows("pushed"), None).await.unwrap();
+        hub.append(text_rows("again"), None).await.unwrap();
+        // Another reindex landed, then its cleanup deleted the versions in between.
+        let manifest = format!("hub/chunks.lance/_versions/{}.manifest", u64::MAX - (read + 1));
+        store.inner.delete(&manifest.as_str().into()).await.unwrap();
+
+        let txns = reindex_snapshot("history", &store, read).await;
+        assert!(replay_onto(hub, read, &txns).await.unwrap().is_none());
     }
 
     #[tokio::test]
