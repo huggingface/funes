@@ -210,13 +210,13 @@ pub(crate) async fn reindex(
     on_event: impl Fn(IndexBuildEvent),
 ) -> Result<Reindexed> {
     let head = head_oid(repo, rev).await?;
-    let (mut ds, wrapper) = open_capturing(dataset_uri, pinned(&storage_options, &head)).await?;
+    let (mut ds, wrapper) = open_pinned(dataset_uri, &storage_options, &head).await?;
     let read = ds.version().version;
 
     // A push landing meanwhile takes the fragment ids past the reserved ones.
     let compacted = dataset::fragments_to_compact(&ds).await?;
     if compacted > 0 {
-        let (reserving, reserved) = open_capturing(dataset_uri, pinned(&storage_options, &head)).await?;
+        let (reserving, reserved) = open_pinned(dataset_uri, &storage_options, &head).await?;
         let reserve = Operation::ReserveFragments {
             num_fragments: compacted as u32,
         };
@@ -283,11 +283,27 @@ async fn delete_old_versions_keeping_uploads(ds: &Dataset) -> Result<()> {
     Ok(())
 }
 
-/// `storage_options` reading the commit `sha`, so a session sees one head however long it runs.
-fn pinned(storage_options: &HashMap<String, String>, sha: &str) -> HashMap<String, String> {
+/// Open the remote dataset at the commit `sha`, so a session sees one head however long it runs,
+/// with a [`CaptureStore`] installed. Reads are whole-file downloads: the Hub can cut short a range
+/// covering a whole file.
+async fn open_pinned(
+    dataset_uri: &str,
+    storage_options: &HashMap<String, String>,
+    sha: &str,
+) -> Result<(Dataset, Arc<CaptureWrapper>)> {
+    let (owner, name, _) = hub::parse_hf(dataset_uri)?;
+    // A client of its own: reads may retry, commits must not.
+    let token = storage_options.get("hf_token").map(String::as_str);
+    let repo = Arc::new(hub::client(token, true)?.dataset(owner, name));
+    let fetch = Arc::new(FetchWrapper::new(repo, sha.to_string()));
     let mut options = storage_options.clone();
     options.insert("hf_revision".to_string(), sha.to_string());
-    options
+    let ds = dataset::open_wrapped(dataset_uri, options, fetch).await?;
+    let wrapper = Arc::new(CaptureWrapper {
+        captured: Captured::default(),
+    });
+    let ds = ds.with_object_store_wrappers([wrapper.clone() as Arc<dyn WrappingObjectStore>]);
+    Ok((ds, wrapper))
 }
 
 /// The commits made after version `read`, but for the fragment reservation: the reindex makes its
@@ -337,7 +353,7 @@ async fn replay(
 ) -> Result<Option<(String, Vec<CommitOperation>)>> {
     for _ in 0..MAX_REPLAYS {
         let head = head_oid(repo, rev).await?;
-        let (ds, wrapper) = open_capturing(dataset_uri, pinned(storage_options, &head)).await?;
+        let (ds, wrapper) = open_pinned(dataset_uri, storage_options, &head).await?;
         if replay_onto(ds, read, txns).await?.is_none() {
             return Ok(None);
         }
