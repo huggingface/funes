@@ -229,6 +229,11 @@ pub(crate) async fn reindex(
     }
 
     let txns = refresh(&mut ds, read, on_event).await?;
+    let written = rewritten_fragments(&txns);
+    ensure!(
+        written <= compacted,
+        "the compaction wrote {written} fragments for {compacted} reserved ids"
+    );
     let deletes = captured_deletes(&wrapper);
     if txns.is_empty() && deletes.is_empty() {
         return Ok(Reindexed::AlreadyCurrent);
@@ -289,6 +294,16 @@ async fn transactions_since(ds: &Dataset, read: u64) -> Result<Vec<Transaction>>
         }
     }
     Ok(txns)
+}
+
+/// The fragments `txns` write in place of others.
+fn rewritten_fragments(txns: &[Transaction]) -> usize {
+    txns.iter()
+        .map(|txn| match &txn.operation {
+            Operation::Rewrite { groups, .. } => groups.iter().map(|group| group.new_fragments.len()).sum(),
+            _ => 0,
+        })
+        .sum()
 }
 
 /// A manifest or a transaction: what a replay writes anew.

@@ -359,9 +359,13 @@ async fn compaction_options(ds: &Dataset, max_small: usize) -> Result<Compaction
     } else {
         indexed.iter().map(|f| f.id() as u32).collect()
     };
+    // Only fragments under FRAGMENT_ROWS merge, so a compaction writes no more fragments than it
+    // reads.
     Ok(CompactionOptions {
         target_rows_per_fragment: FRAGMENT_ROWS,
         excluded_fragment_ids,
+        materialize_deletions: false,
+        max_overlays_per_fragment: None,
         ..Default::default()
     })
 }
@@ -793,6 +797,21 @@ mod tests {
         let after: Vec<_> = ds.load_indices().await.unwrap().iter().map(|i| i.uuid).collect();
         assert_eq!(after, indexes, "no index is rewritten");
         assert_eq!(ds.count_rows(None).await.unwrap(), TRAINABLE + 3);
+    }
+
+    #[tokio::test]
+    async fn compact_fragments_leaves_a_large_fragment_with_deletions_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let uri = table_uri(&dir.path().to_string_lossy());
+        let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
+        let text: Vec<String> = (0..3 * FRAGMENT_ROWS).map(|i| format!("row {i}")).collect();
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(StringArray::from(text))]).unwrap();
+        let mut ds = Dataset::write(RecordBatchIterator::new([Ok(batch)], schema), &uri, None)
+            .await
+            .unwrap();
+        ds.delete("text LIKE 'row 1%'").await.unwrap();
+
+        assert_eq!(fragments_to_compact(&ds).await.unwrap(), 0);
     }
 
     #[tokio::test]
