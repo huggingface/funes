@@ -124,6 +124,10 @@ on disk. A recall reading an old version at that moment can fail once. The
 remote push path optimizes indexes incrementally but does not yet reap, so a
 published memory can run above the live-generation estimate.
 
+Recall time grows with the number of fragments, so each index run merges the
+fragments it wrote. Once more than 256 small fragments are indexed, it rewrites
+every fragment.
+
 ## Fit against HF Hub storage
 
 A published memory is an HF Hub dataset repo, so it counts against the account's

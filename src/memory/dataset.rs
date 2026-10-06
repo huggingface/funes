@@ -13,6 +13,7 @@ use arrow_array::{FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterat
 use arrow_schema::{DataType, Field, Schema};
 use futures::TryStreamExt;
 use lance::dataset::builder::DatasetBuilder;
+use lance::dataset::optimize::{compact_files, CompactionOptions};
 use lance::dataset::{Dataset, MergeInsertBuilder, MergeInsertWriteMode, WhenMatched, WhenNotMatched};
 use lance::index::vector::VectorIndexParams;
 use lance::index::{DatasetIndexExt, DatasetIndexInternalExt};
@@ -305,6 +306,57 @@ pub(crate) async fn optimize_index(
         .await
         .with_context(|| format!("optimizing {name}"))?;
     Ok(())
+}
+
+/// Rows per fragment a compaction writes. A remote read fetches whole data files, so a fragment
+/// stays a few MB.
+const FRAGMENT_ROWS: usize = 4096;
+
+/// Past this many indexed fragments under [`FRAGMENT_ROWS`] rows, a compaction rewrites every
+/// fragment. A recall pays about 0.5 ms per fragment.
+const MAX_SMALL_FRAGMENTS: usize = 256;
+
+/// Merge the fragments no index covers yet, or all of them past [`MAX_SMALL_FRAGMENTS`]. Rewriting
+/// an indexed fragment rewrites every index covering it.
+pub(crate) async fn compact_fragments(ds: &mut Dataset) -> Result<()> {
+    compact_fragments_past(ds, MAX_SMALL_FRAGMENTS).await
+}
+
+/// [`compact_fragments`], rewriting every fragment past `max_small` small indexed ones.
+async fn compact_fragments_past(ds: &mut Dataset, max_small: usize) -> Result<()> {
+    let options = compaction_options(ds, max_small).await?;
+    compact_files(ds, options, None)
+        .await
+        .context("compacting the fragments")?;
+    Ok(())
+}
+
+async fn compaction_options(ds: &Dataset, max_small: usize) -> Result<CompactionOptions> {
+    let indices = ds.load_indices().await.context("listing the indexes")?;
+    let indexed: Vec<_> = ds
+        .get_fragments()
+        .into_iter()
+        .filter(|f| {
+            let id = f.id() as u32;
+            indices
+                .iter()
+                .any(|idx| idx.fragment_bitmap.as_ref().is_none_or(|b| b.contains(id)))
+        })
+        .collect();
+    let small = indexed
+        .iter()
+        .filter(|f| f.metadata().physical_rows.unwrap_or(0) < FRAGMENT_ROWS)
+        .count();
+    let excluded_fragment_ids = if small > max_small {
+        Vec::new()
+    } else {
+        indexed.iter().map(|f| f.id() as u32).collect()
+    };
+    Ok(CompactionOptions {
+        target_rows_per_fragment: FRAGMENT_ROWS,
+        excluded_fragment_ids,
+        ..Default::default()
+    })
 }
 
 /// Delete every version but the current one, and the files no version references. Needs the memory
@@ -693,6 +745,66 @@ mod tests {
         assert_eq!(
             refreshed_text, text_indexes,
             "filling vectors preserves every FTS segment"
+        );
+    }
+
+    /// Two indexed fragments of the same index set, then three unindexed ones.
+    async fn indexed_then_appended(dir: &std::path::Path) -> Dataset {
+        let params = WriteParams {
+            max_rows_per_file: TRAINABLE / 2,
+            ..Default::default()
+        };
+        let uri = table_uri(&dir.to_string_lossy());
+        let mut ds = Dataset::write(reader(embedded(&turns(0, TRAINABLE))), &uri, Some(params))
+            .await
+            .unwrap();
+        build_indexes(&mut ds, |_| {}).await.unwrap();
+        for i in 0..3 {
+            ds.append(reader(embedded(&turns(TRAINABLE + i, 1))), None)
+                .await
+                .unwrap();
+        }
+        assert_eq!(ds.get_fragments().len(), 5);
+        ds
+    }
+
+    fn fragment_ids(ds: &Dataset) -> Vec<usize> {
+        ds.get_fragments().iter().map(|f| f.id()).collect()
+    }
+
+    #[tokio::test]
+    async fn compact_fragments_merges_only_the_unindexed_fragments() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ds = indexed_then_appended(dir.path()).await;
+        let indexes: Vec<_> = ds.load_indices().await.unwrap().iter().map(|i| i.uuid).collect();
+
+        compact_fragments(&mut ds).await.unwrap();
+
+        let ids = fragment_ids(&ds);
+        assert_eq!(ids.len(), 3, "the three appended fragments become one: {ids:?}");
+        assert_eq!(ids[..2], [0, 1], "the indexed fragments are left alone");
+        let after: Vec<_> = ds.load_indices().await.unwrap().iter().map(|i| i.uuid).collect();
+        assert_eq!(after, indexes, "no index is rewritten");
+        assert_eq!(ds.count_rows(None).await.unwrap(), TRAINABLE + 3);
+    }
+
+    #[tokio::test]
+    async fn compact_fragments_rewrites_every_fragment_past_the_small_fragment_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ds = indexed_then_appended(dir.path()).await;
+
+        compact_fragments_past(&mut ds, 0).await.unwrap();
+
+        let ids = fragment_ids(&ds);
+        assert_eq!(ids.len(), 2, "one fragment per index set: {ids:?}");
+        assert!(!ids.contains(&0), "the indexed fragments are rewritten too");
+        let mut fts = ds.scan();
+        fts.full_text_search(FullTextSearchQuery::new("7".to_string()))
+            .unwrap()
+            .fast_search();
+        assert!(
+            turn_uuids(fts).await.contains(&"turn7".to_string()),
+            "the index follows the rewritten fragments"
         );
     }
 
