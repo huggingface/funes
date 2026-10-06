@@ -1,14 +1,15 @@
 //! A write-capturing object-store decorator.
 //!
 //! [`CaptureStore`] wraps an inner [`ObjectStore`](object_store::ObjectStore): it records every
-//! write in memory instead of forwarding it, and delegates reads to the inner store — except for a
-//! path it has already captured, which it serves back (read-your-writes). A caller can run a
-//! sequence of writes against it and then recover exactly the files that would have been written,
-//! keyed by path, with nothing reaching the backend.
+//! write and delete in memory instead of forwarding it, and delegates reads to the inner store,
+//! except for a path it has already captured, which it serves back (read-your-writes). A caller can
+//! run a sequence of writes against it and then recover exactly the files that would have been
+//! written or deleted, keyed by path, with nothing reaching the backend.
 //!
 //! ```text
-//!   put → captured in memory      (never reaches the inner store)
-//!   get → captured if present, else delegated to the inner store
+//!   put    → captured in memory      (never reaches the inner store)
+//!   delete → captured in memory      (never reaches the inner store)
+//!   get    → captured if present, else delegated to the inner store
 //! ```
 //!
 //! It is generic: the inner store is any `ObjectStore`, so the tests exercise it over an in-memory
@@ -28,17 +29,18 @@ use chrono::Utc;
 use futures::stream::{self, BoxStream, StreamExt};
 use object_store::path::Path as OPath;
 use object_store::{
-    Attributes, CopyOptions, GetOptions, GetRange, GetResult, GetResultPayload, ListResult, MultipartUpload,
-    ObjectMeta, ObjectStore as OSObjectStore, PutMultipartOptions, PutOptions, PutPayload, PutResult,
+    Attributes, CopyOptions, Error as OSError, GetOptions, GetRange, GetResult, GetResultPayload, ListResult,
+    MultipartUpload, ObjectMeta, ObjectStore as OSObjectStore, PutMultipartOptions, PutOptions, PutPayload, PutResult,
     Result as OSResult, UploadPart,
 };
 
-/// In-memory capture of object-store writes: path → bytes. Shared between a [`CaptureStore`] and
-/// whatever holds it, so the writes can be read back after the fact.
-pub(crate) type Captured = Arc<Mutex<BTreeMap<OPath, Bytes>>>;
+/// In-memory capture of object-store changes: path → the bytes written, or `None` for a delete.
+/// Shared between a [`CaptureStore`] and whatever holds it, so the changes can be read back after
+/// the fact.
+pub(crate) type Captured = Arc<Mutex<BTreeMap<OPath, Option<Bytes>>>>;
 
 /// Reads delegate to `inner` unless the path was already captured (read-your-writes, so a caller
-/// can read back what it just wrote); writes are captured and never forwarded.
+/// can read back what it just wrote). Writes and deletes are captured and never forwarded.
 #[derive(Debug)]
 pub(crate) struct CaptureStore {
     inner: Arc<dyn OSObjectStore>,
@@ -65,7 +67,10 @@ impl OSObjectStore for CaptureStore {
         for b in payload {
             buf.extend_from_slice(&b);
         }
-        self.captured.lock().unwrap().insert(location.clone(), Bytes::from(buf));
+        self.captured
+            .lock()
+            .unwrap()
+            .insert(location.clone(), Some(Bytes::from(buf)));
         Ok(PutResult {
             e_tag: None,
             version: None,
@@ -87,7 +92,11 @@ impl OSObjectStore for CaptureStore {
     async fn get_opts(&self, location: &OPath, options: GetOptions) -> OSResult<GetResult> {
         let hit = self.captured.lock().unwrap().get(location).cloned();
         match hit {
-            Some(full) => {
+            Some(None) => Err(OSError::NotFound {
+                path: location.to_string(),
+                source: "deleted".into(),
+            }),
+            Some(Some(full)) => {
                 let total = full.len() as u64;
                 let range = match &options.range {
                     None => 0..total,
@@ -108,16 +117,17 @@ impl OSObjectStore for CaptureStore {
     }
 
     fn list(&self, prefix: Option<&OPath>) -> BoxStream<'static, OSResult<ObjectMeta>> {
-        let inner = self.inner.list(prefix);
+        let captured = self.captured.lock().unwrap().clone();
         let prefix = prefix.cloned();
-        let extra: Vec<OSResult<ObjectMeta>> = self
-            .captured
-            .lock()
-            .unwrap()
+        let extra: Vec<OSResult<ObjectMeta>> = captured
             .iter()
             .filter(|(p, _)| prefix.as_ref().is_none_or(|pre| p.as_ref().starts_with(pre.as_ref())))
-            .map(|(p, b)| Ok(meta(p.clone(), b.len() as u64)))
+            .filter_map(|(p, b)| b.as_ref().map(|b| Ok(meta(p.clone(), b.len() as u64))))
             .collect();
+        let inner = self
+            .inner
+            .list(prefix.as_ref())
+            .filter(move |m| std::future::ready(m.as_ref().map_or(true, |m| !captured.contains_key(&m.location))));
         inner.chain(stream::iter(extra)).boxed()
     }
 
@@ -125,12 +135,19 @@ impl OSObjectStore for CaptureStore {
         self.inner.list_with_delimiter(prefix).await
     }
 
+    /// A path written through this store is dropped rather than recorded: Lance writes each file
+    /// once, so it did not exist before.
     fn delete_stream(&self, locations: BoxStream<'static, OSResult<OPath>>) -> BoxStream<'static, OSResult<OPath>> {
         let captured = self.captured.clone();
         locations
             .map(move |loc| {
                 if let Ok(p) = &loc {
-                    captured.lock().unwrap().remove(p);
+                    let mut captured = captured.lock().unwrap();
+                    if let Some(Some(_)) = captured.get(p) {
+                        captured.remove(p);
+                    } else {
+                        captured.insert(p.clone(), None);
+                    }
                 }
                 loc
             })
@@ -140,12 +157,12 @@ impl OSObjectStore for CaptureStore {
     async fn copy_opts(&self, from: &OPath, to: &OPath, _opts: CopyOptions) -> OSResult<()> {
         // The decorator never writes to the underlying store — a copy lands in the capture. The
         // source comes from the capture if present, else a read of the underlying store.
-        let hit = self.captured.lock().unwrap().get(from).cloned();
+        let hit = self.captured.lock().unwrap().get(from).cloned().flatten();
         let body = match hit {
             Some(b) => b,
             None => self.inner.get_opts(from, GetOptions::default()).await?.bytes().await?,
         };
-        self.captured.lock().unwrap().insert(to.clone(), body);
+        self.captured.lock().unwrap().insert(to.clone(), Some(body));
         Ok(())
     }
 }
@@ -178,7 +195,7 @@ impl MultipartUpload for CaptureMultipart {
 
     async fn complete(&mut self) -> OSResult<PutResult> {
         let bytes = Bytes::from(std::mem::take(&mut self.buf));
-        self.captured.lock().unwrap().insert(self.location.clone(), bytes);
+        self.captured.lock().unwrap().insert(self.location.clone(), Some(bytes));
         Ok(PutResult {
             e_tag: None,
             version: None,
@@ -278,6 +295,40 @@ mod tests {
             inner.get_opts(&to, GetOptions::default()).await.is_err(),
             "copy must not write to the underlying store"
         );
+    }
+
+    /// A delete of an underlying file is captured, never forwarded, and hides the file from reads.
+    /// A delete of a file written through the store drops the write.
+    #[tokio::test]
+    async fn delete_is_captured_not_forwarded() {
+        let (store, inner) = capture_over_memory();
+        let old = OPath::from("_versions/1.manifest");
+        inner
+            .put_opts(&old, PutPayload::from("old"), PutOptions::default())
+            .await
+            .unwrap();
+        let new = OPath::from("data/new.lance");
+        store
+            .put_opts(&new, PutPayload::from("new"), PutOptions::default())
+            .await
+            .unwrap();
+
+        let paths = stream::iter([Ok(old.clone()), Ok(new.clone())]).boxed();
+        let deleted: Vec<_> = store.delete_stream(paths).collect().await;
+        assert!(deleted.iter().all(Result::is_ok));
+
+        assert_eq!(
+            *store.captured.lock().unwrap(),
+            BTreeMap::from([(old.clone(), None)]),
+            "the underlying delete is recorded, the captured write dropped"
+        );
+        assert!(
+            inner.get_opts(&old, GetOptions::default()).await.is_ok(),
+            "delete must NOT reach the underlying store"
+        );
+        assert!(store.get_opts(&old, GetOptions::default()).await.is_err());
+        let listed: Vec<_> = store.list(None).collect().await;
+        assert!(listed.is_empty(), "a deleted file is not listed: {listed:?}");
     }
 
     /// `list` shows both the underlying files and the captured ones, so a caller sees the version

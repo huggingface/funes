@@ -192,6 +192,10 @@ async fn push_round_trip_create_append_recall() {
     // the index as its own commit (capture_reindex + a separate commit), then recall it again.
     let reindex = funes::commands::push::run_push(Memory::parse(&uri), true, Confirm::Yes, &[]).await;
     let recall_reindexed = recall_remote(&uri, "SYNCSMOKE2 continuation").await;
+    let versions_reindexed = match Memory::parse(&uri).open().await {
+        Ok(ds) => ds.versions().await.map(|v| v.len()).unwrap_or(0),
+        Err(_) => 0,
+    };
     // Two pushes at once — what N subagents ending together do.
     write_session(
         src.path(),
@@ -315,6 +319,7 @@ async fn push_round_trip_create_append_recall() {
         recall_reindexed.contains("SYNCSMOKE2"),
         "remote recall should still surface the turn after reindex: {recall_reindexed}"
     );
+    assert_eq!(versions_reindexed, 1, "the reindex deletes the old versions");
     let mut published = 0;
     for (who, r) in [("a", race_a), ("b", race_b)] {
         let report = r.unwrap_or_else(|e| panic!("racing push {who} failed: {e}")).report;

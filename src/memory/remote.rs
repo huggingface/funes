@@ -1,7 +1,7 @@
 //! The remote side of a memory: how its Lance dataset is read from and written to a Hub repo.
 //!
 //! [`append`] adds rows; [`reindex`] folds the unindexed backlog into the FTS/IVF indexes, building
-//! any the dataset lacks. Each
+//! any the dataset lacks, and compacts the fragments and deletes the old versions. Each
 //! runs a native Lance op and lands the result in one `create_commit` on the branch, guarded by a
 //! `parent_commit` against the head it read — atomic. Each is a single attempt: if the head moved
 //! first it reports a conflict ([`Appended::Conflict`] / [`Reindexed::Conflict`]) and the caller
@@ -190,10 +190,10 @@ pub(crate) async fn first_publish(
     Ok(Some(info.commit_oid.unwrap_or_else(|| "?".to_string())))
 }
 
-/// Refresh the remote dataset's indexes, building any it lacks, and land the delta in one
-/// `create_commit` on branch `rev`, guarded by the current head. [`Reindexed::AlreadyCurrent`] if
-/// there was nothing to refresh or build, [`Reindexed::Conflict`] if the head moved first (retry
-/// against the new head).
+/// Compact the remote dataset's fragments, refresh its indexes, building any it lacks, and delete
+/// its old versions, landing the result in one `create_commit` on branch `rev`, guarded by the
+/// current head. [`Reindexed::AlreadyCurrent`] if there was nothing to change,
+/// [`Reindexed::Conflict`] if the head moved first (retry against the new head).
 pub(crate) async fn reindex(
     repo: &HFRepository<RepoTypeDataset>,
     dataset_uri: &str,
@@ -204,21 +204,31 @@ pub(crate) async fn reindex(
 ) -> Result<Reindexed> {
     let parent = head_oid(repo, rev).await?;
     let (mut ds, wrapper) = open_capturing(dataset_uri, storage_options).await?;
-
-    dataset::build_indexes(&mut ds, on_event)
-        .await
-        .context("refreshing the remote indexes")?;
+    refresh(&mut ds, on_event).await?;
 
     let files = captured_files(&wrapper);
-    if files.is_empty() {
+    let deletes = captured_deletes(&wrapper);
+    if files.is_empty() && deletes.is_empty() {
         return Ok(Reindexed::AlreadyCurrent);
     }
-    let (ops, _dir) = write_ops(&files)?;
+    let (mut ops, _dir) = write_ops(&files)?;
+    // No lock needed: a write whose files these remove fails its own guarded commit.
+    ops.extend(deletes);
     match send_commit(repo, ops, parent, rev, message).await {
         Ok(info) => Ok(Reindexed::Committed(info.commit_oid.unwrap_or_else(|| "?".to_string()))),
         Err(e) if head_moved(&e) => Ok(Reindexed::Conflict),
         Err(e) => Err(anyhow::Error::new(e).context("reindex commit failed")),
     }
+}
+
+/// Compact a remote dataset, refresh its indexes and delete its old versions. Compacting first
+/// keeps the rewritten fragments outside every index.
+async fn refresh(ds: &mut Dataset, on_event: impl Fn(IndexBuildEvent)) -> Result<()> {
+    dataset::compact_fragments(ds).await?;
+    dataset::build_indexes(ds, on_event)
+        .await
+        .context("refreshing the remote indexes")?;
+    dataset::delete_old_versions(ds).await
 }
 
 /// Rename a column on the remote dataset in one head-guarded commit. `alter_columns` is
@@ -301,7 +311,19 @@ fn captured_files(wrapper: &CaptureWrapper) -> BTreeMap<String, Bytes> {
         .lock()
         .unwrap()
         .iter()
-        .map(|(p, b)| (p.to_string(), b.clone()))
+        .filter_map(|(p, b)| b.as_ref().map(|b| (p.to_string(), b.clone())))
+        .collect()
+}
+
+/// The captured deletes as commit operations: the existing files Lance removed.
+fn captured_deletes(wrapper: &CaptureWrapper) -> Vec<CommitOperation> {
+    wrapper
+        .captured
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, b)| b.is_none())
+        .map(|(p, _)| CommitOperation::delete(p.to_string()))
         .collect()
 }
 
@@ -552,6 +574,60 @@ pub(crate) async fn fetch_wrapper(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow_array::StringArray;
+    use arrow_schema::{DataType, Field, Schema};
+    use futures::TryStreamExt;
+    use lance_io::object_store::ObjectStore as LanceObjectStore;
+    use object_store::ObjectStoreExt;
+
+    /// Every object in `store`: path → size.
+    async fn objects(store: &dyn OSObjectStore) -> BTreeMap<String, u64> {
+        store
+            .list(None)
+            .map_ok(|m| (m.location.to_string(), m.size))
+            .try_collect()
+            .await
+            .unwrap()
+    }
+
+    /// An in-memory store, not a local dataset: Lance writes part of a local dataset straight to
+    /// disk, around the wrapper. Every Hub write goes through it.
+    #[tokio::test]
+    async fn refresh_through_the_capture_compacts_and_deletes_the_old_versions() {
+        let uri = "shared-memory://capture-refresh/chunks.lance";
+        let (store, _) = LanceObjectStore::from_uri(uri).await.unwrap();
+        let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
+        let rows = |text: &str| {
+            let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(StringArray::from(vec![text]))]).unwrap();
+            RecordBatchIterator::new([Ok(batch)], schema.clone())
+        };
+        let mut ds = Dataset::write(rows("base"), uri, None).await.unwrap();
+        dataset::build_indexes(&mut ds, |_| {}).await.unwrap();
+        for text in ["one", "two", "three"] {
+            ds.append(rows(text), None).await.unwrap();
+        }
+        let before = objects(store.inner.as_ref()).await;
+
+        let (mut ds, wrapper) = open_capturing(uri, HashMap::new()).await.unwrap();
+        refresh(&mut ds, |_| {}).await.unwrap();
+        assert_eq!(objects(store.inner.as_ref()).await, before, "nothing reaches the store");
+
+        // Apply the captured changes as the commit would.
+        let captured = wrapper.captured.lock().unwrap().clone();
+        assert!(captured.values().any(Option::is_none), "the old versions are deleted");
+        for (path, body) in captured {
+            match body {
+                Some(body) => store.inner.put(&path, body.into()).await.map(|_| ()),
+                None => store.inner.delete(&path).await,
+            }
+            .unwrap();
+        }
+        let ds = Dataset::open(uri).await.unwrap();
+        assert_eq!(ds.versions().await.unwrap().len(), 1);
+        assert_eq!(ds.get_fragments().len(), 2, "the appended fragments are merged");
+        assert_eq!(ds.count_rows(None).await.unwrap(), 4);
+        assert!(!dataset::fts_needs_refresh(&ds).await.unwrap());
+    }
 
     #[test]
     fn human_bytes_scales_to_binary_units() {
