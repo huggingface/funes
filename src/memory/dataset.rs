@@ -126,6 +126,7 @@ pub(crate) const VECTOR_INDEX: &str = "vector_idx";
 #[derive(Debug)]
 pub enum IndexBuildEvent {
     Building(&'static str),
+    MergingFragments(usize),
     Compacting { index: String, deltas: usize },
     VectorIndexFailed(anyhow::Error),
 }
@@ -318,24 +319,33 @@ const MAX_SMALL_FRAGMENTS: usize = 256;
 
 /// Merge the fragments no index covers yet, or all of them past [`MAX_SMALL_FRAGMENTS`]. Rewriting
 /// an indexed fragment rewrites every index covering it.
-pub(crate) async fn compact_fragments(ds: &mut Dataset) -> Result<()> {
-    compact_fragments_past(ds, MAX_SMALL_FRAGMENTS).await
+pub(crate) async fn compact_fragments(ds: &mut Dataset, on_event: impl Fn(IndexBuildEvent)) -> Result<()> {
+    compact_fragments_past(ds, MAX_SMALL_FRAGMENTS, on_event).await
 }
 
 /// How many fragments [`compact_fragments`] would merge.
 pub(crate) async fn fragments_to_compact(ds: &Dataset) -> Result<usize> {
     let options = compaction_options(ds, MAX_SMALL_FRAGMENTS).await?;
-    let plan = plan_compaction(ds, &options).await.context("planning the compaction")?;
-    Ok(plan.tasks.iter().map(|task| task.fragments.len()).sum())
+    planned_fragments(ds, &options).await
 }
 
 /// [`compact_fragments`], rewriting every fragment past `max_small` small indexed ones.
-async fn compact_fragments_past(ds: &mut Dataset, max_small: usize) -> Result<()> {
+async fn compact_fragments_past(ds: &mut Dataset, max_small: usize, on_event: impl Fn(IndexBuildEvent)) -> Result<()> {
     let options = compaction_options(ds, max_small).await?;
+    let fragments = planned_fragments(ds, &options).await?;
+    if fragments == 0 {
+        return Ok(());
+    }
+    on_event(IndexBuildEvent::MergingFragments(fragments));
     compact_files(ds, options, None)
         .await
         .context("compacting the fragments")?;
     Ok(())
+}
+
+async fn planned_fragments(ds: &Dataset, options: &CompactionOptions) -> Result<usize> {
+    let plan = plan_compaction(ds, options).await.context("planning the compaction")?;
+    Ok(plan.tasks.iter().map(|task| task.fragments.len()).sum())
 }
 
 async fn compaction_options(ds: &Dataset, max_small: usize) -> Result<CompactionOptions> {
@@ -789,8 +799,16 @@ mod tests {
         let mut ds = indexed_then_appended(dir.path()).await;
         let indexes: Vec<_> = ds.load_indices().await.unwrap().iter().map(|i| i.uuid).collect();
 
-        compact_fragments(&mut ds).await.unwrap();
+        let merging = RefCell::new(Vec::new());
+        compact_fragments(&mut ds, |event| {
+            if let IndexBuildEvent::MergingFragments(n) = event {
+                merging.borrow_mut().push(n);
+            }
+        })
+        .await
+        .unwrap();
 
+        assert_eq!(merging.into_inner(), [3], "the merge is announced once, with its size");
         let ids = fragment_ids(&ds);
         assert_eq!(ids.len(), 3, "the three appended fragments become one: {ids:?}");
         assert_eq!(ids[..2], [0, 1], "the indexed fragments are left alone");
@@ -819,7 +837,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut ds = indexed_then_appended(dir.path()).await;
 
-        compact_fragments_past(&mut ds, 0).await.unwrap();
+        compact_fragments_past(&mut ds, 0, |_| {}).await.unwrap();
 
         let ids = fragment_ids(&ds);
         assert_eq!(ids.len(), 2, "one fragment per index set: {ids:?}");

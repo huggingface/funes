@@ -267,7 +267,7 @@ pub(crate) async fn reindex(
 /// Compact a remote dataset and refresh its indexes, returning the commits made after version
 /// `read`. Compacting first keeps the rewritten fragments outside every index.
 async fn refresh(ds: &mut Dataset, read: u64, on_event: impl Fn(IndexBuildEvent)) -> Result<Vec<Transaction>> {
-    dataset::compact_fragments(ds).await?;
+    dataset::compact_fragments(ds, &on_event).await?;
     dataset::build_indexes(ds, on_event)
         .await
         .context("refreshing the remote indexes")?;
@@ -955,7 +955,7 @@ mod tests {
     #[tokio::test]
     async fn a_reindex_does_not_replay_onto_another_compaction() {
         let (store, mut ds, read) = hub_and_snapshot("refuse").await;
-        dataset::compact_fragments(&mut ds).await.unwrap();
+        dataset::compact_fragments(&mut ds, |_| {}).await.unwrap();
 
         let txns = reindex_snapshot("refuse", &store, read).await;
         assert!(replay_onto(ds, read, &txns).await.unwrap().is_none());

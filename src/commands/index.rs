@@ -759,7 +759,7 @@ impl Indexer {
                 || dataset::fts_needs_refresh(d).await?
                 || dataset::fragments_to_compact(d).await? > 0
             {
-                dataset::compact_fragments(d).await?;
+                dataset::compact_fragments(d, ui::index_progress).await?;
                 dataset::build_indexes(d, ui::index_progress).await?;
 
                 // Reap superseded versions — best-effort; on failure the reap waits for next run.
