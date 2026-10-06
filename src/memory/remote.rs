@@ -240,8 +240,7 @@ pub(crate) async fn reindex(
     );
     if txns.is_empty() {
         // Nothing to replay, but a cleanup that failed may have left old versions.
-        delete_old_versions_keeping_uploads(&ds).await?;
-        let oid = commit_in_parts(repo, rev, captured_deletes(&wrapper), &message).await?;
+        let oid = clean(repo, dataset_uri, &storage_options, rev, &message).await?;
         return Ok(oid.map_or(Reindexed::AlreadyCurrent, Reindexed::Committed));
     }
     let mut files = captured_files(&wrapper);
@@ -254,14 +253,28 @@ pub(crate) async fn reindex(
     }
 
     // After an error, the manifest commit may have landed anyway, so the files stay.
-    let Some((oid, deletes)) = replay(repo, dataset_uri, &storage_options, rev, read, &txns, &message).await? else {
+    let Some(oid) = replay(repo, dataset_uri, &storage_options, rev, read, &txns, &message).await? else {
         discard(repo, rev, staged, &message).await;
         return Ok(Reindexed::Conflict);
     };
-    match commit_in_parts(repo, rev, deletes, &message).await {
+    match clean(repo, dataset_uri, &storage_options, rev, &message).await {
         Ok(deleted) => Ok(Reindexed::Committed(deleted.unwrap_or(oid))),
         Err(e) => Ok(Reindexed::Uncleaned(oid, e)),
     }
+}
+
+/// Delete the old versions at the head of `rev`. The oid of the last delete commit, if any.
+async fn clean(
+    repo: &HFRepository<RepoTypeDataset>,
+    dataset_uri: &str,
+    storage_options: &HashMap<String, String>,
+    rev: &str,
+    message: &str,
+) -> Result<Option<String>> {
+    let head = head_oid(repo, rev).await?;
+    let (ds, wrapper) = open_pinned(dataset_uri, storage_options, &head).await?;
+    delete_old_versions_keeping_uploads(&ds).await?;
+    commit_in_parts(repo, rev, captured_deletes(&wrapper), message).await
 }
 
 /// Compact a remote dataset and refresh its indexes, returning the commits made after version
@@ -340,8 +353,8 @@ fn is_version_file(path: &str) -> bool {
 /// Replays tried while pushes keep landing between a head read and the commit.
 const MAX_REPLAYS: usize = 10;
 
-/// Commit `txns` onto the head of `rev` as it is now, returning the commit oid and the deletes of
-/// the old versions. `None` if [`replay_onto`] refuses, or past [`MAX_REPLAYS`].
+/// Commit `txns` onto the head of `rev` as it is now, returning the commit oid. `None` if
+/// [`replay_onto`] refuses, or past [`MAX_REPLAYS`].
 async fn replay(
     repo: &HFRepository<RepoTypeDataset>,
     dataset_uri: &str,
@@ -350,7 +363,7 @@ async fn replay(
     read: u64,
     txns: &[Transaction],
     message: &str,
-) -> Result<Option<(String, Vec<CommitOperation>)>> {
+) -> Result<Option<String>> {
     for _ in 0..MAX_REPLAYS {
         let head = head_oid(repo, rev).await?;
         let (ds, wrapper) = open_pinned(dataset_uri, storage_options, &head).await?;
@@ -359,10 +372,7 @@ async fn replay(
         }
         let (ops, _dir) = write_ops(&captured_files(&wrapper))?;
         match send_commit(repo, ops, Some(head), rev, message.to_string()).await {
-            Ok(info) => {
-                let oid = info.commit_oid.unwrap_or_else(|| "?".to_string());
-                return Ok(Some((oid, captured_deletes(&wrapper))));
-            }
+            Ok(info) => return Ok(Some(info.commit_oid.unwrap_or_else(|| "?".to_string()))),
             Err(e) if head_moved(&e) => continue,
             Err(e) => return Err(anyhow::Error::new(e).context("reindex commit failed")),
         }
@@ -370,9 +380,8 @@ async fn replay(
     Ok(None)
 }
 
-/// `txns` committed onto `ds`, its old versions then deleted, or `None` if a commit other than a
-/// push or a fragment reservation landed after version `read`. Lance takes a compaction or an index
-/// refresh after a push.
+/// `txns` committed onto `ds`, or `None` if a commit other than a push or a fragment reservation
+/// landed after version `read`. Lance takes a compaction or an index refresh after a push.
 async fn replay_onto(mut ds: Dataset, read: u64, txns: &[Transaction]) -> Result<Option<Dataset>> {
     for version in read + 1..=ds.version().version {
         let landed = match ds.read_transaction_by_version(version).await {
@@ -396,7 +405,6 @@ async fn replay_onto(mut ds: Dataset, read: u64, txns: &[Transaction]) -> Result
             .await
             .context("replaying the reindex")?;
     }
-    delete_old_versions_keeping_uploads(&ds).await?;
     Ok(Some(ds))
 }
 
@@ -932,9 +940,14 @@ mod tests {
             .await
             .unwrap()
             .expect("only a push landed");
+        delete_old_versions_keeping_uploads(&head).await.unwrap();
 
         head.validate().await.unwrap();
-        assert_eq!(head.versions().await.unwrap().len(), 1, "the replay leaves one version");
+        assert_eq!(
+            head.versions().await.unwrap().len(),
+            1,
+            "the cleanup leaves one version"
+        );
         assert_eq!(head.count_rows(None).await.unwrap(), 5);
         let ids: Vec<usize> = head.get_fragments().iter().map(|f| f.id()).collect();
         assert_eq!(ids.len(), 3, "the indexed row, the merged ones, the push: {ids:?}");
