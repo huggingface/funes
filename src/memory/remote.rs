@@ -77,9 +77,12 @@ pub(crate) enum Appended {
 
 /// Outcome of a [`reindex`] commit.
 pub(crate) enum Reindexed {
-    /// The index delta was committed; carries the new commit oid.
+    /// The changes were committed; carries the last commit oid.
     Committed(String),
-    /// Nothing to optimize — the index was already current.
+    /// The index delta was committed (its commit oid), but deleting the old versions failed. The
+    /// next reindex deletes them.
+    Uncleaned(String, anyhow::Error),
+    /// Nothing to optimize or delete.
     AlreadyCurrent,
     /// The branch head moved before our commit; the caller may retry against the new head.
     Conflict,
@@ -236,7 +239,10 @@ pub(crate) async fn reindex(
         "the compaction wrote {written} fragments for {compacted} reserved ids"
     );
     if txns.is_empty() {
-        return Ok(Reindexed::AlreadyCurrent);
+        // Nothing to replay, but a cleanup that failed may have left old versions.
+        delete_old_versions_keeping_uploads(&ds).await?;
+        let oid = commit_in_parts(repo, rev, captured_deletes(&wrapper), &message).await?;
+        return Ok(oid.map_or(Reindexed::AlreadyCurrent, Reindexed::Committed));
     }
     let mut files = captured_files(&wrapper);
     files.retain(|path, _| !is_version_file(path));
@@ -246,9 +252,10 @@ pub(crate) async fn reindex(
     let Some((oid, deletes)) = replay(repo, dataset_uri, &storage_options, rev, read, &txns, &message).await? else {
         return Ok(Reindexed::Conflict);
     };
-    // A delete that fails leaves a file only old versions reference, which the next cleanup takes.
-    let deleted = commit_in_parts(repo, rev, deletes, &message).await.ok().flatten();
-    Ok(Reindexed::Committed(deleted.unwrap_or(oid)))
+    match commit_in_parts(repo, rev, deletes, &message).await {
+        Ok(deleted) => Ok(Reindexed::Committed(deleted.unwrap_or(oid))),
+        Err(e) => Ok(Reindexed::Uncleaned(oid, e)),
+    }
 }
 
 /// Compact a remote dataset and refresh its indexes, returning the commits made after version
