@@ -1,28 +1,23 @@
 //! The remote side of a memory: how its Lance dataset is read from and written to a Hub repo.
 //!
-//! [`append`] adds rows: it runs a native Lance op and lands the result in one `create_commit` on the
-//! branch, guarded by a `parent_commit` against the head it read, so it is atomic. It is a single
-//! attempt: if the head moved first it reports [`Appended::Conflict`] and the caller retries against
-//! the new head.
+//! [`append`] adds rows in one `create_commit` on the branch, guarded by a `parent_commit` against
+//! the head it read, so it is atomic. If the head moved first, it reports [`Appended::Conflict`] and
+//! the caller retries against the new head.
 //!
 //! [`reindex`] folds the unindexed backlog into the FTS/IVF indexes, building any the dataset lacks,
-//! compacts the fragments and deletes the old versions. It runs too long to hold the head it read,
-//! so it lands in several commits and replays its own onto the head as it is by then. It reports
-//! [`Reindexed::Conflict`] when more than a push landed meanwhile.
+//! compacts the fragments and deletes the old versions, in several commits.
 //!
-//! The result goes up as a *single* `create_commit` because Lance, left to write straight to
-//! `hf://`, would commit each file on its own: that store is OpenDAL's HuggingFace service, where
-//! every `put` is its own git commit.
+//! Lance, left to write straight to `hf://`, would commit each file on its own: that store is
+//! OpenDAL's HuggingFace service, where every `put` is its own git commit.
 //!
 //! ```text
 //!   Lance Dataset → object_store → OpenDAL hf service → HF Hub
 //!       put = XET upload + one git commit, per file
 //! ```
 //!
-//! A multi-file write would then be several commits — non-atomic, no CAS. So the op runs through a
-//! [`CaptureStore`](super::capture_store::CaptureStore) installed via Lance's
-//! [`WrappingObjectStore`] seam: Lance's writes are captured in memory instead of hitting the Hub,
-//! and we ship the whole set as one guarded `create_commit`. A [`reindex`] goes up in several commits.
+//! So each op runs through a [`CaptureStore`](super::capture_store::CaptureStore) installed via
+//! Lance's [`WrappingObjectStore`] seam: Lance's writes are captured in memory instead of hitting
+//! the Hub, and we choose the commits that ship them.
 //!
 //! # Why this shape
 //!
@@ -78,16 +73,17 @@ pub(crate) enum Appended {
     Conflict,
 }
 
-/// Outcome of a [`reindex`] commit.
+/// Outcome of a [`reindex`].
 pub(crate) enum Reindexed {
-    /// The changes were committed; carries the last commit oid.
+    /// Committed, with the last commit oid.
     Committed(String),
-    /// The index delta was committed (its commit oid), but deleting the old versions failed. The
-    /// next reindex deletes them.
+    /// The new version landed, with its commit oid, but deleting the old ones failed. The next
+    /// reindex deletes them.
     Uncleaned(String, anyhow::Error),
     /// Nothing to optimize or delete.
     AlreadyCurrent,
-    /// The branch head moved before our commit; the caller may retry against the new head.
+    /// The head moved in a way the reindex can't build on. The caller may retry against the new
+    /// head.
     Conflict,
 }
 
@@ -200,12 +196,11 @@ pub(crate) async fn first_publish(
 
 /// Compact the remote dataset's fragments, refresh its indexes, building any it lacks, and delete
 /// its old versions, on branch `rev`. The work can take minutes, so it doesn't hold the head it
-/// read: it reserves the fragment ids its compaction takes, uploads the new files, replays its
-/// commits onto the head as it is by then, then deletes the old files.
-/// [`Reindexed::AlreadyCurrent`] if there was nothing to change, [`Reindexed::Conflict`] if a
-/// commit other than a push landed meanwhile (retry against the new head).
-/// The repo client must have HTTP retries disabled: retrying a successful manifest commit after a
-/// lost response can report a conflict and cause its live files to be discarded.
+/// read: it reserves the fragment ids its compaction takes, uploads the new files, replays its Lance
+/// commits onto the head as it is then, and deletes the old files.
+///
+/// `repo` must not retry HTTP requests: a manifest commit retried after a lost response reports a
+/// conflict, and the files of the version it landed would be discarded.
 pub(crate) async fn reindex(
     repo: &HFRepository<RepoTypeDataset>,
     dataset_uri: &str,
@@ -295,8 +290,8 @@ fn pinned(storage_options: &HashMap<String, String>, sha: &str) -> HashMap<Strin
     options
 }
 
-/// The commits made after version `read`, except the compaction's fragment reservation: the Hub
-/// holds the one that counts.
+/// The commits made after version `read`, but for the fragment reservation: the reindex makes its
+/// own on the Hub.
 async fn transactions_since(ds: &Dataset, read: u64) -> Result<Vec<Transaction>> {
     let mut txns = Vec::new();
     for version in read + 1..=ds.version().version {

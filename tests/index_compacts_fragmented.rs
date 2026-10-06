@@ -1,4 +1,4 @@
-//! An index run with nothing new still compacts a memory left fragmented by an older funes.
+//! An index run with nothing new still compacts a memory of many small indexed fragments.
 //! Own test binary so its `$FUNES_HOME` can't race another integration test's.
 
 use std::io::Write;
@@ -27,7 +27,6 @@ async fn index_compacts_a_fragmented_memory_with_nothing_new() {
         .await
         .unwrap();
 
-    // One small indexed fragment per run, as an older funes left them.
     let mut ds = Memory::local().open().await.unwrap();
     let rows = dataset::scan_rows(&ds, &[], None, None).await.unwrap();
     let schema = Arc::new(arrow_schema::Schema::from(ds.schema()));
