@@ -1532,7 +1532,7 @@ async fn index_lines(ds: &Dataset, now: DateTime<Utc>) -> Result<String> {
 /// A remote memory's published state: when it was last pushed to and its unindexed backlog.
 async fn remote_lines(ds: &Dataset, now: DateTime<Utc>) -> String {
     let mut out = String::new();
-    // Every write to a remote memory is a `funes push` (data or reindex commit), so the head
+    // Every write to a remote memory is a `funes push` (data or compaction commit), so the head
     // version's timestamp is when it was last pushed to.
     let t = ds.version().timestamp;
     if t.timestamp() > 0 {

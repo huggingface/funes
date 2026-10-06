@@ -11,9 +11,9 @@
 //! - **Append:** [`remote::append`] lands the new fragment + manifest + transaction in one
 //!   guarded `create_commit`, retried against a fresh head if a concurrent push moved it. The new
 //!   rows are left unindexed (a query still finds them by brute force).
-//! - **Reindex:** a *separate* guarded commit ([`remote::reindex`]), kept off the data commit so
-//!   the data commit stays small. `push` runs it after the data commit when the unindexed backlog
-//!   crosses [`REINDEX_THRESHOLD`] or the remote has no text index (best-effort: a head-moved
+//! - **Compaction:** separate commits ([`remote::compact`]), kept off the data commit so the
+//!   data commit stays small. `push` runs it after the data commit when the unindexed backlog
+//!   crosses [`COMPACT_THRESHOLD`] or the remote has no text index (best-effort: a head-moved
 //!   conflict is a warning, the next push retries), or eagerly with `--force-reindex` (retried until
 //!   it lands).
 //!
@@ -24,7 +24,7 @@ use crate::hub;
 use crate::memory::card::{self, CardAction, CardCtx};
 use crate::memory::dataset;
 use crate::memory::lock;
-use crate::memory::remote::{self, Appended, Reindexed};
+use crate::memory::remote::{self, Appended, Compacted};
 use crate::memory::{Memory, MemoryState};
 use crate::{chunk, scan, ui};
 use anyhow::{bail, Context, Result};
@@ -42,14 +42,14 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// Reindex the remote once this many appended rows are sitting unindexed (answered by a
+/// Compact the remote once this many appended rows are sitting unindexed (answered by a
 /// brute-force scan until folded in). Bounds per-query cost, not push count, and is stateless —
 /// [`remote::append`] reads it straight from Lance's index stats. Nonzero so tiny per-push
 /// deltas don't pile up between compactions.
-const REINDEX_THRESHOLD: u64 = 500;
+const COMPACT_THRESHOLD: u64 = 500;
 
-/// Cap on CAS-conflict retries (the data append, and a forced reindex) when the branch head keeps
-/// moving under us, so a busy remote can't spin forever.
+/// Cap on CAS-conflict retries (the data append, and a forced compaction) when the branch head
+/// keeps moving under us, so a busy remote can't spin forever.
 const MAX_COMMIT_RETRIES: u32 = 10;
 
 /// Every chunk id in a memory, or empty if it can't be opened (absent local index, not-yet-created
@@ -407,13 +407,13 @@ fn named_ids(by_session: &HashMap<String, Vec<String>>, sessions: &[String]) -> 
 }
 
 /// Publish the local memory's new embedded chunks to `target` (a remote memory on the HF Hub). With
-/// `force_reindex`, refresh the remote index after the data commit (retrying until it lands) even
-/// if the unindexed backlog is below [`REINDEX_THRESHOLD`]; with no new chunks pending it's a pure
-/// index refresh. `confirm` gates a publish to a memory holding none of the chunks to publish.
+/// `compact`, compact the remote after the data commit (retrying until it goes through) even if
+/// the unindexed backlog is below [`COMPACT_THRESHOLD`]. With no new chunks pending, it only
+/// compacts. `confirm` gates a publish to a memory holding none of the chunks to publish.
 ///
 /// `sessions`, when non-empty, restricts candidates to those sessions' embedded chunks.
 /// Empty publishes all embedded chunks the local memory holds that the remote does not.
-pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm, sessions: &[String]) -> Result<Pushed> {
+pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions: &[String]) -> Result<Pushed> {
     let uri = match &target {
         Memory::Remote { uri } => uri.clone(),
         Memory::Local { .. } => {
@@ -485,9 +485,9 @@ pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm, ses
         record_pushed(&uri, candidates.intersection(&remote_ids))?;
     }
 
-    // Nothing to push => done (no token needed), unless this is a forced reindex of an existing
+    // Nothing to push => done (no token needed), unless this is a forced compaction of an existing
     // remote, which is still work.
-    if to_push.is_empty() && (first_publish || !force_reindex) {
+    if to_push.is_empty() && (first_publish || !compact) {
         return Ok(format!("{}: already up to date ({} chunks)\n", target.label(), remote_ids.len()).into());
     }
 
@@ -502,17 +502,17 @@ pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm, ses
         bail!("push aborted");
     }
 
-    // No HTTP retries, as `remote::reindex` requires.
+    // No HTTP retries, as `remote::compact` requires.
     let repo = hub::client(Some(token.as_str()), false)?.dataset(owner, name);
     // No revision pinning: always the `main` branch head.
     let rev = "main".to_string();
     let dataset_uri = format!("{uri}/{}.lance", dataset::TABLE);
     let opts = HashMap::from([("hf_token".to_string(), token), ("revision".to_string(), rev.clone())]);
 
-    // 3. Forced reindex with no new data: just refresh the remote index and stop.
+    // 3. Forced compaction with no new data: just compact the remote and stop.
     if to_push.is_empty() {
         eprintln!("refreshing the remote index…");
-        let note = reindex_forced(&repo, &dataset_uri, &opts, &rev).await?;
+        let note = compact_forced(&repo, &dataset_uri, &opts, &rev).await?;
         return Ok(format!("{}: up to date ({} chunks)\n{note}", target.label(), remote_ids.len()).into());
     }
 
@@ -639,15 +639,15 @@ pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm, ses
     let mut out = format!("{}: pushed {n_chunks} chunks (commit {oid})\n", target.label());
     out.push_str(&card_note);
 
-    // 7. Reindex as a separate commit: forced (retried until it lands), or best-effort (one shot,
+    // 7. Compact in separate commits: forced (retried until it lands), or best-effort (one shot,
     // warn on a conflict — the next push retries) past the threshold or when the remote has no text
     // index, which recall cannot do without.
-    if force_reindex {
+    if compact {
         eprintln!("refreshing the remote index…");
-        out.push_str(&reindex_forced(&repo, &dataset_uri, &opts, &rev).await?);
-    } else if unindexed > REINDEX_THRESHOLD || !text_indexed {
+        out.push_str(&compact_forced(&repo, &dataset_uri, &opts, &rev).await?);
+    } else if unindexed > COMPACT_THRESHOLD || !text_indexed {
         eprintln!("refreshing the remote index…");
-        out.push_str(&reindex_auto(&repo, &dataset_uri, &opts, &rev).await);
+        out.push_str(&compact_auto(&repo, &dataset_uri, &opts, &rev).await);
     }
     out.push_str(&skipped.warning());
     Ok(out.into())
@@ -754,16 +754,16 @@ fn drop_secret_rows(batches: Vec<RecordBatch>) -> Result<(Vec<RecordBatch>, Skip
     Ok((clean, Skipped { rows: dropped, summary }))
 }
 
-/// Forced reindex: ask [`remote::reindex`] to refresh and commit, retrying on a head-moved
+/// Forced compaction: ask [`remote::compact`] to compact and commit, retrying on a head-moved
 /// conflict (it re-reads the head each call) until it lands or [`MAX_COMMIT_RETRIES`] is exceeded.
-async fn reindex_forced(
+async fn compact_forced(
     repo: &HFRepository<RepoTypeDataset>,
     dataset_uri: &str,
     opts: &HashMap<String, String>,
     rev: &str,
 ) -> Result<String> {
     for _ in 0..=MAX_COMMIT_RETRIES {
-        match remote::reindex(
+        match remote::compact(
             repo,
             dataset_uri,
             opts.clone(),
@@ -773,29 +773,29 @@ async fn reindex_forced(
         )
         .await?
         {
-            Reindexed::Committed(oid) => return Ok(format!("  reindexed (commit {oid})\n")),
-            Reindexed::Uncleaned(oid, e) => {
+            Compacted::Committed(oid) => return Ok(format!("  reindexed (commit {oid})\n")),
+            Compacted::Uncleaned(oid, e) => {
                 return Ok(format!(
                     "  reindexed (commit {oid})\n  note: old versions not deleted ({e:#}); \
                      re-run push --force-reindex\n"
                 ))
             }
-            Reindexed::AlreadyCurrent => return Ok("  index already current\n".to_string()),
-            Reindexed::Conflict => continue,
+            Compacted::AlreadyCompact => return Ok("  index already current\n".to_string()),
+            Compacted::Conflict => continue,
         }
     }
     bail!("reindex still conflicting after {MAX_COMMIT_RETRIES} retries; re-run push --force-reindex")
 }
 
-/// Best-effort reindex during a normal push: one attempt, never retried. The data is already
+/// Best-effort compaction during a normal push: one attempt, never retried. The data is already
 /// committed, so any failure here is a warning — the next push past the threshold tries again.
-async fn reindex_auto(
+async fn compact_auto(
     repo: &HFRepository<RepoTypeDataset>,
     dataset_uri: &str,
     opts: &HashMap<String, String>,
     rev: &str,
 ) -> String {
-    match remote::reindex(
+    match remote::compact(
         repo,
         dataset_uri,
         opts.clone(),
@@ -805,13 +805,13 @@ async fn reindex_auto(
     )
     .await
     {
-        Ok(Reindexed::Committed(oid)) => format!("  reindexed (commit {oid})\n"),
-        Ok(Reindexed::Uncleaned(oid, e)) => format!(
+        Ok(Compacted::Committed(oid)) => format!("  reindexed (commit {oid})\n"),
+        Ok(Compacted::Uncleaned(oid, e)) => format!(
             "  reindexed (commit {oid})\n  note: old versions not deleted ({e:#}); \
              will retry on a later push\n"
         ),
-        Ok(Reindexed::AlreadyCurrent) => String::new(),
-        Ok(Reindexed::Conflict) => {
+        Ok(Compacted::AlreadyCompact) => String::new(),
+        Ok(Compacted::Conflict) => {
             "  note: index not refreshed (remote head moved); will retry on a later push\n".to_string()
         }
         Err(e) => format!("  note: index not refreshed ({e:#}); will retry on a later push\n"),
@@ -831,7 +831,8 @@ mod tests {
         assert!(must_confirm(1, 1));
         // Some overlap (fewer to push than there are to publish) → no prompt, it's a memory you add to.
         assert!(!must_confirm(5, 3));
-        // Nothing to push (up to date, or a reindex-only run) → never prompt, even with 0 overlap.
+        // Nothing to push (up to date, or a compaction-only run) → never prompt, even with 0
+        // overlap.
         assert!(!must_confirm(5, 0));
         assert!(!must_confirm(0, 0));
     }

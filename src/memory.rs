@@ -8,7 +8,7 @@
 //!
 //! Below it: [`dataset`], [`fetch_store`] and [`capture_store`] are **mechanics** — Lance and object
 //! stores, knowing nothing about the Hub. [`remote`] is **transport** — the pinned reads and the
-//! single guarded commit an append or reindex lands as, over the Hub client in [`crate::hub`].
+//! commits of an append or a compaction, over the Hub client in [`crate::hub`].
 //! [`card`] serves a published memory's dataset card, [`lock`] the local writer lock.
 //!
 //! The commands ask this module what state a memory is in; they never infer it from error shapes.

@@ -4,8 +4,8 @@
 //! the head it read, so it is atomic. If the head moved first, it reports [`Appended::Conflict`] and
 //! the caller retries against the new head.
 //!
-//! [`reindex`] folds the unindexed backlog into the FTS/IVF indexes, building any the dataset lacks,
-//! compacts the fragments and deletes the old versions, in several commits.
+//! [`compact`] folds the unindexed backlog into the FTS/IVF indexes, building any the dataset
+//! lacks, compacts the fragments and deletes the old versions, in several commits.
 //!
 //! Lance, left to write straight to `hf://`, would commit each file on its own: that store is
 //! OpenDAL's HuggingFace service, where every `put` is its own git commit.
@@ -74,16 +74,16 @@ pub(crate) enum Appended {
     Conflict,
 }
 
-/// Outcome of a [`reindex`].
-pub(crate) enum Reindexed {
+/// Outcome of a [`compact`].
+pub(crate) enum Compacted {
     /// Committed, with the last commit oid.
     Committed(String),
     /// The new version landed, with its commit oid, but deleting the old ones failed. The next
-    /// reindex deletes them.
+    /// compaction deletes them.
     Uncleaned(String, anyhow::Error),
     /// Nothing to optimize or delete.
-    AlreadyCurrent,
-    /// The head moved in a way the reindex can't build on. The caller may retry against the new
+    AlreadyCompact,
+    /// The head moved in a way the compaction can't build on. The caller may retry against the new
     /// head.
     Conflict,
 }
@@ -91,7 +91,7 @@ pub(crate) enum Reindexed {
 /// Append `batches` to the remote Lance dataset at `dataset_uri` (an `hf://…/<table>.lance` URI)
 /// and land them in one `create_commit` on branch `rev`, guarded by the current head. The append
 /// writes only data — a new fragment, manifest, and transaction — and leaves the new rows
-/// unindexed (refresh the index separately with [`reindex`]). `extra_files` (repo path → bytes,
+/// unindexed (refresh the index separately with [`compact`]). `extra_files` (repo path → bytes,
 /// e.g. the dataset card) ride the same guarded commit; cloned per attempt, so a conflict retry
 /// re-attaches them. Returns [`Appended::Committed`] with the new commit oid, the resulting
 /// unindexed-row backlog (the largest across the dataset's indexes — what `push` thresholds on) and
@@ -138,7 +138,7 @@ pub(crate) async fn append(
 }
 
 /// Build the whole dataset locally (data + indexes) and upload it in one `create_commit` — unlike
-/// [`append`]/[`reindex`], no head to guard against, since the dataset doesn't exist yet. `None` if
+/// [`append`]/[`compact`], no head to guard against, since the dataset doesn't exist yet. `None` if
 /// the build produced no files.
 #[allow(clippy::too_many_arguments)] // internal orchestration, one call site (`push`)
 pub(crate) async fn first_publish(
@@ -202,14 +202,14 @@ pub(crate) async fn first_publish(
 ///
 /// `repo` must not retry HTTP requests: a manifest commit retried after a lost response reports a
 /// conflict, and the files of the version it landed would be discarded.
-pub(crate) async fn reindex(
+pub(crate) async fn compact(
     repo: &HFRepository<RepoTypeDataset>,
     dataset_uri: &str,
     storage_options: HashMap<String, String>,
     rev: &str,
     message: String,
     on_event: impl Fn(IndexBuildEvent),
-) -> Result<Reindexed> {
+) -> Result<Compacted> {
     let head = head_oid(repo, rev).await?;
     let (mut ds, wrapper) = open_pinned(dataset_uri, &storage_options, &head).await?;
     let read = ds.version().version;
@@ -228,7 +228,7 @@ pub(crate) async fn reindex(
         let (ops, _dir) = write_ops(&captured_files(&reserved))?;
         match send_commit(repo, ops, Some(head), rev, message.clone()).await {
             Ok(_) => {}
-            Err(e) if head_moved(&e) => return Ok(Reindexed::Conflict),
+            Err(e) if head_moved(&e) => return Ok(Compacted::Conflict),
             Err(e) => return Err(anyhow::Error::new(e).context("reservation commit failed")),
         }
     }
@@ -242,7 +242,7 @@ pub(crate) async fn reindex(
     if txns.is_empty() {
         // Nothing to replay, but a cleanup that failed may have left old versions.
         let oid = clean(repo, dataset_uri, &storage_options, rev, &message).await?;
-        return Ok(oid.map_or(Reindexed::AlreadyCurrent, Reindexed::Committed));
+        return Ok(oid.map_or(Compacted::AlreadyCompact, Compacted::Committed));
     }
     let mut files = captured_files(&wrapper);
     files.retain(|path, _| !is_version_file(path));
@@ -257,7 +257,7 @@ pub(crate) async fn reindex(
         Ok(Replayed::Landed(oid)) => oid,
         Ok(Replayed::Refused) => {
             discard(repo, rev, staged, &message).await;
-            return Ok(Reindexed::Conflict);
+            return Ok(Compacted::Conflict);
         }
         Ok(Replayed::Uncertain(e)) => return Err(e),
         Err(e) => {
@@ -266,8 +266,8 @@ pub(crate) async fn reindex(
         }
     };
     match clean(repo, dataset_uri, &storage_options, rev, &message).await {
-        Ok(deleted) => Ok(Reindexed::Committed(deleted.unwrap_or(oid))),
-        Err(e) => Ok(Reindexed::Uncleaned(oid, e)),
+        Ok(deleted) => Ok(Compacted::Committed(deleted.unwrap_or(oid))),
+        Err(e) => Ok(Compacted::Uncleaned(oid, e)),
     }
 }
 
@@ -331,8 +331,8 @@ async fn open_pinned(
     Ok((ds, wrapper))
 }
 
-/// The commits made after version `read`, but for the fragment reservation: the reindex makes its
-/// own on the Hub.
+/// The commits made after version `read`, but for the fragment reservation: the compaction makes
+/// its own on the Hub.
 async fn transactions_since(ds: &Dataset, read: u64) -> Result<Vec<Transaction>> {
     let mut txns = Vec::new();
     for version in read + 1..=ds.version().version {
@@ -411,7 +411,7 @@ async fn replay_onto(mut ds: Dataset, read: u64, txns: &[Transaction]) -> Result
     for version in read + 1..=ds.version().version {
         let landed = match ds.read_transaction_by_version(version).await {
             Ok(landed) => landed,
-            // Only a reindex deletes versions, once its own landed.
+            // Only a compaction deletes versions, once its own landed.
             Err(e) if matches!(e, LanceError::DatasetNotFound { .. }) || e.is_not_found() => return Ok(None),
             Err(e) => return Err(e.into()),
         };
@@ -941,8 +941,8 @@ mod tests {
         (store, ds, read)
     }
 
-    /// Reindex the copy at `snap/`, upload its new files to `hub/`, and return its commits.
-    async fn reindex_snapshot(authority: &str, store: &LanceObjectStore, read: u64) -> Vec<Transaction> {
+    /// Compact the copy at `snap/`, upload its new files to `hub/`, and return its commits.
+    async fn compact_snapshot(authority: &str, store: &LanceObjectStore, read: u64) -> Vec<Transaction> {
         let wrapper = Arc::new(CaptureWrapper {
             captured: Captured::default(),
         });
@@ -977,12 +977,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_reindex_replays_onto_a_push_that_landed_meanwhile() {
+    async fn a_compaction_replays_onto_a_push_that_landed_meanwhile() {
         let (store, ds, read) = hub_and_snapshot("replay").await;
         let compacted = dataset::fragments_to_compact(&ds).await.unwrap();
         assert_eq!(compacted, 3);
 
-        // On the Hub: the reindex reserves its ids, then another host pushes.
+        // On the Hub: the compaction reserves its ids, then another host pushes.
         let reserve = Operation::ReserveFragments {
             num_fragments: compacted as u32,
         };
@@ -992,7 +992,7 @@ mod tests {
             .unwrap();
         hub.append(text_rows("pushed"), None).await.unwrap();
 
-        let txns = reindex_snapshot("replay", &store, read).await;
+        let txns = compact_snapshot("replay", &store, read).await;
         let head = replay_onto(hub, read, &txns)
             .await
             .unwrap()
@@ -1026,24 +1026,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_reindex_does_not_replay_over_deleted_history() {
+    async fn a_compaction_does_not_replay_over_deleted_history() {
         let (store, mut hub, read) = hub_and_snapshot("history").await;
         hub.append(text_rows("pushed"), None).await.unwrap();
         hub.append(text_rows("again"), None).await.unwrap();
-        // Another reindex landed, then its cleanup deleted the versions in between.
+        // Another compaction landed, then its cleanup deleted the versions in between.
         let manifest = format!("hub/chunks.lance/_versions/{}.manifest", u64::MAX - (read + 1));
         store.inner.delete(&manifest.as_str().into()).await.unwrap();
 
-        let txns = reindex_snapshot("history", &store, read).await;
+        let txns = compact_snapshot("history", &store, read).await;
         assert!(replay_onto(hub, read, &txns).await.unwrap().is_none());
     }
 
     #[tokio::test]
-    async fn a_reindex_does_not_replay_onto_another_compaction() {
+    async fn a_compaction_does_not_replay_onto_another_compaction() {
         let (store, mut ds, read) = hub_and_snapshot("refuse").await;
         dataset::compact_fragments(&mut ds, |_| {}).await.unwrap();
 
-        let txns = reindex_snapshot("refuse", &store, read).await;
+        let txns = compact_snapshot("refuse", &store, read).await;
         assert!(replay_onto(ds, read, &txns).await.unwrap().is_none());
     }
 

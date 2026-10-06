@@ -1,13 +1,13 @@
 //! Gated live test: a push builds the indexes a remote memory lacks. Each remote is a copy of a
 //! synthetic local memory written without any index — as a hand-uploaded snapshot is — so recall
-//! refuses it until a push gives it a text index: a forced reindex with nothing new to publish, and
-//! an ordinary push of one new chunk, far below the reindex threshold.
+//! refuses it until a push gives it a text index: a forced compaction with nothing new to publish,
+//! and an ordinary push of one new chunk, far below the compaction threshold.
 //!
 //! Skipped unless `HF_FUNES_TEST_TOKEN` is set AND `trufflehog` is on PATH (push's pre-publish gate
 //! is fail-closed). To run:
 //!
 //!   export HF_FUNES_TEST_TOKEN=<your HF token>
-//!   RUST_MIN_STACK=16777216 cargo test --test push_reindex_missing_index -- --nocapture
+//!   RUST_MIN_STACK=16777216 cargo test --test push_compact_missing_index -- --nocapture
 
 use std::io::Write;
 use std::process::Command;
@@ -113,8 +113,8 @@ async fn push_builds_the_indexes_a_remote_lacks() {
 
     let before = recall_remote(&forced, "NOINDEXSMOKE").await;
 
-    // Nothing new to publish: a forced reindex only.
-    let reindex = funes::commands::push::run_push(Memory::parse(&forced), true, Confirm::Yes, &[]).await;
+    // Nothing new to publish: a forced compaction only.
+    let compaction = funes::commands::push::run_push(Memory::parse(&forced), true, Confirm::Yes, &[]).await;
     let after_forced = recall_remote(&forced, "NOINDEXSMOKE").await;
 
     // One new chunk, pushed without forcing.
@@ -141,10 +141,10 @@ async fn push_builds_the_indexes_a_remote_lacks() {
         before.contains("recall error"),
         "recall should refuse a memory with no text index: {before}"
     );
-    let reindex = reindex.expect("force reindex").report;
+    let compaction = compaction.expect("forced compaction").report;
     assert!(
-        reindex.contains("reindexed"),
-        "force-reindex should build the missing indexes: {reindex}"
+        compaction.contains("reindexed"),
+        "a forced compaction should build the missing indexes: {compaction}"
     );
     assert!(
         after_forced.contains("NOINDEXSMOKE"),
