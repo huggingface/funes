@@ -50,7 +50,7 @@ use arrow_schema::SchemaRef;
 use async_trait::async_trait;
 use bytes::Bytes;
 use hf_hub::progress::{Progress, ProgressEvent, ProgressHandler, UploadEvent};
-use hf_hub::repository::{CommitInfo, CommitOperation};
+use hf_hub::repository::{CommitInfo, CommitOperation, RepoTreeEntry};
 use hf_hub::{HFError, HFRepository, RepoTypeDataset};
 use lance::dataset::builder::DatasetBuilder;
 use lance::dataset::transaction::{Operation, Transaction};
@@ -249,10 +249,16 @@ pub(crate) async fn reindex(
     }
     let mut files = captured_files(&wrapper);
     files.retain(|path, _| !is_version_file(path));
+    let staged: Vec<String> = files.keys().cloned().collect();
     let (ops, _dir) = write_ops(&files)?;
-    commit_in_parts(repo, rev, ops, &message).await?;
+    if let Err(e) = commit_in_parts(repo, rev, ops, &message).await {
+        discard(repo, rev, staged, &message).await;
+        return Err(e);
+    }
 
+    // After an error, the manifest commit may have landed anyway, so the files stay.
     let Some((oid, deletes)) = replay(repo, dataset_uri, &storage_options, rev, read, &txns, &message).await? else {
+        discard(repo, rev, staged, &message).await;
         return Ok(Reindexed::Conflict);
     };
     match commit_in_parts(repo, rev, deletes, &message).await {
@@ -379,6 +385,29 @@ async fn replay_onto(mut ds: Dataset, read: u64, txns: &[Transaction]) -> Result
     }
     delete_old_versions_keeping_uploads(&ds).await?;
     Ok(Some(ds))
+}
+
+/// Delete those of the `staged` files that reached the branch, which no version references yet. Asks
+/// the Hub which did, since a commit that failed may still have landed. Best-effort: the next
+/// cleanup takes any left once they are 7 days old.
+async fn discard(repo: &HFRepository<RepoTypeDataset>, rev: &str, staged: Vec<String>, message: &str) {
+    let mut deletes = Vec::new();
+    for part in staged.chunks(MAX_COMMIT_OPS) {
+        let Ok(landed) = repo
+            .get_paths_info()
+            .paths(part.to_vec())
+            .revision(rev.to_string())
+            .send()
+            .await
+        else {
+            return;
+        };
+        deletes.extend(landed.into_iter().filter_map(|entry| match entry {
+            RepoTreeEntry::File { path, .. } => Some(CommitOperation::delete(path)),
+            RepoTreeEntry::Directory { .. } => None,
+        }));
+    }
+    let _ = commit_in_parts(repo, rev, deletes, message).await;
 }
 
 /// Operations per Hub commit: the Hub checks each within a 60 s request timeout and advises 50 to
