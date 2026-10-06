@@ -252,10 +252,17 @@ pub(crate) async fn reindex(
         return Err(e);
     }
 
-    // After an error, the manifest commit may have landed anyway, so the files stay.
-    let Some(oid) = replay(repo, dataset_uri, &storage_options, rev, read, &txns, &message).await? else {
-        discard(repo, rev, staged, &message).await;
-        return Ok(Reindexed::Conflict);
+    let oid = match replay(repo, dataset_uri, &storage_options, rev, read, &txns, &message).await {
+        Ok(Replayed::Landed(oid)) => oid,
+        Ok(Replayed::Refused) => {
+            discard(repo, rev, staged, &message).await;
+            return Ok(Reindexed::Conflict);
+        }
+        Ok(Replayed::Uncertain(e)) => return Err(e),
+        Err(e) => {
+            discard(repo, rev, staged, &message).await;
+            return Err(e);
+        }
     };
     match clean(repo, dataset_uri, &storage_options, rev, &message).await {
         Ok(deleted) => Ok(Reindexed::Committed(deleted.unwrap_or(oid))),
@@ -350,11 +357,20 @@ fn is_version_file(path: &str) -> bool {
     path.contains("/_versions/") || path.contains("/_transactions/")
 }
 
+/// How a [`replay`] ended.
+enum Replayed {
+    /// The manifest commit landed, with its oid.
+    Landed(String),
+    /// [`replay_onto`] refused, or pushes kept landing past [`MAX_REPLAYS`].
+    Refused,
+    /// The manifest commit failed, and may have landed anyway.
+    Uncertain(anyhow::Error),
+}
+
 /// Replays tried while pushes keep landing between a head read and the commit.
 const MAX_REPLAYS: usize = 10;
 
-/// Commit `txns` onto the head of `rev` as it is now, returning the commit oid. `None` if
-/// [`replay_onto`] refuses, or past [`MAX_REPLAYS`].
+/// Commit `txns` onto the head of `rev` as it is now.
 async fn replay(
     repo: &HFRepository<RepoTypeDataset>,
     dataset_uri: &str,
@@ -363,21 +379,25 @@ async fn replay(
     read: u64,
     txns: &[Transaction],
     message: &str,
-) -> Result<Option<String>> {
+) -> Result<Replayed> {
     for _ in 0..MAX_REPLAYS {
         let head = head_oid(repo, rev).await?;
         let (ds, wrapper) = open_pinned(dataset_uri, storage_options, &head).await?;
         if replay_onto(ds, read, txns).await?.is_none() {
-            return Ok(None);
+            return Ok(Replayed::Refused);
         }
         let (ops, _dir) = write_ops(&captured_files(&wrapper))?;
         match send_commit(repo, ops, Some(head), rev, message.to_string()).await {
-            Ok(info) => return Ok(Some(info.commit_oid.unwrap_or_else(|| "?".to_string()))),
+            Ok(info) => return Ok(Replayed::Landed(info.commit_oid.unwrap_or_else(|| "?".to_string()))),
             Err(e) if head_moved(&e) => continue,
-            Err(e) => return Err(anyhow::Error::new(e).context("reindex commit failed")),
+            Err(e) => {
+                return Ok(Replayed::Uncertain(
+                    anyhow::Error::new(e).context("reindex commit failed"),
+                ))
+            }
         }
     }
-    Ok(None)
+    Ok(Replayed::Refused)
 }
 
 /// `txns` committed onto `ds`, or `None` if a commit other than a push or a fragment reservation
