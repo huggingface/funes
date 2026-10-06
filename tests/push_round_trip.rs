@@ -312,7 +312,7 @@ async fn push_round_trip_create_append_recall() {
     );
     let compaction = compaction.expect("forced compaction").report;
     assert!(
-        compaction.contains("reindexed"),
+        compaction.contains("compacted"),
         "a forced compaction should commit an index delta: {compaction}"
     );
     assert!(

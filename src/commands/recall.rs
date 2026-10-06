@@ -1542,7 +1542,7 @@ async fn remote_lines(ds: &Dataset, now: DateTime<Utc>) -> String {
     if unindexed > 0 {
         let _ = writeln!(
             out,
-            "unindexed: {unindexed} chunks (searched brute-force until a push reindexes)"
+            "unindexed: {unindexed} chunks (searched brute-force until the next compaction)"
         );
     }
     out

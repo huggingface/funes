@@ -188,10 +188,10 @@ enum Cmd {
         /// Skip the confirmation when the target holds none of the chunks to publish.
         #[arg(short, long)]
         yes: bool,
-        /// Refresh the remote index after pushing (retrying on conflict) even if the unindexed
-        /// backlog is below the auto-reindex threshold. With nothing new to push, reindex only.
-        #[arg(long)]
-        force_reindex: bool,
+        /// Compact the remote after pushing (retrying on conflict) even if the unindexed backlog is
+        /// below the auto-compaction threshold. With nothing new to push, compact only.
+        #[arg(long, alias = "force-reindex")]
+        compact: bool,
         /// Publish embedded chunks from these sessions. Omit to publish every embedded chunk the
         /// remote does not already hold.
         #[arg(long, value_name = "SESSION")]
@@ -517,7 +517,7 @@ async fn main() -> Result<()> {
         Cmd::Push {
             memory: remote,
             yes,
-            force_reindex,
+            compact,
             sessions,
         } => {
             let confirm = if yes {
@@ -525,7 +525,7 @@ async fn main() -> Result<()> {
             } else {
                 push::Confirm::Ask(prompt_new_memory)
             };
-            match push::run_push(memory::Memory::parse(&remote), force_reindex, confirm, &sessions).await {
+            match push::run_push(memory::Memory::parse(&remote), compact, confirm, &sessions).await {
                 Ok(pushed) => {
                     print!("{}", pushed.report);
                     // Secrets held back everything — surface a non-zero exit so automation can react.
@@ -1143,7 +1143,8 @@ fn prompt_new_memory(label: &str, chunks: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_confirm;
+    use super::{parse_confirm, Cli, Cmd};
+    use clap::Parser;
 
     #[test]
     fn parse_confirm_honors_default_and_answers() {
@@ -1157,5 +1158,13 @@ mod tests {
         // Anything unrecognized is a conservative no, even under a yes default.
         assert!(!parse_confirm("nope", true));
         assert!(!parse_confirm("maybe", true));
+    }
+
+    #[test]
+    fn push_still_takes_force_reindex() {
+        for flag in ["--compact", "--force-reindex"] {
+            let cli = Cli::try_parse_from(["funes", "push", "org/memory", flag]).unwrap();
+            assert!(matches!(cli.cmd, Cmd::Push { compact: true, .. }), "{flag}");
+        }
     }
 }

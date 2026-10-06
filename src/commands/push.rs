@@ -14,8 +14,8 @@
 //! - **Compaction:** separate commits ([`remote::compact`]), kept off the data commit so the
 //!   data commit stays small. `push` runs it after the data commit when the unindexed backlog
 //!   crosses [`COMPACT_THRESHOLD`] or the remote has no text index (best-effort: a head-moved
-//!   conflict is a warning, the next push retries), or eagerly with `--force-reindex` (retried until
-//!   it lands).
+//!   conflict is a warning, the next push retries), or eagerly with `--compact` (retried until it
+//!   lands).
 //!
 //! What a push ships is the embedded chunks the remote doesn't hold, optionally restricted to the
 //! sessions named with `--sessions`. Rows awaiting embedding stay local until a later push.
@@ -511,7 +511,7 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
 
     // 3. Forced compaction with no new data: just compact the remote and stop.
     if to_push.is_empty() {
-        eprintln!("refreshing the remote index…");
+        eprintln!("compacting the remote…");
         let note = compact_forced(&repo, &dataset_uri, &opts, &rev).await?;
         return Ok(format!("{}: up to date ({} chunks)\n{note}", target.label(), remote_ids.len()).into());
     }
@@ -643,10 +643,10 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
     // warn on a conflict — the next push retries) past the threshold or when the remote has no text
     // index, which recall cannot do without.
     if compact {
-        eprintln!("refreshing the remote index…");
+        eprintln!("compacting the remote…");
         out.push_str(&compact_forced(&repo, &dataset_uri, &opts, &rev).await?);
     } else if unindexed > COMPACT_THRESHOLD || !text_indexed {
-        eprintln!("refreshing the remote index…");
+        eprintln!("compacting the remote…");
         out.push_str(&compact_auto(&repo, &dataset_uri, &opts, &rev).await);
     }
     out.push_str(&skipped.warning());
@@ -768,23 +768,23 @@ async fn compact_forced(
             dataset_uri,
             opts.clone(),
             rev,
-            "funes push: reindex".to_string(),
+            "funes push: compact".to_string(),
             ui::index_progress,
         )
         .await?
         {
-            Compacted::Committed(oid) => return Ok(format!("  reindexed (commit {oid})\n")),
+            Compacted::Committed(oid) => return Ok(format!("  compacted (commit {oid})\n")),
             Compacted::Uncleaned(oid, e) => {
                 return Ok(format!(
-                    "  reindexed (commit {oid})\n  note: old versions not deleted ({e:#}); \
-                     re-run push --force-reindex\n"
+                    "  compacted (commit {oid})\n  note: old versions not deleted ({e:#}); \
+                     re-run push --compact\n"
                 ))
             }
-            Compacted::AlreadyCompact => return Ok("  index already current\n".to_string()),
+            Compacted::AlreadyCompact => return Ok("  already compact\n".to_string()),
             Compacted::Conflict => continue,
         }
     }
-    bail!("reindex still conflicting after {MAX_COMMIT_RETRIES} retries; re-run push --force-reindex")
+    bail!("compaction still conflicting after {MAX_COMMIT_RETRIES} retries; re-run push --compact")
 }
 
 /// Best-effort compaction during a normal push: one attempt, never retried. The data is already
@@ -800,21 +800,21 @@ async fn compact_auto(
         dataset_uri,
         opts.clone(),
         rev,
-        "funes push: reindex".to_string(),
+        "funes push: compact".to_string(),
         ui::index_progress,
     )
     .await
     {
-        Ok(Compacted::Committed(oid)) => format!("  reindexed (commit {oid})\n"),
+        Ok(Compacted::Committed(oid)) => format!("  compacted (commit {oid})\n"),
         Ok(Compacted::Uncleaned(oid, e)) => format!(
-            "  reindexed (commit {oid})\n  note: old versions not deleted ({e:#}); \
+            "  compacted (commit {oid})\n  note: old versions not deleted ({e:#}); \
              will retry on a later push\n"
         ),
         Ok(Compacted::AlreadyCompact) => String::new(),
         Ok(Compacted::Conflict) => {
-            "  note: index not refreshed (remote head moved); will retry on a later push\n".to_string()
+            "  note: not compacted (remote head moved); will retry on a later push\n".to_string()
         }
-        Err(e) => format!("  note: index not refreshed ({e:#}); will retry on a later push\n"),
+        Err(e) => format!("  note: not compacted ({e:#}); will retry on a later push\n"),
     }
 }
 

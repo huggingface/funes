@@ -24,7 +24,7 @@ you wrote yourself is never touched.
 | Flag | Meaning |
 | --- | --- |
 | `-y`, `--yes` | Skip the wrong-memory confirmation (below). |
-| `--force-reindex` | Refresh the remote index after pushing even if the backlog is below the auto-reindex threshold; with nothing new to push, reindex only. |
+| `--compact` | Compact the remote after pushing, even if the unindexed backlog is below the threshold that triggers it. With nothing new to push, compact only. `--force-reindex` is the old name. |
 
 **The wrong-memory guard.** A push to a memory that holds none of the chunks it would publish — a
 first push, a new host, sessions named with `--sessions` that it lacks, or genuinely the wrong memory —

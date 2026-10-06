@@ -123,9 +123,9 @@ itself as it finishes, with no grace window, so no pre-scrub row stays readable
 on disk. A recall reading an old version at that moment can fail once.
 
 Recall time grows with the number of fragments, so each index run, and each
-reindex a push runs on a remote memory, merges the fragments written since the
+compaction a push runs on a remote memory, merges the fragments written since the
 previous one. Once more than 256 small fragments are indexed, it rewrites every
-fragment. On a remote memory the reindex also deletes the old versions, so no
+fragment. On a remote memory the compaction also deletes the old versions, so no
 folder of the repo nears the Hub's limit of 10k files.
 
 ## Fit against HF Hub storage

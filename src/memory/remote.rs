@@ -397,7 +397,7 @@ async fn replay(
             Err(e) if head_moved(&e) => continue,
             Err(e) => {
                 return Ok(Replayed::Uncertain(
-                    anyhow::Error::new(e).context("reindex commit failed"),
+                    anyhow::Error::new(e).context("compaction commit failed"),
                 ))
             }
         }
@@ -428,7 +428,7 @@ async fn replay_onto(mut ds: Dataset, read: u64, txns: &[Transaction]) -> Result
         ds = CommitBuilder::new(Arc::new(ds))
             .execute(txn)
             .await
-            .context("replaying the reindex")?;
+            .context("replaying the compaction")?;
     }
     Ok(Some(ds))
 }
@@ -474,7 +474,7 @@ async fn commit_in_parts(
         let part = ops.by_ref().take(MAX_COMMIT_OPS).collect();
         let info = send_commit(repo, part, None, rev, message.to_string())
             .await
-            .map_err(|e| anyhow::Error::new(e).context("reindex commit failed"))?;
+            .map_err(|e| anyhow::Error::new(e).context("compaction commit failed"))?;
         oid = info.commit_oid;
     }
     Ok(oid)
