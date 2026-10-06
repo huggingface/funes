@@ -752,8 +752,13 @@ impl Indexer {
     /// Consumes the indexer, releasing the memory lock.
     async fn finalize(mut self) -> Result<()> {
         if let Some(d) = &mut self.ds {
-            // Retry incomplete FTS coverage even when no rows or vectors were written.
-            if self.n_chunks > 0 || self.n_embedded > 0 || dataset::fts_needs_refresh(d).await? {
+            // Retry incomplete FTS coverage, and compact a fragmented memory, even when no rows or
+            // vectors were written.
+            if self.n_chunks > 0
+                || self.n_embedded > 0
+                || dataset::fts_needs_refresh(d).await?
+                || dataset::fragments_to_compact(d).await? > 0
+            {
                 dataset::compact_fragments(d).await?;
                 dataset::build_indexes(d, ui::index_progress).await?;
 
