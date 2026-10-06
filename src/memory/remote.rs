@@ -234,8 +234,7 @@ pub(crate) async fn reindex(
         written <= compacted,
         "the compaction wrote {written} fragments for {compacted} reserved ids"
     );
-    let deletes = captured_deletes(&wrapper);
-    if txns.is_empty() && deletes.is_empty() {
+    if txns.is_empty() {
         return Ok(Reindexed::AlreadyCurrent);
     }
     let mut files = captured_files(&wrapper);
@@ -243,33 +242,22 @@ pub(crate) async fn reindex(
     let (ops, _dir) = write_ops(&files)?;
     commit_in_parts(repo, rev, ops, &message).await?;
 
-    let mut oid = None;
-    if !txns.is_empty() {
-        match replay(repo, dataset_uri, &storage_options, rev, read, &txns, &message).await? {
-            Some(landed) => oid = Some(landed),
-            None => return Ok(Reindexed::Conflict),
-        }
-    }
-    match commit_in_parts(repo, rev, deletes, &message).await {
-        Ok(Some(deleted)) => oid = Some(deleted),
-        Ok(None) => {}
-        // The version is in: the files left are unreferenced, so the next cleanup deletes them.
-        Err(_) if oid.is_some() => {}
-        Err(e) => return Err(e),
-    }
-    Ok(Reindexed::Committed(oid.unwrap_or_else(|| "?".to_string())))
+    let Some((oid, deletes)) = replay(repo, dataset_uri, &storage_options, rev, read, &txns, &message).await? else {
+        return Ok(Reindexed::Conflict);
+    };
+    // A delete that fails leaves a file only old versions reference, which the next cleanup takes.
+    let deleted = commit_in_parts(repo, rev, deletes, &message).await.ok().flatten();
+    Ok(Reindexed::Committed(deleted.unwrap_or(oid)))
 }
 
-/// Compact a remote dataset, refresh its indexes and delete its old versions, returning the commits
-/// made after version `read`. Compacting first keeps the rewritten fragments outside every index.
+/// Compact a remote dataset and refresh its indexes, returning the commits made after version
+/// `read`. Compacting first keeps the rewritten fragments outside every index.
 async fn refresh(ds: &mut Dataset, read: u64, on_event: impl Fn(IndexBuildEvent)) -> Result<Vec<Transaction>> {
     dataset::compact_fragments(ds).await?;
     dataset::build_indexes(ds, on_event)
         .await
         .context("refreshing the remote indexes")?;
-    let txns = transactions_since(ds, read).await?;
-    delete_old_versions_keeping_uploads(ds).await?;
-    Ok(txns)
+    transactions_since(ds, read).await
 }
 
 /// Delete the old versions and the files only they reference. A file no version references is kept
@@ -322,8 +310,8 @@ fn is_version_file(path: &str) -> bool {
 /// Replays tried while pushes keep landing between a head read and the commit.
 const MAX_REPLAYS: usize = 10;
 
-/// Commit `txns` onto the head of `rev` as it is now. `None` if [`replay_onto`] refuses, or past
-/// [`MAX_REPLAYS`].
+/// Commit `txns` onto the head of `rev` as it is now, returning the commit oid and the deletes of
+/// the old versions. `None` if [`replay_onto`] refuses, or past [`MAX_REPLAYS`].
 async fn replay(
     repo: &HFRepository<RepoTypeDataset>,
     dataset_uri: &str,
@@ -332,7 +320,7 @@ async fn replay(
     read: u64,
     txns: &[Transaction],
     message: &str,
-) -> Result<Option<String>> {
+) -> Result<Option<(String, Vec<CommitOperation>)>> {
     for _ in 0..MAX_REPLAYS {
         let head = head_oid(repo, rev).await?;
         let (ds, wrapper) = open_capturing(dataset_uri, pinned(storage_options, &head)).await?;
@@ -341,7 +329,10 @@ async fn replay(
         }
         let (ops, _dir) = write_ops(&captured_files(&wrapper))?;
         match send_commit(repo, ops, Some(head), rev, message.to_string()).await {
-            Ok(info) => return Ok(Some(info.commit_oid.unwrap_or_else(|| "?".to_string()))),
+            Ok(info) => {
+                let oid = info.commit_oid.unwrap_or_else(|| "?".to_string());
+                return Ok(Some((oid, captured_deletes(&wrapper))));
+            }
             Err(e) if head_moved(&e) => continue,
             Err(e) => return Err(anyhow::Error::new(e).context("reindex commit failed")),
         }
@@ -349,8 +340,9 @@ async fn replay(
     Ok(None)
 }
 
-/// `txns` committed onto `ds`, or `None` if a commit other than a push or a fragment reservation
-/// landed after version `read`. Lance takes a compaction or an index refresh after a push.
+/// `txns` committed onto `ds`, its old versions then deleted, or `None` if a commit other than a
+/// push or a fragment reservation landed after version `read`. Lance takes a compaction or an index
+/// refresh after a push.
 async fn replay_onto(mut ds: Dataset, read: u64, txns: &[Transaction]) -> Result<Option<Dataset>> {
     for version in read + 1..=ds.version().version {
         let landed = ds.read_transaction_by_version(version).await?;
@@ -369,6 +361,7 @@ async fn replay_onto(mut ds: Dataset, read: u64, txns: &[Transaction]) -> Result
             .await
             .context("replaying the reindex")?;
     }
+    delete_old_versions_keeping_uploads(&ds).await?;
     Ok(Some(ds))
 }
 
@@ -762,7 +755,7 @@ mod tests {
     /// An in-memory store, not a local dataset: Lance writes part of a local dataset straight to
     /// disk, around the wrapper. Every Hub write goes through it.
     #[tokio::test]
-    async fn refresh_through_the_capture_compacts_and_deletes_the_old_versions() {
+    async fn refresh_through_the_capture_writes_nothing_to_the_store() {
         let uri = "shared-memory://capture-refresh/chunks.lance";
         let (store, _) = LanceObjectStore::from_uri(uri).await.unwrap();
         let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
@@ -782,18 +775,12 @@ mod tests {
         refresh(&mut ds, read, |_| {}).await.unwrap();
         assert_eq!(objects(store.inner.as_ref()).await, before, "nothing reaches the store");
 
-        // Apply the captured changes as the commit would.
+        // Apply the captured writes as the commit would.
         let captured = wrapper.captured.lock().unwrap().clone();
-        assert!(captured.values().any(Option::is_none), "the old versions are deleted");
         for (path, body) in captured {
-            match body {
-                Some(body) => store.inner.put(&path, body.into()).await.map(|_| ()),
-                None => store.inner.delete(&path).await,
-            }
-            .unwrap();
+            store.inner.put(&path, body.unwrap().into()).await.unwrap();
         }
         let ds = Dataset::open(uri).await.unwrap();
-        assert_eq!(ds.versions().await.unwrap().len(), 1);
         assert_eq!(ds.get_fragments().len(), 2, "the appended fragments are merged");
         assert_eq!(ds.count_rows(None).await.unwrap(), 4);
         assert!(!dataset::fts_needs_refresh(&ds).await.unwrap());
@@ -889,6 +876,7 @@ mod tests {
             .expect("only a push landed");
 
         head.validate().await.unwrap();
+        assert_eq!(head.versions().await.unwrap().len(), 1, "the replay leaves one version");
         assert_eq!(head.count_rows(None).await.unwrap(), 5);
         let ids: Vec<usize> = head.get_fragments().iter().map(|f| f.id()).collect();
         assert_eq!(ids.len(), 3, "the indexed row, the merged ones, the push: {ids:?}");
