@@ -645,7 +645,7 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
     if compact {
         eprintln!("compacting the remote…");
         out.push_str(&compact_remote(&repo, &dataset_uri, &opts, &rev, "funes push: compact").await?);
-    } else if unindexed > COMPACT_THRESHOLD || !text_indexed {
+    } else if unindexed >= COMPACT_THRESHOLD || !text_indexed {
         eprintln!("compacting the remote…");
         out.push_str(&compact_auto(&repo, &dataset_uri, &opts, &rev).await);
     }
