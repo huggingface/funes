@@ -39,10 +39,6 @@ walkdir = "2"                    # recursive *.jsonl walk
 rmcp = { version = "3", features = ["server", "macros", "transport-io", "schemars"] }  # MCP stdio server
 tempfile = "3"                   # temp dir for the pre-publish secret scan; temp files/dirs in tests
 hf-hub = { version = "1.0.0-rc.1", features = ["rustls-tls", "blocking"] }  # native create_commit + parent_commit CAS + Xet upload; blocking: model download in the blas backend
-# Optional handle on the transitively-pulled openssl-sys (native-tls, via lance).
-# The `vendored-openssl` feature builds OpenSSL from source so the aarch64-linux cross-build
-# needs no target sysroot. Off by default — native and macOS builds keep their system TLS.
-openssl-sys = { version = "0.9", optional = true }
 # The `blas` backend (feature below): a from-scratch forward that loads safetensors weights
 # and tokenizes itself. macOS runs it on Accelerate, Linux on faer.
 tokenizers = { version = "0.22", optional = true }
@@ -56,7 +52,6 @@ multiversion = { version = "0.8", optional = true }  # per-CPU clones of the vec
 
 [features]
 default = ["blas"]
-vendored-openssl = ["openssl-sys/vendored"]
 # BLAS inference backend (src/inference/blas.rs), the default: macOS wires it to Accelerate (see build.rs),
 # Linux to faer + a polynomial exp.
 blas = ["dep:tokenizers", "dep:safetensors", "dep:faer", "dep:multiversion"]

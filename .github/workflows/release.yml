@@ -134,18 +134,16 @@ jobs:
             objdump: objdump
           - target: aarch64-unknown-linux-gnu
             arch: aarch64
-            features: --features vendored-openssl
             objdump: aarch64-linux-gnu-objdump
     steps:
       # Everything the bare container lacks: compilers and binutils, git for checkout/rust-cache,
       # perl for the version stamp, curl/ca-certificates for the toolchain installs, wget for
-      # setup-mold, pkg-config + libssl-dev for the native x86_64 TLS link, cmake for zstd-sys,
-      # zstd for rust-cache compression, protoc used by lance.
+      # setup-mold, cmake for zstd-sys, zstd for rust-cache compression, protoc used by lance.
       - name: Install build dependencies
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            build-essential git perl curl ca-certificates pkg-config libssl-dev cmake wget zstd protobuf-compiler
+            build-essential git perl curl ca-certificates cmake wget zstd protobuf-compiler
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -167,7 +165,7 @@ jobs:
 
       # aarch64 is cross-compiled inside the same 22.04 container, so its sysroot pins the same
       # glibc 2.35 floor. gcc-aarch64-linux-gnu links the binary and (via the cc crate) builds
-      # vendored OpenSSL for the target; g++-aarch64-linux-gnu brings the target libstdc++.
+      # the C dependencies for the target; g++-aarch64-linux-gnu brings the target libstdc++.
       # cc derives the tool names from the target triple, so installing the packages is enough.
       - name: Install aarch64 cross toolchain
         if: matrix.arch == 'aarch64'
@@ -188,7 +186,7 @@ jobs:
         run: perl -i -pe 'if (!$d && s/^version = ".*"/version = "$ENV{NEW_VERSION}"/) { $d = 1 }' Cargo.toml
 
       - name: Build
-        run: cargo build --profile ${PROFILE} --target ${{ matrix.target }} ${{ matrix.features }}
+        run: cargo build --profile ${PROFILE} --target ${{ matrix.target }}
 
       - name: Check binary version
         run: |
