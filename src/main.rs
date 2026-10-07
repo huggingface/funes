@@ -1024,18 +1024,39 @@ async fn bound_model(memory: &str, takes: bool) -> Result<Option<EmbeddingModel>
         .with_context(|| format!("can't read {memory}"))
 }
 
-fn ask_model() -> EmbeddingModel {
-    eprint!("Index your sessions as English, or multilingual for other languages too? [E/m] ");
+fn ask_model(default: EmbeddingModel) -> EmbeddingModel {
+    let choices = if default == memory::dataset::MULTILINGUAL_MODEL {
+        "[e/M]"
+    } else {
+        "[E/m]"
+    };
+    eprint!("Index your sessions as English, or multilingual for other languages too? {choices} ");
     let _ = std::io::stderr().flush();
     let mut answer = String::new();
     let _ = std::io::stdin().read_line(&mut answer);
-    parse_model(&answer)
+    parse_model(&answer, default)
 }
 
-fn parse_model(input: &str) -> EmbeddingModel {
+fn parse_model(input: &str, default: EmbeddingModel) -> EmbeddingModel {
     match input.trim().to_ascii_lowercase().as_str() {
+        "e" | "english" => memory::dataset::MODEL,
         "m" | "multilingual" => memory::dataset::MULTILINGUAL_MODEL,
-        _ => memory::dataset::MODEL,
+        _ => default,
+    }
+}
+
+fn host_model() -> EmbeddingModel {
+    let locale = ["LC_ALL", "LC_MESSAGES", "LANG"]
+        .into_iter()
+        .find_map(|var| std::env::var(var).ok().filter(|value| !value.is_empty()));
+    model_for_locale(locale.as_deref())
+}
+
+fn model_for_locale(locale: Option<&str>) -> EmbeddingModel {
+    let language = locale.and_then(|l| l.split(['_', '.', '@']).next()).unwrap_or_default();
+    match language.to_ascii_lowercase().as_str() {
+        "" | "c" | "posix" | "en" => memory::dataset::MODEL,
+        _ => memory::dataset::MULTILINGUAL_MODEL,
     }
 }
 
@@ -1088,13 +1109,14 @@ where
                 );
                 model
             }
-            None if std::io::stdin().is_terminal() => ask_model(),
+            None if std::io::stdin().is_terminal() => ask_model(host_model()),
             None => {
+                let model = host_model();
                 eprintln!(
-                    "funes: embedding the local memory with {}, the default off a terminal.",
-                    memory::dataset::MODEL.id()
+                    "funes: embedding the local memory with {}, this host's default off a terminal.",
+                    model.id()
                 );
-                memory::dataset::MODEL
+                model
             }
         };
         index::ensure_local_memory(model).await?;
@@ -1250,17 +1272,39 @@ fn prompt_new_memory(label: &str, chunks: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_confirm, parse_model, Cli, Cmd};
+    use super::{model_for_locale, parse_confirm, parse_model, Cli, Cmd};
     use clap::Parser;
     use funes::memory::dataset::{MODEL, MULTILINGUAL_MODEL};
 
     #[test]
-    fn a_new_memory_is_english_unless_the_answer_is_multilingual() {
-        for answer in ["\n", "e", "English", "nope"] {
-            assert_eq!(parse_model(answer), MODEL, "{answer:?}");
+    fn an_answer_names_the_model_and_anything_else_takes_the_default() {
+        for default in [MODEL, MULTILINGUAL_MODEL] {
+            for answer in ["\n", "nope"] {
+                assert_eq!(parse_model(answer, default), default, "{answer:?}");
+            }
+            for answer in ["e", "English\n"] {
+                assert_eq!(parse_model(answer, default), MODEL, "{answer:?}");
+            }
+            for answer in ["m\n", " M ", "multilingual"] {
+                assert_eq!(parse_model(answer, default), MULTILINGUAL_MODEL, "{answer:?}");
+            }
         }
-        for answer in ["m\n", " M ", "multilingual"] {
-            assert_eq!(parse_model(answer), MULTILINGUAL_MODEL, "{answer:?}");
+    }
+
+    #[test]
+    fn a_locale_in_another_language_than_english_defaults_to_multilingual() {
+        for locale in [
+            None,
+            Some("C"),
+            Some("C.UTF-8"),
+            Some("POSIX"),
+            Some("en_US.UTF-8"),
+            Some("en"),
+        ] {
+            assert_eq!(model_for_locale(locale), MODEL, "{locale:?}");
+        }
+        for locale in ["zh_CN.UTF-8", "fr_FR", "ja_JP.eucJP", "de_DE@euro", "pt"] {
+            assert_eq!(model_for_locale(Some(locale)), MULTILINGUAL_MODEL, "{locale}");
         }
     }
 

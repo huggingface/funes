@@ -55,6 +55,21 @@ lassign [wait] pid spawn_id os_error status
 exit $status
 "#;
 
+/// The same, taking the default model under a Chinese locale.
+const ANSWER_YES_IN_CHINESE: &str = r#"
+set timeout 120
+set env(LANG) zh_CN.UTF-8
+spawn {*}$argv
+expect {
+    -re {Trust it\? \[y/N\] $} { send "y\r"; exp_continue }
+    -re {Proceed\? \[Y/n\] $} { send "y\r"; exp_continue }
+    -re {\[[Ee]/[Mm]\] $} { send "\r"; exp_continue }
+    eof
+}
+lassign [wait] pid spawn_id os_error status
+exit $status
+"#;
+
 /// The same, declining the first index.
 const DECLINE_INDEX: &str = r#"
 set timeout 120
@@ -242,6 +257,9 @@ fn run_with(
         .env_remove("HUGGING_FACE_HUB_TOKEN")
         .env_remove("HUGGINGFACE_TOKEN")
         .env_remove("FUNES_BIN")
+        .env("LANG", "en_US.UTF-8")
+        .env_remove("LC_ALL")
+        .env_remove("LC_MESSAGES")
         .output()
         .unwrap()
 }
@@ -810,6 +828,28 @@ fn an_unreachable_bound_memory_stops_only_a_first_add() {
         "{transcript}"
     );
     assert!(log.exists(), "setup did not run");
+}
+
+#[test]
+fn a_first_add_in_another_language_than_english_defaults_to_multilingual() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let funes_home = tmp.path().join("funes");
+    let log = tmp.path().join("setup.log");
+    install(&home, "clyde", 1);
+    fs::create_dir_all(home.join(".clyde")).unwrap();
+    fs::write(home.join(".clyde/history.funes.jsonl"), format!("{HISTORY}\n")).unwrap();
+
+    let out = funes_at_a_terminal_answering(&home, &funes_home, &log, &["add", "clyde"], ANSWER_YES_IN_CHINESE);
+    let transcript = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{transcript}");
+    assert!(transcript.contains("[e/M]"), "{transcript}");
+    support::assert_success(&funes(
+        &home,
+        &funes_home,
+        &log,
+        &["index", "--multilingual", "--harness", "clyde"],
+    ));
 }
 
 /// A memory `funes index --multilingual` created empty still gets the first add's index.
