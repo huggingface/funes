@@ -6,19 +6,22 @@
 
 mod support;
 
+use funes::inference::EmbeddingModel;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 /// Runs `funes <args>` on a pty, answering the trust confirmation and the first-index prompt with
-/// yes; exits as funes did. Anything else funes asks goes unanswered and times out.
+/// yes, and the memory's model with the default; exits as funes did. Anything else funes asks goes
+/// unanswered and times out.
 const ANSWER_YES: &str = r#"
 set timeout 120
 spawn {*}$argv
 expect {
     -re {Trust it\? \[y/N\] $} { send "y\r"; exp_continue }
     -re {Proceed\? \[Y/n\] $} { send "y\r"; exp_continue }
+    -re {\[E/m\] $} { send "\r"; exp_continue }
     eof
 }
 lassign [wait] pid spawn_id os_error status
@@ -32,6 +35,20 @@ spawn {*}$argv
 expect {
     -re {Trust it\? \[y/N\] $} { send "n\r"; exp_continue }
     -re {Proceed\? \[Y/n\] $} { send "y\r"; exp_continue }
+    eof
+}
+lassign [wait] pid spawn_id os_error status
+exit $status
+"#;
+
+/// The same, answering multilingual for the memory's model.
+const ANSWER_MULTILINGUAL: &str = r#"
+set timeout 120
+spawn {*}$argv
+expect {
+    -re {Trust it\? \[y/N\] $} { send "y\r"; exp_continue }
+    -re {Proceed\? \[Y/n\] $} { send "y\r"; exp_continue }
+    -re {\[E/m\] $} { send "m\r"; exp_continue }
     eof
 }
 lassign [wait] pid spawn_id os_error status
@@ -170,6 +187,24 @@ fn funes_at_a_terminal_answering(home: &Path, funes_home: &Path, log: &Path, arg
     fs::write(&script, answers).unwrap();
     let script = script.to_str().unwrap().to_string();
     let mut argv = vec!["expect", "-f", &script, "--", env!("CARGO_BIN_EXE_funes")];
+    argv.extend(args);
+    run(&argv, home, funes_home, log)
+}
+
+/// [`funes_at_a_terminal`] with the Hub out of reach.
+fn funes_offline_at_a_terminal(home: &Path, funes_home: &Path, log: &Path, args: &[&str]) -> Output {
+    let script = home.join("answers.exp");
+    fs::write(&script, ANSWER_YES).unwrap();
+    let script = script.to_str().unwrap().to_string();
+    let mut argv = vec![
+        "expect",
+        "-f",
+        &script,
+        "--",
+        "env",
+        "HF_ENDPOINT=http://127.0.0.1:9",
+        env!("CARGO_BIN_EXE_funes"),
+    ];
     argv.extend(args);
     run(&argv, home, funes_home, log)
 }
@@ -664,6 +699,13 @@ fn a_fifth_integration_seeds_and_drains_its_spool_under_its_own_facet() {
     let hits = recall("clydebot");
     assert!(hits.contains("clydebot") && hits.contains("h-1"), "{hits}");
     assert!(!recall("clyde").contains("h-1"), "the spool's name is not a facet");
+    let out = funes(
+        &home,
+        &funes_home,
+        &log,
+        &["index", "--multilingual", "--harness", "clyde"],
+    );
+    assert!(stderr(&out).contains("a memory keeps the model"), "{}", stderr(&out));
 
     // `--harness <id>` selects the spool with no list of agents to consult; a name no producer
     // created is refused, not swept.
@@ -676,6 +718,98 @@ fn a_fifth_integration_seeds_and_drains_its_spool_under_its_own_facet() {
         "{}",
         stderr(&out)
     );
+}
+
+#[test]
+fn a_first_add_answered_multilingual_creates_a_multilingual_memory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let funes_home = tmp.path().join("funes");
+    let log = tmp.path().join("setup.log");
+    install(&home, "clyde", 1);
+    fs::create_dir_all(home.join(".clyde")).unwrap();
+    fs::write(home.join(".clyde/history.funes.jsonl"), format!("{HISTORY}\n")).unwrap();
+
+    let out = funes_at_a_terminal_answering(&home, &funes_home, &log, &["add", "clyde"], ANSWER_MULTILINGUAL);
+    let transcript = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{transcript}");
+    assert!(
+        transcript.contains("indexing your recent clyde sessions"),
+        "{transcript}"
+    );
+    support::assert_success(&funes(
+        &home,
+        &funes_home,
+        &log,
+        &["index", "--multilingual", "--harness", "clyde"],
+    ));
+}
+
+#[tokio::test]
+async fn a_bound_memory_gives_its_model_and_refuses_another() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let funes_home = tmp.path().join("funes");
+    let log = tmp.path().join("setup.log");
+    install(&home, "clyde", 1);
+    fs::create_dir_all(home.join(".clyde")).unwrap();
+    fs::write(home.join(".clyde/history.funes.jsonl"), format!("{HISTORY}\n")).unwrap();
+    let (e5, bge) = (tmp.path().join("e5-memory"), tmp.path().join("bge-memory"));
+    support::memory_of(EmbeddingModel::MultilingualE5Small, &["给表加上索引"], &e5).await;
+    support::memory_of(EmbeddingModel::BgeSmallEn, &["add an index to the table"], &bge).await;
+    let (e5, bge) = (e5.to_str().unwrap(), bge.to_str().unwrap());
+
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde", e5]);
+    let transcript = String::from_utf8_lossy(&out.stdout);
+    assert!(!transcript.contains("[E/m]"), "{transcript}");
+    assert!(transcript.contains(&format!("the model of {e5}")), "{transcript}");
+    support::assert_success(&funes(
+        &home,
+        &funes_home,
+        &log,
+        &["index", "--multilingual", "--harness", "clyde"],
+    ));
+
+    fs::remove_file(&log).unwrap();
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde", bge]);
+    let transcript = String::from_utf8_lossy(&out.stdout);
+    assert!(!out.status.success(), "{transcript}");
+    assert!(transcript.contains(&format!("{bge} is embedded with")), "{transcript}");
+    assert!(!log.exists(), "setup ran");
+}
+
+#[test]
+fn an_unreachable_bound_memory_stops_only_a_first_add() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let funes_home = tmp.path().join("funes");
+    let log = tmp.path().join("setup.log");
+    install(&home, "clyde", 1);
+    fs::create_dir_all(home.join(".clyde")).unwrap();
+    fs::write(home.join(".clyde/history.funes.jsonl"), format!("{HISTORY}\n")).unwrap();
+    let add_offline = || {
+        let out = funes_offline_at_a_terminal(&home, &funes_home, &log, &["add", "clyde", "acme/memory"]);
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    let transcript = add_offline();
+    assert!(transcript.contains("can't read acme/memory"), "{transcript}");
+    assert!(!transcript.contains("proceeding"), "{transcript}");
+    assert!(!log.exists(), "setup ran");
+
+    // A local memory with its model has nothing to take from the bound one.
+    support::assert_success(&funes_at_a_terminal(
+        &home,
+        &funes_home,
+        &log,
+        &["index", "--multilingual"],
+    ));
+    let transcript = add_offline();
+    assert!(
+        transcript.contains("can't reach acme/memory right now — proceeding"),
+        "{transcript}"
+    );
+    assert!(log.exists(), "setup did not run");
 }
 
 /// A memory `funes index --multilingual` created empty still gets the first add's index.

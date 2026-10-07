@@ -144,8 +144,9 @@ compaction then reads its files from that cache instead of fetching them one at 
 ## Sessions not in English
 
 funes embeds with `BAAI/bge-small-en-v1.5`, an English model. For sessions in another language,
-create the local memory with `funes index --multilingual` before anything is indexed: it embeds
-with `intfloat/multilingual-e5-small`, and its keyword search splits Chinese and Japanese text into
+answer multilingual when the first `funes add` asks, or create the local memory with
+`funes index --multilingual` before anything is indexed: it embeds with
+`intfloat/multilingual-e5-small`, and its keyword search splits Chinese and Japanese text into
 words. A memory keeps the model it was created with.
 
 ## Flags

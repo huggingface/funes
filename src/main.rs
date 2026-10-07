@@ -7,6 +7,7 @@
 use funes::agents::{self, registry};
 use funes::commands::{ask, compact, index, mcp, push, recall, scrub, sketch, update};
 use funes::hub;
+use funes::inference::EmbeddingModel;
 use funes::memory;
 use funes::traces::spool;
 
@@ -898,20 +899,15 @@ async fn resolve_add_memory(memory: Option<String>) -> Result<Option<Resolved>> 
     }
 }
 
-/// Validate an explicitly-named memory: fine if it exists; offer to create it if missing (default
-/// **no**, to catch typos); warn but proceed if the Hub is unreachable. Returns whether it created
-/// the repo.
+/// Validate an explicitly-named memory: fine if it exists or the Hub is unreachable; offer to create
+/// it if missing (default **no**, to catch typos). Returns whether it created the repo.
 async fn ensure_remote_exists(remote: &str) -> Result<bool> {
     let target = memory::Memory::parse(remote);
     let memory::Memory::Remote { uri } = &target else {
         return Ok(false); // a local path — nothing to check on the Hub
     };
     match memory::remote_reachability(uri).await {
-        memory::Reachability::Ok => Ok(false),
-        memory::Reachability::Offline => {
-            eprintln!("note: can't reach {remote} right now — proceeding; it'll be used once it's back.");
-            Ok(false)
-        }
+        memory::Reachability::Ok | memory::Reachability::Offline => Ok(false),
         memory::Reachability::Missing => {
             let (owner, name, _) = hub::parse_hf(uri)?;
             if std::io::stdin().is_terminal()
@@ -1005,6 +1001,44 @@ fn parse_confirm(input: &str, default_yes: bool) -> bool {
     }
 }
 
+/// The embedding model `memory` holds its sessions in, `None` when it holds none or is unreachable.
+/// When the local memory `takes` its model from it, a memory whose model can't be read is an error:
+/// a guess could pin the local memory to another model.
+async fn bound_model(memory: &str, takes: bool) -> Result<Option<EmbeddingModel>> {
+    let target = memory::Memory::parse(memory);
+    target
+        .state()
+        .await
+        .and_then(|state| match state {
+            memory::MemoryState::Ready(ds) => memory::dataset::embedding_model(&ds).map(Some),
+            memory::MemoryState::Offline if takes => Err(anyhow!(
+                "it is unreachable, and the local memory takes its embedding model: run `funes add` again once it is back"
+            )),
+            memory::MemoryState::Offline => {
+                eprintln!("note: can't reach {memory} right now — proceeding; it'll be used once it's back.");
+                Ok(None)
+            }
+            memory::MemoryState::Unauthorized if takes => Err(target.unauthorized_error()),
+            _ => Ok(None),
+        })
+        .with_context(|| format!("can't read {memory}"))
+}
+
+fn ask_model() -> EmbeddingModel {
+    eprint!("Index your sessions as English, or multilingual for other languages too? [E/m] ");
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    let _ = std::io::stdin().read_line(&mut answer);
+    parse_model(&answer)
+}
+
+fn parse_model(input: &str) -> EmbeddingModel {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "m" | "multilingual" => memory::dataset::MULTILINGUAL_MODEL,
+        _ => memory::dataset::MODEL,
+    }
+}
+
 /// `funes add <agent> [memory]`: bootstrap the one-time steps the hooks can't do unattended,
 /// around the integration's own `setup add` (converts the agent's history into its spool,
 /// registers hooks + MCP).
@@ -1019,6 +1053,22 @@ where
     F: FnOnce(Option<String>) -> Fut,
     Fut: std::future::Future<Output = Result<()>>,
 {
+    let local = index::local_memory_model().await?;
+    let bound = match &resolved {
+        Some(Resolved { memory, .. }) => bound_model(memory, local.is_none())
+            .await?
+            .map(|model| (memory.as_str(), model)),
+        None => None,
+    };
+    if let (Some((memory, there)), Some(here)) = (bound, local) {
+        if there != here {
+            bail!(
+                "{memory} is embedded with {}, and the local memory with {}: a memory takes one embedding model",
+                there.id(),
+                here.id()
+            );
+        }
+    }
     let first_add = !matches!(memory::Memory::local().state().await, Ok(memory::MemoryState::Ready(_)));
     if first_add
         && !confirm(
@@ -1028,6 +1078,26 @@ where
     {
         eprintln!("funes: skipped — nothing was wired up. Run `funes add {agent}` again when you're ready.");
         return Ok(());
+    }
+    if local.is_none() {
+        let model = match bound {
+            Some((memory, model)) => {
+                eprintln!(
+                    "funes: embedding the local memory with {}, the model of {memory}.",
+                    model.id()
+                );
+                model
+            }
+            None if std::io::stdin().is_terminal() => ask_model(),
+            None => {
+                eprintln!(
+                    "funes: embedding the local memory with {}, the default off a terminal.",
+                    memory::dataset::MODEL.id()
+                );
+                memory::dataset::MODEL
+            }
+        };
+        index::ensure_local_memory(model).await?;
     }
     install(resolved.as_ref().map(|r| r.memory.clone())).await?;
     if first_add {
@@ -1180,8 +1250,19 @@ fn prompt_new_memory(label: &str, chunks: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_confirm, Cli, Cmd};
+    use super::{parse_confirm, parse_model, Cli, Cmd};
     use clap::Parser;
+    use funes::memory::dataset::{MODEL, MULTILINGUAL_MODEL};
+
+    #[test]
+    fn a_new_memory_is_english_unless_the_answer_is_multilingual() {
+        for answer in ["\n", "e", "English", "nope"] {
+            assert_eq!(parse_model(answer), MODEL, "{answer:?}");
+        }
+        for answer in ["m\n", " M ", "multilingual"] {
+            assert_eq!(parse_model(answer), MULTILINGUAL_MODEL, "{answer:?}");
+        }
+    }
 
     #[test]
     fn parse_confirm_honors_default_and_answers() {

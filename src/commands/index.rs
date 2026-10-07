@@ -50,26 +50,28 @@ async fn acquire_lock(interactive: bool) -> Result<lock::MemoryLock> {
     ))
 }
 
+pub async fn local_memory_model() -> Result<Option<inference::EmbeddingModel>> {
+    match dataset::open(&dataset::table_uri(&dataset::local_memory_dir()), HashMap::new()).await {
+        Ok(ds) => Ok(Some(dataset::embedding_model(&ds)?)),
+        Err(_) => Ok(None),
+    }
+}
+
 pub async fn ensure_local_memory(model: inference::EmbeddingModel) -> Result<()> {
     std::fs::create_dir_all(dataset::funes_dir())?;
     let _lock = acquire_lock(std::io::stdin().is_terminal()).await?;
-    let uri = dataset::table_uri(&dataset::local_memory_dir());
-    match dataset::open(&uri, HashMap::new()).await {
-        Ok(ds) => {
-            let current = dataset::embedding_model(&ds)?;
-            if current != model {
-                return Err(anyhow!(
-                    "the local memory is embedded with {}, not {}: a memory keeps the model it was created with",
-                    current.id(),
-                    model.id()
-                ));
-            }
-        }
-        Err(_) => {
-            dataset::create_empty(&uri, model).await?;
+    match local_memory_model().await? {
+        Some(current) if current != model => Err(anyhow!(
+            "the local memory is embedded with {}, not {}: a memory keeps the model it was created with",
+            current.id(),
+            model.id()
+        )),
+        Some(_) => Ok(()),
+        None => {
+            dataset::create_empty(&dataset::table_uri(&dataset::local_memory_dir()), model).await?;
+            Ok(())
         }
     }
-    Ok(())
 }
 
 /// Every chunk id already stored. Re-indexing keeps only the chunks whose id isn't here, so a grown
