@@ -13,7 +13,7 @@ use safetensors::tensor::Metadata;
 use tokenizers::utils::padding::pad_encodings;
 use tokenizers::{Encoding, PaddingParams, Tokenizer, TruncationParams};
 
-use super::{Embedder, Reranker};
+use super::{Embedder, EmbeddingModel, Reranker};
 
 // ---------------------------------------------------------------------------------------------
 // Platform seam: the ONLY OS-specific code. A platform backend implements just these two
@@ -783,17 +783,19 @@ fn by_length<T: Default + Clone>(
     Ok(out)
 }
 
-/// bge-small-en-v1.5 embedder: BERT encoder → CLS → L2-normalize.
+/// Sentence embedder: BERT encoder → pooling → L2-normalize. Both models have the [`EMBED`] shape.
 pub struct BlasEmbedder {
+    model: EmbeddingModel,
     w: HashMap<String, Vec<f32>>,
     tok: Tokenizer,
     scratch: Scratch,
 }
 
 impl BlasEmbedder {
-    pub fn new() -> Result<Self> {
-        let dir = hf_snapshot("BAAI/bge-small-en-v1.5")?;
+    pub fn new(model: EmbeddingModel) -> Result<Self> {
+        let dir = hf_snapshot(model.id())?;
         Ok(Self {
+            model,
             w: load_weights(&dir)?,
             tok: load_tokenizer(&dir)?,
             scratch: Scratch::default(),
@@ -802,24 +804,45 @@ impl BlasEmbedder {
 }
 
 impl Embedder for BlasEmbedder {
-    fn embed(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+    fn model(&self) -> EmbeddingModel {
+        self.model
+    }
+
+    fn encode(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         let encs = self
             .tok
             .encode_batch(texts.to_vec(), true)
             .map_err(|e| anyhow!("tokenize: {e}"))?;
-        let (w, scratch) = (&self.w, &mut self.scratch);
+        let (model, w, scratch) = (self.model, &self.w, &mut self.scratch);
         let h = EMBED.h;
         by_length(encs, EMBED.group, |ids, mask, n, l| {
             encode(w, EMBED, ids, mask, n, l, scratch);
             (0..n)
                 .map(|s| {
-                    let mut e = scratch.hid[(s * l) * h..(s * l) * h + h].to_vec();
+                    let rows = &scratch.hid[s * l * h..(s + 1) * l * h];
+                    let mut e = match model {
+                        EmbeddingModel::BgeSmallEn => rows[..h].to_vec(),
+                        EmbeddingModel::MultilingualE5Small => mean_pool(rows, &mask[s * l..(s + 1) * l], h),
+                    };
                     l2_normalize(&mut e);
                     e
                 })
                 .collect()
         })
     }
+}
+
+fn mean_pool(rows: &[f32], mask: &[i64], h: usize) -> Vec<f32> {
+    let mut sum = vec![0f32; h];
+    let mut kept = 0f32;
+    for (row, &m) in rows.chunks_exact(h).zip(mask) {
+        if m != 0 {
+            sum.iter_mut().zip(row).for_each(|(s, x)| *s += x);
+            kept += 1.0;
+        }
+    }
+    sum.iter_mut().for_each(|s| *s /= kept);
+    sum
 }
 
 /// bge-reranker-base cross-encoder: XLM-R encoder → CLS → out_proj(tanh(dense(cls))).

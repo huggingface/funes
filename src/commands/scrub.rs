@@ -87,7 +87,7 @@ pub async fn run() -> Result<()> {
     let replacement_batch = if replacements.is_empty() {
         None
     } else {
-        let mut embedder: Box<dyn Embedder> = inference::embedder()?;
+        let mut embedder: Box<dyn Embedder> = inference::embedder(dataset::MODEL)?;
         let rtexts: Vec<&str> = replacements.iter().map(|c| c.text.as_str()).collect();
         let n = rtexts.len();
         eprintln!("re-embedding {n} redacted chunk(s)…");

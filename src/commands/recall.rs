@@ -393,7 +393,7 @@ static MODELS: OnceCell<Mutex<Models>> = OnceCell::const_new();
 async fn models() -> Result<&'static Mutex<Models>> {
     MODELS
         .get_or_try_init(|| async {
-            let embedder = inference::embedder()?;
+            let embedder = inference::embedder(dataset::MODEL)?;
             Ok::<_, anyhow::Error>(Mutex::new(Models {
                 embedder,
                 reranker: None,
@@ -517,15 +517,7 @@ impl Search {
     ) -> Result<Self> {
         let harness = filter.harness.clone().map(harness_spellings).unwrap_or_default();
         progress("loading model…");
-        let qv: Vec<f32> = models()
-            .await?
-            .lock()
-            .await
-            .embedder
-            .embed(&[query.as_str()])?
-            .into_iter()
-            .next()
-            .context("empty embedding")?;
+        let qv: Vec<f32> = models().await?.lock().await.embedder.embed_query(&query)?;
         Ok(Self {
             where_clause: build_where(
                 filter.block_type.as_deref(),

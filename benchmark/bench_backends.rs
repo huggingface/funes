@@ -1,7 +1,7 @@
 //! A/B the inference backends behind the `Embedder`/`Reranker` traits: latency + agreement (does a
 //! faster backend embed/rank the same as the reference?). Backend-agnostic and cross-platform — it
 //! compares whatever backends are compiled in, with ONNX (fastembed) as the reference when present:
-//!   cargo run --release --features onnx --example bench_backends
+//!   cargo run --release --features onnx --example bench_backends [-- <embedding model id>]
 //!
 //! Six workloads, because they stress different things: a batch of short docs is dominated by
 //! per-call overheads (tokenization, thread spawns), while 30 docs at the 512-token truncation
@@ -16,8 +16,8 @@
 
 use std::time::Instant;
 
-use anyhow::Result;
-use funes::inference::{Embedder, Reranker};
+use anyhow::{anyhow, Result};
+use funes::inference::{Embedder, EmbeddingModel, Reranker};
 
 const QUERY: &str = "why did we move the reranker off the onnx runtime";
 
@@ -100,7 +100,7 @@ struct Backend {
     rr: Box<dyn Reranker>,
 }
 
-fn backends() -> Result<Vec<Backend>> {
+fn backends(model: EmbeddingModel) -> Result<Vec<Backend>> {
     let mut v: Vec<Backend> = Vec::new();
     // ONNX first when compiled in: the first backend is the agreement reference.
     #[cfg(feature = "onnx")]
@@ -108,7 +108,7 @@ fn backends() -> Result<Vec<Backend>> {
         use funes::inference::{OnnxEmbedder, OnnxReranker};
         v.push(Backend {
             name: "onnx",
-            emb: Box::new(OnnxEmbedder::new()?),
+            emb: Box::new(OnnxEmbedder::new(model)?),
             rr: Box::new(OnnxReranker::new()?),
         });
     }
@@ -117,7 +117,7 @@ fn backends() -> Result<Vec<Backend>> {
         use funes::inference::blas::{BlasEmbedder, BlasReranker};
         v.push(Backend {
             name: "blas",
-            emb: Box::new(BlasEmbedder::new()?),
+            emb: Box::new(BlasEmbedder::new(model)?),
             rr: Box::new(BlasReranker::new()?),
         });
     }
@@ -143,7 +143,12 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 }
 
 fn main() -> Result<()> {
-    let mut backs = backends()?;
+    let model = match std::env::args().nth(1) {
+        Some(id) => EmbeddingModel::from_id(&id).ok_or_else(|| anyhow!("funes does not run {id:?}"))?,
+        None => EmbeddingModel::BgeSmallEn,
+    };
+    println!("embedding model: {}\n", model.id());
+    let mut backs = backends(model)?;
     if backs.len() < 2 {
         eprintln!("note: only one backend is compiled — build with `--features onnx` to A/B against the reference\n");
     }

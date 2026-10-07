@@ -281,9 +281,10 @@ fn check_compat(ds: &Dataset) -> Result<()> {
     let schema = arrow_schema::Schema::from(ds.schema());
 
     if let Some(model) = schema.metadata().get("embedding_model") {
-        if model != MODEL {
+        if model != MODEL.id() {
             return Err(anyhow!(
-                "memory built with embedding model {model:?}, not funes's {MODEL:?}"
+                "memory built with embedding model {model:?}, not funes's {:?}",
+                MODEL.id()
             ));
         }
     }

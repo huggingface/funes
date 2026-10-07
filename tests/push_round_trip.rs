@@ -378,7 +378,7 @@ async fn push_round_trip_create_append_recall() {
     );
     assert_eq!(
         remote_model.as_deref(),
-        Some(funes::memory::dataset::MODEL),
+        Some(funes::memory::dataset::MODEL.id()),
         "the model id should travel with the memory via push"
     );
     assert_eq!(

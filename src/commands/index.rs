@@ -467,8 +467,11 @@ impl Indexer {
         if let Some(ds) = &ds {
             let schema = arrow_schema::Schema::from(ds.schema());
             if let Some(em) = schema.metadata().get("embedding_model") {
-                if em != MODEL {
-                    return Err(anyhow!("index built with model {em:?}, refusing to mix with {MODEL:?}"));
+                if em != MODEL.id() {
+                    return Err(anyhow!(
+                        "index built with model {em:?}, refusing to mix with {:?}",
+                        MODEL.id()
+                    ));
                 }
             }
         }
@@ -489,7 +492,7 @@ impl Indexer {
                 .unwrap_or_default()
         };
 
-        let embedder: Box<dyn Embedder> = inference::embedder()?;
+        let embedder: Box<dyn Embedder> = inference::embedder(MODEL)?;
         let scanner = find_scanner();
 
         let existing = match &ds {
@@ -1258,7 +1261,11 @@ mod tests {
     }
 
     impl Embedder for TestEmbedder {
-        fn embed(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        fn model(&self) -> inference::EmbeddingModel {
+            MODEL
+        }
+
+        fn encode(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
             self.texts.extend(texts.iter().map(|text| text.to_string()));
             Ok(vec![vec![1.0; dataset::DIM as usize]; texts.len()])
         }

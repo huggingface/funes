@@ -95,6 +95,7 @@ the default BLAS backend and the optional ONNX reference:
 
 ```sh
 cargo run --release --features onnx --example bench_backends
+cargo run --release --features onnx --example bench_backends -- intfloat/multilingual-e5-small
 ```
 
 It runs six fixed workloads: 16 short documents to expose per-call overhead; 30 documents near
@@ -107,6 +108,7 @@ embedding and reranking latency plus agreement with the first backend:
 - `embed cos↔ref` is the minimum cosine similarity between corresponding embedding vectors.
 - `rerank Δ↔ref` is the maximum absolute difference between corresponding reranker scores.
 
-ONNX is the reference when that feature is present. The benchmark has no command-line options; edit
-its fixed query or workloads when investigating a particular regression. Building with only one
-backend still prints its timing, along with a note that there is nothing to compare.
+ONNX is the reference when that feature is present. The one argument names the embedding model,
+`BAAI/bge-small-en-v1.5` when omitted. Edit the fixed query or workloads when investigating a
+particular regression. Building with only one backend still prints its timing, along with a note
+that there is nothing to compare.

@@ -3,6 +3,7 @@
 //! it holds the incremental state and the local memory at `…/memory` (the `chunks` Lance dataset).
 
 use crate::chunk;
+use crate::inference::EmbeddingModel;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -31,7 +32,7 @@ pub const TABLE: &str = "chunks";
 /// The embedding model a memory's vectors are built with, and their width. Pinned in the schema
 /// metadata and enforced on open ([`super::Memory::open`]): a memory built with another model
 /// can't be queried with funes's embeddings.
-pub const MODEL: &str = "BAAI/bge-small-en-v1.5";
+pub const MODEL: EmbeddingModel = EmbeddingModel::BgeSmallEn;
 pub const DIM: i32 = 384;
 
 /// funes's home directory: `$FUNES_HOME`, else `~/.funes`. Holds the incremental state and the
@@ -444,7 +445,7 @@ pub(crate) fn schema() -> Arc<Schema> {
             utf8("harness"),
             utf8("repo"),
         ],
-        HashMap::from([("embedding_model".to_string(), MODEL.to_string())]),
+        HashMap::from([("embedding_model".to_string(), MODEL.id().to_string())]),
     ))
 }
 
