@@ -7,6 +7,7 @@
 //! inode and the next run picks up the new binary.
 
 use crate::hub::{release_bucket, verify_checksum};
+use crate::memory::lock;
 use anyhow::{anyhow, bail, Context, Result};
 use hf_hub::buckets::BucketDownload;
 use hf_hub::HFBucket;
@@ -36,6 +37,32 @@ const ASSET: Option<&str> = if cfg!(all(target_os = "linux", target_arch = "x86_
 } else {
     None
 };
+
+/// Wait until no funes up to 1.6 writes the home's memory. Those lock it from the funes home, not
+/// from the memory, so an index one started before an update replaced it would not exclude a
+/// current writer. Holds the memory's lock meanwhile, so no current writer starts alongside it.
+/// Temporary: drop it once no older binary can still be running.
+pub async fn wait_for_older_writers() -> Result<()> {
+    let mut waiting = false;
+    let _memory = loop {
+        if let Some(memory) = lock::MemoryLock::try_acquire()? {
+            break memory;
+        }
+        announce_wait(&mut waiting).await;
+    };
+    while lock::older_writer_running()? {
+        announce_wait(&mut waiting).await;
+    }
+    Ok(())
+}
+
+async fn announce_wait(waiting: &mut bool) {
+    if !*waiting {
+        eprintln!("waiting for a running funes index to finish…");
+        *waiting = true;
+    }
+    tokio::time::sleep(Duration::from_secs(1)).await;
+}
 
 /// `funes update`: fetch the latest release binary for this platform and replace the running
 /// executable in place. Idempotent — with `force`, reinstalls even when already up to date. The

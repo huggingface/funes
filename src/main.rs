@@ -764,6 +764,8 @@ async fn remove_agent(id: &str) -> Result<()> {
 /// them, since its contract decides which releases they take; one this host cannot replace does not
 /// hold them back.
 async fn update_funes(force: bool) -> Result<()> {
+    // First: an older release that just replaced its binary hands over to this `funes update`.
+    update::wait_for_older_writers().await?;
     let binary = update::run(force).await;
     if let Ok(Some(exe)) = &binary {
         let e = Command::new(exe).arg("update").exec();

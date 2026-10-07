@@ -30,8 +30,17 @@ async fn memory_lock_fails_loudly_on_contention() {
         "scrub should report contention, got: {err}"
     );
 
+    // A writer reaching the memory by its path, from any funes home, refuses too.
+    let memory = home.path().join("memory");
+    assert!(MemoryLock::acquire_in(&memory).is_err());
+
     // Releasing frees it for the next writer.
     drop(held);
     let regained = MemoryLock::acquire().unwrap();
     drop(regained);
+
+    // And a writer holding the memory by its path keeps the home's writers out.
+    let by_path = MemoryLock::acquire_in(&memory).unwrap();
+    assert!(MemoryLock::acquire().is_err());
+    drop(by_path);
 }
