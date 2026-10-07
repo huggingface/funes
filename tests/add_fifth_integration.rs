@@ -678,6 +678,39 @@ fn a_fifth_integration_seeds_and_drains_its_spool_under_its_own_facet() {
     );
 }
 
+/// A memory `funes index --multilingual` created empty still gets the first add's index.
+#[test]
+fn an_empty_memory_still_gets_the_first_index() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let funes_home = tmp.path().join("funes");
+    let log = tmp.path().join("setup.log");
+    install(&home, "clyde", 1);
+    fs::create_dir_all(home.join(".clyde")).unwrap();
+    fs::write(home.join(".clyde/history.funes.jsonl"), format!("{HISTORY}\n")).unwrap();
+
+    support::assert_success(&funes_at_a_terminal(
+        &home,
+        &funes_home,
+        &log,
+        &["index", "--multilingual"],
+    ));
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde"]);
+    let transcript = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{transcript}");
+    assert!(
+        transcript.contains("indexing your recent clyde sessions"),
+        "{transcript}"
+    );
+    let out = funes(
+        &home,
+        &funes_home,
+        &log,
+        &["recall", "widget cache invalidated on deploy"],
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("h-1"), "{}", stderr(&out));
+}
+
 /// Declining the first index at its prompt installs nothing: setup never runs, so nothing is
 /// converted, and nothing is indexed — and the manifest of the install already there is put
 /// back, since that install is still what the agent runs.

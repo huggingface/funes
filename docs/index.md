@@ -141,6 +141,13 @@ remote on its own, once 500 rows sit unindexed there. To compact a large remote,
 with `hf download <org>/<repo> --repo-type dataset`: as long as nothing is pushed in between, the
 compaction then reads its files from that cache instead of fetching them one at a time.
 
+## Sessions not in English
+
+funes embeds with `BAAI/bge-small-en-v1.5`, an English model. For sessions in another language,
+create the local memory with `funes index --multilingual` before anything is indexed: it embeds
+with `intfloat/multilingual-e5-small`, and its keyword search splits Chinese and Japanese text into
+words. A memory keeps the model it was created with.
+
 ## Flags
 
 | Flag | Meaning |
@@ -150,6 +157,7 @@ compaction then reads its files from that cache instead of fetching them one at 
 | `--limit <N>` | Index only the most recent N sessions per source. Omit to index all. A Hub repo ignores it and indexes every shard. |
 | `--no-thinking` | Exclude thinking blocks. |
 | `--yes` | Don't ask: a budgeted (no-path) run finishes all remaining work; an explicit path skips the first-index size confirmation. |
+| `--multilingual` | Create the local memory with `intfloat/multilingual-e5-small`, for sessions not in English. Refused when the local memory exists with the English model. |
 
 ## See also
 

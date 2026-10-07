@@ -35,6 +35,8 @@ pub const TABLE: &str = "chunks";
 pub const MODEL: EmbeddingModel = EmbeddingModel::BgeSmallEn;
 pub const DIM: i32 = 384;
 
+pub const MULTILINGUAL_MODEL: EmbeddingModel = EmbeddingModel::MultilingualE5Small;
+
 /// funes's home directory: `$FUNES_HOME`, else `~/.funes`. Holds the incremental state and the
 /// local memory.
 pub fn funes_dir() -> PathBuf {
@@ -435,6 +437,11 @@ fn ivf_pq_params(ds: &Dataset) -> Option<VectorIndexParams> {
         IvfBuildParams::default(),
         pq,
     ))
+}
+
+pub(crate) async fn create_empty(uri: &str, model: EmbeddingModel) -> Result<Dataset> {
+    let reader = RecordBatchIterator::new(std::iter::empty(), schema(model));
+    Dataset::write(reader, uri, None).await.context("creating the memory")
 }
 
 /// The table schema (column order is load-bearing for Lance).
@@ -916,6 +923,17 @@ mod tests {
                 .unwrap();
             assert_eq!(embedding_model(&ds).unwrap(), model);
         }
+    }
+
+    #[tokio::test]
+    async fn an_empty_memory_is_stamped_with_its_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let e5 = EmbeddingModel::MultilingualE5Small;
+        let ds = create_empty(&table_uri(&dir.path().to_string_lossy()), e5)
+            .await
+            .unwrap();
+        assert_eq!(ds.count_rows(None).await.unwrap(), 0);
+        assert_eq!(embedding_model(&ds).unwrap(), e5);
     }
 
     async fn turn_uuids(mut scan: lance::dataset::scanner::Scanner) -> Vec<String> {

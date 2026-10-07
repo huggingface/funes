@@ -145,6 +145,7 @@ impl Memory {
             }
         }
         match self.open().await {
+            Ok(ds) if matches!(self, Memory::Local { .. }) && ds.count_rows(None).await? == 0 => Ok(MemoryState::Empty),
             Ok(ds) => Ok(MemoryState::Ready(ds)),
             // A gated repo answers `info()` fine and 403s only here, on the file read — so the open
             // is the only place this is knowable. Local paths keep their own error: a
@@ -201,7 +202,7 @@ impl Memory {
 pub enum MemoryState {
     /// Opened, compatible, ready to query.
     Ready(Dataset),
-    /// Nothing there yet: a local memory with no dataset, or a repo never pushed to.
+    /// Nothing there yet: a local memory with no dataset or no rows, or a repo never pushed to.
     Empty,
     /// A remote repo that doesn't exist on the Hub. funes never creates it.
     Missing,
@@ -478,6 +479,19 @@ mod tests {
         let ds = Dataset::write(reader, &uri, None).await.unwrap();
         let err = check_compat(&ds).unwrap_err().to_string();
         assert!(err.contains("other-model") && err.contains("does not run"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_local_memory_with_no_rows_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_string_lossy().into_owned();
+        dataset::create_empty(&dataset::table_uri(&path), dataset::MODEL)
+            .await
+            .unwrap();
+        assert!(matches!(
+            Memory::parse(&path).state().await.unwrap(),
+            MemoryState::Empty
+        ));
     }
 
     #[tokio::test]

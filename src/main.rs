@@ -115,6 +115,10 @@ enum Cmd {
         /// an explicit path skips the first-index size confirmation.
         #[arg(long)]
         yes: bool,
+        /// Create the local memory with the multilingual embedding model, for sessions not in English.
+        /// A memory keeps the model it was created with, so an existing English memory refuses it.
+        #[arg(long, conflicts_with = "check")]
+        multilingual: bool,
     },
     /// Find a literal string everywhere in one session — exhaustive, unranked.
     Scan {
@@ -441,6 +445,7 @@ async fn main() -> Result<()> {
             no_thinking,
             limit,
             yes,
+            multilingual,
         } => {
             // `--harness` selects a spool; a path's turns name their own harness.
             if let (Some(p), Some(_)) = (&path, &harness) {
@@ -470,6 +475,9 @@ async fn main() -> Result<()> {
                     let memory::Memory::Remote { uri } = memory::Memory::parse(&p) else {
                         return Err(anyhow!("expected a Hub repo, got {p:?}"));
                     };
+                    if multilingual {
+                        index::ensure_local_memory(memory::dataset::MULTILINGUAL_MODEL).await?;
+                    }
                     return index::run_index_remote(&uri, no_thinking).await;
                 }
                 (Some(p), _) => return Err(anyhow!("no such path: {p}")),
@@ -499,6 +507,9 @@ async fn main() -> Result<()> {
                     spool::spools()
                 }
             };
+            if multilingual {
+                index::ensure_local_memory(memory::dataset::MULTILINGUAL_MODEL).await?;
+            }
             if roots.is_empty() {
                 println!(
                     "no agent converts its sessions here yet — `funes add <agent>` sets that up, \
@@ -998,8 +1009,8 @@ fn parse_confirm(input: &str, default_yes: bool) -> bool {
 /// around the integration's own `setup add` (converts the agent's history into its spool,
 /// registers hooks + MCP).
 ///
-/// 1. on a first add (no local memory yet), ask — the first index is about a minute of work, and
-///    declining aborts the add before anything is installed, so nothing is wired up;
+/// 1. on a first add (no rows in the local memory yet), ask — the first index is about a minute of
+///    work, and declining aborts the add before anything is installed, so nothing is wired up;
 /// 2. `install` — writes the spool, bakes the memory in;
 /// 3. build the first index from that spool, so recall and the push have content;
 /// 4. first push if a memory is bound — clears the overlap guard so the push hook works thereafter.
@@ -1008,7 +1019,7 @@ where
     F: FnOnce(Option<String>) -> Fut,
     Fut: std::future::Future<Output = Result<()>>,
 {
-    let first_add = memory::Memory::local().open().await.is_err();
+    let first_add = !matches!(memory::Memory::local().state().await, Ok(memory::MemoryState::Ready(_)));
     if first_add
         && !confirm(
             &format!("funes will index your existing {agent} sessions, if any, so recall works (about a minute). Proceed? [Y/n] "),
@@ -1026,7 +1037,7 @@ where
     // build, or no sessions yet) there's nothing to push, and running it would just error on the
     // absent memory.
     if let Some(Resolved { memory, created }) = resolved {
-        if memory::Memory::local().open().await.is_ok() {
+        if matches!(memory::Memory::local().state().await, Ok(memory::MemoryState::Ready(_))) {
             // The integration is in place by now; only the push is owed, and it takes a terminal.
             first_push(&memory, created).await.with_context(|| {
                 format!(

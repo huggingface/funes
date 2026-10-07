@@ -50,6 +50,28 @@ async fn acquire_lock(interactive: bool) -> Result<lock::MemoryLock> {
     ))
 }
 
+pub async fn ensure_local_memory(model: inference::EmbeddingModel) -> Result<()> {
+    std::fs::create_dir_all(dataset::funes_dir())?;
+    let _lock = acquire_lock(std::io::stdin().is_terminal()).await?;
+    let uri = dataset::table_uri(&dataset::local_memory_dir());
+    match dataset::open(&uri, HashMap::new()).await {
+        Ok(ds) => {
+            let current = dataset::embedding_model(&ds)?;
+            if current != model {
+                return Err(anyhow!(
+                    "the local memory is embedded with {}, not {}: a memory keeps the model it was created with",
+                    current.id(),
+                    model.id()
+                ));
+            }
+        }
+        Err(_) => {
+            dataset::create_empty(&uri, model).await?;
+        }
+    }
+    Ok(())
+}
+
 /// Every chunk id already stored. Re-indexing keeps only the chunks whose id isn't here, so a grown
 /// session (the same memory) contributes just its new turns — nothing is re-embedded or deleted. (A
 /// rewritten turn arrives under new ids, i.e. as another memory.) Chunk ids are global, so one
@@ -395,7 +417,7 @@ struct Indexer {
     state: HashMap<String, UnitState>,
     state_path: PathBuf,
     coverage_path: PathBuf,
-    /// The memory didn't exist when this run opened it — the first index.
+    /// The memory held no rows when this run opened it — the first index.
     first_index: bool,
     /// A human is watching (stdin is a terminal) — probed once here, so every prompt-or-proceed
     /// choice in a run agrees.
@@ -465,11 +487,15 @@ impl Indexer {
             Some(ds) => dataset::embedding_model(ds)?,
             None => MODEL,
         };
-        let first_index = ds.is_none();
+        let existing = match &ds {
+            Some(d) => stored_ids(d).await?,
+            None => HashSet::new(),
+        };
+        let first_index = existing.is_empty();
 
         // Incremental state: path -> {change stamp, level/refusal}; an unreadable or old-schema file →
-        // empty. A first index (memory missing) owes everything, whatever an old state.json says — a
-        // stale one would silently skip every unit against the empty memory.
+        // empty. A first index (memory missing or empty) owes everything, whatever an old state.json
+        // says — a stale one would silently skip every unit against the empty memory.
         let state_path = dir.join("state.json");
         let coverage_path = dir.join("index-coverage.json");
         let mut state: HashMap<String, UnitState> = if first_index {
@@ -483,11 +509,6 @@ impl Indexer {
 
         let embedder: Box<dyn Embedder> = inference::embedder(model)?;
         let scanner = find_scanner();
-
-        let existing = match &ds {
-            Some(d) => stored_ids(d).await?,
-            None => HashSet::new(),
-        };
 
         let units = collect_units(&sources)?;
         if !no_thinking {
