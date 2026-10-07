@@ -1,66 +1,17 @@
 //! Recall over a memory embedded with multilingual-e5-small, through the real models.
 
-use std::collections::HashMap;
-use std::sync::Arc;
+mod support;
 
-use arrow_array::types::Float32Type;
-use arrow_array::{ArrayRef, FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator, StringArray};
-use arrow_schema::{Field, Schema};
 use funes::commands::recall;
-use funes::inference::{self, EmbeddingModel};
-use funes::memory::{dataset, Memory};
-use lance::Dataset;
+use funes::inference::EmbeddingModel;
+use funes::memory::Memory;
 use tempfile::TempDir;
 
 async fn memory_of(model: EmbeddingModel, texts: &[&str]) -> (TempDir, Memory) {
     let home = tempfile::tempdir().unwrap();
-    let memory = home.path().join("memory").to_string_lossy().into_owned();
-    let n = texts.len();
-    let embedded = inference::embedder(model).unwrap().embed(texts).unwrap();
-    let ids: Vec<String> = (0..n).map(|i| format!("row-{i}")).collect();
-    let sessions: Vec<String> = (0..n).map(|i| format!("s-{i}")).collect();
-    let string = |values: Vec<Option<&str>>| -> ArrayRef { Arc::new(StringArray::from(values)) };
-    let number = |values: Vec<i64>| -> ArrayRef { Arc::new(Int64Array::from(values)) };
-    let vectors = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
-        embedded.into_iter().map(|v| Some(v.into_iter().map(Some))),
-        dataset::DIM,
-    );
-    let columns: Vec<(&str, ArrayRef)> = vec![
-        ("id", string(ids.iter().map(|s| Some(s.as_str())).collect())),
-        ("text", string(texts.iter().copied().map(Some).collect())),
-        (
-            "session_id",
-            string(sessions.iter().map(|s| Some(s.as_str())).collect()),
-        ),
-        ("workdir", string(vec![Some("demo"); n])),
-        ("turn_uuid", string(vec![Some("turn-0"); n])),
-        ("parent_uuid", string(vec![None; n])),
-        ("seq", number(vec![0; n])),
-        ("ts", string(vec![Some("2026-01-01T00:00:00Z"); n])),
-        ("role", string(vec![Some("user"); n])),
-        ("block_type", string(vec![Some("text"); n])),
-        ("tool_name", string(vec![None; n])),
-        ("source_path", string(vec![Some("zh.funes.jsonl"); n])),
-        ("block_idx", number(vec![0; n])),
-        ("split_idx", number(vec![0; n])),
-        ("vector", Arc::new(vectors)),
-        ("harness", string(vec![Some("codex"); n])),
-        ("repo", string(vec![Some(""); n])),
-    ];
-    let schema = Arc::new(Schema::new_with_metadata(
-        columns
-            .iter()
-            .map(|(name, array)| Field::new(*name, array.data_type().clone(), true))
-            .collect::<Vec<_>>(),
-        HashMap::from([("embedding_model".to_string(), model.id().to_string())]),
-    ));
-    let batch = RecordBatch::try_new(schema.clone(), columns.into_iter().map(|(_, array)| array).collect()).unwrap();
-    let reader = RecordBatchIterator::new([Ok(batch)], schema);
-    let mut ds = Dataset::write(reader, &dataset::table_uri(&memory), None)
-        .await
-        .unwrap();
-    dataset::build_indexes(&mut ds, |_| {}).await.unwrap();
-    (home, Memory::parse(&memory))
+    let path = home.path().join("memory");
+    support::memory_of(model, texts, &path).await;
+    (home, Memory::parse(&path.to_string_lossy()))
 }
 
 #[tokio::test]

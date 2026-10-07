@@ -461,21 +461,10 @@ impl Indexer {
         let uri = dataset::table_uri(&dataset::local_memory_dir());
         let ds = dataset::open(&uri, HashMap::new()).await.ok();
 
-        // Model-pin: refuse to add to a memory built with a different embedding model. The id rides
-        // in the dataset's schema metadata; a pre-metadata memory (no id) is tolerated and guarded
-        // only by the dimension check until it is reindexed.
-        if let Some(ds) = &ds {
-            let schema = arrow_schema::Schema::from(ds.schema());
-            if let Some(em) = schema.metadata().get("embedding_model") {
-                if em != MODEL.id() {
-                    return Err(anyhow!(
-                        "index built with model {em:?}, refusing to mix with {:?}",
-                        MODEL.id()
-                    ));
-                }
-            }
-        }
-
+        let model = match &ds {
+            Some(ds) => dataset::embedding_model(ds)?,
+            None => MODEL,
+        };
         let first_index = ds.is_none();
 
         // Incremental state: path -> {change stamp, level/refusal}; an unreadable or old-schema file →
@@ -492,7 +481,7 @@ impl Indexer {
                 .unwrap_or_default()
         };
 
-        let embedder: Box<dyn Embedder> = inference::embedder(MODEL)?;
+        let embedder: Box<dyn Embedder> = inference::embedder(model)?;
         let scanner = find_scanner();
 
         let existing = match &ds {
@@ -716,8 +705,9 @@ impl Indexer {
         if chunks.is_empty() {
             return Ok(0);
         }
-        let batch = build_batch(chunks, None)?;
-        let reader = RecordBatchIterator::new(vec![Ok(batch)], schema());
+        let model = self.embedder.model();
+        let batch = build_batch(model, chunks, None)?;
+        let reader = RecordBatchIterator::new(vec![Ok(batch)], schema(model));
         let uri = self.uri.clone();
         match &mut self.ds {
             Some(d) => {
@@ -1295,7 +1285,7 @@ mod tests {
                 })
             })
             .collect();
-        let reader = RecordBatchIterator::new([Ok(build_batch(&chunks, None).unwrap())], schema());
+        let reader = RecordBatchIterator::new([Ok(build_batch(MODEL, &chunks, None).unwrap())], schema(MODEL));
         Dataset::write(reader, path.to_str().unwrap(), None).await.unwrap()
     }
 

@@ -42,7 +42,7 @@ use std::sync::Arc;
 
 use anyhow::{ensure, Context, Result};
 use arrow_array::{RecordBatch, RecordBatchIterator};
-use arrow_schema::SchemaRef;
+use arrow_schema::{Schema, SchemaRef};
 use async_trait::async_trait;
 use bytes::Bytes;
 use hf_hub::progress::{Progress, ProgressEvent, ProgressHandler, UploadEvent};
@@ -110,6 +110,7 @@ pub(crate) async fn append(
 ) -> Result<Appended> {
     let parent = head_oid(repo, rev).await?;
     let (mut ds, wrapper) = open_capturing(dataset_uri, storage_options).await?;
+    same_model(&ds, &schema)?;
 
     let reader = RecordBatchIterator::new(batches.into_iter().map(Ok), schema);
     ds.append(reader, None)
@@ -135,6 +136,19 @@ pub(crate) async fn append(
         Err(e) if head_moved(&e) => Ok(Appended::Conflict),
         Err(e) => Err(anyhow::Error::new(e).context("data commit failed")),
     }
+}
+
+/// Refuse rows embedded with another model than `ds`'s: Lance appends them whatever model their
+/// schema records.
+fn same_model(ds: &Dataset, rows: &Schema) -> Result<()> {
+    let (there, here) = (dataset::embedding_model(ds)?, dataset::stamped_model(rows)?);
+    ensure!(
+        here == there,
+        "the remote memory is embedded with {}, and the rows to append with {}: a memory takes one embedding model",
+        there.id(),
+        here.id()
+    );
+    Ok(())
 }
 
 /// Build the whole dataset locally (data + indexes) and upload it in one `create_commit` — unlike
@@ -855,6 +869,7 @@ pub(crate) async fn fetch_wrapper(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inference::EmbeddingModel;
     use arrow_array::StringArray;
     use arrow_schema::{DataType, Field, Schema};
     use futures::TryStreamExt;
@@ -1045,6 +1060,18 @@ mod tests {
 
         let txns = compact_snapshot("refuse", &store, read).await;
         assert!(replay_onto(ds, read, &txns).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn an_append_refuses_rows_of_another_model() {
+        let (e5, bge) = (EmbeddingModel::MultilingualE5Small, EmbeddingModel::BgeSmallEn);
+        let rows = RecordBatchIterator::new(std::iter::empty(), dataset::schema(e5));
+        let ds = Dataset::write(rows, "shared-memory://model/chunks.lance", None)
+            .await
+            .unwrap();
+        assert!(same_model(&ds, &dataset::schema(e5)).is_ok());
+        let err = same_model(&ds, &dataset::schema(bge)).unwrap_err().to_string();
+        assert!(err.contains(e5.id()) && err.contains(bge.id()), "{err}");
     }
 
     #[test]

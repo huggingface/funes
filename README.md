@@ -182,8 +182,8 @@ cargo run --release --features onnx --example bench_backends  # A/B both backend
 ## Notes
 
 - **Each memory names its embedding model**, and funes embeds a query with the model of the memory
-  it searches. A memory holds one model's vectors: indexing or pushing another model's vectors into it
-  is refused. To change it, rebuild from the transcripts (the memory is a disposable derived
+  it searches. A memory holds one model's vectors: funes indexes into it with that model, and refuses
+  to push another model's vectors into it. To change it, rebuild from the transcripts (the memory is a disposable derived
   artifact — the raw text is retained in every row). This is separate from the model you *reason*
   with, which is free to change.
 - **Subagent transcripts** (`.../subagents/agent-*.jsonl`) are indexed too.

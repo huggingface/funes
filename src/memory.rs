@@ -29,7 +29,6 @@ use hf_hub::HFError;
 use lance::dataset::Dataset;
 
 use crate::hub::{client, hf_token, is_offline_error, is_remote_shorthand, parse_hf};
-use crate::inference::EmbeddingModel;
 use dataset::DIM;
 
 /// A memory to recall from: a local Lance directory or a remote dataset on the HF Hub.
@@ -274,24 +273,12 @@ fn dataset_absent(err: &anyhow::Error) -> bool {
     })
 }
 
-/// A memory from before the model was recorded holds bge-small-en vectors.
-pub fn embedding_model(ds: &Dataset) -> Result<EmbeddingModel> {
-    match arrow_schema::Schema::from(ds.schema())
-        .metadata()
-        .get("embedding_model")
-    {
-        None => Ok(EmbeddingModel::BgeSmallEn),
-        Some(id) => EmbeddingModel::from_id(id)
-            .ok_or_else(|| anyhow!("memory built with embedding model {id:?}, which funes does not run")),
-    }
-}
-
 /// Reject a memory funes can't query with its own embeddings: the `vector` dimension must be
 /// funes's `DIM`, and — when the memory records an embedding model in its schema metadata — that
 /// model must be one funes runs. A memory with no recorded model (pre-metadata) is guarded by the
 /// dimension alone.
 fn check_compat(ds: &Dataset) -> Result<()> {
-    embedding_model(ds)?;
+    dataset::embedding_model(ds)?;
     let schema = arrow_schema::Schema::from(ds.schema());
     let field = schema
         .field_with_name("vector")
@@ -494,26 +481,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_memory_names_its_model_and_an_unstamped_one_is_bge() {
+    async fn check_compat_accepts_a_model_funes_runs() {
         let dir = tempfile::tempdir().unwrap();
-        let e5 = EmbeddingModel::MultilingualE5Small;
+        let e5 = crate::inference::EmbeddingModel::MultilingualE5Small;
         let schema = Arc::new(Schema::new_with_metadata(
             vec![Field::new("id", DataType::Int64, true), vector_field(DIM)],
             HashMap::from([("embedding_model".to_string(), e5.id().to_string())]),
         ));
         let batch = RecordBatch::try_new(schema.clone(), vec![ids(2), vectors(2, DIM)]).unwrap();
         let uri = format!("{}/chunks.lance", dir.path().to_str().unwrap());
-        let ds = Dataset::write(RecordBatchIterator::new(vec![Ok(batch)], schema), &uri, None)
-            .await
-            .unwrap();
+        let reader = RecordBatchIterator::new(vec![Ok(batch)], schema);
+        let ds = Dataset::write(reader, &uri, None).await.unwrap();
         assert!(check_compat(&ds).is_ok());
-        assert_eq!(embedding_model(&ds).unwrap(), e5);
-
-        let (_d, unstamped) = dataset_with(
-            vec![Field::new("id", DataType::Int64, true), vector_field(DIM)],
-            vec![ids(2), vectors(2, DIM)],
-        )
-        .await;
-        assert_eq!(embedding_model(&unstamped).unwrap(), EmbeddingModel::BgeSmallEn);
     }
 }

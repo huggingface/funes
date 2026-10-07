@@ -6,7 +6,8 @@
 
 use crate::chunk;
 use crate::inference::{self, Embedder, EmbeddingModel, Reranker};
-use crate::memory::{self, dataset, Memory, MemoryState};
+use crate::memory::dataset;
+use crate::memory::{Memory, MemoryState};
 use anyhow::{anyhow, bail, Context, Result};
 use arrow_array::{Float32Array, Int64Array, RecordBatch, StringArray, UInt64Array};
 use chrono::{DateTime, NaiveDate, Utc};
@@ -545,7 +546,7 @@ impl Search {
                 "this memory predates the harness facet — reindex it, or drop --harness"
             ));
         }
-        let model = memory::embedding_model(&read.ds)?;
+        let model = dataset::embedding_model(&read.ds)?;
         let (embedded_by, qv) = self
             .qv
             .get_or_try_init(|| async {
@@ -1719,8 +1720,8 @@ mod tests {
     async fn memory_of(turns: &[Turn], dir: &Path) -> Dataset {
         let chunks = chunk::chunks_from_turns(turns, &chunk::Tier::ALL, true);
         let vectors = vec![vec![0.0f32; dataset::DIM as usize]; chunks.len()];
-        let batch = dataset::build_batch(&chunks, Some(&vectors)).unwrap();
-        let reader = RecordBatchIterator::new(vec![Ok(batch)], dataset::schema());
+        let batch = dataset::build_batch(dataset::MODEL, &chunks, Some(&vectors)).unwrap();
+        let reader = RecordBatchIterator::new(vec![Ok(batch)], dataset::schema(dataset::MODEL));
         Dataset::write(reader, dir.to_str().unwrap(), None).await.unwrap()
     }
 
@@ -1749,8 +1750,8 @@ mod tests {
             text_turn("session", 1, "assistant", "Each line becomes a typed turn."),
         ];
         let chunks = chunk::chunks_from_turns(&turns, &chunk::Tier::ALL, true);
-        let batch = dataset::build_batch(&chunks, None).unwrap();
-        let reader = RecordBatchIterator::new([Ok(batch)], dataset::schema());
+        let batch = dataset::build_batch(dataset::MODEL, &chunks, None).unwrap();
+        let reader = RecordBatchIterator::new([Ok(batch)], dataset::schema(dataset::MODEL));
         let mut ds = Dataset::write(reader, &dataset::table_uri(&memory.label()), None)
             .await
             .unwrap();

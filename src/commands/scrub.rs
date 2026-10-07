@@ -27,6 +27,7 @@ pub async fn run() -> Result<()> {
         println!("no local memory to scrub");
         return Ok(());
     };
+    let model = dataset::embedding_model(&ds)?;
     let scanner = scan::Trufflehog::find()?;
 
     eprintln!("loading the local memory…");
@@ -87,7 +88,7 @@ pub async fn run() -> Result<()> {
     let replacement_batch = if replacements.is_empty() {
         None
     } else {
-        let mut embedder: Box<dyn Embedder> = inference::embedder(dataset::MODEL)?;
+        let mut embedder: Box<dyn Embedder> = inference::embedder(model)?;
         let rtexts: Vec<&str> = replacements.iter().map(|c| c.text.as_str()).collect();
         let n = rtexts.len();
         eprintln!("re-embedding {n} redacted chunk(s)…");
@@ -101,7 +102,7 @@ pub async fn run() -> Result<()> {
             "\r    embedded {n} chunk(s) in {:.1}s          ",
             t0.elapsed().as_secs_f64()
         );
-        Some(build_batch(&replacements, Some(&vectors))?)
+        Some(build_batch(model, &replacements, Some(&vectors))?)
     };
 
     // Rewrite the memory in a single Overwrite commit: every clean row (with its existing vector) plus
@@ -111,7 +112,7 @@ pub async fn run() -> Result<()> {
     // `cid` hashes only coordinates, so a same-piece-count re-split reuses the old ids and a later
     // delete couldn't tell the fresh rows from the stale ones. (Cost: scrub rewrites the whole table,
     // fine for a rare remediation.)
-    let schema = schema();
+    let schema = schema(model);
     let mut out: Vec<RecordBatch> = Vec::new();
     let mut base = 0usize;
     for b in &batches {
