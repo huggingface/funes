@@ -41,7 +41,7 @@ tempfile = "3"                   # temp dir for the pre-publish secret scan; tem
 hf-hub = { version = "1.0.0-rc.1", features = ["rustls-tls", "blocking"] }  # native create_commit + parent_commit CAS + Xet upload; blocking: model download in the blas backend
 # The `blas` backend (feature below): a from-scratch forward that loads safetensors weights
 # and tokenizes itself. macOS runs it on Accelerate, Linux on faer.
-tokenizers = { version = "0.22", optional = true }
+tokenizers = { version = "0.22", optional = true, default-features = false, features = ["onig"] }  # onig: the reranker's normalizer is a regex
 safetensors = { version = "0.8", optional = true }
 
 # The `blas` backend's Linux seam. Both are pure Rust with runtime CPU dispatch, so release
