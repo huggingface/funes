@@ -25,7 +25,7 @@ use crate::memory::card::{self, CardAction, CardCtx};
 use crate::memory::dataset;
 use crate::memory::lock;
 use crate::memory::remote::{self, Appended, Compacted};
-use crate::memory::{Memory, MemoryState};
+use crate::memory::{self, Memory, MemoryState};
 use crate::{chunk, scan, ui};
 use anyhow::{bail, Context, Result};
 use arrow_array::{BooleanArray, RecordBatch, StringArray, UInt64Array};
@@ -459,6 +459,9 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
         )
         .into());
     };
+    if let Some(ds) = &remote {
+        same_model(&local, ds, &target.label())?;
+    }
 
     eprintln!("comparing local and remote indexes…");
     let remote_ids = match &remote {
@@ -820,6 +823,18 @@ async fn compact_auto(
     }
 }
 
+fn same_model(local: &Dataset, remote: &Dataset, label: &str) -> Result<()> {
+    let (here, there) = (memory::embedding_model(local)?, memory::embedding_model(remote)?);
+    if here != there {
+        bail!(
+            "{label} is embedded with {}, and the local memory with {}: a memory takes one embedding model",
+            there.id(),
+            here.id()
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1041,6 +1056,29 @@ mod tests {
             .await
             .unwrap();
         dataset::open(&uri, HashMap::new()).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_memory_embedded_with_another_model_is_refused() {
+        let (dir, other) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let bge = two_session_ds(dir.path()).await;
+        let e5_id = crate::inference::EmbeddingModel::MultilingualE5Small.id();
+        let (b, _) = batch(&[turn_sess("s", 0, "un passage")]);
+        let schema = Arc::new(
+            dataset::schema()
+                .as_ref()
+                .clone()
+                .with_metadata(HashMap::from([("embedding_model".to_string(), e5_id.to_string())])),
+        );
+        let b = RecordBatch::try_new(schema.clone(), b.columns().to_vec()).unwrap();
+        let uri = dataset::table_uri(&other.path().to_string_lossy());
+        let e5 = Dataset::write(RecordBatchIterator::new(vec![Ok(b)], schema), &uri, None)
+            .await
+            .unwrap();
+
+        assert!(same_model(&bge, &bge, "acme/kb").is_ok());
+        let err = same_model(&bge, &e5, "acme/kb").unwrap_err().to_string();
+        assert!(err.contains(e5_id) && err.contains(dataset::MODEL.id()), "{err}");
     }
 
     #[tokio::test]

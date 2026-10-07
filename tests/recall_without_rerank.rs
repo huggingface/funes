@@ -30,8 +30,7 @@ async fn a_search_without_rerank_keeps_the_fused_order() {
     let quiet = |_: &str| ();
     let query = "parse transcripts into turns";
 
-    let search = recall::Search::new(query.into(), 30, Default::default(), &quiet)
-        .await
+    let search = recall::Search::new(query.into(), 30, Default::default())
         .unwrap()
         .with_rerank(false);
     let pool = search.candidates(&Memory::local(), &quiet).await.unwrap();
@@ -48,9 +47,7 @@ async fn a_search_without_rerank_keeps_the_fused_order() {
         "hits should come in fused order"
     );
 
-    let search = recall::Search::new(query.into(), 30, Default::default(), &quiet)
-        .await
-        .unwrap();
+    let search = recall::Search::new(query.into(), 30, Default::default()).unwrap();
     let pool = search.candidates(&Memory::local(), &quiet).await.unwrap();
     let (_, reranked) = search.rank(vec![pool], 5, 0, &quiet).await.unwrap();
     assert_eq!(reranked.len(), fused.len(), "a rerank keeps the same hits");

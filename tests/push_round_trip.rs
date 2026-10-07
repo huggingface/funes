@@ -84,9 +84,7 @@ async fn root_readme(repo: &HFRepository<RepoTypeDataset>) -> Option<String> {
 async fn recall_with_unpushed(uri: &str, query: &str) -> String {
     let memory = Memory::parse(uri);
     let quiet = |_: &str| ();
-    let search = recall::Search::new(query.into(), 30, Default::default(), &quiet)
-        .await
-        .unwrap();
+    let search = recall::Search::new(query.into(), 30, Default::default()).unwrap();
     let mut pools = vec![search.candidates(&memory, &quiet).await.unwrap()];
     pools.extend(funes::commands::mcp::unpushed(&search, &memory).await.unwrap());
     let (note, hits) = search.rank(pools, 5, 0, &quiet).await.unwrap();

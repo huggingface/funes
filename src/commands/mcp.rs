@@ -221,9 +221,7 @@ impl Funes {
                     since,
                     until,
                 },
-                &quiet,
-            )
-            .await?;
+            )?;
             // The server's own memory, as it will be after this host's next push. The local search
             // runs while the remote one waits on the network.
             let (read, owed) = tokio::join!(search.candidates(&memory, &quiet), async {
