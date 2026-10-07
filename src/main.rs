@@ -477,7 +477,7 @@ async fn main() -> Result<()> {
                         return Err(anyhow!("expected a Hub repo, got {p:?}"));
                     };
                     if multilingual {
-                        index::ensure_local_memory(memory::dataset::MULTILINGUAL_MODEL).await?;
+                        index::ensure_local_memory(memory::dataset::model::MULTILINGUAL).await?;
                     }
                     return index::run_index_remote(&uri, no_thinking).await;
                 }
@@ -509,7 +509,7 @@ async fn main() -> Result<()> {
                 }
             };
             if multilingual {
-                index::ensure_local_memory(memory::dataset::MULTILINGUAL_MODEL).await?;
+                index::ensure_local_memory(memory::dataset::model::MULTILINGUAL).await?;
             }
             if roots.is_empty() {
                 println!(
@@ -1025,7 +1025,7 @@ async fn bound_model(memory: &str, takes: bool) -> Result<Option<EmbeddingModel>
 }
 
 fn ask_model(default: EmbeddingModel) -> EmbeddingModel {
-    let choices = if default == memory::dataset::MULTILINGUAL_MODEL {
+    let choices = if default == memory::dataset::model::MULTILINGUAL {
         "[e/M]"
     } else {
         "[E/m]"
@@ -1039,8 +1039,8 @@ fn ask_model(default: EmbeddingModel) -> EmbeddingModel {
 
 fn parse_model(input: &str, default: EmbeddingModel) -> EmbeddingModel {
     match input.trim().to_ascii_lowercase().as_str() {
-        "e" | "english" => memory::dataset::MODEL,
-        "m" | "multilingual" => memory::dataset::MULTILINGUAL_MODEL,
+        "e" | "english" => memory::dataset::model::ENGLISH,
+        "m" | "multilingual" => memory::dataset::model::MULTILINGUAL,
         _ => default,
     }
 }
@@ -1055,8 +1055,8 @@ fn host_model() -> EmbeddingModel {
 fn model_for_locale(locale: Option<&str>) -> EmbeddingModel {
     let language = locale.and_then(|l| l.split(['_', '.', '@']).next()).unwrap_or_default();
     match language.to_ascii_lowercase().as_str() {
-        "" | "c" | "posix" | "en" => memory::dataset::MODEL,
-        _ => memory::dataset::MULTILINGUAL_MODEL,
+        "" | "c" | "posix" | "en" => memory::dataset::model::ENGLISH,
+        _ => memory::dataset::model::MULTILINGUAL,
     }
 }
 
@@ -1274,19 +1274,19 @@ fn prompt_new_memory(label: &str, chunks: usize) -> bool {
 mod tests {
     use super::{model_for_locale, parse_confirm, parse_model, Cli, Cmd};
     use clap::Parser;
-    use funes::memory::dataset::{MODEL, MULTILINGUAL_MODEL};
+    use funes::memory::dataset::model::{ENGLISH, MULTILINGUAL};
 
     #[test]
     fn an_answer_names_the_model_and_anything_else_takes_the_default() {
-        for default in [MODEL, MULTILINGUAL_MODEL] {
+        for default in [ENGLISH, MULTILINGUAL] {
             for answer in ["\n", "nope"] {
                 assert_eq!(parse_model(answer, default), default, "{answer:?}");
             }
             for answer in ["e", "English\n"] {
-                assert_eq!(parse_model(answer, default), MODEL, "{answer:?}");
+                assert_eq!(parse_model(answer, default), ENGLISH, "{answer:?}");
             }
             for answer in ["m\n", " M ", "multilingual"] {
-                assert_eq!(parse_model(answer, default), MULTILINGUAL_MODEL, "{answer:?}");
+                assert_eq!(parse_model(answer, default), MULTILINGUAL, "{answer:?}");
             }
         }
     }
@@ -1301,10 +1301,10 @@ mod tests {
             Some("en_US.UTF-8"),
             Some("en"),
         ] {
-            assert_eq!(model_for_locale(locale), MODEL, "{locale:?}");
+            assert_eq!(model_for_locale(locale), ENGLISH, "{locale:?}");
         }
         for locale in ["zh_CN.UTF-8", "fr_FR", "ja_JP.eucJP", "de_DE@euro", "pt"] {
-            assert_eq!(model_for_locale(Some(locale)), MULTILINGUAL_MODEL, "{locale}");
+            assert_eq!(model_for_locale(Some(locale)), MULTILINGUAL, "{locale}");
         }
     }
 

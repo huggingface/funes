@@ -957,7 +957,7 @@ mod tests {
         let chunks = chunk::chunks_from_turns(turns, &chunk::Tier::ALL, true);
         let vectors = vec![vec![0.0f32; dataset::DIM as usize]; chunks.len()];
         (
-            dataset::build_batch(dataset::MODEL, &chunks, Some(&vectors)).unwrap(),
+            dataset::build_batch(dataset::model::ENGLISH, &chunks, Some(&vectors)).unwrap(),
             chunks,
         )
     }
@@ -1080,7 +1080,7 @@ mod tests {
         assert!(same_model(&bge, &bge, "acme/kb").is_ok());
         let err = same_model(&bge, &e5, "acme/kb").unwrap_err().to_string();
         assert!(
-            err.contains(e5_model.id()) && err.contains(dataset::MODEL.id()),
+            err.contains(e5_model.id()) && err.contains(dataset::model::ENGLISH.id()),
             "{err}"
         );
     }
@@ -1107,8 +1107,8 @@ mod tests {
             true,
         );
         let reader = RecordBatchIterator::new(
-            vec![Ok(dataset::build_batch(dataset::MODEL, &chunks, None).unwrap())],
-            dataset::schema(dataset::MODEL),
+            vec![Ok(dataset::build_batch(dataset::model::ENGLISH, &chunks, None).unwrap())],
+            dataset::schema(dataset::model::ENGLISH),
         );
         let uri = dataset::table_uri(&dir.path().to_string_lossy());
         let ds = Dataset::write(reader, &uri, None).await.unwrap();

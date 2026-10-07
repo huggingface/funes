@@ -50,7 +50,7 @@ async fn shallow_recall_returns_ranked_passages_and_neighbors() {
             .iter()
             .map(|(name, array)| Field::new(*name, array.data_type().clone(), true))
             .collect::<Vec<_>>(),
-        HashMap::from([("embedding_model".to_string(), dataset::MODEL.id().to_string())]),
+        HashMap::from([("embedding_model".to_string(), dataset::model::ENGLISH.id().to_string())]),
     ));
     let batch = RecordBatch::try_new(schema.clone(), columns.into_iter().map(|(_, array)| array).collect()).unwrap();
     let reader = RecordBatchIterator::new([Ok(batch)], schema);

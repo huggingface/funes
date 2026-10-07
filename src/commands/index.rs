@@ -12,7 +12,7 @@ use super::compact;
 use crate::chunk::{self, Tier};
 use crate::hub;
 use crate::inference::{self, embed_batched, Embedder};
-use crate::memory::dataset::{self, build_batch, schema, MODEL};
+use crate::memory::dataset::{self, build_batch, model, schema};
 use crate::memory::lock;
 use crate::scan;
 use crate::traces::spool;
@@ -487,7 +487,7 @@ impl Indexer {
 
         let model = match &ds {
             Some(ds) => dataset::embedding_model(ds)?,
-            None => MODEL,
+            None => model::ENGLISH,
         };
         let existing = match &ds {
             Some(d) => stored_ids(d).await?,
@@ -1275,7 +1275,7 @@ mod tests {
 
     impl Embedder for TestEmbedder {
         fn model(&self) -> inference::EmbeddingModel {
-            MODEL
+            model::ENGLISH
         }
 
         fn encode(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
@@ -1308,7 +1308,10 @@ mod tests {
                 })
             })
             .collect();
-        let reader = RecordBatchIterator::new([Ok(build_batch(MODEL, &chunks, None).unwrap())], schema(MODEL));
+        let reader = RecordBatchIterator::new(
+            [Ok(build_batch(model::ENGLISH, &chunks, None).unwrap())],
+            schema(model::ENGLISH),
+        );
         Dataset::write(reader, path.to_str().unwrap(), None).await.unwrap()
     }
 

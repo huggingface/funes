@@ -29,13 +29,26 @@ use lance_linalg::distance::MetricType;
 /// The table (Lance dataset) name within a memory.
 pub const TABLE: &str = "chunks";
 
-/// The embedding model a new memory's vectors are built with, and their width. Pinned in the schema
+/// The embedding models a new memory's vectors are built with, each by the id pinned in the schema
 /// metadata and enforced on open ([`super::Memory::open`]): a memory built with a model funes
 /// doesn't run can't be queried.
-pub const MODEL: EmbeddingModel = EmbeddingModel::BgeSmallEn;
+pub mod model {
+    use super::stored;
+    use crate::inference::EmbeddingModel;
+
+    pub const ENGLISH: EmbeddingModel = stored("BAAI/bge-small-en-v1.5");
+    pub const MULTILINGUAL: EmbeddingModel = stored("intfloat/multilingual-e5-small");
+}
+
+/// The width of every model's vectors.
 pub const DIM: i32 = 384;
 
-pub const MULTILINGUAL_MODEL: EmbeddingModel = EmbeddingModel::MultilingualE5Small;
+const fn stored(id: &str) -> EmbeddingModel {
+    match EmbeddingModel::from_id(id) {
+        Some(model) => model,
+        None => panic!("a memory stores an embedding model funes does not run"),
+    }
+}
 
 /// funes's home directory: `$FUNES_HOME`, else `~/.funes`. Holds the incremental state and the
 /// local memory.
@@ -134,6 +147,8 @@ pub enum IndexBuildEvent {
     VectorIndexFailed(anyhow::Error),
 }
 
+const UNSTAMPED: EmbeddingModel = stored("BAAI/bge-small-en-v1.5");
+
 /// A memory from before the model was recorded holds bge-small-en vectors.
 pub fn embedding_model(ds: &Dataset) -> Result<EmbeddingModel> {
     stamped_model(&Schema::from(ds.schema()))
@@ -142,7 +157,7 @@ pub fn embedding_model(ds: &Dataset) -> Result<EmbeddingModel> {
 /// The model a memory's `schema` records, as [`embedding_model`] reads it.
 pub(crate) fn stamped_model(schema: &Schema) -> Result<EmbeddingModel> {
     match schema.metadata().get("embedding_model") {
-        None => Ok(EmbeddingModel::BgeSmallEn),
+        None => Ok(UNSTAMPED),
         Some(id) => EmbeddingModel::from_id(id)
             .ok_or_else(|| anyhow!("memory built with embedding model {id:?}, which funes does not run")),
     }
@@ -613,11 +628,11 @@ mod tests {
 
     fn embedded(turns: &[Turn]) -> RecordBatch {
         let chunks = chunk::chunks_from_turns(turns, &chunk::Tier::ALL, true);
-        build_batch(MODEL, &chunks, Some(&vectors(chunks.len()))).unwrap()
+        build_batch(model::ENGLISH, &chunks, Some(&vectors(chunks.len()))).unwrap()
     }
 
     fn reader(batch: RecordBatch) -> impl arrow_array::RecordBatchReader + Send + 'static {
-        RecordBatchIterator::new(vec![Ok(batch)], schema(MODEL))
+        RecordBatchIterator::new(vec![Ok(batch)], schema(model::ENGLISH))
     }
 
     /// Enough rows to train IVF_PQ (lance wants 256 per PQ codebook).
@@ -643,14 +658,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let uri = table_uri(&dir.path().to_string_lossy());
         let chunks = chunk::chunks_from_turns(&turns(0, 2), &chunk::Tier::ALL, true);
-        let mut ds = Dataset::write(reader(build_batch(MODEL, &chunks[..1], None).unwrap()), &uri, None)
-            .await
-            .unwrap();
+        let mut ds = Dataset::write(
+            reader(build_batch(model::ENGLISH, &chunks[..1], None).unwrap()),
+            &uri,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(fts_needs_refresh(&ds).await.unwrap(), "no FTS index was committed");
         build_indexes(&mut ds, |_| {}).await.unwrap();
         assert!(!fts_needs_refresh(&ds).await.unwrap());
 
-        ds.append(reader(build_batch(MODEL, &chunks[1..], None).unwrap()), None)
+        ds.append(reader(build_batch(model::ENGLISH, &chunks[1..], None).unwrap()), None)
             .await
             .unwrap();
         assert!(
@@ -680,7 +699,7 @@ mod tests {
             .await
             .unwrap();
         let pending = chunk::chunks_from_turns(&turns(255, 3), &chunk::Tier::ALL, true);
-        ds.append(reader(build_batch(MODEL, &pending, None).unwrap()), None)
+        ds.append(reader(build_batch(model::ENGLISH, &pending, None).unwrap()), None)
             .await
             .unwrap();
 
@@ -735,7 +754,7 @@ mod tests {
             .value(0);
         ds.append(reader(appended), None).await.unwrap();
         let pending = chunk::chunks_from_turns(&turns(TRAINABLE + 4, 1), &chunk::Tier::ALL, true);
-        ds.append(reader(build_batch(MODEL, &pending, None).unwrap()), None)
+        ds.append(reader(build_batch(model::ENGLISH, &pending, None).unwrap()), None)
             .await
             .unwrap();
         build_indexes(&mut ds, |event| {
@@ -893,7 +912,7 @@ mod tests {
         let mut zh = turns(0, 1);
         zh[0].blocks[0].text = "我们修改了向量索引的构建方式".into();
         let chunks = chunk::chunks_from_turns(&zh, &chunk::Tier::ALL, true);
-        for (model, found) in [(MODEL, false), (EmbeddingModel::MultilingualE5Small, true)] {
+        for (model, found) in [(model::ENGLISH, false), (EmbeddingModel::MultilingualE5Small, true)] {
             let dir = tempfile::tempdir().unwrap();
             let uri = table_uri(&dir.path().to_string_lossy());
             let batch = build_batch(model, &chunks, None).unwrap();
@@ -912,7 +931,7 @@ mod tests {
     async fn a_memory_names_its_embedding_model() {
         let chunks = chunk::chunks_from_turns(&turns(0, 1), &chunk::Tier::ALL, true);
         let e5 = EmbeddingModel::MultilingualE5Small;
-        let unstamped = Arc::new(Schema::new(schema(MODEL).fields().clone()));
+        let unstamped = Arc::new(Schema::new(schema(model::ENGLISH).fields().clone()));
         for (stamp, model) in [(schema(e5), e5), (unstamped, EmbeddingModel::BgeSmallEn)] {
             let dir = tempfile::tempdir().unwrap();
             let columns = build_batch(model, &chunks, None).unwrap().columns().to_vec();
@@ -1166,7 +1185,7 @@ mod tests {
     #[test]
     fn build_batch_preserves_rows_without_embeddings() {
         let chunks = chunk::chunks_from_turns(&turns(0, 3), &chunk::Tier::ALL, true);
-        let pending = build_batch(MODEL, &chunks, None).unwrap();
+        let pending = build_batch(model::ENGLISH, &chunks, None).unwrap();
         let embedded = embedded(&turns(0, 3));
         assert_eq!(pending.num_rows(), 3);
         for (i, field) in pending.schema().fields().iter().enumerate() {
@@ -1184,7 +1203,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let uri = table_uri(&dir.path().to_string_lossy());
         let chunks = chunk::chunks_from_turns(&turns(0, 3), &chunk::Tier::ALL, true);
-        let unembedded = build_batch(MODEL, &chunks, None).unwrap();
+        let unembedded = build_batch(model::ENGLISH, &chunks, None).unwrap();
         let ds = Dataset::write(reader(unembedded), &uri, Some(WriteParams::default()))
             .await
             .unwrap();
@@ -1230,7 +1249,7 @@ mod tests {
     fn schema_column_order_is_load_bearing() {
         // Column order must match build_batch's array order exactly, or Lance writes the
         // wrong column. Pin it so a reorder can't slip through.
-        let s = schema(MODEL);
+        let s = schema(model::ENGLISH);
         let names: Vec<&str> = s.fields().iter().map(|f| f.name().as_str()).collect();
         assert_eq!(
             names,

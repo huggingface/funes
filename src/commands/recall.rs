@@ -1720,8 +1720,8 @@ mod tests {
     async fn memory_of(turns: &[Turn], dir: &Path) -> Dataset {
         let chunks = chunk::chunks_from_turns(turns, &chunk::Tier::ALL, true);
         let vectors = vec![vec![0.0f32; dataset::DIM as usize]; chunks.len()];
-        let batch = dataset::build_batch(dataset::MODEL, &chunks, Some(&vectors)).unwrap();
-        let reader = RecordBatchIterator::new(vec![Ok(batch)], dataset::schema(dataset::MODEL));
+        let batch = dataset::build_batch(dataset::model::ENGLISH, &chunks, Some(&vectors)).unwrap();
+        let reader = RecordBatchIterator::new(vec![Ok(batch)], dataset::schema(dataset::model::ENGLISH));
         Dataset::write(reader, dir.to_str().unwrap(), None).await.unwrap()
     }
 
@@ -1750,8 +1750,8 @@ mod tests {
             text_turn("session", 1, "assistant", "Each line becomes a typed turn."),
         ];
         let chunks = chunk::chunks_from_turns(&turns, &chunk::Tier::ALL, true);
-        let batch = dataset::build_batch(dataset::MODEL, &chunks, None).unwrap();
-        let reader = RecordBatchIterator::new([Ok(batch)], dataset::schema(dataset::MODEL));
+        let batch = dataset::build_batch(dataset::model::ENGLISH, &chunks, None).unwrap();
+        let reader = RecordBatchIterator::new([Ok(batch)], dataset::schema(dataset::model::ENGLISH));
         let mut ds = Dataset::write(reader, &dataset::table_uri(&memory.label()), None)
             .await
             .unwrap();

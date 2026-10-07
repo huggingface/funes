@@ -63,7 +63,7 @@ fn memory_row(id: &str, seed: u32, embedded: bool) -> RecordBatch {
             .iter()
             .map(|(name, array)| Field::new(*name, array.data_type().clone(), true))
             .collect::<Vec<_>>(),
-        HashMap::from([("embedding_model".to_string(), dataset::MODEL.id().to_string())]),
+        HashMap::from([("embedding_model".to_string(), dataset::model::ENGLISH.id().to_string())]),
     ));
     RecordBatch::try_new(schema, columns.into_iter().map(|(_, array)| array).collect()).unwrap()
 }

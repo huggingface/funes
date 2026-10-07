@@ -31,15 +31,22 @@ pub enum EmbeddingModel {
 impl EmbeddingModel {
     pub const ALL: [EmbeddingModel; 2] = [EmbeddingModel::BgeSmallEn, EmbeddingModel::MultilingualE5Small];
 
-    pub fn id(self) -> &'static str {
+    pub const fn id(self) -> &'static str {
         match self {
             EmbeddingModel::BgeSmallEn => "BAAI/bge-small-en-v1.5",
             EmbeddingModel::MultilingualE5Small => "intfloat/multilingual-e5-small",
         }
     }
 
-    pub fn from_id(id: &str) -> Option<EmbeddingModel> {
-        EmbeddingModel::ALL.into_iter().find(|m| m.id() == id)
+    pub const fn from_id(id: &str) -> Option<EmbeddingModel> {
+        let mut i = 0;
+        while i < EmbeddingModel::ALL.len() {
+            if same_bytes(EmbeddingModel::ALL[i].id().as_bytes(), id.as_bytes()) {
+                return Some(EmbeddingModel::ALL[i]);
+            }
+            i += 1;
+        }
+        None
     }
 
     /// e5 was trained with these query and passage prefixes, and its model card asks for them.
@@ -49,6 +56,20 @@ impl EmbeddingModel {
             EmbeddingModel::MultilingualE5Small => ("query: ", "passage: "),
         }
     }
+}
+
+const fn same_bytes(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
 }
 
 /// Embed each text into a dense vector, in input order.

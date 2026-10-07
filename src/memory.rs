@@ -485,7 +485,7 @@ mod tests {
     async fn a_local_memory_with_no_rows_is_empty() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().to_string_lossy().into_owned();
-        dataset::create_empty(&dataset::table_uri(&path), dataset::MODEL)
+        dataset::create_empty(&dataset::table_uri(&path), dataset::model::ENGLISH)
             .await
             .unwrap();
         assert!(matches!(
