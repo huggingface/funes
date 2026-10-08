@@ -804,6 +804,33 @@ async fn a_bound_memory_gives_its_model_and_refuses_another() {
 }
 
 #[test]
+fn an_empty_bound_memory_gives_its_model() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let funes_home = tmp.path().join("funes");
+    let log = tmp.path().join("setup.log");
+    install(&home, "clyde", 1);
+    fs::create_dir_all(home.join(".clyde")).unwrap();
+    fs::write(home.join(".clyde/history.funes.jsonl"), format!("{HISTORY}\n")).unwrap();
+    // The memory `funes index --multilingual` leaves on another home: no rows, a model.
+    let other = tmp.path().join("other");
+    support::assert_success(&funes_at_a_terminal(&home, &other, &log, &["index", "--multilingual"]));
+    let bound = other.join("memory");
+    let bound = bound.to_str().unwrap();
+
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde", bound]);
+    let transcript = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{transcript}");
+    assert!(transcript.contains(&format!("the model of {bound}")), "{transcript}");
+    support::assert_success(&funes(
+        &home,
+        &funes_home,
+        &log,
+        &["index", "--multilingual", "--harness", "clyde"],
+    ));
+}
+
+#[test]
 fn an_unreachable_bound_memory_stops_only_a_first_add() {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("home");

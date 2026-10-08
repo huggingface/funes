@@ -163,7 +163,7 @@ integration that never publishes, does not need it.
    the memory's [embedding model](index.md#sessions-not-in-english). The default is multilingual
    when your locale (`LC_ALL`, `LC_MESSAGES`, then `LANG`) is in another language than English,
    and off a terminal funes takes that default without asking. When the memory it binds
-   already holds sessions, the local memory takes that memory's model instead, and nothing is asked.
+   already has a model, the local memory takes it instead, and nothing is asked.
    If funes can't read that memory (offline, or your token has no access), the add stops here.
 2. **Installs the hooks and registers the MCP server** (baking in the bound memory). This is where
    the integration converts the agent's existing sessions into its spool.

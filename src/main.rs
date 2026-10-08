@@ -1001,27 +1001,33 @@ fn parse_confirm(input: &str, default_yes: bool) -> bool {
     }
 }
 
-/// The embedding model `memory` holds its sessions in, `None` when it holds none or is unreachable.
+/// The embedding model `memory` records, `None` when it holds no dataset or is unreachable.
 /// When the local memory `takes` its model from it, a memory whose model can't be read is an error:
 /// a guess could pin the local memory to another model.
 async fn bound_model(memory: &str, takes: bool) -> Result<Option<EmbeddingModel>> {
     let target = memory::Memory::parse(memory);
-    target
-        .state()
-        .await
-        .and_then(|state| match state {
-            memory::MemoryState::Ready(ds) => memory::dataset::embedding_model(&ds).map(Some),
-            memory::MemoryState::Offline if takes => Err(anyhow!(
+    async {
+        let ds = match target.state().await? {
+            memory::MemoryState::Ready(ds) => ds,
+            // A dataset with no rows still records its model.
+            memory::MemoryState::Empty => match target.open().await {
+                Ok(ds) => ds,
+                Err(_) => return Ok(None),
+            },
+            memory::MemoryState::Offline if takes => bail!(
                 "it is unreachable, and the local memory takes its embedding model: run `funes add` again once it is back"
-            )),
+            ),
             memory::MemoryState::Offline => {
                 eprintln!("note: can't reach {memory} right now — proceeding; it'll be used once it's back.");
-                Ok(None)
+                return Ok(None);
             }
-            memory::MemoryState::Unauthorized if takes => Err(target.unauthorized_error()),
-            _ => Ok(None),
-        })
-        .with_context(|| format!("can't read {memory}"))
+            memory::MemoryState::Unauthorized if takes => return Err(target.unauthorized_error()),
+            _ => return Ok(None),
+        };
+        memory::dataset::embedding_model(&ds).map(Some)
+    }
+    .await
+    .with_context(|| format!("can't read {memory}"))
 }
 
 fn ask_model(default: EmbeddingModel) -> EmbeddingModel {
