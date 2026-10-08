@@ -409,7 +409,8 @@ fn named_ids(by_session: &HashMap<String, Vec<String>>, sessions: &[String]) -> 
 /// Publish the local memory's new embedded chunks to `target` (a remote memory on the HF Hub). With
 /// `compact`, compact the remote after the data commit (retrying until it goes through) even if
 /// the unindexed backlog is below [`COMPACT_THRESHOLD`]. With no new chunks pending, it only
-/// compacts. `confirm` gates a publish to a memory holding none of the chunks to publish.
+/// compacts, or gives a remote with no dataset yet the local memory's embedding model. `confirm`
+/// gates a publish to a memory holding none of the chunks to publish.
 ///
 /// `sessions`, when non-empty, restricts candidates to those sessions' embedded chunks.
 /// Empty publishes all embedded chunks the local memory holds that the remote does not.
@@ -452,7 +453,14 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
 
     // Only `Empty` can land here: a local path has no Hub states, and an unreadable memory is an
     // `Err`. A host whose first index isn't built yet has nothing to publish — that is not a failure.
-    let MemoryState::Ready(local) = Memory::local().state().await? else {
+    // A local memory with no rows still has a model, which a remote with no dataset takes, so the
+    // next host to bind it embeds with the same.
+    let local = match Memory::local().state().await? {
+        MemoryState::Ready(ds) => Some(ds),
+        MemoryState::Empty if remote.is_none() => Memory::local().open().await.ok(),
+        _ => None,
+    };
+    let Some(local) = local else {
         return Ok(format!(
             "{}: nothing indexed on this machine yet — nothing to publish\n",
             target.label()
@@ -488,9 +496,9 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
         record_pushed(&uri, candidates.intersection(&remote_ids))?;
     }
 
-    // Nothing to push => done (no token needed), unless this is a forced compaction of an existing
-    // remote, which is still work.
-    if to_push.is_empty() && (first_publish || !compact) {
+    // Nothing to push => done (no token needed), unless this is a first publish, which still gives
+    // the remote its model, or a forced compaction of an existing remote, which is still work.
+    if to_push.is_empty() && !first_publish && !compact {
         return Ok(format!("{}: already up to date ({} chunks)\n", target.label(), remote_ids.len()).into());
     }
 
@@ -513,7 +521,7 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
     let opts = HashMap::from([("hf_token".to_string(), token), ("revision".to_string(), rev.clone())]);
 
     // 3. Forced compaction with no new data: just compact the remote and stop.
-    if to_push.is_empty() {
+    if to_push.is_empty() && !first_publish {
         eprintln!("compacting the remote…");
         let note = compact_remote(&repo, &dataset_uri, &opts, &rev, "funes push: compact").await?;
         return Ok(format!("{}: up to date ({} chunks)\n{note}", target.label(), remote_ids.len()).into());
@@ -541,7 +549,7 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
     eprintln!("scanning {n_scanning} chunk(s) for secrets…");
     let (batches, skipped) = drop_secret_rows(batches)?;
     let n_chunks: usize = batches.iter().map(|b| b.num_rows()).sum();
-    if n_chunks == 0 {
+    if n_chunks == 0 && skipped.rows > 0 {
         // Everything was held back: nothing reached the Hub. Mark `blocked` so the CLI exits non-zero
         // — automation must not read this as a successful publish.
         return Ok(Pushed {
@@ -600,8 +608,12 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
             return Ok(format!("{}: nothing new to upload\n", target.label()).into());
         };
         record_pushed(&uri, &pushed_ids)?;
+        let pushed = match n_chunks {
+            0 => format!("created with {}, no chunks yet", embedding_model(&schema)),
+            n => format!("pushed {n} chunks"),
+        };
         return Ok(format!(
-            "{}: pushed {n_chunks} chunks (commit {oid})\n{card_note}{}",
+            "{}: {pushed} (commit {oid})\n{card_note}{}",
             target.label(),
             skipped.warning()
         )
@@ -715,6 +727,16 @@ impl Skipped {
 /// chunk of a block is dirty, the whole block is held back (its other chunks carry the rest of the
 /// secret). Fail-closed on the scanner — a push must scan before it uploads.
 fn drop_secret_rows(batches: Vec<RecordBatch>) -> Result<(Vec<RecordBatch>, Skipped)> {
+    // Nothing to scan needs no scanner.
+    if batches.iter().all(|b| b.num_rows() == 0) {
+        return Ok((
+            batches,
+            Skipped {
+                rows: 0,
+                summary: String::new(),
+            },
+        ));
+    }
     let scanner = scan::Trufflehog::find()?;
     // Row order across batches matches `chunks_from_batches`, so a chunk's index is its global row.
     let chunks = chunk::chunks_from_batches(&batches);

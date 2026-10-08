@@ -170,8 +170,9 @@ integration that never publishes, does not need it.
 3. **Builds your first index** from that spool if you don't have one. Indexed content is ready
    to recall; [unfinished work continues on later turns](index.md#progress-and-resuming).
 4. **Does the first push** to a freshly-bound memory — the publish the hook refuses to do off a
-   terminal (the wrong-memory guard; see [automation.md](automation.md)). A memory at a local path
-   is not pushed to.
+   terminal (the wrong-memory guard; see [automation.md](automation.md)). With nothing indexed yet,
+   it still gives a memory with no dataset your local memory's model. A memory at a local path is
+   not pushed to.
 
 ### The spool
 

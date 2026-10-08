@@ -40,7 +40,8 @@ If your token can't write the target, push says so — recall can still read a m
 to.
 
 A memory holds one embedding model's vectors, so a push into a memory embedded with another model than
-the local one is refused.
+the local one is refused. A first publish with no chunks to upload still creates the memory with the
+local one's model, so every host that binds it next embeds with the same.
 
 One publish per memory at a time on a machine: a push that starts while another is still running
 says so and stops, and the next one picks up what it left. The hooks [`funes add`](add.md) installs
