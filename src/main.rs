@@ -1132,7 +1132,7 @@ where
             first_push(&memory, created).await.with_context(|| {
                 format!(
                     "funes is added to {agent}, bound to {memory}, but the first push there did not go \
-                     through — run `funes push {memory}` at a terminal once it is reachable"
+                     through — run `funes push {memory}` at a terminal to publish there"
                 )
             })?;
         }
