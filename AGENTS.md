@@ -27,9 +27,9 @@ that will drift.
   returns, so `src/commands/mcp.rs` stays the one place a verb is described to an agent.
 - **`--memory` precedence.** A tool call's own `memory` beats the server's (`funes mcp <memory>`),
   which beats the local memory. Same order for the CLI flag.
-- **The stored harness facet for Claude is `claude_code`.** `--harness` takes the CLI spellings
-  (`claude`, and `claude_code` too) and normalizes before filtering; comparing a raw CLI name against
-  the column silently matches nothing.
+- **Claude's turns carry two harness facets.** Its integration writes `claude`, older rows say
+  `claude_code`, and a memory may hold both. `--harness` expands either spelling to both before
+  filtering. Comparing the raw value against the column silently misses the other spelling's turns.
 - **`ask` grounds in one turn.** funes recalls in-process, embeds the passages in the prompt, and
   runs the agent with no tools and its MCP servers silenced. An A/B against agent-driven recall
   showed the agentic loop pays only on a first-retrieval miss, at several times the latency and cost.
