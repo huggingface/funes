@@ -56,7 +56,8 @@ decay relative to it.
 
 ### 3. Local-first, model-agnostic, on storage you own
 
-Local embeddings (`BAAI/bge-small-en-v1.5`) and a local cross-encoder reranker. The only
+Local embeddings (an English or a multilingual model, chosen per memory) and a local
+cross-encoder reranker, used only on a deep pool. The only
 state is a derived, rebuildable memory; the transcripts are the source of truth. Any model
 can query it — switch models per task; nothing is trained into weights.
 
@@ -146,16 +147,17 @@ funes optimizes for the opposite: **verbatim, auditable, local-first recall with
 provenance, no LLM in the loop, pulled on demand rather than injected, and no dependency on
 infrastructure you don't own** (sharing, when you want it, is to a hub repo you control).
 It is a different contract with your data —
-note that the *retrieval* machinery (hybrid vector + lexical search, fused and reranked) is
+note that the *retrieval* machinery (hybrid vector + lexical search, fused, optionally reranked) is
 common to mature memory systems; funes does not differentiate on search. The difference is
 entirely *upstream*: deterministic no-LLM ingest, immutable passages, and provenance.
 
 This isn't a guess about search — it was measured. A run of recall-quality enhancements —
 abstention thresholds, MMR diversity, near-duplicate collapse, semantic expansion, deeper
-candidate pools, stronger rerankers, and a per-chunk *kind* facet, some at query time and
+candidate pools, and a per-chunk *kind* facet, some at query time and
 some computed at index time — was A/B'd against a labeled retrieval anchor; none moved
-recall. The cross-encoder is the ceiling, and it already resolves a query's intent to the
-right *kind* of passage without a saved label.
+recall. The shipped cross-encoder does not move it either: on a later benchmark it scored no
+better than the fused order, at seconds per recall. So recall returns the fused order and
+leaves the judging to the reader, reranking only a pool several times the hits.
 
 ## Where this leaves funes
 
