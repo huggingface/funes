@@ -4,7 +4,7 @@
 
 use super::{push, recall};
 use crate::agents::{self, registry};
-use crate::memory::Memory;
+use crate::memory::{Memory, MemoryState};
 use anyhow::Result;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -429,6 +429,10 @@ pub async fn unpushed(search: &recall::Search, memory: &Memory) -> Result<Option
     let Some(pushed) = push::load_pushed(uri) else {
         return Ok(None);
     };
+    // A local memory with no rows has nothing unpushed, and searching it is an error.
+    if !matches!(Memory::local().state().await?, MemoryState::Ready(_)) {
+        return Ok(None);
+    }
     let mut pool = search.candidates(&Memory::local(), &|_| ()).await?;
     pool.retain(|h| !pushed.contains(&h.id));
     Ok(Some(pool))
