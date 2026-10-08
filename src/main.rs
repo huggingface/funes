@@ -1127,18 +1127,20 @@ where
     }
     // First push only when there's actually a local index to publish. Without one (a failed first
     // build, or no sessions yet) there's nothing to push, and running it would just error on the
-    // absent memory.
+    // absent memory. A memory at a local path is read where it is: push only publishes to the Hub.
     if let Some(Resolved { memory, created }) = resolved {
-        if matches!(memory::Memory::local().state().await, Ok(memory::MemoryState::Ready(_))) {
-            // The integration is in place by now; only the push is owed, and it takes a terminal.
-            first_push(&memory, created).await.with_context(|| {
-                format!(
-                    "funes is added to {agent}, bound to {memory}, but the first push there did not go \
-                     through — run `funes push {memory}` at a terminal once it is reachable"
-                )
-            })?;
-        } else {
-            eprintln!("funes: nothing indexed yet — nothing to publish to {memory} yet.");
+        if matches!(memory::Memory::parse(&memory), memory::Memory::Remote { .. }) {
+            if matches!(memory::Memory::local().state().await, Ok(memory::MemoryState::Ready(_))) {
+                // The integration is in place by now; only the push is owed, and it takes a terminal.
+                first_push(&memory, created).await.with_context(|| {
+                    format!(
+                        "funes is added to {agent}, bound to {memory}, but the first push there did not go \
+                         through — run `funes push {memory}` at a terminal once it is reachable"
+                    )
+                })?;
+            } else {
+                eprintln!("funes: nothing indexed yet — nothing to publish to {memory} yet.");
+            }
         }
     }
     Ok(())

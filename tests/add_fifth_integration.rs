@@ -592,12 +592,18 @@ fn a_failed_first_push_still_records_the_install() {
     fs::write(home.join(".clyde/history.funes.jsonl"), format!("{HISTORY}\n")).unwrap();
     let record = home.join(".funes/agents/clyde.json");
 
-    // A path is no push target: the first push fails, after setup and the seed.
-    let memory = tmp.path().join("team-memory");
-    let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde", memory.to_str().unwrap()]);
+    // Offline, a local memory that has its model takes nothing from the bound one: the first push
+    // fails, after setup and the seed.
+    support::assert_success(&funes_at_a_terminal(
+        &home,
+        &funes_home,
+        &log,
+        &["index", "--multilingual"],
+    ));
+    let out = funes_offline_at_a_terminal(&home, &funes_home, &log, &["add", "clyde", "acme/memory"]);
     let transcript = String::from_utf8_lossy(&out.stdout);
     assert!(!out.status.success(), "{transcript}");
-    assert!(transcript.contains("push target must be a remote"), "{transcript}");
+    assert!(transcript.contains("can't push while offline"), "{transcript}");
     assert!(fs::read_to_string(&log).unwrap().starts_with("v1\nadd"), "setup ran");
     assert!(record.exists(), "recorded all the same");
 
@@ -779,6 +785,7 @@ async fn a_bound_memory_gives_its_model_and_refuses_another() {
 
     let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde", e5]);
     let transcript = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{transcript}");
     assert!(!transcript.contains("[E/m]"), "{transcript}");
     assert!(transcript.contains(&format!("the model of {e5}")), "{transcript}");
     support::assert_success(&funes(
@@ -1016,9 +1023,8 @@ fn an_installed_only_integration_adds_and_removes_once_trusted_at_a_terminal() {
             funes_home.display()
         )
     );
-    // Clyde wrote no spool, so there was nothing to seed or publish — noted, not failed.
+    // Clyde wrote no spool, so there was nothing to seed — noted, not failed.
     assert!(transcript.contains("no clyde sessions to index yet"), "{transcript}");
-    assert!(transcript.contains("nothing indexed yet"), "{transcript}");
     assert!(
         !home.join(".funes/agents/clyde.json").exists(),
         "nothing refreshed the files, so nothing is recorded"
