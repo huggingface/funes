@@ -26,6 +26,8 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 /// Take the memory lock. An interactive caller (a human at `funes index`/`funes add`) waits out a
@@ -411,7 +413,11 @@ struct Indexer {
     ds: Option<Dataset>,
     /// [`stored_ids`] at open plus everything written this run — the dedup baseline for new chunks.
     existing: HashSet<String>,
-    embedder: Box<dyn Embedder>,
+    model: inference::EmbeddingModel,
+    /// `None` while lent to a [`Prefetch`] worker.
+    embedder: Option<Box<dyn Embedder>>,
+    /// Embeds this run's rows as they are written, when the run embeds everything it writes.
+    prefetch: Option<Prefetch>,
     scanner: Option<scan::Trufflehog>,
     include_thinking: bool,
     /// cwd → resolved `repo` value, so each distinct checkout runs `git` once across the run.
@@ -513,6 +519,7 @@ impl Indexer {
         let scanner = find_scanner();
 
         let units = collect_units(&sources)?;
+
         if !no_thinking {
             // A retained spool's completion stamp may have omitted thinking.
             for (_, unit) in &units {
@@ -531,7 +538,9 @@ impl Indexer {
             uri,
             ds,
             existing,
-            embedder,
+            model,
+            embedder: Some(embedder),
+            prefetch: None,
             scanner,
             include_thinking: !no_thinking,
             repo_cache: HashMap::new(),
@@ -675,7 +684,11 @@ impl Indexer {
                 0
             } else {
                 eprintln!("{progress} {label} — {} new of {total_chunks} chunks", new_chunks.len());
-                self.write_rows(&new_chunks).await?
+                let written = self.write_rows(&new_chunks).await?;
+                if let Some(prefetch) = self.prefetch.as_mut() {
+                    prefetch.send(&new_chunks)?;
+                }
+                written
             }
         };
 
@@ -728,7 +741,7 @@ impl Indexer {
         if chunks.is_empty() {
             return Ok(0);
         }
-        let model = self.embedder.model();
+        let model = self.model;
         let batch = build_batch(model, chunks, None)?;
         let reader = RecordBatchIterator::new(vec![Ok(batch)], schema(model));
         let uri = self.uri.clone();
@@ -760,9 +773,60 @@ impl Indexer {
             return Ok(0);
         }
         let ds = self.ds.as_mut().context("embedding rows before any was written")?;
-        let embedded = embed_pending(ds, self.embedder.as_mut(), pending, keep_going).await?;
+        let embedder = self.embedder.as_deref_mut().context("the embedder is still lent out")?;
+        let embedded = embed_pending(ds, embedder, pending, keep_going).await?;
         self.n_embedded += embedded as u64;
         Ok(embedded)
+    }
+
+    /// Hand the embedder to a [`Prefetch`] worker, which embeds every row written from here on.
+    /// It warms the embedder first when the units this run owes hold enough text to pay for it.
+    fn start_prefetch(&mut self) {
+        // A unit that is not a local file (a Hub shard) is taken to be large.
+        let owed: u64 = self
+            .pending()
+            .iter()
+            .map(|&i| std::fs::metadata(&self.units[i].1.key).map_or(u64::MAX, |m| m.len()))
+            .fold(0, u64::saturating_add);
+        if let Some(embedder) = self.embedder.take() {
+            self.prefetch = Some(Prefetch::spawn(embedder, owed >= WARM_BYTES));
+        }
+    }
+
+    /// Fill the vectors the worker has finished, a fill's worth at a time. With `last`, no more
+    /// rows are coming: wait for the worker to embed them all, fill the rest, and take the
+    /// embedder back.
+    async fn fill_prefetched(&mut self, last: bool) -> Result<()> {
+        let Some(prefetch) = self.prefetch.as_mut() else {
+            return Ok(());
+        };
+        if last {
+            prefetch.close();
+        }
+        loop {
+            let open = prefetch.collect(last)?;
+            while prefetch.ready.len() >= PREFETCH_FILL || (!open && !prefetch.ready.is_empty()) {
+                let n = prefetch.ready.len().min(PREFETCH_FILL);
+                let (ids, vectors): (Vec<String>, Vec<Vec<f32>>) = prefetch.ready.drain(..n).unzip();
+                let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+                let ds = self.ds.as_mut().context("embedding rows before any was written")?;
+                *ds = dataset::fill_vectors(ds, &ids, &vectors).await?;
+                self.n_embedded += n as u64;
+                eprintln!(
+                    "    embedded {}  ({:.0}/s)        ",
+                    self.n_embedded,
+                    self.n_embedded as f64 / prefetch.started.elapsed().as_secs_f64().max(0.001)
+                );
+            }
+            if !last || !open {
+                break;
+            }
+        }
+        if last {
+            let prefetch = self.prefetch.take().expect("checked above");
+            self.embedder = Some(prefetch.join()?);
+        }
+        Ok(())
     }
 
     /// Consumes the indexer, releasing the memory lock.
@@ -818,6 +882,139 @@ fn run_summary(
     }
 }
 
+/// Each embedded row's id and vector.
+type Embedded = Vec<(String, Vec<f32>)>;
+
+/// Rows a fill from a [`Prefetch`] carries. Its run has no budget to check between fills, so they
+/// are as large as a fast embedder's; each is a merge over the memory.
+const PREFETCH_FILL: usize = 4096;
+
+/// Units' worth of rows queued for a [`Prefetch`] worker before the run waits for it, so a run that
+/// writes faster than it embeds does not hold all its text at once.
+const PREFETCH_QUEUE: usize = 2 * SCAN_BATCH;
+
+/// Text a run must owe for its [`Prefetch`] worker to warm the embedder first: below it the warm-up
+/// (a GPU compiling and running every shape it may need) costs more than it saves.
+const WARM_BYTES: u64 = 256 << 10;
+
+/// Embeds the rows a run writes on a thread of its own, while the run goes on reading and scanning
+/// the next units: the GPU embeds one batch's chunks while trufflehog scans the next. Only a run that
+/// embeds everything it writes uses one, so that vectors land in write order rather than tier by
+/// tier never shows. Dropped before [`Prefetch::join`] — the run failed — it stops the worker at its
+/// next call and waits for it.
+struct Prefetch {
+    /// `None` once the run has written its last row.
+    rows: Option<mpsc::SyncSender<Vec<(String, String)>>>,
+    vectors: mpsc::Receiver<Result<Embedded>>,
+    /// `None` once joined.
+    worker: Option<std::thread::JoinHandle<Box<dyn Embedder>>>,
+    stop: Arc<AtomicBool>,
+    /// Vectors received and not yet filled.
+    ready: Embedded,
+    started: Instant,
+}
+
+impl Prefetch {
+    fn spawn(mut embedder: Box<dyn Embedder>, warm: bool) -> Prefetch {
+        let (rows, queued) = mpsc::sync_channel::<Vec<(String, String)>>(PREFETCH_QUEUE);
+        let (done, vectors) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = stop.clone();
+        let worker = std::thread::spawn(move || {
+            if warm {
+                // Bring the GPU up while the first batch is still being scanned.
+                embedder.warm_up();
+            }
+            let mut pending: Vec<(String, String)> = Vec::new();
+            let mut open = true;
+            loop {
+                // A full call's worth while rows keep coming; whatever is left once they stop.
+                while open && pending.len() < embedder.batch_size() {
+                    match queued.recv() {
+                        Ok(more) => pending.extend(more),
+                        Err(_) => open = false,
+                    }
+                }
+                if pending.is_empty() || stopped.load(Ordering::Relaxed) {
+                    return embedder;
+                }
+                let n = pending.len().min(embedder.batch_size());
+                let batch: Vec<(String, String)> = pending.drain(..n).collect();
+                let texts: Vec<&str> = batch.iter().map(|(_, t)| t.as_str()).collect();
+                let result = embedder
+                    .embed(&texts)
+                    .map(|v| batch.iter().map(|(id, _)| id.clone()).zip(v).collect());
+                let failed = result.is_err();
+                if done.send(result).is_err() || failed {
+                    return embedder;
+                }
+            }
+        });
+        Prefetch {
+            rows: Some(rows),
+            vectors,
+            worker: Some(worker),
+            stop,
+            ready: Vec::new(),
+            started: Instant::now(),
+        }
+    }
+
+    /// Queue `chunks` for the worker. A worker that has stopped stopped on an error, which this
+    /// returns in place of the closed queue.
+    fn send(&mut self, chunks: &[chunk::Chunk]) -> Result<()> {
+        let rows = chunks.iter().map(|c| (c.id.clone(), c.text.clone())).collect();
+        let queue = self.rows.as_ref().context("rows written after the last")?;
+        if queue.send(rows).is_err() {
+            while self.collect(true)? {}
+            anyhow::bail!("the embedding worker stopped");
+        }
+        Ok(())
+    }
+
+    /// No more rows are coming.
+    fn close(&mut self) {
+        self.rows = None;
+    }
+
+    /// Move finished vectors into `ready`, waiting for the next batch with `wait`. Returns whether
+    /// the worker may still send more.
+    fn collect(&mut self, wait: bool) -> Result<bool> {
+        let mut take = |r: Result<Embedded>| -> Result<()> {
+            self.ready.extend(r?);
+            Ok(())
+        };
+        if wait {
+            match self.vectors.recv() {
+                Ok(r) => take(r)?,
+                Err(_) => return Ok(false),
+            }
+        }
+        loop {
+            match self.vectors.try_recv() {
+                Ok(r) => take(r)?,
+                Err(mpsc::TryRecvError::Empty) => return Ok(true),
+                Err(mpsc::TryRecvError::Disconnected) => return Ok(false),
+            }
+        }
+    }
+
+    fn join(mut self) -> Result<Box<dyn Embedder>> {
+        let worker = self.worker.take().context("the embedding worker was already joined")?;
+        worker.join().map_err(|_| anyhow!("the embedding worker panicked"))
+    }
+}
+
+impl Drop for Prefetch {
+    fn drop(&mut self) {
+        if let Some(worker) = self.worker.take() {
+            self.stop.store(true, Ordering::Relaxed);
+            self.rows = None;
+            let _ = worker.join();
+        }
+    }
+}
+
 /// Rows still owing a vector: per tier, the sessions holding them in storage order, each with its
 /// row ids.
 #[derive(Default)]
@@ -842,7 +1039,10 @@ async fn embed_pending(
         let t0 = Instant::now();
         for (n, (_, rows)) in sessions.iter().enumerate() {
             rows_to_fill.extend(rows);
-            if rows_to_fill.len() < EMBED_BATCH && n + 1 < sessions.len() {
+            // Two calls' worth per fill: each fill is a merge over the memory, so an embedder that
+            // turns out fast gets fewer, larger ones.
+            let fill_rows = EMBED_BATCH.max(2 * embedder.batch_size());
+            if rows_to_fill.len() < fill_rows && n + 1 < sessions.len() {
                 continue;
             }
             fill(ds, embedder, &rows_to_fill).await?;
@@ -933,8 +1133,8 @@ pub async fn run_index_remote(uri: &str, no_thinking: bool) -> Result<()> {
 /// embed-fill boundary past this. Deeper tiers and older sessions backfill on later runs.
 const INDEX_BUDGET_SECS: u64 = 60;
 
-/// Rows embedded per fill. A fill rewrites the vector column of every fragment it touches, so fills
-/// span whole sessions and are not cut small.
+/// Rows embedded per fill, at least (a fast embedder's fills are larger). A fill rewrites the vector
+/// column of every fragment it touches, so fills span whole sessions and are not cut small.
 const EMBED_BATCH: usize = 512;
 
 /// What a budgeted run does when the budget expires with work still owed.
@@ -1078,14 +1278,22 @@ async fn index_sources(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: 
         eprintln!("{} — {} to index, {cached} cached", src.describe(), n - cached);
     }
 
+    // A first interactive index asks before a long embedding run, after timing its first fill; any
+    // other run embeds all it writes, so it can embed while it writes.
+    let mut probe = indexer.first_index && !yes && interactive;
+    if !probe {
+        indexer.start_prefetch();
+    }
     let all: Vec<usize> = (0..total).collect();
     let mut done = 0;
     while done < total {
         done += indexer.write_units(&all[done..], done, total).await?;
+        indexer.fill_prefetched(false).await?;
     }
+    indexer.fill_prefetched(true).await?;
 
+    // Rows an earlier run left unembedded.
     let pending = indexer.pending_embeddings().await?;
-    let mut probe = indexer.first_index && !yes && interactive;
     let t0 = Instant::now();
     let embedded = indexer
         .embed_pending(&pending, |embedded| {
