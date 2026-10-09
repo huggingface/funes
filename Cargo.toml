@@ -91,6 +91,11 @@ path = "benchmark/bench_recall.rs"
 name = "bench_backends"
 path = "benchmark/bench_backends.rs"
 
+# A default `funes recall` scored against a labeled set of questions.
+[[example]]
+name = "score_recall"
+path = "benchmark/score_recall.rs"
+
 # One-off backfill of the `repo` column (local: add_columns; remote: add_columns via a guarded
 # commit). Delete both, and `memory::remote::add_column`, once every store carries `repo`.
 [[example]]

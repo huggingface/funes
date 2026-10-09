@@ -1,9 +1,10 @@
 # Benchmarks
 
-Two runnable examples, each `cargo run --release --example <name>`:
+Three runnable examples, each `cargo run --release --example <name>`:
 
 - **`bench_recall`** — `recall()` latency, local vs remote, cold vs warm.
 - **`bench_backends`** — latency and output agreement between the BLAS and ONNX inference backends.
+- **`score_recall`** — a default `funes recall` scored against a labeled set of questions.
 
 ## `bench_recall` — recall latency
 
@@ -112,3 +113,23 @@ ONNX is the reference when that feature is present. The one argument names the e
 `BAAI/bge-small-en-v1.5` when omitted. Edit the fixed query or workloads when investigating a
 particular regression. Building with only one backend still prints its timing, along with a note
 that there is nothing to compare.
+
+## `score_recall` — recall against labeled questions
+
+`score_recall.rs` asks each question of a labeled set with `funes recall`'s defaults and prints the
+receipt: the funes version, the memory's revision and the file's hash, then hit@1, hit@5, found@8,
+the mean reciprocal rank and the median latency, overall and by kind, then each question's rank.
+A question is one JSON line with an `id`, the `question`, `gold` (the spans its answer is in, each a
+`session_id` with optional `from` and `to` turns) and an optional `kind`. Its rank is the position of
+its first hit in a gold span. The labeled sets and their receipts live in the
+[`dacorvo/funes-recall-benchmark`](https://huggingface.co/datasets/dacorvo/funes-recall-benchmark)
+dataset:
+
+```sh
+cargo run --release --example score_recall -- funes-memory/questions.jsonl --memory huggingface/funes-memory
+```
+
+The hits come from the call `funes recall` makes, not from its printed text: a hit's text can quote
+an earlier recall, `→ get` lines included, and nothing in the text tells a quoted hit from a real one.
+A run stops on a degraded read (the Hub unreachable, recall answering from the local memory), since
+those hits were drawn from another memory.
