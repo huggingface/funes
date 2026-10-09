@@ -2,10 +2,14 @@
 //! funes talks to these traits via the [`embedder`]/[`reranker`] factories, never a concrete ML
 //! stack, so an alternative backend slots in behind the same interface. The backend is chosen at
 //! build time in one place — the `Default*` aliases below: default build → BLAS (a from-scratch
-//! forward on Accelerate/faer); `--no-default-features --features onnx` → fastembed/ort.
+//! forward on Accelerate/faer); `--no-default-features --features onnx` → fastembed/ort. On macOS
+//! the default build also carries `metal`, the same encoder on the GPU, which [`embedder`] hands
+//! the bulk calls to (see [`Hybrid`]).
 
 #[cfg(feature = "blas")]
 pub mod blas;
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub mod metal;
 
 use anyhow::{Context, Result};
 
@@ -79,6 +83,15 @@ pub trait Embedder: Send {
     /// Encode each text as given, in input order.
     fn encode(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>>;
 
+    /// How many texts a call should carry. A caller reports progress and checks its budget between
+    /// calls, so this is about a few seconds' work; a GPU wants many texts per call to stay busy.
+    fn batch_size(&self) -> usize {
+        EMBED_BATCH
+    }
+
+    /// Bring up whatever the next calls will run on, ahead of them.
+    fn warm_up(&mut self) {}
+
     fn embed(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         let prefix = self.model().prefixes().1;
         let prefixed: Vec<String> = texts.iter().map(|t| format!("{prefix}{t}")).collect();
@@ -99,7 +112,104 @@ pub trait Reranker: Send {
 /// Build the embedder for `model` on the compiled-in backend. Call sites use this instead of
 /// naming a concrete type, so the backend is decided only by the `Default*` alias above.
 pub fn embedder(model: EmbeddingModel) -> Result<Box<dyn Embedder>> {
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    return Ok(Box::new(Hybrid::new(model)?));
+    #[allow(unreachable_code)]
     Ok(Box::new(DefaultEmbedder::new(model)?))
+}
+
+/// Texts per call once the GPU is in play: a couple of seconds' work for it.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+const GPU_BATCH: usize = 2048;
+
+/// Calls of at least this many texts go to the GPU. Below it the CPU forward finishes before the GPU
+/// would have its weights uploaded and its first graph compiled.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+const GPU_MIN_TEXTS: usize = 32;
+
+/// The CPU forward for small calls — a recall query, the few chunks of one turn — and the GPU for
+/// bulk ones, each brought up on its first call. A GPU that cannot start is tried once; every call
+/// after runs on the CPU.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+struct Hybrid {
+    model: EmbeddingModel,
+    cpu: Option<DefaultEmbedder>,
+    gpu: Gpu,
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+enum Gpu {
+    Untried,
+    Ready(Box<metal::MetalEmbedder>),
+    Unavailable,
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+impl Hybrid {
+    fn new(model: EmbeddingModel) -> Result<Self> {
+        // Fetch the weights now, so a failed download fails here, as an eager backend's would.
+        blas::hf_snapshot(model.id())?;
+        Ok(Self {
+            model,
+            cpu: None,
+            gpu: Gpu::Untried,
+        })
+    }
+
+    fn gpu(&mut self) -> Option<&mut metal::MetalEmbedder> {
+        if let Gpu::Untried = self.gpu {
+            self.gpu = match metal::MetalEmbedder::new(self.model) {
+                Ok(gpu) => Gpu::Ready(Box::new(gpu)),
+                Err(e) => {
+                    eprintln!("note: embedding on the CPU — the GPU is unavailable: {e:#}");
+                    Gpu::Unavailable
+                }
+            };
+        }
+        match &mut self.gpu {
+            Gpu::Ready(gpu) => Some(gpu),
+            _ => None,
+        }
+    }
+
+    fn cpu(&mut self) -> Result<&mut DefaultEmbedder> {
+        if self.cpu.is_none() {
+            self.cpu = Some(DefaultEmbedder::new(self.model)?);
+        }
+        Ok(self.cpu.as_mut().expect("just set"))
+    }
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+impl Embedder for Hybrid {
+    fn model(&self) -> EmbeddingModel {
+        self.model
+    }
+
+    fn encode(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        if texts.len() >= GPU_MIN_TEXTS {
+            if let Some(gpu) = self.gpu() {
+                return gpu.encode(texts);
+            }
+        }
+        self.cpu()?.encode(texts)
+    }
+
+    fn warm_up(&mut self) {
+        if let Some(gpu) = self.gpu() {
+            if let Err(e) = gpu.warm() {
+                eprintln!("note: embedding on the CPU — the GPU failed to warm up: {e:#}");
+                self.gpu = Gpu::Unavailable;
+            }
+        }
+    }
+
+    fn batch_size(&self) -> usize {
+        match self.gpu {
+            Gpu::Unavailable => EMBED_BATCH,
+            Gpu::Untried | Gpu::Ready(_) => GPU_BATCH,
+        }
+    }
 }
 
 /// Build the reranker for the compiled-in backend. See [`embedder`].
@@ -166,7 +276,7 @@ impl Reranker for OnnxReranker {
     }
 }
 
-/// Embed `texts` in batches of [`EMBED_BATCH`], calling `on_batch(embedded_so_far)` after each so a
+/// Embed `texts` in batches of the embedder's [`Embedder::batch_size`], calling `on_batch(embedded_so_far)` after each so a
 /// caller can report progress (or pass a no-op).
 pub(crate) fn embed_batched(
     embedder: &mut dyn Embedder,
@@ -174,7 +284,7 @@ pub(crate) fn embed_batched(
     mut on_batch: impl FnMut(usize),
 ) -> Result<Vec<Vec<f32>>> {
     let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
-    for group in texts.chunks(EMBED_BATCH) {
+    for group in texts.chunks(embedder.batch_size()) {
         vectors.extend(embedder.embed(group)?);
         on_batch(vectors.len());
     }

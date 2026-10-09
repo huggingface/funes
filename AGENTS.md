@@ -47,6 +47,8 @@ a new function belongs follows from that; the layers and the placement test are 
 
 Inference has two backends behind the `Embedder`/`Reranker` traits (`src/inference.rs`): the
 default `blas` (src/inference/blas.rs, hand-written forward on Accelerate/faer) and the opt-in `onnx`
-(fastembed/ort). CI lints both on every PR, so also run
+(fastembed/ort). On macOS the default build also carries `metal` (src/inference/metal.rs): the same
+encoder as an MPSGraph in fp16, which the embedder hands calls of 32+ texts to, falling back to `blas`
+where no GPU starts. CI lints both backends on every PR, so also run
 `cargo clippy --all-targets --no-default-features --features onnx` before calling work done;
 `cargo run --release --features onnx --example bench_backends` A/Bs them (latency + agreement).

@@ -399,7 +399,7 @@ fn softmax_rows(s: &mut [f32], rows: usize, cols: usize) {
     }
 }
 
-fn l2_normalize(v: &mut [f32]) {
+pub(super) fn l2_normalize(v: &mut [f32]) {
     let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     for x in v.iter_mut() {
         *x /= norm;
@@ -600,7 +600,7 @@ fn encode(w: &HashMap<String, Vec<f32>>, c: Cfg, ids: &[i64], mask: &[i64], n: u
 
 /// Resolve a snapshot dir for `repo` (e.g. "BAAI/bge-small-en-v1.5") in the standard HF cache,
 /// downloading the two files the forward needs on first use (like the ONNX backend does).
-fn hf_snapshot(repo: &str) -> Result<PathBuf> {
+pub(super) fn hf_snapshot(repo: &str) -> Result<PathBuf> {
     if let Some(dir) = local_snapshot(repo) {
         return Ok(dir);
     }
@@ -657,7 +657,7 @@ fn local_snapshot(repo: &str) -> Option<PathBuf> {
 /// hold its bytes and the f32 copies of them side by side — 2.2 GB for the reranker's 1.1 GB of
 /// weights, on a run that keeps 1.2 GB — so only the header is buffered and each tensor is
 /// converted through a small window.
-fn load_weights(dir: &Path) -> Result<HashMap<String, Vec<f32>>> {
+pub(super) fn load_weights(dir: &Path) -> Result<HashMap<String, Vec<f32>>> {
     /// Bytes read per conversion. A multiple of 4, so no f32 straddles two reads.
     const WINDOW: usize = 1 << 20;
     /// What safetensors itself accepts, so a corrupt length cannot ask for an unbounded allocation.
@@ -734,7 +734,7 @@ fn load_weights(dir: &Path) -> Result<HashMap<String, Vec<f32>>> {
     Ok(weights)
 }
 
-fn load_tokenizer(dir: &Path) -> Result<Tokenizer> {
+pub(super) fn load_tokenizer(dir: &Path) -> Result<Tokenizer> {
     let mut tok = Tokenizer::from_file(dir.join("tokenizer.json")).map_err(|e| anyhow!("load tokenizer: {e}"))?;
     tok.with_truncation(Some(TruncationParams {
         max_length: 512,
