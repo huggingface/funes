@@ -122,14 +122,15 @@ pub fn embedder(model: EmbeddingModel) -> Result<Box<dyn Embedder>> {
 #[cfg(all(feature = "metal", target_os = "macos"))]
 const GPU_BATCH: usize = 2048;
 
-/// Calls of at least this many texts go to the GPU. Below it the CPU forward finishes before the GPU
-/// would have its weights uploaded and its first graph compiled.
+/// Calls of at least this many texts bring the GPU up. Below it the CPU forward finishes before the
+/// GPU would have its weights uploaded and its first graph compiled; once it is up, every call runs
+/// there.
 #[cfg(all(feature = "metal", target_os = "macos"))]
 const GPU_MIN_TEXTS: usize = 32;
 
 /// The CPU forward for small calls — a recall query, the few chunks of one turn — and the GPU for
-/// bulk ones, each brought up on its first call. A GPU that cannot start is tried once; every call
-/// after runs on the CPU.
+/// bulk ones, each brought up on its first call. A GPU that cannot start, or fails a call, is given
+/// up on: that call and every one after run on the CPU.
 #[cfg(all(feature = "metal", target_os = "macos"))]
 struct Hybrid {
     model: EmbeddingModel,
@@ -172,6 +173,11 @@ impl Hybrid {
         }
     }
 
+    fn give_up_gpu(&mut self, e: anyhow::Error) {
+        eprintln!("note: embedding on the CPU — the GPU failed: {e:#}");
+        self.gpu = Gpu::Unavailable;
+    }
+
     fn cpu(&mut self) -> Result<&mut DefaultEmbedder> {
         if self.cpu.is_none() {
             self.cpu = Some(DefaultEmbedder::new(self.model)?);
@@ -187,9 +193,17 @@ impl Embedder for Hybrid {
     }
 
     fn encode(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-        if texts.len() >= GPU_MIN_TEXTS {
+        let on_gpu = match self.gpu {
+            Gpu::Ready(_) => true,
+            Gpu::Untried => texts.len() >= GPU_MIN_TEXTS,
+            Gpu::Unavailable => false,
+        };
+        if on_gpu {
             if let Some(gpu) = self.gpu() {
-                return gpu.encode(texts);
+                match gpu.encode(texts) {
+                    Ok(vectors) => return Ok(vectors),
+                    Err(e) => self.give_up_gpu(e),
+                }
             }
         }
         self.cpu()?.encode(texts)
@@ -198,16 +212,17 @@ impl Embedder for Hybrid {
     fn warm_up(&mut self) {
         if let Some(gpu) = self.gpu() {
             if let Err(e) = gpu.warm() {
-                eprintln!("note: embedding on the CPU — the GPU failed to warm up: {e:#}");
-                self.gpu = Gpu::Unavailable;
+                self.give_up_gpu(e);
             }
         }
     }
 
+    /// The GPU's batch only once it is up: until a call has proved it, callers size their work for
+    /// the CPU.
     fn batch_size(&self) -> usize {
         match self.gpu {
-            Gpu::Unavailable => EMBED_BATCH,
-            Gpu::Untried | Gpu::Ready(_) => GPU_BATCH,
+            Gpu::Ready(_) => GPU_BATCH,
+            Gpu::Untried | Gpu::Unavailable => EMBED_BATCH,
         }
     }
 }
@@ -276,16 +291,25 @@ impl Reranker for OnnxReranker {
     }
 }
 
-/// Embed `texts` in batches of the embedder's [`Embedder::batch_size`], calling `on_batch(embedded_so_far)` after each so a
-/// caller can report progress (or pass a no-op).
+/// Embed `texts` in batches of the embedder's [`Embedder::batch_size`], calling
+/// `on_batch(embedded_so_far)` after each so a caller can report progress (or pass a no-op).
 pub(crate) fn embed_batched(
     embedder: &mut dyn Embedder,
     texts: &[&str],
     mut on_batch: impl FnMut(usize),
 ) -> Result<Vec<Vec<f32>>> {
     let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
-    for group in texts.chunks(embedder.batch_size()) {
-        vectors.extend(embedder.embed(group)?);
+    // Asked per call: the first call may bring up a faster backend that wants larger ones.
+    while vectors.len() < texts.len() {
+        let end = texts.len().min(vectors.len() + embedder.batch_size().max(1));
+        let batch = embedder.embed(&texts[vectors.len()..end])?;
+        anyhow::ensure!(
+            batch.len() == end - vectors.len(),
+            "the embedder returned {} vector(s) for {} text(s)",
+            batch.len(),
+            end - vectors.len()
+        );
+        vectors.extend(batch);
         on_batch(vectors.len());
     }
     Ok(vectors)
