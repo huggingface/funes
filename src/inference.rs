@@ -4,7 +4,7 @@
 //! build time in one place — the `Default*` aliases below: default build → BLAS (a from-scratch
 //! forward on Accelerate/faer); `--no-default-features --features onnx` → fastembed/ort. On macOS
 //! the default build also carries `metal`, the same encoder on the GPU, which [`embedder`] hands
-//! the bulk calls to (see [`Hybrid`]).
+//! the bulk calls to (see [`metal::Hybrid`]).
 
 #[cfg(feature = "blas")]
 pub mod blas;
@@ -110,110 +110,9 @@ pub trait Reranker: Send {
 /// naming a concrete type, so the backend is decided only by the `Default*` alias above.
 pub fn embedder(model: EmbeddingModel) -> Result<Box<dyn Embedder>> {
     #[cfg(all(feature = "metal", target_os = "macos"))]
-    return Ok(Box::new(Hybrid::new(model)?));
+    return Ok(Box::new(metal::Hybrid::new(model)?));
     #[allow(unreachable_code)]
     Ok(Box::new(DefaultEmbedder::new(model)?))
-}
-
-/// Texts per call once the GPU is in play: a couple of seconds' work for it.
-#[cfg(all(feature = "metal", target_os = "macos"))]
-const GPU_BATCH: usize = 2048;
-
-/// Calls of at least this many texts bring the GPU up. Below it the CPU forward finishes before the
-/// GPU would have its weights uploaded and its first graph compiled; once it is up, every call runs
-/// there.
-#[cfg(all(feature = "metal", target_os = "macos"))]
-const GPU_MIN_TEXTS: usize = 32;
-
-/// The CPU forward for small calls — a recall query, the few chunks of one turn — and the GPU for
-/// bulk ones, each brought up on its first call. A GPU that cannot start, or fails a call, is given
-/// up on: that call and every one after run on the CPU.
-#[cfg(all(feature = "metal", target_os = "macos"))]
-struct Hybrid {
-    model: EmbeddingModel,
-    cpu: Option<DefaultEmbedder>,
-    gpu: Gpu,
-}
-
-#[cfg(all(feature = "metal", target_os = "macos"))]
-enum Gpu {
-    Untried,
-    Ready(Box<metal::MetalEmbedder>),
-    Unavailable,
-}
-
-#[cfg(all(feature = "metal", target_os = "macos"))]
-impl Hybrid {
-    fn new(model: EmbeddingModel) -> Result<Self> {
-        // Fetch the weights now, so a failed download fails here, as an eager backend's would.
-        blas::hf_snapshot(model.id())?;
-        Ok(Self {
-            model,
-            cpu: None,
-            gpu: Gpu::Untried,
-        })
-    }
-
-    fn gpu(&mut self) -> Option<&mut metal::MetalEmbedder> {
-        if let Gpu::Untried = self.gpu {
-            self.gpu = match metal::MetalEmbedder::new(self.model) {
-                Ok(gpu) => Gpu::Ready(Box::new(gpu)),
-                Err(e) => {
-                    eprintln!("note: embedding on the CPU — the GPU is unavailable: {e:#}");
-                    Gpu::Unavailable
-                }
-            };
-        }
-        match &mut self.gpu {
-            Gpu::Ready(gpu) => Some(gpu),
-            _ => None,
-        }
-    }
-
-    fn give_up_gpu(&mut self, e: anyhow::Error) {
-        eprintln!("note: embedding on the CPU — the GPU failed: {e:#}");
-        self.gpu = Gpu::Unavailable;
-    }
-
-    fn cpu(&mut self) -> Result<&mut DefaultEmbedder> {
-        if self.cpu.is_none() {
-            self.cpu = Some(DefaultEmbedder::new(self.model)?);
-        }
-        Ok(self.cpu.as_mut().expect("just set"))
-    }
-}
-
-#[cfg(all(feature = "metal", target_os = "macos"))]
-impl Embedder for Hybrid {
-    fn model(&self) -> EmbeddingModel {
-        self.model
-    }
-
-    fn encode(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-        let on_gpu = match self.gpu {
-            Gpu::Ready(_) => true,
-            Gpu::Untried => texts.len() >= GPU_MIN_TEXTS,
-            Gpu::Unavailable => false,
-        };
-        if on_gpu {
-            if let Some(gpu) = self.gpu() {
-                match gpu.encode(texts) {
-                    Ok(vectors) => return Ok(vectors),
-                    Err(e) => self.give_up_gpu(e),
-                }
-            }
-        }
-        self.cpu()?.encode(texts)
-    }
-
-    /// The GPU's batch only once it is up: until a call has proved it, callers size their work for
-    /// the CPU.
-    fn batch_size(&self) -> usize {
-        match self.gpu {
-            Gpu::Ready(_) => GPU_BATCH,
-            Gpu::Untried | Gpu::Unavailable => EMBED_BATCH,
-        }
-    }
 }
 
 /// Build the reranker for the compiled-in backend. See [`embedder`].

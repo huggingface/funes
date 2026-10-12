@@ -1,7 +1,7 @@
 //! The embedder on the GPU: the same BERT encoder as [`super::blas`], built as an MPSGraph and run
-//! in fp16 on Metal. Indexing is embedding-bound, and the GPU runs it about fifty times faster than
-//! the CPU forward, agreeing with it to a cosine of 0.99999. macOS only; [`super::embedder`] falls
-//! back to the CPU forward wherever this one cannot start.
+//! in fp16 on Metal. Indexing is embedding-bound, and the GPU runs it faster than the CPU forward
+//! (about 50x on an M5 Max, 4x on an M2), agreeing with it to a cosine of 0.99999. macOS only;
+//! [`super::embedder`] falls back to the CPU forward wherever this one cannot start.
 //!
 //! A graph is compiled per (batch, padded length) bucket, the first time a forward needs it: inputs
 //! are sorted by length and padded only to their group's longest, rounded up to [`ROUND`] so a run
@@ -11,6 +11,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ptr::NonNull;
+use std::time::Instant;
 
 use anyhow::{anyhow, bail, Context, Result};
 use objc2::rc::{autoreleasepool, Retained};
@@ -26,7 +27,7 @@ use objc2_metal_performance_shaders_graph::{
 use tokenizers::Tokenizer;
 
 use super::blas::{hf_snapshot, l2_normalize, load_tokenizer, load_weights};
-use super::{Embedder, EmbeddingModel};
+use super::{DefaultEmbedder, Embedder, EmbeddingModel, EMBED_BATCH};
 
 const H: usize = 384;
 const HEADS: usize = 12;
@@ -435,6 +436,111 @@ impl Embedder for MetalEmbedder {
             }
         }
         Ok(at.into_iter().map(|i| vectors[i].clone()).collect())
+    }
+}
+
+/// Seconds of work a GPU call should carry: a caller reports progress and checks its budget
+/// between calls, and the rate that sizes the call is measured, so this holds on any GPU.
+const GPU_CALL_SECS: f64 = 2.0;
+/// Texts per GPU call at most: past this an M5 Max gains nothing.
+const GPU_BATCH: usize = 2048;
+
+/// Calls of at least this many texts bring the GPU up. Below it the CPU forward finishes before the
+/// GPU would have its weights uploaded and its first graph compiled; once it is up, every call runs
+/// there.
+const GPU_MIN_TEXTS: usize = 32;
+
+/// The CPU forward for small calls — a recall query, the few chunks of one turn — and the GPU for
+/// bulk ones, each brought up on its first call. A GPU that cannot start, or fails a call, is given
+/// up on: that call and every one after run on the CPU.
+pub struct Hybrid {
+    model: EmbeddingModel,
+    cpu: Option<DefaultEmbedder>,
+    gpu: Gpu,
+    /// Texts per second of the last GPU call, which sizes the next.
+    gpu_rate: Option<f64>,
+}
+
+enum Gpu {
+    Untried,
+    Ready(Box<MetalEmbedder>),
+    Unavailable,
+}
+
+impl Hybrid {
+    pub fn new(model: EmbeddingModel) -> Result<Self> {
+        // Fetch the weights now, so a failed download fails here, as an eager backend's would.
+        hf_snapshot(model.id())?;
+        Ok(Self {
+            model,
+            cpu: None,
+            gpu: Gpu::Untried,
+            gpu_rate: None,
+        })
+    }
+
+    fn gpu(&mut self) -> Option<&mut MetalEmbedder> {
+        if let Gpu::Untried = self.gpu {
+            self.gpu = match MetalEmbedder::new(self.model) {
+                Ok(gpu) => Gpu::Ready(Box::new(gpu)),
+                Err(e) => {
+                    eprintln!("note: embedding on the CPU — the GPU is unavailable: {e:#}");
+                    Gpu::Unavailable
+                }
+            };
+        }
+        match &mut self.gpu {
+            Gpu::Ready(gpu) => Some(gpu),
+            _ => None,
+        }
+    }
+
+    fn give_up_gpu(&mut self, e: anyhow::Error) {
+        eprintln!("note: embedding on the CPU — the GPU failed: {e:#}");
+        self.gpu = Gpu::Unavailable;
+    }
+
+    fn cpu(&mut self) -> Result<&mut DefaultEmbedder> {
+        if self.cpu.is_none() {
+            self.cpu = Some(DefaultEmbedder::new(self.model)?);
+        }
+        Ok(self.cpu.as_mut().expect("just set"))
+    }
+}
+
+impl Embedder for Hybrid {
+    fn model(&self) -> EmbeddingModel {
+        self.model
+    }
+
+    fn encode(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        let on_gpu = match self.gpu {
+            Gpu::Ready(_) => true,
+            Gpu::Untried => texts.len() >= GPU_MIN_TEXTS,
+            Gpu::Unavailable => false,
+        };
+        if on_gpu {
+            if let Some(gpu) = self.gpu() {
+                let t0 = Instant::now();
+                match gpu.encode(texts) {
+                    Ok(vectors) => {
+                        self.gpu_rate = Some(texts.len() as f64 / t0.elapsed().as_secs_f64().max(1e-3));
+                        return Ok(vectors);
+                    }
+                    Err(e) => self.give_up_gpu(e),
+                }
+            }
+        }
+        self.cpu()?.encode(texts)
+    }
+
+    /// [`GPU_CALL_SECS`] of work at the last GPU call's rate, once a call has measured it: until
+    /// then callers size their work for the CPU.
+    fn batch_size(&self) -> usize {
+        match (&self.gpu, self.gpu_rate) {
+            (Gpu::Ready(_), Some(rate)) => ((rate * GPU_CALL_SECS) as usize).clamp(EMBED_BATCH, GPU_BATCH),
+            _ => EMBED_BATCH,
+        }
     }
 }
 
