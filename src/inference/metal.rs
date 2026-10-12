@@ -309,19 +309,6 @@ impl MetalEmbedder {
         }
     }
 
-    /// Compile and run once every full-group bucket, so a run's forwards find them ready. A bucket's
-    /// first run costs more than its compile: Metal builds its pipelines then.
-    pub fn warm(&mut self) -> Result<()> {
-        let lens: Vec<usize> = (1..=MAX_LEN / ROUND).map(|i| i * ROUND).collect();
-        for &l in &lens {
-            self.bucket(GROUP, l)?;
-        }
-        for &l in &lens {
-            self.forward(&vec![0; GROUP * l], &vec![0.0; GROUP * l], GROUP, l)?;
-        }
-        Ok(())
-    }
-
     /// One forward over `b` sequences padded to `l`: `ids` and `mask` are [b·l], row-major. Returns
     /// the [b·H] pooled rows.
     fn forward(&mut self, ids: &[i32], mask: &[f32], b: usize, l: usize) -> Result<Vec<f32>> {
