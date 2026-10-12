@@ -89,15 +89,20 @@ pub struct MetalEmbedder {
 // shares them.
 unsafe impl Send for MetalEmbedder {}
 
+/// The Metal device, where its MPSGraph has fused attention (macOS 15); otherwise what is missing.
+fn device() -> Result<Retained<ProtocolObject<dyn MTLDevice>>> {
+    let mtl = MTLCreateSystemDefaultDevice().context("no Metal device")?;
+    let attention = sel!(scaledDotProductAttentionWithQueryTensor:keyTensor:valueTensor:maskTensor:scale:name:);
+    if !unsafe { MPSGraph::new() }.respondsToSelector(attention) {
+        bail!("this MPSGraph has no fused attention (macOS 15 or later)");
+    }
+    Ok(mtl)
+}
+
 impl MetalEmbedder {
-    /// Fails, for the caller to fall back to the CPU, when there is no Metal device or its
-    /// MPSGraph predates fused attention (macOS 15).
+    /// Fails where there is no usable [`device`], or the model's weights cannot be loaded.
     pub fn new(model: EmbeddingModel) -> Result<Self> {
-        let mtl = MTLCreateSystemDefaultDevice().context("no Metal device")?;
-        let attention = sel!(scaledDotProductAttentionWithQueryTensor:keyTensor:valueTensor:maskTensor:scale:name:);
-        if !unsafe { MPSGraph::new() }.respondsToSelector(attention) {
-            bail!("this MPSGraph has no fused attention (macOS 15 or later)");
-        }
+        let mtl = device()?;
         let queue = mtl.newCommandQueue().context("no Metal command queue")?;
         let device = unsafe { MPSGraphDevice::deviceWithMTLDevice(&mtl) };
         let dir = hf_snapshot(model.id())?;
@@ -573,11 +578,12 @@ mod tests {
             .collect();
         texts.push(texts[3].clone());
         let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
+        if let Err(e) = device() {
+            eprintln!("skipping: {e:#}");
+            return;
+        }
         for model in EmbeddingModel::ALL {
-            let Ok(mut gpu) = MetalEmbedder::new(model) else {
-                eprintln!("no usable GPU; skipping {}", model.id());
-                return;
-            };
+            let mut gpu = MetalEmbedder::new(model).unwrap_or_else(|e| panic!("{}: {e:#}", model.id()));
             let got = gpu.embed(&texts).unwrap();
             let want = BlasEmbedder::new(model).unwrap().embed(&texts).unwrap();
             assert_eq!(got.len(), texts.len());
