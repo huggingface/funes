@@ -25,12 +25,20 @@ env:
 permissions: {}
 
 jobs:
+  # One leg per OS funes ships on: a run proves only the OS it ran on, the dependencies having
+  # per-platform code paths and funes its own (faer on Linux, Accelerate and the metal backend
+  # on macOS). macos-15 is the first whose MPSGraph has the fused attention the metal backend
+  # needs.
   lint-test:
     permissions:
       contents: read
-    name: Lint & Unit Tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+    name: Lint & Unit Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -40,39 +48,70 @@ jobs:
 
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
-          # One cache shared by both CI jobs (same deps under the ci profile) — fewer,
-          # smaller caches that survive GitHub's 10 GB/repo limit instead of evicting.
+          # One cache per OS (the key carries it), the Linux one shared with the integration job
+          # (same deps under the ci profile) — fewer, smaller caches that survive GitHub's
+          # 10 GB/repo limit instead of evicting.
           shared-key: ci
 
       # Faster, lower-memory linker — keeps the heavy lance link in budget.
       - uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # v1
+        if: runner.os == 'Linux'
 
       # lance-encoding (via lancedb) compiles protobuf in its build script.
       - name: Install protoc
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Install protoc
+        if: runner.os == 'macOS'
+        run: brew install protobuf
 
       - name: Format check
         run: cargo fmt --check
 
       # Both backend variants, so a PR can't leave either failing fmt or a bumped linter — the
       # onnx build/test job below only runs on merges. (fmt is feature-independent: one check
-      # covers both.)
+      # covers both; onnx has no OS-specific code, so one OS lints it.)
       - name: Clippy
         run: cargo clippy --all-targets --profile ci -- -D warnings
 
       - name: Clippy (onnx backend)
+        if: runner.os == 'Linux'
         run: cargo clippy --all-targets --profile ci --no-default-features --features onnx -- -D warnings
 
-      # trufflehog for the secret-scan unit tests, pinned to the version used locally.
+      # trufflehog for the secret-scan unit tests, pinned to the version used locally. sudo, so
+      # the install dir is writable on both runners.
       - name: Install trufflehog
         run: |
-          curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin v3.95.5
+          curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sudo sh -s -- -b /usr/local/bin v3.95.5
           trufflehog --version
 
-      # Unit tests only here — hermetic, no network. The integration test that runs the
-      # real embedder lives in its own job below.
+      # The two embedding models' weights, for the metal backend's test that it agrees with the
+      # CPU forward. Cached on main only, like the integration job's.
+      - name: Restore model weights
+        if: runner.os == 'macOS'
+        id: models
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/huggingface/hub/models--BAAI--bge-small-en-v1.5
+            ~/.cache/huggingface/hub/models--intfloat--multilingual-e5-small
+          key: hf-models-metal-v1
+
+      # Unit tests only here — hermetic, no network but the weights above. The integration test
+      # that runs the real embedder lives in its own job below. --nocapture: the agreement test
+      # says in the log whether it ran on the GPU or skipped for want of one.
       - name: Unit tests
-        run: cargo test --lib --profile ci
+        run: cargo test --lib --profile ci -- --nocapture
+
+      - name: Save model weights
+        if: ${{ runner.os == 'macOS' && !cancelled() && github.ref == 'refs/heads/main' && steps.models.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/huggingface/hub/models--BAAI--bge-small-en-v1.5
+            ~/.cache/huggingface/hub/models--intfloat--multilingual-e5-small
+          key: hf-models-metal-v1
 
   # install.sh ships to Linux and macOS and is plain POSIX sh, so it gets a runner of
   # each: the test fakes the platform detection, but not the BSD vs GNU utilities
@@ -94,13 +133,18 @@ jobs:
       - name: Installer tests
         run: sh scripts/test-install.sh
 
+  # One leg per OS, as above, and gated on nothing: a lint failure is cheaper to see twice than to
+  # wait on the other OS's lint for.
   integration-test:
     permissions:
       contents: read
-    name: Integration Test (real embedder)
-    runs-on: ubuntu-latest
-    needs: lint-test
-    timeout-minutes: 45
+    name: Integration Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
     env:
       # The push round-trip test awaits one large combined future (embed + Xet upload + lance);
       # it overflows the default ~2 MB test-thread stack under the CI toolchain. Give it headroom.
@@ -115,22 +159,29 @@ jobs:
           shared-key: ci
 
       - uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # v1
+        if: runner.os == 'Linux'
 
       # expect drives `funes add` at a pty, so the tests can answer the prompts that are only
-      # asked at a terminal.
+      # asked at a terminal. macOS ships it.
       - name: Install protoc and expect
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler expect
+
+      - name: Install protoc
+        if: runner.os == 'macOS'
+        run: brew install protobuf
 
       # push's pre-publish secret gate shells out to trufflehog (fail-closed), so the
       # round-trip test below needs the binary on PATH. Pinned to the version used locally.
       - name: Install trufflehog
         run: |
-          curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin v3.95.5
+          curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sudo sh -s -- -b /usr/local/bin v3.95.5
           trufflehog --version
 
       # Embedder/reranker weights for the default (blas) backend (~1.2 GB of safetensors; funes
       # downloads them into the HF cache on first use). Cache on main only — PRs restore main's
-      # copy, so there's no duplicate per-PR copy eating the 10 GB cache budget.
+      # copy, so there's no duplicate per-PR copy eating the 10 GB cache budget. The files are the
+      # same on both OSes, so one key serves both legs.
       - name: Restore model weights
         id: models
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
