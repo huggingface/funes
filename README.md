@@ -172,7 +172,8 @@ integration test downloads the embedder/reranker weights on first run.
 
 Inference (embedding + reranking) runs on a built-in backend — Accelerate on macOS, pure Rust on
 Linux — so the default build has no ML runtime dependency and runs on any glibc ≥ 2.35 (Ubuntu
-22.04). An ONNX Runtime backend is available as an opt-in variant:
+22.04). On macOS 15 or later, indexing embeds on the GPU through Metal and falls back to the CPU
+where no GPU starts. An ONNX Runtime backend is available as an opt-in variant:
 
 ```bash
 cargo build --release --no-default-features --features onnx   # ONNX backend instead
