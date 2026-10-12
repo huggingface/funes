@@ -960,7 +960,7 @@ impl Prefetch {
         }
     }
 
-    /// Queue `chunks` for the worker. A worker that has stopped stopped on an error, which this
+    /// Queue `chunks` for the worker. A worker that has stopped did so on an error, which this
     /// returns in place of the closed queue.
     fn send(&mut self, chunks: &[chunk::Chunk]) -> Result<()> {
         let rows = chunks.iter().map(|c| (c.id.clone(), c.text.clone())).collect();
