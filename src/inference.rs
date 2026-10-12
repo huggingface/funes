@@ -89,9 +89,6 @@ pub trait Embedder: Send {
         EMBED_BATCH
     }
 
-    /// Bring up whatever the next calls will run on, ahead of them.
-    fn warm_up(&mut self) {}
-
     fn embed(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         let prefix = self.model().prefixes().1;
         let prefixed: Vec<String> = texts.iter().map(|t| format!("{prefix}{t}")).collect();
@@ -207,14 +204,6 @@ impl Embedder for Hybrid {
             }
         }
         self.cpu()?.encode(texts)
-    }
-
-    fn warm_up(&mut self) {
-        if let Some(gpu) = self.gpu() {
-            if let Err(e) = gpu.warm() {
-                self.give_up_gpu(e);
-            }
-        }
     }
 
     /// The GPU's batch only once it is up: until a call has proved it, callers size their work for
