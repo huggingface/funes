@@ -43,7 +43,7 @@ fn user_agent_origin(current: Option<&str>) -> String {
     }
 
     if !added_funes {
-        origins.insert(0, FUNES_USER_AGENT_ORIGIN);
+        origins.push(FUNES_USER_AGENT_ORIGIN);
     }
     origins.join("; ")
 }
@@ -273,7 +273,7 @@ mod tests {
     fn user_agent_origin_keeps_caller_origins() {
         assert_eq!(
             user_agent_origin(Some("custom/2.0; deployment/private")),
-            format!("{FUNES_USER_AGENT_ORIGIN}; custom/2.0; deployment/private")
+            format!("custom/2.0; deployment/private; {FUNES_USER_AGENT_ORIGIN}")
         );
     }
 
