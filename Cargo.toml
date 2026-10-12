@@ -52,7 +52,7 @@ multiversion = { version = "0.8", optional = true }  # per-CPU clones of the vec
 
 # The `metal` backend's Objective-C bindings and its weight format.
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = { version = "0.6", optional = true }
+objc2 = { version = "0.6", optional = true, features = ["exception"] }  # exception: catch what MPSGraph raises
 objc2-foundation = { version = "0.3", optional = true }
 objc2-metal = { version = "0.3", optional = true }
 objc2-metal-performance-shaders = { version = "0.3", optional = true }

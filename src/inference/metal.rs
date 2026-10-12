@@ -10,10 +10,12 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
 use std::time::Instant;
 
 use anyhow::{anyhow, bail, Context, Result};
+use objc2::exception::{catch, Exception};
 use objc2::rc::{autoreleasepool, Retained};
 use objc2::runtime::ProtocolObject;
 use objc2::{sel, AnyThread};
@@ -128,7 +130,7 @@ impl MetalEmbedder {
 
     fn bucket(&mut self, b: usize, l: usize) -> Result<&Bucket> {
         if !self.buckets.contains_key(&(b, l)) {
-            let bucket = autoreleasepool(|_| self.compile(b, l))?;
+            let bucket = catch(AssertUnwindSafe(|| autoreleasepool(|_| self.compile(b, l)))).map_err(raised)??;
             self.buckets.insert((b, l), bucket);
         }
         Ok(&self.buckets[&(b, l)])
@@ -315,45 +317,57 @@ impl MetalEmbedder {
     fn forward(&mut self, ids: &[i32], mask: &[f32], b: usize, l: usize) -> Result<Vec<f32>> {
         self.bucket(b, l)?;
         let bucket = &self.buckets[&(b, l)];
-        autoreleasepool(|_| unsafe {
-            let tensor = |bytes: Vec<u8>, dims: &[usize], dtype: MPSDataType| {
-                MPSGraphTensorData::initWithDevice_data_shape_dataType(
-                    MPSGraphTensorData::alloc(),
-                    &self.device,
-                    &NSData::from_vec(bytes),
-                    &shape(dims),
-                    dtype,
-                )
-            };
-            let ids = tensor(
-                ids.iter().flat_map(|v| v.to_le_bytes()).collect(),
-                &[b * l],
-                MPSDataType::Int32,
-            );
-            let mask = tensor(f16_bytes(mask), &[b, l], MPSDataType::Float16);
-            let inputs: Vec<&MPSGraphTensorData> = bucket
-                .feeds
-                .iter()
-                .map(|f| match f {
-                    Feed::Ids => &*ids,
-                    Feed::Mask => &*mask,
-                    Feed::Weight(name) => &*self.weights[name].1,
-                })
-                .collect();
-            let results = bucket
-                .exec
-                .runWithMTLCommandQueue_inputsArray_resultsArray_executionDescriptor(
-                    &self.queue,
-                    &NSArray::from_slice(&inputs),
-                    None,
-                    None,
+        let run = || {
+            autoreleasepool(|_| unsafe {
+                let tensor = |bytes: Vec<u8>, dims: &[usize], dtype: MPSDataType| {
+                    MPSGraphTensorData::initWithDevice_data_shape_dataType(
+                        MPSGraphTensorData::alloc(),
+                        &self.device,
+                        &NSData::from_vec(bytes),
+                        &shape(dims),
+                        dtype,
+                    )
+                };
+                let ids = tensor(
+                    ids.iter().flat_map(|v| v.to_le_bytes()).collect(),
+                    &[b * l],
+                    MPSDataType::Int32,
                 );
-            let out = results.firstObject().context("the encoder returned nothing")?;
-            let mut rows = vec![0f32; b * H];
-            out.mpsndarray()
-                .readBytes_strideBytes(NonNull::new_unchecked(rows.as_mut_ptr().cast()), std::ptr::null_mut());
-            Ok(rows)
-        })
+                let mask = tensor(f16_bytes(mask), &[b, l], MPSDataType::Float16);
+                let inputs: Vec<&MPSGraphTensorData> = bucket
+                    .feeds
+                    .iter()
+                    .map(|f| match f {
+                        Feed::Ids => &*ids,
+                        Feed::Mask => &*mask,
+                        Feed::Weight(name) => &*self.weights[name].1,
+                    })
+                    .collect();
+                let results = bucket
+                    .exec
+                    .runWithMTLCommandQueue_inputsArray_resultsArray_executionDescriptor(
+                        &self.queue,
+                        &NSArray::from_slice(&inputs),
+                        None,
+                        None,
+                    );
+                let out = results.firstObject().context("the encoder returned nothing")?;
+                let mut rows = vec![0f32; b * H];
+                out.mpsndarray()
+                    .readBytes_strideBytes(NonNull::new_unchecked(rows.as_mut_ptr().cast()), std::ptr::null_mut());
+                Ok(rows)
+            })
+        };
+        catch(AssertUnwindSafe(run)).map_err(raised)?
+    }
+}
+
+/// An Objective-C exception as the error it stands for. MPSGraph raises one for a shape or an op
+/// the device rejects, and uncaught it would abort the process.
+fn raised(e: Option<Retained<Exception>>) -> anyhow::Error {
+    match e {
+        Some(e) => anyhow!("MPSGraph raised: {e}"),
+        None => anyhow!("MPSGraph raised an exception"),
     }
 }
 
