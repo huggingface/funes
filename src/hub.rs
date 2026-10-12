@@ -12,6 +12,42 @@ use std::collections::HashSet;
 use std::fs::File;
 use std::io::Read;
 
+const USER_AGENT_ORIGIN_ENV: &str = "HF_HUB_USER_AGENT_ORIGIN";
+const FUNES_USER_AGENT_ORIGIN: &str = concat!("funes/", env!("CARGO_PKG_VERSION"));
+
+/// Tag every Hub client the process creates, while retaining origins supplied by the caller or an
+/// agent integration. Call this once at process startup, before starting worker threads.
+pub fn configure_user_agent_origin() {
+    let current = std::env::var(USER_AGENT_ORIGIN_ENV).ok();
+    std::env::set_var(USER_AGENT_ORIGIN_ENV, user_agent_origin(current.as_deref()));
+}
+
+fn user_agent_origin(current: Option<&str>) -> String {
+    let mut origins = Vec::new();
+    let mut added_funes = false;
+
+    for origin in current
+        .unwrap_or_default()
+        .split(';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if origin == "funes" || origin.starts_with("funes/") {
+            if !added_funes {
+                origins.push(FUNES_USER_AGENT_ORIGIN);
+                added_funes = true;
+            }
+        } else {
+            origins.push(origin);
+        }
+    }
+
+    if !added_funes {
+        origins.insert(0, FUNES_USER_AGENT_ORIGIN);
+    }
+    origins.join("; ")
+}
+
 /// `<org>/<repo>[/…]` with no scheme and not a path (`/` `.` `~`) → an HF dataset shorthand.
 pub fn is_remote_shorthand(spec: &str) -> bool {
     !spec.starts_with(['/', '.', '~']) && spec.contains('/')
@@ -227,6 +263,31 @@ pub(crate) fn sha256_file(path: &Path) -> Result<[u8; 32]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_agent_origin_defaults_to_versioned_funes() {
+        assert_eq!(user_agent_origin(None), FUNES_USER_AGENT_ORIGIN);
+    }
+
+    #[test]
+    fn user_agent_origin_keeps_caller_origins() {
+        assert_eq!(
+            user_agent_origin(Some("custom/2.0; deployment/private")),
+            format!("{FUNES_USER_AGENT_ORIGIN}; custom/2.0; deployment/private")
+        );
+    }
+
+    #[test]
+    fn user_agent_origin_versions_and_deduplicates_integration_token() {
+        assert_eq!(
+            user_agent_origin(Some("funes; agent/claude; agent_version/2.1.296")),
+            format!("{FUNES_USER_AGENT_ORIGIN}; agent/claude; agent_version/2.1.296")
+        );
+        assert_eq!(
+            user_agent_origin(Some("funes/1.6.0; agent/hermes; funes")),
+            format!("{FUNES_USER_AGENT_ORIGIN}; agent/hermes")
+        );
+    }
 
     #[test]
     fn bucket_urls_split_into_owner_name_and_path() {

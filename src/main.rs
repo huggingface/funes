@@ -318,8 +318,12 @@ impl MemoryOpts {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    hub::configure_user_agent_origin();
+    tokio::runtime::Runtime::new()?.block_on(run())
+}
+
+async fn run() -> Result<()> {
     let cli = Cli::parse();
     // A read is where a user of an install that stopped capturing lands, so it carries the line
     // that says so — on stderr, so stdout stays the agent-format text the MCP tools return.
