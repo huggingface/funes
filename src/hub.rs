@@ -37,8 +37,6 @@ pub fn configure_user_agent_origin() {
     );
 }
 
-/// The version and the install id replace a bare or stale `funes` where the caller put it, else go
-/// last. An inherited `install/…` is a parent funes's: this process says whether it carries one.
 fn user_agent_origin(current: Option<&str>, install_id: Option<&str>) -> String {
     let install = install_id.map(|id| format!("install/{id}"));
     let mut origins = Vec::new();
@@ -48,7 +46,8 @@ fn user_agent_origin(current: Option<&str>, install_id: Option<&str>) -> String 
         .unwrap_or_default()
         .split(';')
         .map(str::trim)
-        .filter(|s| !s.is_empty())
+        // An install/… token was inherited from the funes that spawned this process.
+        .filter(|s| !s.is_empty() && !s.starts_with("install/"))
     {
         if origin == "funes" || origin.starts_with("funes/") {
             if !added_funes {
@@ -56,7 +55,7 @@ fn user_agent_origin(current: Option<&str>, install_id: Option<&str>) -> String 
                 origins.extend(install.as_deref());
                 added_funes = true;
             }
-        } else if !origin.starts_with("install/") {
+        } else {
             origins.push(origin);
         }
     }
