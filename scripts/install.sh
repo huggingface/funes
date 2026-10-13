@@ -11,6 +11,7 @@ set -eu
 
 REPO="huggingface/funes"
 BUCKET="huggingface/funes"
+INSTALL_REV=1  # bump when this script changes: its downloads name the revision
 BINDIR="${FUNES_INSTALL_DIR:-$HOME/.local/bin}"
 REQUESTED_VERSION="${FUNES_VERSION:-latest}"
 
@@ -40,15 +41,6 @@ case "$(uname -s)-$(uname -m)" in
         exit 1
         ;;
 esac
-
-if command -v curl >/dev/null 2>&1; then
-    fetch() { curl -fsSL "$1" -o "$2"; }
-elif command -v wget >/dev/null 2>&1; then
-    fetch() { wget -qO "$2" "$1"; }
-else
-    echo "funes: need curl or wget on PATH to download." >&2
-    exit 1
-fi
 
 valid_version() {
     case "$1" in
@@ -102,6 +94,22 @@ sha256_file() {
         return 1
     fi
 }
+
+# What every download says about where it comes from: this script's revision and the
+# platform, and the tag when one was pinned.
+user_agent="funes-install/$INSTALL_REV ($(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m))"
+if [ "$REQUESTED_VERSION" != latest ] && valid_version "${REQUESTED_VERSION#v}"; then
+    user_agent="$user_agent; requested/v${REQUESTED_VERSION#v}"
+fi
+
+if command -v curl >/dev/null 2>&1; then
+    fetch() { curl -fsSL -A "$user_agent" "$1" -o "$2"; }
+elif command -v wget >/dev/null 2>&1; then
+    fetch() { wget -qO "$2" -U "$user_agent" "$1"; }
+else
+    echo "funes: need curl or wget on PATH to download." >&2
+    exit 1
+fi
 
 mkdir -p "$BINDIR"
 tmpdir=$(mktemp -d "$BINDIR/.funes-install.XXXXXX") || {
