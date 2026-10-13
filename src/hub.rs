@@ -9,8 +9,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use hf_hub::{HFBucket, HFClient, HFError, RepoTypeDataset};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
-use std::fs::File;
-use std::io::Read;
+use std::fs::{File, OpenOptions};
+use std::io::{ErrorKind, Read, Write};
 use uuid::Uuid;
 
 const USER_AGENT_ORIGIN_ENV: &str = "HF_HUB_USER_AGENT_ORIGIN";
@@ -68,14 +68,22 @@ fn user_agent_origin(current: Option<&str>, install_id: Option<&str>) -> String 
 /// Read from `path`, or created there. None when it can't be kept: a fresh id per run would
 /// count one install many times.
 fn install_id(path: &Path) -> Option<String> {
-    let kept = std::fs::read_to_string(path).ok();
-    if let Some(id) = kept.and_then(|text| Uuid::parse_str(text.trim()).ok()) {
-        return Some(id.hyphenated().to_string());
+    if let Some(id) = read_install_id(path) {
+        return Some(id);
     }
     let id = Uuid::new_v4().hyphenated().to_string();
     std::fs::create_dir_all(path.parent()?).ok()?;
-    std::fs::write(path, format!("{id}\n")).ok()?;
-    Some(id)
+    // Exclusive, so processes starting together end up with one id: the first writer's.
+    match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(mut file) => file.write_all(format!("{id}\n").as_bytes()).ok().map(|()| id),
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => read_install_id(path),
+        Err(_) => None,
+    }
+}
+
+fn read_install_id(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    Some(Uuid::parse_str(text.trim()).ok()?.hyphenated().to_string())
 }
 
 /// `<org>/<repo>[/…]` with no scheme and not a path (`/` `.` `~`) → an HF dataset shorthand.
@@ -347,13 +355,25 @@ mod tests {
     }
 
     #[test]
-    fn install_id_replaces_one_that_is_not_a_uuid() {
+    fn install_id_ignores_a_file_that_is_not_a_uuid() {
         let home = tempfile::tempdir().unwrap();
         let path = home.path().join("install-id");
         std::fs::write(&path, "not an id\n").unwrap();
-        let id = install_id(&path).unwrap();
-        assert!(Uuid::parse_str(&id).is_ok());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), format!("{id}\n"));
+        assert_eq!(install_id(&path), None);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "not an id\n");
+    }
+
+    #[test]
+    fn concurrent_first_runs_share_one_install_id() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("install-id");
+        let ids: Vec<Option<String>> = std::thread::scope(|scope| {
+            let runs: Vec<_> = (0..20).map(|_| scope.spawn(|| install_id(&path))).collect();
+            runs.into_iter().map(|run| run.join().unwrap()).collect()
+        });
+        let kept = std::fs::read_to_string(&path).unwrap();
+        assert!(ids.iter().flatten().count() >= 1);
+        assert!(ids.iter().flatten().all(|id| format!("{id}\n") == kept));
     }
 
     #[test]
