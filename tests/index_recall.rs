@@ -151,13 +151,12 @@ async fn index_then_read_surface() {
     let listed = funes::commands::recall::sessions(funes::memory::Memory::local(), Default::default())
         .await
         .unwrap();
-    assert!(
-        listed.contains(&session) && listed.contains(" turns "),
-        "sessions should list the session with its turn count: {listed}"
-    );
-    assert!(
-        listed.trim_end().ends_with("1 sessions"),
-        "a complete listing closes with the total: {listed}"
+    assert_eq!(
+        listed,
+        format!(
+            "[2026-01-01T00:00:00Z → 2026-01-01T00:00:10Z] claude {workdir} 3 turns {session}\n  how do we parse transcripts into turns\n---\n1 sessions\n"
+        ),
+        "the sessions row is byte-stable"
     );
 
     // A limit of zero would render nothing, so it is an error that names the bounds.
