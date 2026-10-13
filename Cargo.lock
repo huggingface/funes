@@ -2662,6 +2662,7 @@ dependencies = [
  "tempfile",
  "tokenizers",
  "tokio",
+ "uuid",
  "walkdir",
 ]
 

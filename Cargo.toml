@@ -35,6 +35,7 @@ serde_json = { version = "1", features = ["preserve_order"] }  # parse JSONL; pr
 sha1 = "0.10"                    # chunk id = sha1(...)[:16]
 sha2 = "0.10"                    # verify release binaries before the installer/updater executes them
 hex = "0.4"
+uuid = { version = "1", features = ["v4"] }  # the anonymous install id in the User-Agent
 walkdir = "2"                    # recursive *.jsonl walk
 rmcp = { version = "3", features = ["server", "macros", "transport-io", "schemars"] }  # MCP stdio server
 tempfile = "3"                   # temp dir for the pre-publish secret scan; temp files/dirs in tests

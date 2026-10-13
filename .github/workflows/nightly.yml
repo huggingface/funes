@@ -7,6 +7,10 @@ on:
     - cron: "0 6 * * 1-5"
   workflow_dispatch:
 
+env:
+  # Each run installs into a fresh home: no install id on its Hub and bucket requests.
+  DO_NOT_TRACK: "1"
+
 permissions: {}
 
 jobs:

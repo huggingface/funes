@@ -48,6 +48,10 @@ chmod +x "$fakebin/uname" "$fakebin/curl"
 # The revision the script stamps on its downloads.
 rev=$(sed -n 's/^INSTALL_REV=\([0-9][0-9]*\).*/\1/p' scripts/install.sh)
 test -n "$rev"
+uuid_pattern='^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+
+# The installer keeps the install id under HOME, so every run gets one of its own.
+home="$work/home"
 
 # Mirrors install.sh's own hasher selection: macOS ships shasum, not sha256sum.
 sha256_file() {
@@ -79,8 +83,8 @@ done
 
 # Every (uname -s, uname -m) pair install.sh publishes an asset for, aliases
 # included. The fixtures are byte-identical, so the request log is what proves
-# the right asset was picked, and every download names the script revision
-# and the platform.
+# the right asset was picked. Every download names the script revision and the
+# platform, and the one install id the first run created under HOME.
 while read -r os arch asset; do
     install="$work/install-$os-$arch"
     requests="$work/requests-$os-$arch"
@@ -88,13 +92,15 @@ while read -r os arch asset; do
     mkdir -p "$install"
     : > "$requests"
     : > "$agents"
-    PATH="$fakebin:$PATH" FIXTURE_ROOT="$fixtures" FUNES_INSTALL_DIR="$install" \
+    PATH="$fakebin:$PATH" HOME="$home" FIXTURE_ROOT="$fixtures" FUNES_INSTALL_DIR="$install" \
         REQUESTS="$requests" USER_AGENTS="$agents" FAKE_OS="$os" FAKE_ARCH="$arch" \
         sh scripts/install.sh >/dev/null
     test "$("$install/funes" --version)" = "funes $version"
     grep -qx "v$version/$asset" "$requests"
     platform="$(printf '%s' "$os" | tr '[:upper:]' '[:lower:]')-$arch"
-    test "$(sort -u "$agents")" = "funes-install/$rev ($platform)"
+    id=$(cat "$home/.funes/install-id")
+    printf '%s\n' "$id" | grep -Eq "$uuid_pattern"
+    test "$(sort -u "$agents")" = "funes-install/$rev ($platform); install/$id"
 done <<TARGETS
 Linux x86_64 funes-x86_64-linux
 Linux aarch64 funes-aarch64-linux
@@ -102,21 +108,23 @@ Linux arm64 funes-aarch64-linux
 Darwin arm64 funes-arm64-apple-darwin
 Darwin aarch64 funes-arm64-apple-darwin
 TARGETS
+test "$(cat "$work"/agents-* | sed 's/.*install\///' | sort -u | wc -l)" -eq 1
 
-# A pinned install names the tag it asked for.
+# Opted out, a pinned install names the tag it asked for, and neither creates nor sends an id.
 pinned="$work/pinned"
 mkdir -p "$pinned/install"
 : > "$pinned/agents"
-PATH="$fakebin:$PATH" FIXTURE_ROOT="$fixtures" \
+PATH="$fakebin:$PATH" HOME="$pinned" DO_NOT_TRACK=1 FIXTURE_ROOT="$fixtures" \
     FUNES_INSTALL_DIR="$pinned/install" REQUESTS="$pinned/requests" \
     USER_AGENTS="$pinned/agents" FAKE_OS=Linux FAKE_ARCH=x86_64 \
     sh scripts/install.sh -v "v$version" >/dev/null
 test "$("$pinned/install/funes" --version)" = "funes $version"
 test "$(sort -u "$pinned/agents")" = "funes-install/$rev (linux-x86_64); requested/v$version"
+test ! -e "$pinned/.funes"
 
 # A platform with no prebuilt asset stops before it touches the install dir.
 unsupported="$work/unsupported"
-if PATH="$fakebin:$PATH" FIXTURE_ROOT="$fixtures" FUNES_INSTALL_DIR="$unsupported" \
+if PATH="$fakebin:$PATH" HOME="$home" FIXTURE_ROOT="$fixtures" FUNES_INSTALL_DIR="$unsupported" \
     REQUESTS="$work/requests-unsupported" USER_AGENTS="$work/agents-unsupported" \
     FAKE_OS=Linux FAKE_ARCH=riscv64 \
     sh scripts/install.sh >/dev/null 2>&1; then
@@ -136,7 +144,7 @@ touch "$EXECUTED"
 echo 'funes 9.9.9'
 SH
 
-if PATH="$fakebin:$PATH" FIXTURE_ROOT="$fixtures" FUNES_INSTALL_DIR="$sentinel" \
+if PATH="$fakebin:$PATH" HOME="$home" FIXTURE_ROOT="$fixtures" FUNES_INSTALL_DIR="$sentinel" \
     REQUESTS="$work/requests-tamper" USER_AGENTS="$work/agents-tamper" \
     FAKE_OS=Linux FAKE_ARCH=x86_64 \
     EXECUTED="$executed" sh scripts/install.sh >/dev/null 2>&1; then

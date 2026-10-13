@@ -65,6 +65,13 @@ platform (`--force` reinstalls the current one), then brings your agent integrat
 release; `funes status` tells you when a newer release is out. To build it yourself, see
 [Building from source](#building-from-source).
 
+The installer and the binary name themselves to the Hub: the User-Agent of their Hugging Face
+requests carries the funes version and an anonymous install id. The id is a random UUID kept in
+`~/.funes/install-id`, created by the installer or the first run. It derives from nothing (not your
+hostname, user, hardware, or Hugging Face account) and only lets the project count installs and
+active installs, local-only ones included. It goes nowhere but the Hub. Set `DO_NOT_TRACK=1` or
+`FUNES_NO_TELEMETRY=1` to leave it out. Deleting the file starts a new one.
+
 ## Works across your agents (and models)
 
 Your memory isn't tied to one tool. Because Claude Code, Codex, pi, and Hermes all index into a single

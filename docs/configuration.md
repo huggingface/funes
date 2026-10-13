@@ -26,8 +26,11 @@ benchmarks, and tests because it leaves the normal local memory untouched.
 The memory and indexing state are derived from the original agent transcripts and can be rebuilt,
 and push receipts can be recreated by running `funes push <memory>`.
 
-`FUNES_HOME` does **not** relocate agent configuration, installed integrations, or model caches.
-Those paths must remain stable after an agent records them.
+`FUNES_HOME` does **not** relocate agent configuration, installed integrations, model caches, or
+the install id. Those paths must remain stable after an agent records them, and the install id
+(`~/.funes/install-id`, a random UUID the installer or the first run creates) names the install,
+not a memory. funes sends it in the User-Agent of its Hub requests. The [README](../README.md#get-funes)
+says what it is for and how to opt out.
 
 ## Agent integration files
 
@@ -86,7 +89,8 @@ file-grained cache design and cold-versus-warm behavior.
 | `HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN`, `HUGGINGFACE_TOKEN` | Hugging Face authentication, in the precedence shown above. |
 | `HF_HOME` | Hugging Face home, including the default backend's model cache. |
 | `HF_HUB_CACHE` | Hugging Face Hub file-cache location, including cached remote-memory files. |
-| `HF_HUB_USER_AGENT_ORIGIN` | Origin hf-hub appends to the User-Agent of every Hub request. funes adds `funes/<version>` to it, keeping an origin already set, and the agent integrations add `agent/<harness>`. |
+| `HF_HUB_USER_AGENT_ORIGIN` | Origin hf-hub appends to the User-Agent of every Hub request. funes adds `funes/<version>` and `install/<id>` to it, keeping an origin already set, and the agent integrations add `agent/<harness>`. |
+| `DO_NOT_TRACK`, `FUNES_NO_TELEMETRY` | Either set to anything but `0` or `false` keeps the install id out of the User-Agent, in the installer and the binary. |
 | `NO_COLOR` | Disable ANSI color in human-facing terminal output. |
 | `COLUMNS` | Human-rendering width, clamped to 40–120 columns. |
 

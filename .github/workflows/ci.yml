@@ -21,6 +21,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
+  # The tests' Hub and bucket requests are not installs: no install id on them.
+  DO_NOT_TRACK: "1"
 
 permissions: {}
 
