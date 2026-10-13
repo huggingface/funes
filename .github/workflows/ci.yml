@@ -21,8 +21,6 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
-  # The tests' Hub and bucket requests are not installs: no install id on them.
-  DO_NOT_TRACK: "1"
 
 permissions: {}
 
@@ -151,6 +149,8 @@ jobs:
       # The push round-trip test awaits one large combined future (embed + Xet upload + lance);
       # it overflows the default ~2 MB test-thread stack under the CI toolchain. Give it headroom.
       RUST_MIN_STACK: "16777216"
+      # The tests' Hub and bucket requests are not installs: no install id on them.
+      DO_NOT_TRACK: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -224,6 +224,7 @@ jobs:
     timeout-minutes: 45
     env:
       RUST_MIN_STACK: "16777216"
+      DO_NOT_TRACK: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
