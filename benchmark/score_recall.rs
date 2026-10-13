@@ -88,7 +88,7 @@ async fn revision(memory: &Memory) -> Result<String> {
 }
 
 fn dash(rank: Option<usize>) -> String {
-    rank.map_or_else(|| "-".to_string(), |r| r.to_string())
+    rank.map_or_else(|| "-".to_string(), |r| (r + 1).to_string())
 }
 
 fn row(label: &str, ranks: &[Option<usize>]) {
