@@ -86,6 +86,7 @@ file-grained cache design and cold-versus-warm behavior.
 | `HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN`, `HUGGINGFACE_TOKEN` | Hugging Face authentication, in the precedence shown above. |
 | `HF_HOME` | Hugging Face home, including the default backend's model cache. |
 | `HF_HUB_CACHE` | Hugging Face Hub file-cache location, including cached remote-memory files. |
+| `HF_HUB_USER_AGENT_ORIGIN` | Origin hf-hub appends to the User-Agent of every Hub request. funes adds `funes/<version>` to it, keeping an origin already set, and the agent integrations add `agent/<harness>`. |
 | `NO_COLOR` | Disable ANSI color in human-facing terminal output. |
 | `COLUMNS` | Human-rendering width, clamped to 40–120 columns. |
 
