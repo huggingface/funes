@@ -97,16 +97,6 @@ sha256_file() {
     fi
 }
 
-telemetry_opted_out() {
-    for value in "${DO_NOT_TRACK:-}" "${FUNES_NO_TELEMETRY:-}"; do
-        case "$value" in
-            '' | 0 | false) ;;
-            *) return 0 ;;
-        esac
-    done
-    return 1
-}
-
 # The id in $HOME/.funes/install-id, created here when there is none: a random UUID the
 # binary reuses, so an install and its later activity count as one. The kernel's generator
 # comes first: where uuidgen finds no good randomness it falls back to a time-based UUID,
@@ -134,7 +124,7 @@ user_agent="funes-install/$INSTALL_REV ($(uname -s | tr '[:upper:]' '[:lower:]')
 if [ "$REQUESTED_VERSION" != latest ] && valid_version "${REQUESTED_VERSION#v}"; then
     user_agent="$user_agent; requested/v${REQUESTED_VERSION#v}"
 fi
-if ! telemetry_opted_out && token=$(install_id); then
+if [ -z "${DO_NOT_TRACK:-}${FUNES_NO_TELEMETRY:-}" ] && token=$(install_id); then
     user_agent="$user_agent; install/$token"
 fi
 

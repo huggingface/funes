@@ -15,31 +15,30 @@ use uuid::Uuid;
 
 const USER_AGENT_ORIGIN_ENV: &str = "HF_HUB_USER_AGENT_ORIGIN";
 const FUNES_USER_AGENT_ORIGIN: &str = concat!("funes/", env!("CARGO_PKG_VERSION"));
-/// Either set to anything but `0` or `false` keeps the install id out of the User-Agent: the
-/// `DO_NOT_TRACK` convention, and a switch that reaches funes alone.
-const TELEMETRY_OPT_OUT_ENVS: [&str; 2] = ["DO_NOT_TRACK", "FUNES_NO_TELEMETRY"];
 /// The anonymous install id, `~/.funes/install-id`, fixed rather than under `$FUNES_HOME`: it
 /// names the install, not a memory, and install.sh creates it before any home exists.
 const INSTALL_ID_FILE: &str = ".funes/install-id";
 
 /// Tag every Hub client the process creates, while retaining origins supplied by the caller or an
 /// agent integration. Call this once at process startup, before starting worker threads.
+/// `DO_NOT_TRACK` or `FUNES_NO_TELEMETRY` set keeps the install id out.
 pub fn configure_user_agent_origin() {
     let current = std::env::var(USER_AGENT_ORIGIN_ENV).ok();
-    let install = if telemetry_opted_out(|key| std::env::var(key).ok()) {
-        None
-    } else {
-        install_id_path().and_then(|path| install_id(&path))
-    };
+    let opted_out = ["DO_NOT_TRACK", "FUNES_NO_TELEMETRY"]
+        .iter()
+        .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()));
+    let install = (!opted_out)
+        .then(|| std::env::var_os("HOME"))
+        .flatten()
+        .and_then(|home| install_id(&PathBuf::from(home).join(INSTALL_ID_FILE)));
     std::env::set_var(
         USER_AGENT_ORIGIN_ENV,
         user_agent_origin(current.as_deref(), install.as_deref()),
     );
 }
 
-/// funes's own tokens, the version and the install id, replace a bare or stale `funes` where the
-/// caller put it, else go last. An inherited `install/…` is a parent funes's: this process says
-/// whether it carries one.
+/// The version and the install id replace a bare or stale `funes` where the caller put it, else go
+/// last. An inherited `install/…` is a parent funes's: this process says whether it carries one.
 fn user_agent_origin(current: Option<&str>, install_id: Option<&str>) -> String {
     let install = install_id.map(|id| format!("install/{id}"));
     let mut origins = Vec::new();
@@ -69,34 +68,16 @@ fn user_agent_origin(current: Option<&str>, install_id: Option<&str>) -> String 
     origins.join("; ")
 }
 
-/// Pure core of the opt-out, split out like [`token_from`] so it's testable without mutating
-/// process env.
-fn telemetry_opted_out(env: impl Fn(&str) -> Option<String>) -> bool {
-    TELEMETRY_OPT_OUT_ENVS
-        .iter()
-        .filter_map(|key| env(key))
-        .any(|value| !matches!(value.trim(), "" | "0" | "false"))
-}
-
-fn install_id_path() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(INSTALL_ID_FILE))
-}
-
 /// The id kept in `path`, created on the first call: a random UUID that says nothing about the
 /// host. None when the file can't be kept (a fresh id per run would count one install many times).
 fn install_id(path: &Path) -> Option<String> {
-    let kept = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|text| Uuid::parse_str(text.trim()).ok());
-    if let Some(id) = kept {
+    let kept = std::fs::read_to_string(path).ok();
+    if let Some(id) = kept.and_then(|text| Uuid::parse_str(text.trim()).ok()) {
         return Some(id.hyphenated().to_string());
     }
     let id = Uuid::new_v4().hyphenated().to_string();
-    let dir = path.parent()?;
-    std::fs::create_dir_all(dir).ok()?;
-    let tmp = dir.join(format!(".install-id.funes-tmp{}", std::process::id()));
-    std::fs::write(&tmp, format!("{id}\n")).ok()?;
-    std::fs::rename(&tmp, path).ok()?;
+    std::fs::create_dir_all(path.parent()?).ok()?;
+    std::fs::write(path, format!("{id}\n")).ok()?;
     Some(id)
 }
 
@@ -363,9 +344,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let path = home.path().join(INSTALL_ID_FILE);
         let id = install_id(&path).unwrap();
-        let parsed = Uuid::parse_str(&id).unwrap();
-        assert_eq!(parsed.get_version(), Some(uuid::Version::Random));
-        assert_eq!(parsed.hyphenated().to_string(), id);
+        assert_eq!(Uuid::parse_str(&id).unwrap().get_version(), Some(uuid::Version::Random));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), format!("{id}\n"));
         assert_eq!(install_id(&path).as_deref(), Some(id.as_str()));
     }
@@ -386,20 +365,6 @@ mod tests {
         let file = dir.path().join("file");
         std::fs::write(&file, "").unwrap();
         assert_eq!(install_id(&file.join("install-id")), None);
-    }
-
-    #[test]
-    fn telemetry_opt_out_honours_either_variable_unless_it_says_no() {
-        let env = |vars: &'static [(&'static str, &'static str)]| {
-            move |key: &str| vars.iter().find(|(k, _)| *k == key).map(|(_, v)| v.to_string())
-        };
-        assert!(!telemetry_opted_out(env(&[])));
-        assert!(telemetry_opted_out(env(&[("DO_NOT_TRACK", "1")])));
-        assert!(telemetry_opted_out(env(&[("FUNES_NO_TELEMETRY", "true")])));
-        assert!(!telemetry_opted_out(env(&[
-            ("DO_NOT_TRACK", "0"),
-            ("FUNES_NO_TELEMETRY", "false")
-        ])));
     }
 
     #[test]
