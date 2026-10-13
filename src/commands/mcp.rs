@@ -282,7 +282,7 @@ impl Funes {
     }
 
     #[tool(
-        description = "Enumerate a memory's sessions, oldest first. Metadata only — date, harness, repo, turn count, id, and the prompt each opened with, which is the ask a session started from, not what it became. Filter by repo or date to get the session ids the other verbs take; a whole memory can run to thousands of rows."
+        description = "Enumerate a memory's sessions, oldest first. Metadata only — when it started and when its last indexed turn was, harness, repo, turn count, id, and the prompt each opened with, which is the ask a session started from, not what it became. Filter by repo or date to get the session ids the other verbs take; a whole memory can run to thousands of rows."
     )]
     async fn sessions(
         &self,

@@ -156,7 +156,36 @@ async fn a_tracker_thread_indexes_and_lists_without_agent_roles() {
     let listing = recall::sessions(Memory::local(), filter).await.unwrap();
     assert!(listing.contains("gh/huggingface/transformers#31234"), "{listing}");
     assert!(
+        listing.contains("[2026-06-02T14:03:55Z → 2026-06-03T09:15:00Z] github"),
+        "a row spans the first stamp to the last indexed turn's:\n{listing}"
+    );
+    assert!(
         listing.contains("**@someone** opened: Static cache"),
         "the thread opens on its contributor's text:\n{listing}"
+    );
+}
+
+#[tokio::test]
+async fn a_row_closes_on_the_highest_seq_not_the_latest_stamp() {
+    let _one_at_a_time = HOME.lock().await;
+    let mut turns = turns_of("funes_jsonl/valid.funes.jsonl");
+    let first_ts = turns[0].ts.clone();
+    let highest = turns.iter().map(|t| t.seq).max().unwrap();
+    let last = turns.last_mut().unwrap();
+    assert_eq!(last.seq, highest);
+    // Stamped like the first turn, so the latest stamp belongs to an earlier turn.
+    last.ts = first_ts.clone();
+    assert!(turns.iter().any(|t| t.ts > first_ts));
+
+    let out = tempfile::tempdir().unwrap();
+    let path = out.path().join("backdated.funes.jsonl");
+    write_turns(&path, &turns);
+    let (_home, _rows) = index_fresh(&path).await;
+    let listing = recall::sessions(Memory::local(), SessionFilter::default())
+        .await
+        .unwrap();
+    assert!(
+        listing.contains(&format!("[{first_ts} → {first_ts}]")),
+        "the span closes on the highest seq's stamp:\n{listing}"
     );
 }

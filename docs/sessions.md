@@ -18,10 +18,11 @@ is in it, and [`funes get`](recall.md#reading-turns-with-get) reads the turns th
 funes sessions [--repo <owner/name>] [--since <date>] [--until <date>] [--limit <n>] [--offset <n>] [--memory <label>]
 ```
 
-`sessions` lists what a memory holds, oldest first: date, harness, source repo (or the working
-directory when the checkout didn't resolve), turn count, session id, and the prompt the session
-opened with. That opening prompt is what each session was *for*, so a listing is usually enough to
-pick the one you want without reading any of it.
+`sessions` lists what a memory holds, oldest first: its span (the first turn's timestamp to the
+last indexed turn's), harness, source repo (or the working directory when the checkout didn't
+resolve), turn count, session id, and the prompt the session opened with. That opening prompt is
+what each session was *for*, so a listing is usually enough to pick the one you want without
+reading any of it.
 
 | flag | default | effect |
 |---|---|---|

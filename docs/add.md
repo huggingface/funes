@@ -190,11 +190,12 @@ its content. A file funes cannot read stays, so converter failures remain visibl
 That leaves the memory as the only copy of the converted turns. Rebuilding one from scratch is
 `funes add <agent>` again: its seed re-converts the agent's own history.
 
-What a producer owes the spool: write, never read back — funes may have drained what you wrote, so
-keep your own record if you need one; one file per session, named from the session id, so a re-emit
-overwrites its own file; write a temporary name in the same directory and rename it into place, with
-the temporary name off `.jsonl` (see [funes-jsonl.md](funes-jsonl.md)). The hook then runs
-`funes index --harness <id>`, one budgeted step over the spool.
+What a producer owes the spool: write, never read back — funes may have drained what you wrote,
+and what it holds `funes sessions` says, each row closing on the last indexed turn's timestamp, so
+a seed can skip a session whose source has not grown since; one file per session, named from the
+session id, so a re-emit overwrites its own file; write a temporary name in the same directory and
+rename it into place, with the temporary name off `.jsonl` (see [funes-jsonl.md](funes-jsonl.md)).
+The hook then runs `funes index --harness <id>`, one budgeted step over the spool.
 
 Re-run `funes add <agent> <memory>` any time to change the memory or refresh the setup — it's
 idempotent. On a new host, re-running it once clears the wrong-memory guard for that machine, as

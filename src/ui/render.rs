@@ -178,7 +178,8 @@ fn one_line(s: &str, max: usize) -> String {
 }
 
 /// The agent `sessions` format: a row per session, oldest first, each carrying the prompt it opened
-/// with on an indented second line, closed by the total. The session id is printed whole — it is the
+/// with on an indented second line, closed by the total. A row is the session's span, first stamp
+/// to last indexed turn, then harness, origin, turn count and id. The id is printed whole — it is the
 /// payload here, not a pointer into a hint line. `total` is every session the filter matched and
 /// `offset` where this page started, so the trailer can name the offset that continues.
 /// Byte-stable.
@@ -192,8 +193,9 @@ pub fn sessions_agent(note: &str, sessions: &[Session], total: usize, offset: us
         let mut row = String::new();
         let _ = writeln!(
             row,
-            "[{}] {} {} {} turns {}",
-            s.date(),
+            "[{} → {}] {} {} {} turns {}",
+            s.ts,
+            s.last_ts,
             s.harness,
             s.origin(),
             s.turns,
@@ -426,6 +428,7 @@ mod tests {
         Session {
             session_id: format!("session-{i:03}"),
             ts: "2026-06-19T01:29:59.000Z".to_string(),
+            last_ts: "2026-06-19T01:30:59.000Z".to_string(),
             workdir: "/home/u/funes".to_string(),
             harness: "codex".to_string(),
             repo: format!("owner/{}", "r".repeat(100)),

@@ -113,6 +113,8 @@ pub struct Session {
     pub session_id: String,
     /// First timestamp in the session.
     pub ts: String,
+    /// Timestamp of the last indexed turn, the one with the highest seq.
+    pub last_ts: String,
     pub workdir: String,
     pub harness: String,
     /// The session's source repo(s) as `owner/name`, space-joined; empty when unresolvable.
@@ -126,11 +128,6 @@ pub struct Session {
 }
 
 impl Session {
-    /// The `YYYY-MM-DD` the session started.
-    pub fn date(&self) -> &str {
-        day(&self.ts)
-    }
-
     /// Best available provenance: the repo when the checkout resolved, else the working directory.
     pub fn origin(&self) -> &str {
         self.repo.split_whitespace().next().unwrap_or(&self.workdir)
@@ -1157,7 +1154,13 @@ async fn scan_sessions(ds: &Dataset) -> Result<Vec<Session>> {
     }
     let batches = dataset::scan_rows(ds, &cols, None, None).await?;
 
-    let mut by_id: HashMap<String, (Session, HashSet<(i64, String)>)> = HashMap::new();
+    // A session's fold: its distinct turns and the highest seq seen, which names the last one.
+    struct Fold {
+        session: Session,
+        turns: HashSet<(i64, String)>,
+        last_seq: i64,
+    }
+    let mut by_id: HashMap<String, Fold> = HashMap::new();
     for batch in &batches {
         let (sid, ts, wd, turn, harness, repo) = (
             scol(batch, "session_id"),
@@ -1170,34 +1173,41 @@ async fn scan_sessions(ds: &Dataset) -> Result<Vec<Session>> {
         let seq = icol(batch, "seq");
         for i in 0..batch.num_rows() {
             let id = sval(sid, i);
-            let (session, turns) = by_id.entry(id.clone()).or_insert_with(|| {
-                (
-                    Session {
-                        session_id: id,
-                        ts: sval(ts, i),
-                        workdir: sval(wd, i),
-                        harness: sval(harness, i),
-                        repo: sval(repo, i),
-                        turns: 0,
-                        first_prompt: String::new(),
-                    },
-                    HashSet::new(),
-                )
+            let row_seq = ival(seq, i);
+            let fold = by_id.entry(id.clone()).or_insert_with(|| Fold {
+                session: Session {
+                    session_id: id,
+                    ts: sval(ts, i),
+                    last_ts: sval(ts, i),
+                    workdir: sval(wd, i),
+                    harness: sval(harness, i),
+                    repo: sval(repo, i),
+                    turns: 0,
+                    first_prompt: String::new(),
+                },
+                turns: HashSet::new(),
+                last_seq: row_seq,
             });
             // Rows arrive in scan order, not time order, so the first one seen isn't the earliest.
             let row_ts = sval(ts, i);
-            if row_ts < session.ts {
-                session.ts = row_ts;
+            if row_ts < fold.session.ts {
+                fold.session.ts = row_ts.clone();
             }
-            turns.insert((ival(seq, i), sval(turn, i)));
+            // The last turn is the highest seq, whatever its stamp: a source may stamp its turns
+            // out of order.
+            if row_seq > fold.last_seq {
+                fold.last_seq = row_seq;
+                fold.session.last_ts = row_ts;
+            }
+            fold.turns.insert((row_seq, sval(turn, i)));
         }
     }
 
     let mut out: Vec<Session> = by_id
         .into_values()
-        .map(|(session, turns)| Session {
-            turns: turns.len(),
-            ..session
+        .map(|fold| Session {
+            turns: fold.turns.len(),
+            ..fold.session
         })
         .collect();
     out.sort_by(|a, b| (&a.ts, &a.session_id).cmp(&(&b.ts, &b.session_id)));
