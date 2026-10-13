@@ -87,7 +87,7 @@ file-grained cache design and cold-versus-warm behavior.
 | `HF_HOME` | Hugging Face home, including the default backend's model cache. |
 | `HF_HUB_CACHE` | Hugging Face Hub file-cache location, including cached remote-memory files. |
 | `HF_HUB_USER_AGENT_ORIGIN` | Origin hf-hub appends to the User-Agent of every Hub request. funes adds `funes/<version>` and `install/<id>` to it, keeping an origin already set, and the agent integrations add `agent/<harness>`. |
-| `DO_NOT_TRACK`, `FUNES_NO_TELEMETRY` | Either set keeps the install id out of the User-Agent, in the installer and the binary. |
+| `DO_NOT_TRACK`, `FUNES_NO_TELEMETRY` | Either set keeps the install id out of the User-Agent. |
 | `NO_COLOR` | Disable ANSI color in human-facing terminal output. |
 | `COLUMNS` | Human-rendering width, clamped to 40–120 columns. |
 

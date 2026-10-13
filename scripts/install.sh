@@ -7,8 +7,6 @@
 # onto your PATH. Flags (pass after `sh -s --` when piping):
 #   -b <dir>   install dir          (default: $HOME/.local/bin; env: FUNES_INSTALL_DIR)
 #   -v <tag>   release tag to fetch (default: latest;           env: FUNES_VERSION)
-# Downloads carry an anonymous install id, kept in $HOME/.funes/install-id and reused
-# by the binary. DO_NOT_TRACK=1 or FUNES_NO_TELEMETRY=1 leaves it out (see the README).
 set -eu
 
 REPO="huggingface/funes"
@@ -97,35 +95,11 @@ sha256_file() {
     fi
 }
 
-# The id in $HOME/.funes/install-id, created here when there is none: a random UUID the
-# binary reuses, so an install and its later activity count as one. The kernel's generator
-# comes first: where uuidgen finds no good randomness it falls back to a time-based UUID,
-# which names the hardware.
-install_id() {
-    file="$HOME/.funes/install-id"
-    if token=$(head -n 1 "$file" 2>/dev/null) &&
-       printf '%s\n' "$token" | grep -Eq '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'; then
-        echo "$token"
-        return 0
-    fi
-    if [ -r /proc/sys/kernel/random/uuid ]; then
-        token=$(cat /proc/sys/kernel/random/uuid)
-    elif command -v uuidgen >/dev/null 2>&1; then
-        token=$(uuidgen | tr '[:upper:]' '[:lower:]')
-    else
-        return 1
-    fi
-    mkdir -p "$HOME/.funes" && printf '%s\n' "$token" > "$file" && echo "$token"
-}
-
 # What every download says about where it comes from: this script's revision and the
-# platform, the tag when one was pinned, and the install id unless opted out.
+# platform, and the tag when one was pinned.
 user_agent="funes-install/$INSTALL_REV ($(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m))"
 if [ "$REQUESTED_VERSION" != latest ] && valid_version "${REQUESTED_VERSION#v}"; then
     user_agent="$user_agent; requested/v${REQUESTED_VERSION#v}"
-fi
-if [ -z "${DO_NOT_TRACK:-}${FUNES_NO_TELEMETRY:-}" ] && token=$(install_id); then
-    user_agent="$user_agent; install/$token"
 fi
 
 if command -v curl >/dev/null 2>&1; then
