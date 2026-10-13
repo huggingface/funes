@@ -15,13 +15,11 @@ use uuid::Uuid;
 
 const USER_AGENT_ORIGIN_ENV: &str = "HF_HUB_USER_AGENT_ORIGIN";
 const FUNES_USER_AGENT_ORIGIN: &str = concat!("funes/", env!("CARGO_PKG_VERSION"));
-/// The anonymous install id, `~/.funes/install-id`, fixed rather than under `$FUNES_HOME`: it
-/// names the install, not a memory, and install.sh creates it before any home exists.
+/// Not under `$FUNES_HOME`: the id names the install, not a memory.
 const INSTALL_ID_FILE: &str = ".funes/install-id";
 
 /// Tag every Hub client the process creates, while retaining origins supplied by the caller or an
 /// agent integration. Call this once at process startup, before starting worker threads.
-/// `DO_NOT_TRACK` or `FUNES_NO_TELEMETRY` set keeps the install id out.
 pub fn configure_user_agent_origin() {
     let current = std::env::var(USER_AGENT_ORIGIN_ENV).ok();
     let opted_out = ["DO_NOT_TRACK", "FUNES_NO_TELEMETRY"]
@@ -67,8 +65,8 @@ fn user_agent_origin(current: Option<&str>, install_id: Option<&str>) -> String 
     origins.join("; ")
 }
 
-/// The id kept in `path`, created on the first call: a random UUID that says nothing about the
-/// host. None when the file can't be kept (a fresh id per run would count one install many times).
+/// Read from `path`, or created there. None when it can't be kept: a fresh id per run would
+/// count one install many times.
 fn install_id(path: &Path) -> Option<String> {
     let kept = std::fs::read_to_string(path).ok();
     if let Some(id) = kept.and_then(|text| Uuid::parse_str(text.trim()).ok()) {

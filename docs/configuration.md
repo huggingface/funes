@@ -27,10 +27,7 @@ The memory and indexing state are derived from the original agent transcripts an
 and push receipts can be recreated by running `funes push <memory>`.
 
 `FUNES_HOME` does **not** relocate agent configuration, installed integrations, model caches, or
-the install id. Those paths must remain stable after an agent records them, and the install id
-(`~/.funes/install-id`, a random UUID the installer or the first run creates) names the install,
-not a memory. funes sends it in the User-Agent of its Hub requests. The [README](../README.md#get-funes)
-says what it is for and how to opt out.
+the install id (`~/.funes/install-id`). Those paths must remain stable after an agent records them.
 
 ## Agent integration files
 
