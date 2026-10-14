@@ -32,9 +32,9 @@ It also performs the one-time bootstrap steps, so nothing is left to run by hand
   your local memory shares no chunks with is refused off a terminal (the wrong-memory guard, below),
   so it must be interactive — `funes add` handles it.
 
-Re-run `funes add <agent> <org>/<repo>` any time to change the memory or refresh the setup — it's
-idempotent, and it brings an install an older funes made forward too; [add.md](add.md) says what
-it clears and when to remove first.
+Run `funes bind <org>/<repo>` any time to change the memory, every installed agent following, and
+re-run `funes add <agent>` to refresh one setup — it's idempotent, and it brings an install an older
+funes made forward too; [add.md](add.md) says what it clears and when to remove first.
 
 ## How it's wired
 

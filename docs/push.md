@@ -69,7 +69,7 @@ $ echo $?
 ```
 
 A hold-back is easy to miss when the hooks push in the background, so `funes status` scans this
-host's pending rows for each bound memory the same way and reports what a push would hold back, until a
+host's pending rows for the bound memory the same way and reports what a push would hold back, until a
 scrub lets them publish.
 
 `funes push` and `funes scrub` refuse to run unscanned when TruffleHog is unavailable. See the
@@ -128,16 +128,15 @@ against your criteria and reports them, and the person publishing passes that li
 
 ## Inspecting a memory: `status`
 
-`funes status` shows your local memory, then each memory your agents are bound to (by
-[`funes add <agent> <memory>`](add.md)), naming the agents bound to it, and an update check. An
-agent installed with no memory recorded — placed by hand, or by a funes older than 1.4.0 — is named
-at the end; if it publishes somewhere, `funes add <agent> <memory>` records where.
+`funes status` shows your local memory, then the memory this host is bound to (by
+[`funes bind`](add.md#binding-a-memory)), and an update check. A host set up by a funes from
+before the binding is told what its agents were bound to, and what binds it.
 
 `funes status` tells you whether recall is reading your own memory yet, and whether a newer funes
 release is out. Its local-index sections distinguish chunks awaiting embedding from source
 sessions not yet indexed. Run `funes index` to continue either.
 
-For each bound memory, one `local push` line says either that this host is up to date or how many
+For the bound memory, one `local push` line says either that this host is up to date or how many
 local sessions are pending. This comes from a per-remote receipt kept on this host, so sessions
 contributed by other hosts do not distort the result and status never scans the remote to compute
 it. Run `funes push <memory>` once to initialize the receipt for an existing memory.

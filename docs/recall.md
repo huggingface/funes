@@ -30,15 +30,15 @@ Each hit carries its provenance and a ready-to-run drill-down line:
 
 ```
 [<ts>] <harness> <workdir>/<session8> <block_type>  score=<s.sss>
-  → get <session_id> --from <seq> --to <seq> --memory <label>
+  → get <session_id> --from <seq> --to <seq>[ --memory <memory>]
 <the full chunk text>
   ~ [<role> <block_type> seq<N>] <neighbor chunk, first 160 chars>
 ---
 ```
 
-The `→ get` line carries exactly the arguments `get` wants, including the memory the hit was read
-from — the local one for a turn an agent's bound memory is still owed (see
-[add.md](add.md#other-mcp-clients)). `no results` prints when nothing matched. The exact shape is
+The `→ get` line carries exactly the arguments `get` wants, `--memory` included when the call
+named one, as it named it, so the drill-down reads what the search read; a call naming none gets
+a bare line, and following it reads the same way. `no results` prints when nothing matched. The exact shape is
 stable — a contract, not a presentation; don't parse it loosely.
 The score is the cross-encoder's probability when the pool was reranked, the fused rank score
 otherwise (see `--candidates` below).
@@ -54,7 +54,7 @@ otherwise (see `--candidates` below).
 | `--role` | — | restrict to one role, as the turns carry it (an agent's turns say `user \| assistant \| tool \| system`) |
 | `--harness` | — | restrict to one harness facet, as the turns carry it (`claude` also matches the older `claude_code`) |
 | `--since` / `--until` | — | restrict to turns on or after / on or before a `YYYY-MM-DD` |
-| `--memory` | local | the memory to read (see below) |
+| `--memory` | the bound memory, else local | the memory to read, as it stands (see below) |
 
 The MCP `recall` tool takes the same parameters and defaults. Each hit is a passage to read, so
 `k` is what a call costs in tokens and `candidates` is how far it looks. Reading more hits is the
@@ -72,7 +72,8 @@ funes get <session_id> [--from <seq>] [--to <seq>] [--memory <label>]
 ```
 
 `get` returns a range of a session's turns, with their splits reassembled into whole blocks. Pass the
-same `--memory` the recall hint named, so the drill-down reads the memory the hit came from. The
+`--memory` the recall hint carries, or none when it carries none, so the drill-down reads what the
+search read. The
 output is the agent format, the same in a terminal as when piped.
 
 Turns are addressed by `seq`, the session's own dense counter over its turns, so `--from 40 --to 60`
@@ -102,8 +103,11 @@ when the id is unknown.
 
 ## Reading a different memory
 
-`--memory` takes an `<org>/<repo>` shorthand, a full `hf://…` URI, a local path, or `local`. This is
-how you read a **shared** memory without changing your own setup:
+Without `--memory`, a read is of the memory this host is bound to
+([add.md](add.md#binding-a-memory)), as it will be after the next push: its rows, and this host's
+turns not pushed yet; on a host bound to nothing, the local memory. `--memory` names a memory to
+read as it stands — an `<org>/<repo>` shorthand, a full `hf://…` URI, a local path, or `local` for
+this host's memory alone. This is how you read a **shared** memory without changing your own setup:
 
 ```bash
 funes recall "why is funes append-only" --memory huggingface/funes-memory

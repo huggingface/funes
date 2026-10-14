@@ -97,8 +97,9 @@ an agent can recall.
 Dataset repositories created by funes are **private by default**. Existing repositories retain their
 current visibility, and making a funes-created memory public is a deliberate change on the Hub.
 
-Bind a memory when you add funes to an agent and it recalls from there and keeps it current on its
-own; or run the two commands directly:
+Bind your host to a memory, `funes bind <user|org>/funes-memory` or the memory named when you add
+an agent, and every agent recalls from it and keeps it current on its own; or run the two commands
+directly:
 
 ```bash
 funes push <user|org>/funes-memory                    # publish your local memory's new chunks
@@ -132,7 +133,7 @@ workflow-oriented [documentation index](docs/README.md) for the complete guides.
 
 | Command | Docs |
 | --- | --- |
-| `funes add <agent> [memory]` / `funes remove <agent>` / `funes mcp [memory]` | [docs/add.md](docs/add.md) — supported agents, integration lifecycle, generic MCP clients, hooks, and memory binding |
+| `funes add <agent> [memory]` / `funes bind <memory>` / `funes remove <agent>` / `funes mcp [memory]` | [docs/add.md](docs/add.md) — supported agents, integration lifecycle, memory binding, generic MCP clients, and hooks |
 | `funes index [path]` / `funes compact [memory]` | [docs/index.md](docs/index.md) — build/update the memory and compact it; sources, incremental, flags |
 | `funes recall "…"` / `funes get …` | [docs/recall.md](docs/recall.md) — recall passages and drill into them |
 | `funes sessions` / `funes sketch …` / `funes scan …` | [docs/sessions.md](docs/sessions.md) — list sessions, digest one, find a literal in one |

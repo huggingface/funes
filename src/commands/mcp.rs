@@ -41,7 +41,7 @@ pub struct RecallRequest {
     #[schemars(description = "Restrict to turns on or before this date, `YYYY-MM-DD`")]
     pub until: Option<String>,
     #[schemars(
-        description = "Memory to read for this call — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Defaults to the server's memory, with this host's turns not yet pushed to it."
+        description = "Memory to read for this call, as it stands — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Omitted, the server's memory, with this host's turns not yet pushed to it when the host is bound to it."
     )]
     pub memory: Option<String>,
 }
@@ -59,7 +59,7 @@ pub struct GetRequest {
     )]
     pub to: Option<i64>,
     #[schemars(
-        description = "Memory to read for this call — the one the recall hit's `→ get` line names. Defaults to the server's memory, where a session this host has not finished pushing is read from the local memory."
+        description = "Memory to read for this call, as it stands — the one the hit's `→ get` line carries, and none when it carries none, so the drill-down reads what the search read. Omitted, the server's memory, where a session this host has not finished pushing is read from the local memory."
     )]
     pub memory: Option<String>,
 }
@@ -81,7 +81,7 @@ pub struct SessionsRequest {
     )]
     pub offset: Option<usize>,
     #[schemars(
-        description = "Memory to list — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Defaults to the server's memory, with the sessions this host has not finished pushing listed from the local memory."
+        description = "Memory to list, as it stands — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Omitted, the server's memory, with the sessions this host has not finished pushing listed from the local memory when the host is bound to it."
     )]
     pub memory: Option<String>,
 }
@@ -105,7 +105,7 @@ pub struct ScanRequest {
     #[schemars(description = "Characters of surrounding text shown on each side of a match")]
     pub context: Option<usize>,
     #[schemars(
-        description = "Memory to scan — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Defaults to the server's memory, where a session this host has not finished pushing is read from the local memory."
+        description = "Memory to scan, as it stands — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Omitted, the server's memory, where a session this host has not finished pushing is read from the local memory."
     )]
     pub memory: Option<String>,
 }
@@ -129,7 +129,7 @@ pub struct SketchRequest {
     #[schemars(description = "Last turn to digest, as the session's own seq.")]
     pub to: Option<i64>,
     #[schemars(
-        description = "Memory to read for this call — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Defaults to the server's memory, where a session this host has not finished pushing is read from the local memory."
+        description = "Memory to read for this call, as it stands — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Omitted, the server's memory, where a session this host has not finished pushing is read from the local memory."
     )]
     pub memory: Option<String>,
 }
@@ -137,7 +137,7 @@ pub struct SketchRequest {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct StatusRequest {
     #[schemars(
-        description = "Memory to inspect — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Defaults to the server's memory."
+        description = "Memory to inspect — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Omitted, the server's memory."
     )]
     pub memory: Option<String>,
 }

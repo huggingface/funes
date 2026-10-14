@@ -10,7 +10,7 @@ itself.
 | --- | --- |
 | wire funes into an agent | `funes add claude` — or `codex`, `pi`, `hermes` |
 | the same, with a memory that follows me across machines, or a team | `funes add claude <user\|org>/funes-memory` |
-| switch an agent to another memory, or back to the local one | `funes add claude <memory>`, `funes add claude local` |
+| bind this host to another memory, or back to the local one | `funes bind <memory>`, `funes bind local` |
 | bring an integration to its newest release | `funes update` |
 | run my own checkout of an integration | `funes add claude --from ~/dev/funes-integrations/claude` |
 | install an integration the catalog does not list | `funes add <id> --from <dir \| hf://…/<id>.tar.gz>` |
@@ -45,47 +45,62 @@ syncing later. The steps, and what each does without a terminal, are under
 
 ## Binding a memory
 
-The optional `[memory]` is the memory the agent recalls from and, for the agents with publishing,
-publishes to: an `<org>/<repo>` shorthand, a full `hf://…` URI, or `local`.
+A host has one memory: the one every agent on it recalls from and, for the agents with
+publishing, publishes to. `funes bind` sets it, and `funes add <agent> <memory>` runs that bind
+before installing the agent, as it runs the first index and the first push. The memory is an
+`<org>/<repo>` shorthand, a full `hf://…` URI, or `local`.
 
 ```bash
-funes add claude <user|org>/funes-memory   # recall reads it; the hooks publish there
-funes add claude                           # re-run: keeps the memory bound; a first add stays local
-funes add claude local                     # back to the local memory
+funes add claude <user|org>/funes-memory   # binds this host, then installs claude on it
+funes add codex                            # installs codex on the same memory
+funes bind <user|org>/other-memory         # every installed agent follows
+funes bind local                           # back to the local memory, every agent following
 ```
 
-- The binding lives in the agent's own config, and funes notes it beside the install, so a bare
-  re-run keeps it. There is no hidden global default, and `local` unbinds.
+- The binding is one record for the host, `$FUNES_HOME/bound`, written by `bind` alone. Each
+  agent's registration carries a copy, and `bind` re-runs every installed agent's setup so the
+  copies follow; a bare `funes add <agent>` installs on it, and `funes update` keeps it.
+- A read naming no memory — `funes recall` with no `--memory`, a tool call with no `memory` —
+  reads the bound memory as it will be after this host's next push: its rows, and the turns this
+  host has indexed but not pushed yet. A read naming a memory, the bound one included, reads it
+  as it stands, and `local` reads this host's memory alone;
+  [recall.md](recall.md#reading-a-different-memory) has the details.
+- A host set up by a funes from before the binding noted a memory beside each agent it bound
+  instead. The next `funes update` or bare `funes add` binds the host to it when those agents all
+  noted the same one, every installed agent following, and `funes status` says so until then.
+  Agents that noted different memories were never meant to: the update names them, and
+  `funes bind <memory>` picks one.
 - A memory that does not exist on the Hub yet: `funes add` offers to create it (default no, to
   catch typos). Repositories funes creates are **private by default**; changing that later is an
   explicit action on the Hub. An existing repository keeps its visibility.
-- A memory holds one [embedding model](index.md#sessions-not-in-english), so `funes add` refuses a
-  memory embedded with another model than your local memory, before anything is installed.
+- A memory holds one [embedding model](index.md#sessions-not-in-english), so `funes bind` and
+  `funes add` refuse a memory embedded with another model than your local memory, before anything
+  is bound.
 - Publishing needs [TruffleHog](https://github.com/trufflesecurity/trufflehog): the first push
   `add` performs and every push the automation runs fail closed unless funes can scan the content
   for credentials, which agent traces commonly capture. funes looks for it on `PATH`, or at the
   path `FUNES_TRUFFLEHOG` names. A local-only setup does not need it.
-- The first push to a freshly-bound memory is `add`'s to do, at a terminal: the hooks refuse it off
-  one (the wrong-memory guard, in [automation.md](automation.md)). On a new host, re-running
-  `funes add` once clears the guard for that machine, as soon as it has an index of its own to
-  push. A memory at a local path is not pushed to.
+- The first push to a freshly-bound memory is `bind`'s, or `add`'s, to do, at a terminal: the
+  hooks refuse it off one (the wrong-memory guard, in [automation.md](automation.md)). On a new
+  host, binding it or re-running `funes add` once clears the guard for that machine, as soon as it
+  has an index of its own to push. A memory at a local path is not pushed to.
 
 ## Getting the newest integration
 
 `funes update` replaces the binary, then takes each installed integration to what its source now
-holds and re-runs its setup, bound as it was, only when that changed its files. None of an add's
+holds and re-runs its setup, on the host's memory, only when that changed its files. None of an add's
 one-time steps run: no first index, no first push. An install named with `--from` stays as it is,
 and so does a copy no source lists. The update says so.
 
-Re-running `funes add <agent>` does the same for one agent, and more: it keeps the memory bound, or
-rebinds to the one you name, and re-runs the integration's setup, which clears what an older funes
+Re-running `funes add <agent>` does the same for one agent, and more: it installs on the host's
+memory, or binds the host to the one you name first, and re-runs the integration's setup, which clears what an older funes
 put where the current one no longer looks. An integration the catalog installed, or one funes has
 no record of installing, is brought to its newest release for this funes first. `funes remove`
 first is for a clean slate: it takes the install away in full, your memory aside.
 
 ```bash
-funes add codex                                                  # as bound, at the catalog's newest release
-funes add codex <user|org>/funes-memory                          # rebound
+funes add codex                                                  # on the host's memory, at the catalog's newest release
+funes add codex <user|org>/funes-memory                          # binds the host first
 funes remove codex && funes add codex <user|org>/funes-memory    # from a clean slate
 ```
 
@@ -169,7 +184,7 @@ use the same read tools by running `funes mcp [memory]`. For example, in the com
 }
 ```
 
-To bind that server to a shared memory, put the memory after `mcp`:
+To start that server on a memory other than the host's, put it after `mcp`:
 
 ```json
 {
@@ -187,21 +202,22 @@ server exposes:
 | `get` | Reassemble a hit and its surrounding turns. | `session_id`, `turn_uuid`, optional `window`, `memory` |
 | `status` | Inspect memory and synchronization state. | optional `memory` |
 
-Every tool returns the same stable strings the CLI prints. A
-tool-call `memory` overrides the memory bound when the server started; with neither, the server reads
-the local memory. `mcp` is read-only: indexing and publishing remain separate commands or automation
-installed by `funes add`.
+Every tool returns the same stable strings the CLI prints. A tool call naming a `memory` reads it
+as it stands. One naming none reads the memory the server was started on, or, started on none,
+the memory this host is bound to, else the local memory. `mcp` is read-only: indexing and
+publishing remain separate commands or automation installed by `funes add`.
 
-A call that reads the bound memory also reads what this host has indexed but not pushed to it yet.
-The hooks publish at session boundaries, so without this, a turn another local session just indexed
-would stay out of reach until a session opens or ends. Such turns come back with a `→ get` naming the
-local memory, and a session holding them is listed and read from the local memory, which holds all of
-it. A call naming its memory, the bound one included, reads exactly what that memory holds.
+On a server started on the host's bound memory, which is what `funes add` registers, a call naming
+none reads it as it will be after this host's next push. The hooks publish at session boundaries,
+so without this, a turn another local session just indexed would stay out of reach until a session
+opens or ends. Such turns come back in the same reply, a session holding them is listed and read
+from the local memory, which holds all of it, and the `→ get` lines name no memory, so following
+them reads the same way. What counts as not pushed is what this host's push receipt for the memory
+lacks, which `funes status` reports as pending.
 
-What counts as not pushed is what this host's push receipt for the memory lacks, and a receipt only
-exists once this host has pushed there (`funes add` does the first push). A memory this host only
-reads, such as a team memory bound by hand, is read as it stands: your local sessions are never
-mixed into it.
+A call naming a memory, the bound one included, reads exactly what that memory holds, and so does
+a call naming none on a server started by hand on a memory this host is not bound to: your local
+sessions are never mixed into a memory this host only reads.
 
 ## How it works
 
@@ -217,11 +233,13 @@ mixed into it.
    takes that default without asking. When the memory it binds already has a model, the local
    memory takes it instead, and nothing is asked.
    If funes can't read that memory (offline, or your token has no access), the add stops here.
-2. **Installs the hooks and registers the MCP server** (baking in the bound memory). This is where
+2. **Binds the host** to the memory named, or offered and taken, as `funes bind` does: every
+   other installed agent's setup is re-run on it. A bare add on a bound host binds nothing.
+3. **Installs the hooks and registers the MCP server** on the host's memory. This is where
    the integration converts the agent's existing sessions into its spool.
-3. **Builds your first index** from that spool if you don't have one. Indexed content is ready
+4. **Builds your first index** from that spool if you don't have one. Indexed content is ready
    to recall; [unfinished work continues on later turns](index.md#progress-and-resuming).
-4. **Does the first push** to a freshly-bound memory — the publish the hook refuses to do off a
+5. **Does the first push** to a freshly-bound memory — the publish the hook refuses to do off a
    terminal (the wrong-memory guard; see [automation.md](automation.md)). With nothing indexed yet,
    it still gives a memory with no dataset your local memory's model. A memory at a local path is
    not pushed to.

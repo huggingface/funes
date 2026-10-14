@@ -49,7 +49,7 @@ this session was about, what was worked on, where it ended up.
 $ funes sketch 987a1e04-98cc-4d18-a618-8efebca34b0d --units 4
 sketch 987a1e04-98cc-4d18-a618-8efebca34b0d — 4 of 4 places · 2103 of 8000 chars · 164 eligible units
 [2026-08-26T07:27:41.111Z] user text seq0
-  → get 987a1e04-98cc-4d18-a618-8efebca34b0d --from 0 --to 3 --memory local
+  → get 987a1e04-98cc-4d18-a618-8efebca34b0d --from 0 --to 3
 retrieve the personas that were used for the last adversarial review of this blog post
 …
 ---
@@ -61,7 +61,7 @@ a sketch samples: it shows what it selected, not that anything is absent — sca
 | `--units` | 8 | places to show; clamped to 40, and to what `--max-chars` fits at 240 chars each |
 | `--max-chars` | 8000 | characters rendered in total; clamped to 40000 |
 | `--from` / `--to` | whole session | digest one stretch of a long session |
-| `--memory` | local | the memory to read |
+| `--memory` | the bound memory, else local | the memory to read, as it stands ([recall.md](recall.md#reading-a-different-memory)) |
 
 Places come back in reading order, so a digest reads as a timeline rather than a ranking, and each
 one carries a `→ get` line — the surrounding turns are one call away, verbatim.
@@ -92,7 +92,7 @@ matched nothing would read as a clean result.
 | `--from` / `--to` | whole session | scan only this seq range |
 | `-i`, `--ignore-case` | off | match regardless of case |
 | `--context` | 100 | characters of surrounding text shown on each side of a match |
-| `--memory` | local | the memory to read |
+| `--memory` | the bound memory, else local | the memory to read, as it stands ([recall.md](recall.md#reading-a-different-memory)) |
 
 Splits are stitched back together before matching, so a needle that straddles a chunk boundary is
 found. A zero — `no matches for "<needle>" in <session_id>` — covers that session and that exact
