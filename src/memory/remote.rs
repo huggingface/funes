@@ -709,10 +709,11 @@ fn repo_busy(e: &HFError) -> bool {
 
 /// Whether a [`send_commit`] failure is the Hub rejecting a stale `parent_commit`: the commit API
 /// answers a moved head with 412 Precondition Failed, which hf-hub leaves as a generic
-/// [`HFError::Http`] (only 409 is typed as [`HFError::Conflict`]).
+/// [`HFError::Http`] (only 409 is typed as [`HFError::Conflict`]). A busy repo's 409 is not one:
+/// [`send_commit`] has already waited it out.
 fn head_moved(e: &HFError) -> bool {
     match e {
-        HFError::Conflict { .. } => true,
+        HFError::Conflict { .. } => !repo_busy(e),
         HFError::Http { context } => context.status.as_u16() == 412,
         _ => false,
     }
