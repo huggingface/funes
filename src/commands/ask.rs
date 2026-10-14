@@ -14,7 +14,7 @@ use std::io::{BufRead, BufReader, IsTerminal, Read};
 use std::process::{Command, ExitStatus, Stdio};
 
 use super::recall::{check_readable, recall_hits, RecallFilter};
-use crate::memory::Memory;
+use super::target::Target;
 use crate::ui::banner::{accent, band_width, Banner};
 use crate::ui::render;
 
@@ -78,7 +78,7 @@ fn grounded_prompt(question: &str, passages: &str) -> String {
 }
 
 /// `funes ask claude`: recall in-process, then hand claude a prompt with the passages baked in.
-pub async fn claude(question: String, memory: Memory) -> Result<()> {
+pub async fn claude(question: String, target: impl Into<Target>) -> Result<()> {
     // The binary probe comes first — grounding pays for a model load.
     preflight("claude")?;
     let banner = Banner::start("recalling…");
@@ -87,7 +87,7 @@ pub async fn claude(question: String, memory: Memory) -> Result<()> {
             b.set(label);
         }
     };
-    let prompt = grounding(memory, &question, &progress).await?;
+    let prompt = grounding(target, &question, &progress).await?;
     progress("waking claude…");
     let run = run_streaming("claude", &claude_args(&prompt), claude_event, &progress)?;
     drop(banner);
@@ -95,7 +95,7 @@ pub async fn claude(question: String, memory: Memory) -> Result<()> {
 }
 
 /// `funes ask codex`: recall in-process, then hand codex a prompt with the passages baked in.
-pub async fn codex(question: String, memory: Memory) -> Result<()> {
+pub async fn codex(question: String, target: impl Into<Target>) -> Result<()> {
     // The binary probe comes first — grounding pays for a model load.
     preflight("codex")?;
     let banner = Banner::start("recalling…");
@@ -104,7 +104,7 @@ pub async fn codex(question: String, memory: Memory) -> Result<()> {
             b.set(label);
         }
     };
-    let prompt = grounding(memory, &question, &progress).await?;
+    let prompt = grounding(target, &question, &progress).await?;
     progress("waking codex…");
     let run = run_streaming("codex", &codex_args(&prompt), codex_event, &progress)?;
     drop(banner);
@@ -113,10 +113,11 @@ pub async fn codex(question: String, memory: Memory) -> Result<()> {
 
 /// The grounding for an ask. The memory is checked first: one that can't be read must fail
 /// rather than silently answer from another corpus.
-pub async fn grounding(memory: Memory, question: &str, progress: &(dyn Fn(&str) + Sync)) -> Result<String> {
-    check_readable(&memory).await?;
+pub async fn grounding(target: impl Into<Target>, question: &str, progress: &(dyn Fn(&str) + Sync)) -> Result<String> {
+    let target = target.into();
+    check_readable(target.memory()).await?;
     let (note, hits) = recall_hits(
-        memory,
+        target,
         question.to_string(),
         K,
         CANDIDATES,

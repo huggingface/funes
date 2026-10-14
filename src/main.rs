@@ -5,6 +5,7 @@
 //! `$FUNES_HOME` or `~/.funes`.
 
 use funes::agents::{self, registry};
+use funes::commands::target::Target;
 use funes::commands::{ask, compact, index, mcp, push, recall, scrub, sketch, update};
 use funes::hub;
 use funes::inference::EmbeddingModel;
@@ -227,7 +228,7 @@ enum Cmd {
     /// Run as an MCP server over stdio (for Claude Code, Cursor, …).
     Mcp {
         /// Memory to serve — an `<org>/<repo>` shorthand, an `hf://…` URI, a local path, or `local`.
-        /// Defaults to your local memory.
+        /// Defaults to the memory this host is bound to, else your local memory.
         #[arg(value_name = "MEMORY")]
         memory: Option<String>,
     },
@@ -306,15 +307,16 @@ enum AskAgent {
 /// Which memory the read commands act on. Shared by `recall`/`get`/`status`/`ask` and `mcp`.
 #[derive(Args)]
 struct MemoryOpts {
-    /// The memory to read — an `<org>/<repo>` shorthand, an `hf://…` URI, a local path, or `local`.
-    /// Defaults to your local memory.
+    /// The memory to read, as it stands — an `<org>/<repo>` shorthand, an `hf://…` URI, a local
+    /// path, or `local`. Omitted, the memory this host is bound to, with this host's turns not yet
+    /// pushed to it; your local memory when the host is local.
     #[arg(long = "memory", value_name = "MEMORY")]
     memory: Option<String>,
 }
 
 impl MemoryOpts {
-    fn resolve(self) -> memory::Memory {
-        memory::Memory::resolve(self.memory)
+    fn resolve(self) -> Result<Target> {
+        Target::resolve(self.memory.as_deref())
     }
 }
 
@@ -354,7 +356,7 @@ async fn run() -> Result<()> {
             until,
             memory,
         } => {
-            let memory = memory.resolve();
+            let memory = memory.resolve()?;
             let query = query.join(" ");
             let spinner = Spinner::start("recalling…");
             let progress = |label: &str| {
@@ -393,7 +395,7 @@ async fn run() -> Result<()> {
         } => {
             print!(
                 "{}",
-                recall::scan(memory.resolve(), needle, session_id, from, to, ignore_case, context).await?
+                recall::scan(memory.resolve()?, needle, session_id, from, to, ignore_case, context).await?
             );
             Ok(())
         }
@@ -412,7 +414,7 @@ async fn run() -> Result<()> {
                 limit,
                 offset,
             };
-            print!("{}", recall::sessions(memory.resolve(), filter).await?);
+            print!("{}", recall::sessions(memory.resolve()?, filter).await?);
             Ok(())
         }
         Cmd::Sketch {
@@ -425,7 +427,7 @@ async fn run() -> Result<()> {
         } => {
             print!(
                 "{}",
-                sketch::run(memory.resolve(), session_id, from, to, units, max_chars).await?
+                sketch::run(memory.resolve()?, session_id, from, to, units, max_chars).await?
             );
             Ok(())
         }
@@ -436,12 +438,12 @@ async fn run() -> Result<()> {
             memory,
         } => {
             let range = recall::TurnRange { from, to };
-            print!("{}", recall::get(memory.resolve(), session_id, range).await?);
+            print!("{}", recall::get(memory.resolve()?, session_id, range).await?);
             Ok(())
         }
         Cmd::Ask { agent } => match agent {
-            AskAgent::Claude { args } => ask::claude(args.question.join(" "), args.memory.resolve()).await,
-            AskAgent::Codex { args } => ask::codex(args.question.join(" "), args.memory.resolve()).await,
+            AskAgent::Claude { args } => ask::claude(args.question.join(" "), args.memory.resolve()?).await,
+            AskAgent::Codex { args } => ask::codex(args.question.join(" "), args.memory.resolve()?).await,
         },
         Cmd::Index {
             path,

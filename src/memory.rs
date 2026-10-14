@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use hf_hub::HFError;
 use lance::dataset::Dataset;
 
@@ -70,9 +70,9 @@ impl Memory {
         }
     }
 
-    /// Resolve the memory the read commands should use: an explicit `spec` (a CLI `--memory`), else
-    /// the local index. There is no persisted default — a memory binding lives in the caller's
-    /// config (e.g. an agent's `funes mcp <memory>` registration), not in funes.
+    /// Resolve the memory a write command acts on: an explicit `spec`, else the local memory. What a
+    /// read command reads is [`crate::commands::target::Target`]'s to resolve: naming no memory, it
+    /// defaults to the one this host is bound to.
     pub fn resolve(spec: Option<String>) -> Self {
         match spec.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
             Some(s) => Memory::parse(&s),
@@ -296,10 +296,64 @@ fn check_compat(ds: &Dataset) -> Result<()> {
     }
 }
 
+/// The file naming the memory this host is bound to, under funes's home, as typed to `funes add`.
+/// Absent when the host is local.
+const BINDING_FILE: &str = "bound";
+
+/// The memory this host is bound to: the one `funes add` installs every agent to read and publish
+/// to, as typed to it. `None` when the host is local.
+pub fn binding() -> Result<Option<String>> {
+    binding_at(&dataset::funes_dir())
+}
+
+/// [`binding`], with funes's home at `dir`.
+pub fn binding_at(dir: &Path) -> Result<Option<String>> {
+    let path = dir.join(BINDING_FILE);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok(Some(text.trim().to_string()).filter(|s| !s.is_empty())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(anyhow::Error::new(e).context(format!("reading {}", path.display()))),
+    }
+}
+
+/// Bind this host to `memory`, as typed; `None` makes it local.
+pub fn bind(memory: Option<&str>) -> Result<()> {
+    bind_at(&dataset::funes_dir(), memory)
+}
+
+/// [`bind`], with funes's home at `dir`.
+pub fn bind_at(dir: &Path, memory: Option<&str>) -> Result<()> {
+    let path = dir.join(BINDING_FILE);
+    match memory {
+        Some(memory) => {
+            std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+            std::fs::write(&path, format!("{memory}\n")).with_context(|| format!("writing {}", path.display()))
+        }
+        None => match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(anyhow::Error::new(e).context(format!("removing {}", path.display()))),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn the_host_binding_is_kept_as_typed_until_unbound() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("funes");
+        assert_eq!(binding_at(&home).unwrap(), None);
+        bind_at(&home, Some("acme/kb")).unwrap();
+        assert_eq!(binding_at(&home).unwrap().as_deref(), Some("acme/kb"));
+        bind_at(&home, None).unwrap();
+        assert_eq!(binding_at(&home).unwrap(), None);
+        // A local host has nothing to unbind.
+        bind_at(&home, None).unwrap();
+    }
 
     use arrow_array::types::Float32Type;
     use arrow_array::{ArrayRef, FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator};

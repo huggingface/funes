@@ -2,9 +2,8 @@
 //! nothing indexed leaves. The local memory adds nothing to that remote's recall, and does not
 //! fail it.
 
-use funes::commands::{index, mcp, recall};
+use funes::commands::{index, recall, target};
 use funes::inference::EmbeddingModel;
-use funes::memory::Memory;
 
 #[tokio::test]
 async fn an_empty_local_memory_adds_no_unpushed_pool() {
@@ -19,8 +18,6 @@ async fn an_empty_local_memory_adds_no_unpushed_pool() {
     std::fs::write(&receipt, "").unwrap();
 
     let search = recall::Search::new("an index on the table".into(), 30, Default::default()).unwrap();
-    let pool = mcp::unpushed(&search, &Memory::parse("hf://datasets/acme/memory"))
-        .await
-        .unwrap();
+    let pool = target::unpushed(&search, "hf://datasets/acme/memory").await.unwrap();
     assert!(pool.is_none());
 }

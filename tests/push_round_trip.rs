@@ -22,6 +22,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use funes::commands::push::{Confirm, Disjoint};
 use funes::commands::recall;
+use funes::commands::target::Target;
 use funes::memory::Memory;
 use hf_hub::{HFClient, HFError, HFRepository, RepoTypeDataset};
 
@@ -79,20 +80,24 @@ async fn root_readme(repo: &HFRepository<RepoTypeDataset>) -> Option<String> {
     }
 }
 
-/// A recall of `uri` pooled with this host's turns not yet pushed to it, as the MCP server runs one
-/// for its own memory.
-async fn recall_with_unpushed(uri: &str, query: &str) -> String {
-    let memory = Memory::parse(uri);
-    let quiet = |_: &str| ();
-    let search = recall::Search::new(query.into(), 30, Default::default()).unwrap();
-    let mut pools = vec![search.candidates(&memory, &quiet).await.unwrap()];
-    pools.extend(funes::commands::mcp::unpushed(&search, &memory).await.unwrap());
-    let (note, hits) = search.rank(pools, 5, 0, &quiet).await.unwrap();
-    recall::rendered(&note, &hits)
+/// A recall of `uri` as this host's bound memory, pooled with its turns not yet pushed there: what
+/// a read naming no memory runs on a host bound to it.
+async fn recall_bound(uri: &str, query: &str) -> String {
+    recall::recall(
+        Target::Bound(Memory::parse(uri)),
+        query.into(),
+        5,
+        30,
+        0,
+        Default::default(),
+    )
+    .await
+    .unwrap()
 }
 
+/// A recall of `uri` as it stands: what a read naming it runs.
 async fn recall_remote(uri: &str, query: &str) -> String {
-    funes::commands::recall::recall(Memory::parse(uri), query.into(), 5, 30, 0, Default::default())
+    recall::recall(Memory::parse(uri), query.into(), 5, 30, 0, Default::default())
         .await
         .unwrap_or_else(|e| format!("<recall error: {e}>"))
 }
@@ -212,8 +217,8 @@ async fn push_round_trip_create_append_recall() {
         funes::commands::push::run_push(Memory::parse(&uri), false, Confirm::Yes, &[]),
     );
     let (remote_rows, remote_ids) = remote_rows_and_ids(&uri).await;
-    // A turn indexed after the last push: pooling this host's unpushed turns recalls it from the
-    // local memory, an exact read of the remote does not.
+    // A turn indexed after the last push: read as the bound memory, the remote recalls it from the
+    // local memory; read as it stands, it does not.
     write_session(
         src.path(),
         &[
@@ -226,10 +231,10 @@ async fn push_round_trip_create_append_recall() {
     funes::commands::index::run_index(src.path(), false, None)
         .await
         .unwrap();
-    let recall_pooled = recall_with_unpushed(&uri, "SYNCSMOKE4 not yet pushed").await;
+    let recall_pooled = recall_bound(&uri, "SYNCSMOKE4 not yet pushed").await;
     let recall_exact = recall_remote(&uri, "SYNCSMOKE4 not yet pushed").await;
-    // The session it grew is owed, so the server's own memory lists and reads it from the local
-    // memory, whole; an exact read sees the remote's shorter copy.
+    // The session it grew is owed, so the bound memory lists and reads it from the local memory,
+    // whole; read as it stands, the remote shows its shorter copy.
     let all_sessions = || recall::SessionFilter {
         repo: None,
         since: None,
@@ -237,20 +242,20 @@ async fn push_round_trip_create_append_recall() {
         limit: None,
         offset: 0,
     };
-    let pools = funes::commands::mcp::session_pools(&Memory::parse(&uri)).await.unwrap();
-    let sessions_pooled = recall::list_sessions(pools, all_sessions()).await.unwrap();
-    let sessions_exact = recall::sessions(Memory::parse(&uri), all_sessions()).await.unwrap();
-    let whole = recall::TurnRange { from: None, to: None };
-    let holder = funes::commands::mcp::session_memory(Memory::parse(&uri), "sess")
+    let sessions_pooled = recall::sessions(Target::Bound(Memory::parse(&uri)), all_sessions())
         .await
         .unwrap();
-    let get_pooled = recall::get(holder, "sess".into(), whole).await.unwrap();
+    let sessions_exact = recall::sessions(Memory::parse(&uri), all_sessions()).await.unwrap();
+    let whole = recall::TurnRange { from: None, to: None };
+    let get_pooled = recall::get(Target::Bound(Memory::parse(&uri)), "sess".into(), whole)
+        .await
+        .unwrap();
     let whole = recall::TurnRange { from: None, to: None };
     let get_exact = recall::get(Memory::parse(&uri), "sess".into(), whole).await.unwrap();
     // This host holds a receipt for the remote either way. Only a memory an agent here is bound to
     // is one it pushes to, so only that one reports what is pending.
-    let status_bound = recall::status(Memory::parse(&uri), true).await.unwrap();
-    let status_unbound = recall::status(Memory::parse(&uri), false).await.unwrap();
+    let status_bound = recall::status(Target::Bound(Memory::parse(&uri))).await.unwrap();
+    let status_unbound = recall::status(Memory::parse(&uri)).await.unwrap();
 
     let readme_after = root_readme(&repo).await;
     // The model id must travel with the memory (stamped in the schema metadata, uploaded by push).

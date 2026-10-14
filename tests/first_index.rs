@@ -22,7 +22,7 @@ fn write_session(source: &std::path::Path) {
 }
 
 async fn chunk_count() -> usize {
-    let s = funes::commands::recall::status(funes::memory::Memory::local(), false)
+    let s = funes::commands::recall::status(funes::memory::Memory::local())
         .await
         .unwrap();
     s.lines()

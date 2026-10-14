@@ -2,9 +2,9 @@
 //! so any MCP client (Claude Code, Cursor, …) can call funes as a first-class tool.
 //! stdout is the JSON-RPC channel — logs must go to stderr.
 
-use super::{push, recall};
-use crate::agents::{self, registry};
-use crate::memory::{Memory, MemoryState};
+use super::recall;
+use super::target::Target;
+use crate::agents;
 use anyhow::Result;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -155,8 +155,8 @@ fn noted(memory: Option<&str>, text: String) -> String {
 
 #[derive(Clone)]
 pub(crate) struct Funes {
-    /// Explicit memory spec (`funes mcp <memory>`), pinned for the server's lifetime. `None` reads
-    /// the local memory unless a call passes its own `memory`.
+    /// The memory the server was started on (`funes mcp <memory>`), read by every call naming
+    /// none; `None` leaves those calls to the host's binding, as on the CLI.
     memory: Option<String>,
     #[allow(dead_code)]
     tool_router: ToolRouter<Funes>,
@@ -171,21 +171,12 @@ impl Funes {
         }
     }
 
-    /// The memory a call reads: its explicit `memory` argument wins over the server's `<memory>`,
-    /// else the local memory.
-    fn memory(&self, spec: Option<String>) -> Memory {
-        Memory::resolve(spec.filter(|s| !s.trim().is_empty()).or_else(|| self.memory.clone()))
-    }
-
-    /// The memory a session verb reads: a call on the server's own memory reads a session this
-    /// host still owes it from the local memory, which holds all of it.
-    async fn memory_for_session(&self, spec: Option<String>, session_id: &str) -> Result<Memory> {
-        let own = own(&spec);
-        let memory = self.memory(spec);
-        if own {
-            return session_memory(memory, session_id).await;
+    /// What a call reads: the memory it names, as it stands; naming none, the server's.
+    fn target(&self, spec: Option<String>) -> Result<Target> {
+        match spec.filter(|s| !s.trim().is_empty()) {
+            Some(spec) => Target::resolve(Some(&spec)),
+            None => Target::served(self.memory.as_deref()),
         }
-        Ok(memory)
     }
 
     #[tool(
@@ -206,46 +197,27 @@ impl Funes {
             memory,
         }): Parameters<RecallRequest>,
     ) -> String {
-        let own = own(&memory);
-        let memory = self.memory(memory);
-        let quiet = |_: &str| ();
-        let recalled = async {
-            let candidates = candidates.unwrap_or(recall::DEFAULT_CANDIDATES);
-            let search = recall::Search::new(
-                query,
-                candidates,
-                recall::RecallFilter {
-                    block_type,
-                    role,
-                    harness,
-                    since,
-                    until,
-                },
-            )?;
-            // The server's own memory, as it will be after this host's next push. The local search
-            // runs while the remote one waits on the network.
-            let (read, owed) = tokio::join!(search.candidates(&memory, &quiet), async {
-                if own {
-                    unpushed(&search, &memory).await
-                } else {
-                    Ok(None)
-                }
-            });
-            let mut pools = vec![read?];
-            pools.extend(owed?);
-            let (note, hits) = search
-                .rank(
-                    pools,
-                    k.unwrap_or(recall::DEFAULT_K),
-                    neighbors.unwrap_or(recall::DEFAULT_NEIGHBORS),
-                    &quiet,
-                )
-                .await?;
-            anyhow::Ok(recall::rendered(&note, &hits))
-        };
         noted(
             self.memory.as_deref(),
-            match recalled.await {
+            match async {
+                recall::recall(
+                    self.target(memory)?,
+                    query,
+                    k.unwrap_or(recall::DEFAULT_K),
+                    candidates.unwrap_or(recall::DEFAULT_CANDIDATES),
+                    neighbors.unwrap_or(recall::DEFAULT_NEIGHBORS),
+                    recall::RecallFilter {
+                        block_type,
+                        role,
+                        harness,
+                        since,
+                        until,
+                    },
+                )
+                .await
+            }
+            .await
+            {
                 Ok(s) if !s.is_empty() => s,
                 Ok(_) => "no results".to_string(),
                 Err(e) => format!("recall error: {e}"),
@@ -268,12 +240,7 @@ impl Funes {
         let range = recall::TurnRange { from, to };
         noted(
             self.memory.as_deref(),
-            match async {
-                let memory = self.memory_for_session(memory, &session_id).await?;
-                recall::get(memory, session_id, range).await
-            }
-            .await
-            {
+            match async { recall::get(self.target(memory)?, session_id, range).await }.await {
                 Ok(s) if !s.is_empty() => s,
                 Ok(_) => "no results".to_string(),
                 Err(e) => format!("get error: {e}"),
@@ -304,15 +271,7 @@ impl Funes {
         };
         noted(
             self.memory.as_deref(),
-            match async {
-                if own(&memory) {
-                    recall::list_sessions(session_pools(&self.memory(memory)).await?, filter).await
-                } else {
-                    recall::sessions(self.memory(memory), filter).await
-                }
-            }
-            .await
-            {
+            match async { recall::sessions(self.target(memory)?, filter).await }.await {
                 Ok(s) if !s.is_empty() => s,
                 Ok(_) => "no results".to_string(),
                 Err(e) => format!("sessions error: {e}"),
@@ -339,7 +298,7 @@ impl Funes {
             self.memory.as_deref(),
             match async {
                 recall::scan(
-                    self.memory_for_session(memory, &session_id).await?,
+                    self.target(memory)?,
                     needle,
                     session_id,
                     from,
@@ -374,11 +333,7 @@ impl Funes {
     ) -> String {
         noted(
             self.memory.as_deref(),
-            match async {
-                let memory = self.memory_for_session(memory, &session_id).await?;
-                super::sketch::run(memory, session_id, from, to, units, max_chars).await
-            }
-            .await
+            match async { super::sketch::run(self.target(memory)?, session_id, from, to, units, max_chars).await }.await
             {
                 Ok(s) if !s.is_empty() => s,
                 Ok(_) => "no results".to_string(),
@@ -393,84 +348,13 @@ impl Funes {
     async fn status(&self, Parameters(StatusRequest { memory }): Parameters<StatusRequest>) -> String {
         // No update check here: it needs the network, and the "update available" notice belongs
         // on the human-facing CLI `funes status`, not on this hot, otherwise-local tool path.
-        let memory = self.memory(memory);
         noted(
             self.memory.as_deref(),
-            async {
-                let (bound, _) = registry::bindings(&registry::default_root()?)?;
-                let bound = is_bound(&bound, &memory);
-                recall::status(memory, bound).await
-            }
-            .await
-            .unwrap_or_else(|e| format!("status error: {e}")),
+            async { recall::status(self.target(memory)?).await }
+                .await
+                .unwrap_or_else(|e| format!("status error: {e}")),
         )
     }
-}
-
-/// Whether `memory` is one of the `bound` memories, in whichever spelling its binding was given.
-fn is_bound(bound: &[(String, Vec<String>)], memory: &Memory) -> bool {
-    bound
-        .iter()
-        .any(|(spec, _)| Memory::parse(spec).label() == memory.label())
-}
-
-/// Whether a call reads the server's own memory — it names none of its own.
-fn own(spec: &Option<String>) -> bool {
-    spec.as_deref().is_none_or(|s| s.trim().is_empty())
-}
-
-/// This host's turns not yet pushed to `memory`: the local memory's candidates for `search`, kept
-/// to the rows missing from this host's receipt for it. `None` unless this host has pushed to
-/// `memory`, a remote.
-pub async fn unpushed(search: &recall::Search, memory: &Memory) -> Result<Option<recall::Candidates>> {
-    let Memory::Remote { uri } = memory else {
-        return Ok(None);
-    };
-    let Some(pushed) = push::load_pushed(uri) else {
-        return Ok(None);
-    };
-    // A local memory with no rows has nothing unpushed, and searching it is an error.
-    if !matches!(Memory::local().state().await?, MemoryState::Ready(_)) {
-        return Ok(None);
-    }
-    let mut pool = search.candidates(&Memory::local(), &|_| ()).await?;
-    pool.retain(|h| !pushed.contains(&h.id));
-    Ok(Some(pool))
-}
-
-/// The sessions of `memory` as it will be after this host's next push: its own, except those this
-/// host still owes rows, which come from the local memory whole. The local side is read while the
-/// remote one waits on the network.
-pub async fn session_pools(memory: &Memory) -> Result<Vec<recall::SessionPool>> {
-    let Memory::Remote { uri } = memory else {
-        return Ok(vec![recall::SessionPool::open(memory).await?]);
-    };
-    let (pool, owed) = tokio::join!(recall::SessionPool::open(memory), async {
-        let owed = push::owed_sessions(uri).await?;
-        if owed.is_empty() {
-            return Ok(None);
-        }
-        let mut local = recall::SessionPool::open(&Memory::local()).await?;
-        local.retain(|s| owed.contains(&s.session_id));
-        anyhow::Ok(Some((local, owed)))
-    });
-    let mut pool = pool?;
-    let Some((local, owed)) = owed? else {
-        return Ok(vec![pool]);
-    };
-    pool.retain(|s| !owed.contains(&s.session_id));
-    Ok(vec![pool, local])
-}
-
-/// Where `memory`, as it will be after this host's next push, holds `session_id`: the local memory
-/// when this host still owes the session rows, else `memory` itself.
-pub async fn session_memory(memory: Memory, session_id: &str) -> Result<Memory> {
-    if let Memory::Remote { uri } = &memory {
-        if push::owes_session(uri, session_id).await? {
-            return Ok(Memory::local());
-        }
-    }
-    Ok(memory)
 }
 
 #[tool_handler]
@@ -497,20 +381,4 @@ pub async fn run(memory: Option<String>) -> Result<()> {
     let service = Funes::new(memory).serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// `funes add` records a binding as typed, a shorthand most often, while a call names its
-    /// memory as a `→ get` line prints it.
-    #[test]
-    fn a_binding_matches_its_memory_in_either_spelling() {
-        let bound = vec![("acme/kb".to_string(), vec!["claude".to_string()])];
-        assert!(is_bound(&bound, &Memory::parse("acme/kb")));
-        assert!(is_bound(&bound, &Memory::parse("hf://datasets/acme/kb")));
-        assert!(!is_bound(&bound, &Memory::parse("acme/other")));
-        assert!(!is_bound(&[], &Memory::parse("acme/kb")));
-    }
 }

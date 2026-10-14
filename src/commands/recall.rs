@@ -4,6 +4,7 @@
 //! `recall`/`get` return results rendered in the agent format;
 //! `recall_hits`/`get_turns` return the structured results for other renderings (see `render`).
 
+use super::target::Target;
 use crate::chunk;
 use crate::inference::{self, Embedder, EmbeddingModel, Reranker};
 use crate::memory::dataset;
@@ -416,16 +417,17 @@ pub fn reranks(k: usize, candidates: usize) -> bool {
     candidates >= RERANK_RATIO * k
 }
 
-/// Run the recall pipeline over one memory and return the results rendered in the agent format.
+/// Run the recall pipeline over what `target` reads and return the results rendered in the agent
+/// format.
 pub async fn recall(
-    memory: Memory,
+    target: impl Into<Target>,
     query: String,
     k: usize,
     candidates: usize,
     neighbors: i64,
     filter: RecallFilter,
 ) -> Result<String> {
-    let (note, hits) = recall_hits(memory, query, k, candidates, neighbors, filter, &|_| ()).await?;
+    let (note, hits) = recall_hits(target, query, k, candidates, neighbors, filter, &|_| ()).await?;
     Ok(rendered(&note, &hits))
 }
 
@@ -437,13 +439,14 @@ pub fn rendered(note: &str, hits: &[(Hit, f64)]) -> String {
     crate::ui::render::recall_agent(note, hits)
 }
 
-/// Run the recall pipeline over one memory: hybrid retrieval → rank, reranked when the pool is
-/// several times `k` → neighbor expansion.
+/// Run the recall pipeline over what `target` reads: hybrid retrieval, pooled with this host's
+/// unpushed turns for the bound memory → rank, reranked when the pool is several times `k` →
+/// neighbor expansion.
 /// Returns the degradation note (empty when the memory opened normally) and the scored hits, best
 /// first — rendering is the caller's choice. `progress` hears a short label as each slow phase
 /// starts (model load, search, rerank); pass a no-op to run silently.
 pub async fn recall_hits(
-    memory: Memory,
+    target: impl Into<Target>,
     query: String,
     k: usize,
     candidates: usize,
@@ -452,8 +455,8 @@ pub async fn recall_hits(
     progress: &(dyn Fn(&str) + Sync),
 ) -> Result<(String, Vec<(Hit, f64)>)> {
     let search = Search::new(query, candidates, filter)?;
-    let pool = search.candidates(&memory, progress).await?;
-    search.rank(vec![pool], k, neighbors, progress).await
+    let pools = target.into().candidates(&search, progress).await?;
+    search.rank(pools, k, neighbors, progress).await
 }
 
 /// What narrows a search.
@@ -875,7 +878,8 @@ pub struct TurnRange {
 pub const DEFAULT_SPAN: i64 = 20;
 
 /// Read a range of a session's turns, rendered in the agent format.
-pub async fn get(memory: Memory, session_id: String, range: TurnRange) -> Result<String> {
+pub async fn get(target: impl Into<Target>, session_id: String, range: TurnRange) -> Result<String> {
+    let memory = target.into().holder(&session_id).await?;
     let label = memory.label();
     let (note, turns, total) = get_turns(memory, session_id.clone(), range).await?;
     // A session with no rows is absent, not empty: only a range can come back empty.
@@ -975,10 +979,10 @@ impl SessionFilter {
     }
 }
 
-/// The sessions of a memory that `filter` keeps, oldest first, rendered in the agent format.
-pub async fn sessions(memory: Memory, filter: SessionFilter) -> Result<String> {
+/// The sessions `target` reads that `filter` keeps, oldest first, rendered in the agent format.
+pub async fn sessions(target: impl Into<Target>, filter: SessionFilter) -> Result<String> {
     check_filter(&filter)?;
-    list_sessions(vec![SessionPool::open(&memory).await?], filter).await
+    list_sessions(target.into().session_pools().await?, filter).await
 }
 
 /// One memory's sessions, before a listing pools, filters and pages them.
@@ -1235,7 +1239,7 @@ type BlockParts = HashMap<(i64, String, i64), (Block, Vec<(i64, String)>)>;
 ///
 /// A session that isn't in the memory is an error, not an empty result.
 pub async fn scan(
-    memory: Memory,
+    target: impl Into<Target>,
     needle: String,
     session_id: String,
     from: Option<i64>,
@@ -1243,6 +1247,7 @@ pub async fn scan(
     ignore_case: bool,
     context: usize,
 ) -> Result<String> {
+    let memory = target.into().holder(&session_id).await?;
     let read = open_read(&memory).await?;
     let note = read.note.clone().unwrap_or_default();
     let label = read.memory_label.clone().unwrap_or_else(|| memory.label());
@@ -1592,9 +1597,13 @@ async fn push_coverage_lines(local: &Dataset, memory: &Memory, uri: &str) -> Str
     out
 }
 
-/// `memory`'s status. A remote reports this host's push coverage only when an agent here is `bound`
-/// to it: coverage is a question only for a memory this host pushes to.
-pub async fn status(memory: Memory, bound: bool) -> Result<String> {
+/// The status of what `target` reads. A remote reports this host's push coverage only as the bound
+/// memory: coverage is a question only for a memory this host pushes to.
+pub async fn status(target: impl Into<Target>) -> Result<String> {
+    let (memory, bound) = match target.into() {
+        Target::Exact(memory) => (memory, false),
+        Target::Bound(memory) => (memory, true),
+    };
     match open_for_read(&memory).await? {
         ReadOutcome::Ready(ds) => {
             let now = Utc::now();
@@ -1624,7 +1633,7 @@ pub async fn status(memory: Memory, bound: bool) -> Result<String> {
         }
         // An unreachable remote shows the local index's status instead, like the read commands.
         ReadOutcome::Offline => {
-            let body = Box::pin(status(Memory::local(), false)).await?;
+            let body = Box::pin(status(Memory::local())).await?;
             Ok(format!(
                 "remote {} unreachable — showing your local memory instead\n{body}",
                 memory.label()
@@ -1642,7 +1651,7 @@ pub async fn status(memory: Memory, bound: bool) -> Result<String> {
 /// This host's status: the local memory, then each memory its integrations are bound to — `bound`
 /// pairs a memory spec with the ids bound to it — and the ids installed with no memory recorded.
 pub async fn host_status(bound: &[(String, Vec<String>)], unrecorded: &[String]) -> Result<String> {
-    let mut out = status(Memory::local(), false).await?;
+    let mut out = status(Memory::local()).await?;
     let local = Memory::local().open().await.ok();
     let now = Utc::now();
     for (spec, ids) in bound {
@@ -1771,13 +1780,13 @@ mod tests {
             .iter()
             .zip(["2 chunks awaiting embedding\n", "1 chunk awaiting embedding\n"])
         {
-            let out = status(memory.clone(), false).await.unwrap();
+            let out = status(memory.clone()).await.unwrap();
             assert!(out.starts_with(&format!("{prefix}{line}")), "{out}");
             ds = dataset::fill_vectors(&ds, &[chunk.id.as_str()], &[vec![0.0; dataset::DIM as usize]])
                 .await
                 .unwrap();
         }
-        let out = status(memory, false).await.unwrap();
+        let out = status(memory).await.unwrap();
         assert!(out.starts_with(&prefix), "{out}");
         assert!(!out.contains("awaiting embedding"), "{out}");
     }
