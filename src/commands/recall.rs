@@ -59,6 +59,8 @@ pub struct Hit {
     pub block_type: String,
     pub harness: String,
     pub neighbors: Vec<Neighbor>,
+    /// The `--memory` the hit's drill-down repeats, as the call named it; empty for a call naming
+    /// none.
     pub memory: String,
     pub fused: f32,
 }
@@ -503,6 +505,13 @@ pub struct Candidates {
 }
 
 impl Candidates {
+    /// Give every hit the `--memory` its drill-down repeats.
+    pub(crate) fn hint(&mut self, memory: &str) {
+        for h in &mut self.hits {
+            h.memory = memory.to_string();
+        }
+    }
+
     /// Keep only the candidates `keep` accepts.
     pub fn retain(&mut self, keep: impl Fn(&Hit) -> bool) {
         self.hits.retain(keep);
@@ -564,12 +573,7 @@ impl Search {
             );
         }
         progress(&format!("searching {}…", memory.label()));
-        let mut hits =
-            hybrid_candidates(&read.ds, qv, &self.query, self.candidates, self.where_clause.as_deref()).await?;
-        let label = read.memory_label.unwrap_or_default();
-        for h in &mut hits {
-            h.memory = label.clone();
-        }
+        let hits = hybrid_candidates(&read.ds, qv, &self.query, self.candidates, self.where_clause.as_deref()).await?;
         Ok(Candidates {
             ds: read.ds,
             note: read.note.unwrap_or_default(),
@@ -1247,7 +1251,9 @@ pub async fn scan(
     ignore_case: bool,
     context: usize,
 ) -> Result<String> {
-    let memory = target.into().holder(&session_id).await?;
+    let target = target.into();
+    let hint = target.hint();
+    let memory = target.holder(&session_id).await?;
     let read = open_read(&memory).await?;
     let note = read.note.clone().unwrap_or_default();
     let label = read.memory_label.clone().unwrap_or_else(|| memory.label());
@@ -1267,12 +1273,7 @@ pub async fn scan(
         bail!("no session {session_id} in {label}");
     }
     let result = find_needle(&blocks, &needle, &session_id, from, to, ignore_case);
-    Ok(crate::ui::render::scan_agent(
-        &note,
-        &memory_hint(read.memory_label.as_deref()),
-        &result,
-        context,
-    ))
+    Ok(crate::ui::render::scan_agent(&note, &hint, &result, context))
 }
 
 /// Every block of one session, splits de-overlapped. Matching raw chunks would miss a needle that
@@ -1600,10 +1601,9 @@ async fn push_coverage_lines(local: &Dataset, memory: &Memory, uri: &str) -> Str
 /// The status of what `target` reads. A remote reports this host's push coverage only as the bound
 /// memory: coverage is a question only for a memory this host pushes to.
 pub async fn status(target: impl Into<Target>) -> Result<String> {
-    let (memory, bound) = match target.into() {
-        Target::Exact(memory) => (memory, false),
-        Target::Bound(memory) => (memory, true),
-    };
+    let target = target.into();
+    let bound = target.is_bound();
+    let memory = target.into_memory();
     match open_for_read(&memory).await? {
         ReadOutcome::Ready(ds) => {
             let now = Utc::now();

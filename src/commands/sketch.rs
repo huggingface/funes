@@ -24,7 +24,9 @@ pub async fn run(
     units: Option<usize>,
     max_chars: Option<usize>,
 ) -> Result<String> {
-    let memory = target.into().holder(&session_id).await?;
+    let target = target.into();
+    let hint = target.hint();
+    let memory = target.holder(&session_id).await?;
     let asked = SketchOptions {
         budget: units.unwrap_or(DEFAULT_UNITS),
         char_budget: max_chars.unwrap_or(DEFAULT_CHARS),
@@ -50,10 +52,5 @@ pub async fn run(
     if sketch.evidence.is_empty() {
         bail!("nothing to sketch in session {session_id} — it holds no text worth selecting");
     }
-    Ok(crate::ui::render::sketch_agent(
-        "",
-        &super::recall::memory_hint(Some(&memory.label())),
-        &sketch,
-        clamped,
-    ))
+    Ok(crate::ui::render::sketch_agent("", &hint, &sketch, clamped))
 }

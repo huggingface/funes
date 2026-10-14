@@ -84,7 +84,7 @@ async fn root_readme(repo: &HFRepository<RepoTypeDataset>) -> Option<String> {
 /// a read naming no memory runs on a host bound to it.
 async fn recall_bound(uri: &str, query: &str) -> String {
     recall::recall(
-        Target::Bound(Memory::parse(uri)),
+        Target::bound(Memory::parse(uri)),
         query.into(),
         5,
         30,
@@ -242,19 +242,19 @@ async fn push_round_trip_create_append_recall() {
         limit: None,
         offset: 0,
     };
-    let sessions_pooled = recall::sessions(Target::Bound(Memory::parse(&uri)), all_sessions())
+    let sessions_pooled = recall::sessions(Target::bound(Memory::parse(&uri)), all_sessions())
         .await
         .unwrap();
     let sessions_exact = recall::sessions(Memory::parse(&uri), all_sessions()).await.unwrap();
     let whole = recall::TurnRange { from: None, to: None };
-    let get_pooled = recall::get(Target::Bound(Memory::parse(&uri)), "sess".into(), whole)
+    let get_pooled = recall::get(Target::bound(Memory::parse(&uri)), "sess".into(), whole)
         .await
         .unwrap();
     let whole = recall::TurnRange { from: None, to: None };
     let get_exact = recall::get(Memory::parse(&uri), "sess".into(), whole).await.unwrap();
     // This host holds a receipt for the remote either way. Only a memory an agent here is bound to
     // is one it pushes to, so only that one reports what is pending.
-    let status_bound = recall::status(Target::Bound(Memory::parse(&uri))).await.unwrap();
+    let status_bound = recall::status(Target::bound(Memory::parse(&uri))).await.unwrap();
     let status_unbound = recall::status(Memory::parse(&uri)).await.unwrap();
 
     let readme_after = root_readme(&repo).await;
@@ -344,8 +344,12 @@ async fn push_round_trip_create_append_recall() {
         .find(|hit| hit.contains("SYNCSMOKE4"))
         .unwrap_or_else(|| panic!("pooling should surface the unpushed turn: {recall_pooled}"));
     assert!(
-        unpushed_hit.contains(&format!("--memory {}", Memory::local().label())),
-        "an unpushed hit's `→ get` should name the local memory: {unpushed_hit}"
+        !unpushed_hit.contains("--memory"),
+        "a read naming no memory hints none, so its drill-down reads the same way: {unpushed_hit}"
+    );
+    assert!(
+        recall_exact.contains(&format!("--memory {uri}")),
+        "a read naming the memory hints it: {recall_exact}"
     );
     assert_eq!(
         recall_pooled.matches("SYNCSMOKE3 the turn").count(),
