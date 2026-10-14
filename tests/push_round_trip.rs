@@ -109,8 +109,7 @@ fn decline(_label: &str, chunks: usize, _why: Disjoint) -> bool {
     false
 }
 
-/// A confirmation that records the call and accepts. Only a first publish reaches it here, and the
-/// gate must say so.
+/// A confirmation that records the call and accepts: only a first publish reaches it here.
 fn accept(_label: &str, chunks: usize, why: Disjoint) -> bool {
     assert_eq!(why, Disjoint::FirstPublish, "the create is a first publish");
     PROMPTS.fetch_add(1, Ordering::SeqCst);

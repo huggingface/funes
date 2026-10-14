@@ -1317,31 +1317,25 @@ mod tests {
     #[test]
     fn the_push_prompt_says_which_case_it_found() {
         let label = "hf://datasets/acme/memory";
-        let selection = disjoint_prompt(label, 1339, Disjoint::Selection { sessions: 3 });
         assert_eq!(
-            selection,
+            disjoint_prompt(label, 1339, Disjoint::Selection { sessions: 3 }),
             "hf://datasets/acme/memory holds none of the 1339 chunk(s) of the 3 named session(s). Publish them? [y/N] "
         );
-        assert!(!selection.contains("first"), "{selection}");
-        let first = disjoint_prompt(label, 40, Disjoint::FirstPublish);
-        assert!(
-            first.contains("is empty") && first.ends_with("Publish? [y/N] "),
-            "{first}"
+        assert_eq!(
+            disjoint_prompt(label, 40, Disjoint::FirstPublish),
+            "hf://datasets/acme/memory is empty, so these 40 chunk(s) would be its first publish. Publish? [y/N] "
         );
-        let host = disjoint_prompt(label, 40, Disjoint::NewHost { remote_chunks: 67339 });
-        assert!(
-            host.contains("67339 chunk(s), none from this host") && host.ends_with("Publish anyway? [y/N] "),
-            "{host}"
+        assert_eq!(
+            disjoint_prompt(label, 40, Disjoint::NewHost { remote_chunks: 67339 }),
+            "hf://datasets/acme/memory holds 67339 chunk(s), none from this host: a new host of yours, or the wrong memory. Publish anyway? [y/N] "
         );
-        let odd = disjoint_prompt(label, 40, Disjoint::Unexplained { remote_chunks: 67339 });
-        assert!(
-            odd.contains("pushed there before") && odd.contains("right memory"),
-            "{odd}"
+        assert_eq!(
+            disjoint_prompt(label, 40, Disjoint::Unexplained { remote_chunks: 67339 }),
+            "hf://datasets/acme/memory holds 67339 chunk(s) and none of the 40 to publish, although this host has pushed there before: check that it is the right memory. Publish anyway? [y/N] "
         );
-        let refusal = disjoint_refusal(label, 1339, Disjoint::Selection { sessions: 3 });
-        assert!(
-            refusal.starts_with("refusing to push: ") && refusal.ends_with("Re-run with `--yes` to confirm."),
-            "{refusal}"
+        assert_eq!(
+            disjoint_refusal(label, 1339, Disjoint::Selection { sessions: 3 }),
+            "refusing to push: hf://datasets/acme/memory holds none of the 1339 chunk(s) of the 3 named session(s). Re-run with `--yes` to confirm."
         );
     }
 

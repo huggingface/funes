@@ -327,8 +327,7 @@ impl From<String> for Pushed {
     }
 }
 
-/// Why a push stops to ask: the target holds none of the chunks it would publish, and what the
-/// comparison established about that. Each case gets its own wording at the prompt.
+/// Why a target holds none of the chunks a push would publish, as far as the comparison can tell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Disjoint {
     /// `--sessions` named sessions the target lacks entirely.
@@ -337,8 +336,7 @@ pub enum Disjoint {
     FirstPublish,
     /// The target has rows, and this host has never compared against it before.
     NewHost { remote_chunks: usize },
-    /// The target has rows and this host has pushed there before, yet shares nothing with it: the
-    /// case to double-check, since it is what the wrong memory looks like.
+    /// The target has rows and this host has pushed there before, yet shares nothing with it.
     Unexplained { remote_chunks: usize },
 }
 
@@ -346,8 +344,7 @@ pub enum Disjoint {
 pub enum Confirm {
     /// Proceed without asking (`--yes`, or a caller that has already established intent, e.g. tests).
     Yes,
-    /// Ask before publishing. Called with the target label, the number of chunks to be pushed, and
-    /// what the comparison knows about why the target shares nothing with them.
+    /// Ask before publishing. Called with the target label, the chunk count, and the [`Disjoint`] case.
     Ask(fn(&str, usize, Disjoint) -> bool),
 }
 
@@ -362,8 +359,7 @@ impl Confirm {
 }
 
 /// Whether a push must be confirmed first, and why: there are rows to publish and the remote holds
-/// none of them. `sessions` is how many were named, `remote_chunks` what the remote holds, and
-/// `known_host` whether this host has compared against the remote before (it holds a receipt).
+/// none of them.
 fn disjoint(
     publishable: usize,
     to_push: usize,
@@ -524,8 +520,7 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
     let publishable: HashSet<String> = candidates.intersection(&embedded_ids(&local).await?).cloned().collect();
     let to_push: HashSet<String> = publishable.difference(&remote_ids).cloned().collect();
 
-    // Whether this host has compared against the remote before. Read ahead of the receipt write
-    // below, which would make every host look known.
+    // Read before the receipt write below, which would make every host look known.
     let known_host = load_pushed(&uri).is_some();
 
     // Bootstrap/refresh the local receipt from facts the push comparison has already established.
@@ -546,7 +541,7 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
     let repo_id = format!("{owner}/{name}");
     let token = hub::hf_token().context("no HF token (set HF_TOKEN) — required to push")?;
 
-    // When required, ask for confirmation before publishing, saying what the comparison found.
+    // When required, ask for confirmation before publishing.
     if let Some(why) = disjoint(
         publishable.len(),
         to_push.len(),
@@ -922,7 +917,7 @@ mod tests {
     }
 
     #[test]
-    fn the_prompt_names_the_case_the_comparison_found() {
+    fn disjoint_names_the_case_the_comparison_found() {
         // Named sessions the remote lacks: the selection is the reason, whatever the remote holds.
         assert_eq!(disjoint(5, 5, 3, 100, true), Some(Disjoint::Selection { sessions: 3 }));
         assert_eq!(disjoint(5, 5, 1, 0, false), Some(Disjoint::Selection { sessions: 1 }));
