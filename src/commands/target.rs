@@ -147,7 +147,8 @@ impl Target {
 
 /// This host's turns not yet pushed to the remote at `uri`: the local memory's candidates for
 /// `search`, kept to the rows missing from this host's receipt for it. `None` unless this host has
-/// pushed there.
+/// pushed there. The hits hint no memory, as a call naming none does; [`Target::candidates`] sets
+/// the hint of every pool it ranks.
 pub async fn unpushed(search: &Search, uri: &str) -> Result<Option<Candidates>> {
     let Some(pushed) = push::load_pushed(uri) else {
         return Ok(None);
@@ -158,6 +159,7 @@ pub async fn unpushed(search: &Search, uri: &str) -> Result<Option<Candidates>> 
     }
     let mut pool = search.candidates(&Memory::local(), &|_| ()).await?;
     pool.retain(|h| !pushed.contains(&h.id));
+    pool.hint("");
     Ok(Some(pool))
 }
 
