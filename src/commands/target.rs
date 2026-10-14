@@ -89,7 +89,9 @@ impl Target {
 
     /// The pools a recall ranks: the memory's own candidates, and for the bound memory the local
     /// memory's, kept to this host's turns not yet pushed. The local search runs while the remote
-    /// one waits on the network. Every hit carries the `--memory` its drill-down repeats.
+    /// one waits on the network; a remote that turns out unreachable degrades to the local memory,
+    /// which the unpushed pool is part of, so that pool is dropped. Every hit carries the
+    /// `--memory` its drill-down repeats.
     pub(crate) async fn candidates(
         &self,
         search: &Search,
@@ -101,8 +103,10 @@ impl Target {
                 None => Ok(None),
             }
         });
-        let mut pools = vec![own?];
-        pools.extend(owed?);
+        let own = own?;
+        let owed = owed?.filter(|_| !own.degraded());
+        let mut pools = vec![own];
+        pools.extend(owed);
         for pool in &mut pools {
             pool.hint(self.named.as_deref().unwrap_or_default());
         }

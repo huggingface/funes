@@ -505,6 +505,11 @@ pub struct Candidates {
 }
 
 impl Candidates {
+    /// Whether the pool came from the local memory in place of an unreachable remote.
+    pub(crate) fn degraded(&self) -> bool {
+        !self.note.is_empty()
+    }
+
     /// Give every hit the `--memory` its drill-down repeats.
     pub(crate) fn hint(&mut self, memory: &str) {
         for h in &mut self.hits {
