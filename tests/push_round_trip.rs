@@ -20,7 +20,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use funes::commands::push::Confirm;
+use funes::commands::push::{Confirm, Disjoint};
 use funes::commands::recall;
 use funes::memory::Memory;
 use hf_hub::{HFClient, HFError, HFRepository, RepoTypeDataset};
@@ -103,14 +103,16 @@ static PROMPTS: AtomicUsize = AtomicUsize::new(0);
 static LAST_CHUNKS: AtomicUsize = AtomicUsize::new(0);
 
 /// A confirmation that records the call and declines.
-fn decline(_label: &str, chunks: usize) -> bool {
+fn decline(_label: &str, chunks: usize, _why: Disjoint) -> bool {
     PROMPTS.fetch_add(1, Ordering::SeqCst);
     LAST_CHUNKS.store(chunks, Ordering::SeqCst);
     false
 }
 
-/// A confirmation that records the call and accepts.
-fn accept(_label: &str, chunks: usize) -> bool {
+/// A confirmation that records the call and accepts. Only a first publish reaches it here, and the
+/// gate must say so.
+fn accept(_label: &str, chunks: usize, why: Disjoint) -> bool {
+    assert_eq!(why, Disjoint::FirstPublish, "the create is a first publish");
     PROMPTS.fetch_add(1, Ordering::SeqCst);
     LAST_CHUNKS.store(chunks, Ordering::SeqCst);
     true

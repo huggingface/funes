@@ -30,9 +30,11 @@ Once 500 pushed rows sit unindexed on the remote, a push also compacts it: it me
 fragments, adds those rows to the search indexes, and deletes the old versions.
 `funes compact <memory>` does the same without pushing ([index.md](index.md#compaction)).
 
-**The wrong-memory guard.** A push to a memory that holds none of the chunks it would publish — a
-first push, a new host, sessions named with `--sessions` that it lacks, or genuinely the wrong memory —
-asks before uploading. Off a terminal it refuses
+**The wrong-memory guard.** A push to a memory that holds none of the chunks it would publish asks
+before uploading, and says which case it found: sessions named with `--sessions` that the memory
+lacks, an empty memory (a first publish), a memory with chunks but none from this host (a new host of
+yours), or a memory this host has pushed to before that shares nothing with what it would publish,
+which is what the wrong memory looks like. Off a terminal it refuses
 rather than guess; `--yes` overrides. ([`funes add`](add.md) clears this for you by doing the first
 push interactively — once that machine has an index of its own to push.)
 

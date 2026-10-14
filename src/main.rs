@@ -1256,18 +1256,12 @@ impl Drop for Spinner {
 /// The push confirmation for a target holding none of the chunks to publish. Fails closed (returns
 /// false) off a terminal, so an unattended push can't silently publish to the wrong memory — there it
 /// must be re-run with `--yes`.
-fn prompt_new_memory(label: &str, chunks: usize) -> bool {
+fn prompt_new_memory(label: &str, chunks: usize, why: push::Disjoint) -> bool {
     if !std::io::stdin().is_terminal() {
-        eprintln!(
-            "refusing to push {chunks} chunk(s) to {label}: it holds none of them \
-             (a first push, a new host, sessions it lacks, or the wrong memory) — re-run with `--yes` to confirm."
-        );
+        eprintln!("{}", disjoint_refusal(label, chunks, why));
         return false;
     }
-    eprint!(
-        "{label} holds none of the {chunks} chunk(s) to publish — a first push here, a new host of yours, \
-         sessions it lacks, or the wrong memory. Publish anyway? [y/N] "
-    );
+    eprint!("{}", disjoint_prompt(label, chunks, why));
     let _ = std::io::stderr().flush();
     let mut answer = String::new();
     if std::io::stdin().read_line(&mut answer).is_err() {
@@ -1276,11 +1270,80 @@ fn prompt_new_memory(label: &str, chunks: usize) -> bool {
     matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
+/// What the push found about the target and the chunks to publish, in the words of that case.
+fn disjoint_finding(label: &str, chunks: usize, why: push::Disjoint) -> String {
+    match why {
+        push::Disjoint::Selection { sessions } => {
+            format!("{label} holds none of the {chunks} chunk(s) of the {sessions} named session(s)")
+        }
+        push::Disjoint::FirstPublish => {
+            format!("{label} is empty, so these {chunks} chunk(s) would be its first publish")
+        }
+        push::Disjoint::NewHost { remote_chunks } => format!(
+            "{label} holds {remote_chunks} chunk(s), none from this host: a new host of yours, or the wrong memory"
+        ),
+        push::Disjoint::Unexplained { remote_chunks } => format!(
+            "{label} holds {remote_chunks} chunk(s) and none of the {chunks} to publish, although this host \
+             has pushed there before: check that it is the right memory"
+        ),
+    }
+}
+
+/// The question put to the user at a terminal: the finding, then a question that fits it.
+fn disjoint_prompt(label: &str, chunks: usize, why: push::Disjoint) -> String {
+    let question = match why {
+        push::Disjoint::Selection { .. } => "Publish them?",
+        push::Disjoint::FirstPublish => "Publish?",
+        push::Disjoint::NewHost { .. } | push::Disjoint::Unexplained { .. } => "Publish anyway?",
+    };
+    format!("{}. {question} [y/N] ", disjoint_finding(label, chunks, why))
+}
+
+/// The refusal off a terminal, where no question can be asked.
+fn disjoint_refusal(label: &str, chunks: usize, why: push::Disjoint) -> String {
+    format!(
+        "refusing to push: {}. Re-run with `--yes` to confirm.",
+        disjoint_finding(label, chunks, why)
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{model_for_locale, parse_confirm, parse_model, Cli, Cmd};
+    use super::{disjoint_prompt, disjoint_refusal, model_for_locale, parse_confirm, parse_model, Cli, Cmd};
     use clap::Parser;
+    use funes::commands::push::Disjoint;
     use funes::memory::dataset::model::{ENGLISH, MULTILINGUAL};
+
+    #[test]
+    fn the_push_prompt_says_which_case_it_found() {
+        let label = "hf://datasets/acme/memory";
+        let selection = disjoint_prompt(label, 1339, Disjoint::Selection { sessions: 3 });
+        assert_eq!(
+            selection,
+            "hf://datasets/acme/memory holds none of the 1339 chunk(s) of the 3 named session(s). Publish them? [y/N] "
+        );
+        assert!(!selection.contains("first"), "{selection}");
+        let first = disjoint_prompt(label, 40, Disjoint::FirstPublish);
+        assert!(
+            first.contains("is empty") && first.ends_with("Publish? [y/N] "),
+            "{first}"
+        );
+        let host = disjoint_prompt(label, 40, Disjoint::NewHost { remote_chunks: 67339 });
+        assert!(
+            host.contains("67339 chunk(s), none from this host") && host.ends_with("Publish anyway? [y/N] "),
+            "{host}"
+        );
+        let odd = disjoint_prompt(label, 40, Disjoint::Unexplained { remote_chunks: 67339 });
+        assert!(
+            odd.contains("pushed there before") && odd.contains("right memory"),
+            "{odd}"
+        );
+        let refusal = disjoint_refusal(label, 1339, Disjoint::Selection { sessions: 3 });
+        assert!(
+            refusal.starts_with("refusing to push: ") && refusal.ends_with("Re-run with `--yes` to confirm."),
+            "{refusal}"
+        );
+    }
 
     #[test]
     fn an_answer_names_the_model_and_anything_else_takes_the_default() {

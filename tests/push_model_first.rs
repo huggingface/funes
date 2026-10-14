@@ -21,7 +21,7 @@ use hf_hub::HFClient;
 const OWNER: &str = "optimum-internal-testing";
 const NAME: &str = "funes-test";
 
-fn never_asked(_label: &str, _chunks: usize) -> bool {
+fn never_asked(_label: &str, _chunks: usize, _why: push::Disjoint) -> bool {
     panic!("a push of no chunks asks nothing");
 }
 

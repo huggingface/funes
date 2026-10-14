@@ -327,28 +327,62 @@ impl From<String> for Pushed {
     }
 }
 
+/// Why a push stops to ask: the target holds none of the chunks it would publish, and what the
+/// comparison established about that. Each case gets its own wording at the prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Disjoint {
+    /// `--sessions` named sessions the target lacks entirely.
+    Selection { sessions: usize },
+    /// The target has no rows yet.
+    FirstPublish,
+    /// The target has rows, and this host has never compared against it before.
+    NewHost { remote_chunks: usize },
+    /// The target has rows and this host has pushed there before, yet shares nothing with it: the
+    /// case to double-check, since it is what the wrong memory looks like.
+    Unexplained { remote_chunks: usize },
+}
+
 /// How a push handles a target that holds none of the chunks it would publish.
 pub enum Confirm {
     /// Proceed without asking (`--yes`, or a caller that has already established intent, e.g. tests).
     Yes,
-    /// Ask before publishing. Called with the target label and the number of chunks to be pushed.
-    Ask(fn(&str, usize) -> bool),
+    /// Ask before publishing. Called with the target label, the number of chunks to be pushed, and
+    /// what the comparison knows about why the target shares nothing with them.
+    Ask(fn(&str, usize, Disjoint) -> bool),
 }
 
 impl Confirm {
     /// Whether the push may proceed to a share-nothing target.
-    fn proceed(self, label: &str, chunks: usize) -> bool {
+    fn proceed(self, label: &str, chunks: usize, why: Disjoint) -> bool {
         match self {
             Confirm::Yes => true,
-            Confirm::Ask(ask) => ask(label, chunks),
+            Confirm::Ask(ask) => ask(label, chunks, why),
         }
     }
 }
 
-/// Whether a push must be confirmed first: there are rows to publish and the remote holds none of
-/// them — a first publish, a new host of yours, sessions it lacks, or the wrong memory.
-fn must_confirm(publishable: usize, to_push: usize) -> bool {
-    to_push > 0 && to_push == publishable
+/// Whether a push must be confirmed first, and why: there are rows to publish and the remote holds
+/// none of them. `sessions` is how many were named, `remote_chunks` what the remote holds, and
+/// `known_host` whether this host has compared against the remote before (it holds a receipt).
+fn disjoint(
+    publishable: usize,
+    to_push: usize,
+    sessions: usize,
+    remote_chunks: usize,
+    known_host: bool,
+) -> Option<Disjoint> {
+    if to_push == 0 || to_push != publishable {
+        return None;
+    }
+    Some(if sessions > 0 {
+        Disjoint::Selection { sessions }
+    } else if remote_chunks == 0 {
+        Disjoint::FirstPublish
+    } else if !known_host {
+        Disjoint::NewHost { remote_chunks }
+    } else {
+        Disjoint::Unexplained { remote_chunks }
+    })
 }
 
 /// A memory URI as one path-safe filename — the push receipt's key.
@@ -490,6 +524,10 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
     let publishable: HashSet<String> = candidates.intersection(&embedded_ids(&local).await?).cloned().collect();
     let to_push: HashSet<String> = publishable.difference(&remote_ids).cloned().collect();
 
+    // Whether this host has compared against the remote before. Read ahead of the receipt write
+    // below, which would make every host look known.
+    let known_host = load_pushed(&uri).is_some();
+
     // Bootstrap/refresh the local receipt from facts the push comparison has already established.
     // This makes a no-op push enough to initialize status for a legacy remote, with no extra scan.
     if remote.is_some() {
@@ -508,9 +546,17 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
     let repo_id = format!("{owner}/{name}");
     let token = hub::hf_token().context("no HF token (set HF_TOKEN) — required to push")?;
 
-    // When required, ask for confirmation before publishing.
-    if must_confirm(publishable.len(), to_push.len()) && !confirm.proceed(&target.label(), to_push.len()) {
-        bail!("push aborted");
+    // When required, ask for confirmation before publishing, saying what the comparison found.
+    if let Some(why) = disjoint(
+        publishable.len(),
+        to_push.len(),
+        sessions.len(),
+        remote_ids.len(),
+        known_host,
+    ) {
+        if !confirm.proceed(&target.label(), to_push.len(), why) {
+            bail!("push aborted");
+        }
     }
 
     // No HTTP retries, as `remote::compact` requires.
@@ -864,16 +910,35 @@ mod tests {
     use lance::dataset::WriteParams;
 
     #[test]
-    fn must_confirm_only_when_overlap_is_empty_and_there_is_work() {
-        // First publish / fully disjoint (every chunk to publish is new to the remote) → confirm.
-        assert!(must_confirm(5, 5));
-        assert!(must_confirm(1, 1));
-        // Some overlap (fewer to push than there are to publish) → no prompt, it's a memory you add to.
-        assert!(!must_confirm(5, 3));
-        // Nothing to push (up to date, or a compaction-only run) → never prompt, even with 0
-        // overlap.
-        assert!(!must_confirm(5, 0));
-        assert!(!must_confirm(0, 0));
+    fn a_push_asks_only_when_the_overlap_is_empty_and_there_is_work() {
+        // Some overlap (fewer to push than there are to publish): no prompt, it's a memory you add to.
+        assert_eq!(disjoint(5, 3, 0, 100, true), None);
+        // Nothing to push (up to date, or a compaction-only run): never a prompt, even with no overlap.
+        assert_eq!(disjoint(5, 0, 0, 0, false), None);
+        assert_eq!(disjoint(0, 0, 0, 0, false), None);
+        // Every chunk to publish is new to the remote: a prompt, whatever the case.
+        assert!(disjoint(5, 5, 0, 0, false).is_some());
+        assert!(disjoint(1, 1, 0, 100, true).is_some());
+    }
+
+    #[test]
+    fn the_prompt_names_the_case_the_comparison_found() {
+        // Named sessions the remote lacks: the selection is the reason, whatever the remote holds.
+        assert_eq!(disjoint(5, 5, 3, 100, true), Some(Disjoint::Selection { sessions: 3 }));
+        assert_eq!(disjoint(5, 5, 1, 0, false), Some(Disjoint::Selection { sessions: 1 }));
+        // An empty remote: a first publish.
+        assert_eq!(disjoint(5, 5, 0, 0, false), Some(Disjoint::FirstPublish));
+        assert_eq!(disjoint(5, 5, 0, 0, true), Some(Disjoint::FirstPublish));
+        // A remote with rows this host never compared against: a new host.
+        assert_eq!(
+            disjoint(5, 5, 0, 100, false),
+            Some(Disjoint::NewHost { remote_chunks: 100 })
+        );
+        // A remote with rows this host has pushed to before, sharing nothing: the one to check.
+        assert_eq!(
+            disjoint(5, 5, 0, 100, true),
+            Some(Disjoint::Unexplained { remote_chunks: 100 })
+        );
     }
 
     #[test]
