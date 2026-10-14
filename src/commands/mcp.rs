@@ -144,10 +144,9 @@ pub struct StatusRequest {
 
 /// A tool's text, led by the stale-install note when there is one. A tool result is the one channel
 /// every client hands to the model, so this is where an install that stopped capturing gets said;
-/// the CLI prints the same line on stderr and keeps stdout byte-identical to this text. `memory`
-/// is the server's own, which the note's cure names.
-fn noted(memory: Option<&str>, text: String) -> String {
-    match agents::stale_install_notice(memory) {
+/// the CLI prints the same line on stderr and keeps stdout byte-identical to this text.
+fn noted(text: String) -> String {
+    match agents::stale_install_notice() {
         Some(note) => format!("{note}\n{text}"),
         None => text,
     }
@@ -198,7 +197,6 @@ impl Funes {
         }): Parameters<RecallRequest>,
     ) -> String {
         noted(
-            self.memory.as_deref(),
             match async {
                 recall::recall(
                     self.target(memory)?,
@@ -239,7 +237,6 @@ impl Funes {
     ) -> String {
         let range = recall::TurnRange { from, to };
         noted(
-            self.memory.as_deref(),
             match async { recall::get(self.target(memory)?, session_id, range).await }.await {
                 Ok(s) if !s.is_empty() => s,
                 Ok(_) => "no results".to_string(),
@@ -270,7 +267,6 @@ impl Funes {
             offset: offset.unwrap_or(0),
         };
         noted(
-            self.memory.as_deref(),
             match async { recall::sessions(self.target(memory)?, filter).await }.await {
                 Ok(s) if !s.is_empty() => s,
                 Ok(_) => "no results".to_string(),
@@ -295,7 +291,6 @@ impl Funes {
         }): Parameters<ScanRequest>,
     ) -> String {
         noted(
-            self.memory.as_deref(),
             match async {
                 recall::scan(
                     self.target(memory)?,
@@ -332,7 +327,6 @@ impl Funes {
         }): Parameters<SketchRequest>,
     ) -> String {
         noted(
-            self.memory.as_deref(),
             match async { super::sketch::run(self.target(memory)?, session_id, from, to, units, max_chars).await }.await
             {
                 Ok(s) if !s.is_empty() => s,
@@ -349,7 +343,6 @@ impl Funes {
         // No update check here: it needs the network, and the "update available" notice belongs
         // on the human-facing CLI `funes status`, not on this hot, otherwise-local tool path.
         noted(
-            self.memory.as_deref(),
             async { recall::status(self.target(memory)?).await }
                 .await
                 .unwrap_or_else(|e| format!("status error: {e}")),
@@ -367,7 +360,7 @@ impl ServerHandler for Funes {
                                 indexed automatically as they work and read-only here — nothing has to be saved. \
                                 When earlier work matters, this is the memory to consult."
             .to_string();
-        if let Some(note) = agents::stale_install_notice(self.memory.as_deref()) {
+        if let Some(note) = agents::stale_install_notice() {
             instructions.push_str("\n\n");
             instructions.push_str(&note);
         }

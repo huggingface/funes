@@ -12,19 +12,11 @@ use crate::traces::spool;
 /// What a read says when this funes and an install on this machine disagree, one `note:` line per
 /// case, or `None`: a hook asked for a spool nothing writes (an install from before the spool), or a
 /// registered integration speaks another contract (an install by another binary). The cure is the
-/// same, `funes add <id>` again — and funes knows no agent here, only what asked and what is
-/// registered.
-///
-/// `memory` is the one the caller serves, when it knows it: the MCP server's own, since the agent
-/// launched it with the binding `funes add` recorded. A bare `funes add <id>` would bind anew, so
-/// the cure names the memory when it can and asks for it when it cannot.
-pub fn stale_install_notice(memory: Option<&str>) -> Option<String> {
+/// same, `funes add <id>` again, which installs on the memory the host is bound to — and funes
+/// knows no agent here, only what asked and what is registered.
+pub fn stale_install_notice() -> Option<String> {
     let line = |id: &str| {
-        let cure = match memory {
-            Some(memory) => format!("Re-run `funes add {id} {memory}` to update it."),
-            None => format!("Re-run `funes add {id}`, naming the memory it is bound to, to update it."),
-        };
-        format!("the {id} integration does not match this version of funes. {cure}")
+        format!("the {id} integration does not match this version of funes. Re-run `funes add {id}` to update it.")
     };
     let mut lines: Vec<String> = spool::missing().iter().map(|id| line(id)).collect();
     if let Ok(root) = registry::default_root() {

@@ -94,7 +94,7 @@ fn a_stale_install_is_said_on_every_read_until_funes_add_runs_again() {
     assert_eq!(
         stderr(&refused).lines().next(),
         Some(
-            "Error: the bonnie integration does not match this version of funes. Re-run `funes add bonnie`, naming the memory it is bound to, to update it."
+            "Error: the bonnie integration does not match this version of funes. Re-run `funes add bonnie` to update it."
         )
     );
     assert!(stamp.is_file(), "the refusal leaves its stamp");
@@ -108,13 +108,13 @@ fn a_stale_install_is_said_on_every_read_until_funes_add_runs_again() {
     )
     .unwrap();
 
-    // The CLI says both on stderr and keeps stdout as it was. It does not know which memory the
-    // install was bound to, so the cure asks for it: a bare `funes add` would bind anew.
+    // The CLI says both on stderr and keeps stdout as it was. The cure is a bare `funes add`, which
+    // installs on the memory the host is bound to.
     let status = funes(&home, &funes_home, &["status"]);
     support::assert_success(&status);
     let err = stderr(&status);
-    let notes = "note: the bonnie integration does not match this version of funes. Re-run `funes add bonnie`, naming the memory it is bound to, to update it.\n\
-                 note: the clyde integration does not match this version of funes. Re-run `funes add clyde`, naming the memory it is bound to, to update it.\n";
+    let notes = "note: the bonnie integration does not match this version of funes. Re-run `funes add bonnie` to update it.\n\
+                 note: the clyde integration does not match this version of funes. Re-run `funes add clyde` to update it.\n";
     assert_eq!(err, notes);
     assert!(!stdout(&status).contains("note:"), "{}", stdout(&status));
 
@@ -123,17 +123,12 @@ fn a_stale_install_is_said_on_every_read_until_funes_add_runs_again() {
     let asked = funes(&home, &funes_home, &["ask", "claude", "anything"]);
     assert!(stderr(&asked).starts_with(notes), "{}", stderr(&asked));
 
-    // The MCP server says both in its instructions and ahead of every tool's text — and it was
-    // launched with the binding, so its cure carries the memory.
+    // The MCP server says both in its instructions and ahead of every tool's text, whatever memory
+    // it was started on.
     let team = tmp.path().join("team-memory");
     let (instructions, text) = mcp_status(&home, &funes_home, team.to_str().unwrap());
-    let notes = format!(
-        "note: the bonnie integration does not match this version of funes. Re-run `funes add bonnie {m}` to update it.\n\
-         note: the clyde integration does not match this version of funes. Re-run `funes add clyde {m}` to update it.\n",
-        m = team.display()
-    );
-    assert!(instructions.contains(&notes), "{instructions}");
-    assert!(text.starts_with(&notes), "{text}");
+    assert!(instructions.contains(notes), "{instructions}");
+    assert!(text.starts_with(notes), "{text}");
     let body = &text[notes.len()..];
     assert!(
         body.starts_with('\n') && body.len() > 1,

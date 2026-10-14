@@ -337,7 +337,7 @@ async fn run() -> Result<()> {
             | Cmd::Status
             | Cmd::Ask { .. }
     ) {
-        if let Some(note) = agents::stale_install_notice(None) {
+        if let Some(note) = agents::stale_install_notice() {
             eprint!("{note}");
         }
     }
