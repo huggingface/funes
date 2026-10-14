@@ -98,7 +98,7 @@ interpretation. Pulled on demand, context stays clean and recall happens for a r
 
 funes owns the shared memory pipeline: the turns format, indexing, storage, recall, and publishing.
 An agent integration owns the parts that follow that agent: converting its transcripts, registering
-tools, and installing hooks or event handlers. The [integration contract](add.md#the-integration-contract)
+tools, and installing hooks or event handlers. The [integration contract](../CONTRIBUTING.md#the-integration-contract)
 connects those parts to funes through its CLI, MCP server, and turns files.
 
 Agent transcript formats and configuration change on their own schedules. Keeping their converters

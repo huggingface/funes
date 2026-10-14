@@ -115,8 +115,7 @@ shared and listed too.
 
 For installation through `funes add`, make a bundle with a `manifest.json` and an executable
 `setup` implementing `setup add [MEMORY]` and `setup remove`. Follow the
-[integration contract](docs/add.md#the-integration-contract) for the manifest, environment,
-and spool. The [pi bundle](https://github.com/huggingface/funes-integrations/tree/main/pi)
+[integration contract](#the-integration-contract) for the manifest, environment, and spool. The [pi bundle](https://github.com/huggingface/funes-integrations/tree/main/pi)
 shows how setup, a converter, automation, and tests fit together.
 
 If your integration indexes sessions, convert the agent's existing history at setup and use its
@@ -133,6 +132,54 @@ funes remove <id>
 ```
 
 funes asks for confirmation before running your bundle's setup.
+
+### The integration contract
+
+`funes add <id>` installs the bundle at `~/.funes/agents/<id>/` and executes it. The bundle:
+
+| File | Role |
+| --- | --- |
+| `manifest.json` | What the integration declares — the fields below. |
+| `setup` | An executable. `setup add [MEMORY]` wires funes into the agent, bound to `MEMORY` when given (an `<org>/<repo>` shorthand or an `hf://…` URI; absent is the local memory); `setup remove` undoes it. A non-zero exit fails the command. |
+
+| Field | |
+| --- | --- |
+| `contract_version` | The contract this section describes, `1`. funes refuses a mismatch before running anything, pointing at `funes update`. |
+| `id` | The directory name, lowercase `[a-z0-9_-]`; it names the installation and its spool. |
+| `label` | The agent's name as a human writes it. |
+| `repo` | Where it is published from, `<publisher>/<name>`. The publisher and the `id` are what the package is: funes will not put one publisher's files where another's are installed — `funes remove <id>` first says you mean to replace it. |
+| `version` | Its own release, `MAJOR.MINOR.PATCH`, moving independently of the contract. Optional. |
+
+`setup` runs with three variables: `FUNES_BIN`, the funes command to record or invoke (the user's
+pin, else `funes`); `FUNES_HOME`, the home whose memory and spool this install serves; and
+`FUNES_AGENT_ID`, its own id, which names its spool. Everything else the bundle needs — converter,
+hook scripts, plugin files — sits beside `setup`, and so does any state it keeps: a refresh rewrites
+only the files that changed and prunes nothing, while `funes remove` deletes the directory whole.
+
+Each integration converts a session into `~/.funes/spool/<id>/<session id>.funes.jsonl` — at
+install for the history, then on every turn for the session in progress and any other changed since
+the last turn — and funes indexes what it finds there. The id names the spool; the `harness` each
+turn carries is the integration's own to choose (the maintained four use their id, by convention),
+and `recall --harness` filters on what the turns carry, whatever is installed. The directory is
+funes's: a bundle only ever writes into it, funes deletes each file after storing its content, and
+a file funes cannot read stays, so converter failures remain visible.
+
+What a producer owes the spool: write, never read back — funes may have drained what you wrote,
+and what it holds `funes sessions` says, each row closing on the last indexed turn's timestamp, so
+a seed can skip a session whose source has not grown since; one file per session, named from the
+session id, so a re-emit overwrites its own file; write a temporary name in the same directory and
+rename it into place, with the temporary name off `.jsonl` (see [funes-jsonl.md](docs/funes-jsonl.md)).
+The hook then runs `funes index --harness <id>`, one budgeted step over the spool.
+
+The maintained four register `$FUNES_BIN mcp [MEMORY]` as the agent's MCP server, convert the
+agent's history into the spool at install, and install automation that converts each finished
+session and runs `funes index --harness <id>`, plus a session-boundary `funes push` when a memory
+is bound. None of that is required of an integration — one may register the read tools alone — and
+funes does not ask which kind it is running: the bootstrap around `setup` is the same for every
+integration, and each step is a no-op when there is nothing for it. A first add asks before
+indexing, the seed indexes what the spool holds, and the first push follows the usual
+[publishing rules](docs/push.md). An integration that converts nothing gets a note at each step and
+nothing else.
 
 ### Publish and list
 
