@@ -152,7 +152,7 @@ async fn push_builds_the_indexes_a_remote_lacks() {
     );
     let append = append.expect("push").report;
     assert!(
-        append.contains("pushed 1 chunks") && append.contains("compacted"),
+        append.contains("pushed 1 chunks") && append.contains("compacted (commit"),
         "a push to a memory with no text index should build it: {append}"
     );
     assert!(
