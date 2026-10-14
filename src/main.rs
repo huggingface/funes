@@ -1279,9 +1279,9 @@ fn disjoint_finding(label: &str, chunks: usize, why: push::Disjoint) -> String {
         push::Disjoint::FirstPublish => {
             format!("{label} is empty, so these {chunks} chunk(s) would be its first publish")
         }
-        push::Disjoint::NewHost { remote_chunks } => format!(
-            "{label} holds {remote_chunks} chunk(s), none from this host: a new host of yours, or the wrong memory"
-        ),
+        push::Disjoint::NewHost { remote_chunks } => {
+            format!("{label} holds {remote_chunks} chunk(s), none from this host: a new host of yours")
+        }
         push::Disjoint::Unexplained { remote_chunks } => format!(
             "{label} holds {remote_chunks} chunk(s) and none of the {chunks} to publish, although this host \
              has pushed there before: check that it is the right memory"
@@ -1327,7 +1327,7 @@ mod tests {
         );
         assert_eq!(
             disjoint_prompt(label, 40, Disjoint::NewHost { remote_chunks: 67339 }),
-            "hf://datasets/acme/memory holds 67339 chunk(s), none from this host: a new host of yours, or the wrong memory. Publish anyway? [y/N] "
+            "hf://datasets/acme/memory holds 67339 chunk(s), none from this host: a new host of yours. Publish anyway? [y/N] "
         );
         assert_eq!(
             disjoint_prompt(label, 40, Disjoint::Unexplained { remote_chunks: 67339 }),

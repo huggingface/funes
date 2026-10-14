@@ -117,6 +117,15 @@ pub(crate) fn load_pushed(memory_uri: &str) -> Option<HashSet<String>> {
     load_pushed_from(&pushed_path(memory_uri))
 }
 
+/// Whether this host has pushed to the memory before: its receipt exists and is not empty.
+fn pushed_before_at(path: &Path) -> bool {
+    load_pushed_from(path).is_some_and(|pushed| !pushed.is_empty())
+}
+
+fn pushed_before(memory_uri: &str) -> bool {
+    pushed_before_at(&pushed_path(memory_uri))
+}
+
 fn record_pushed_at<'a>(path: &Path, ids: impl IntoIterator<Item = &'a String>) -> Result<()> {
     let dir = path.parent().context("push receipt has no parent directory")?;
     std::fs::create_dir_all(dir).context("creating the push receipt directory")?;
@@ -334,7 +343,7 @@ pub enum Disjoint {
     Selection { sessions: usize },
     /// The target has no rows yet.
     FirstPublish,
-    /// The target has rows, and this host has never compared against it before.
+    /// The target has rows, none from this host.
     NewHost { remote_chunks: usize },
     /// The target has rows and this host has pushed there before, yet shares nothing with it.
     Unexplained { remote_chunks: usize },
@@ -520,8 +529,8 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
     let publishable: HashSet<String> = candidates.intersection(&embedded_ids(&local).await?).cloned().collect();
     let to_push: HashSet<String> = publishable.difference(&remote_ids).cloned().collect();
 
-    // Read before the receipt write below, which would make every host look known.
-    let known_host = load_pushed(&uri).is_some();
+    // Read before the receipt write below, which can make this host look known.
+    let known_host = pushed_before(&uri);
 
     // Bootstrap/refresh the local receipt from facts the push comparison has already established.
     // This makes a no-op push enough to initialize status for a legacy remote, with no extra scan.
@@ -1313,6 +1322,19 @@ mod tests {
             ["a", "b", "c"].into_iter().map(str::to_string).collect()
         );
         assert_eq!(std::fs::read_to_string(path).unwrap(), "a\nb\nc\n");
+    }
+
+    #[test]
+    fn an_empty_receipt_does_not_count_as_a_push() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("receipt");
+        assert!(!pushed_before_at(&path));
+        // The receipt bootstrap of a push that then stops at the prompt writes an empty file.
+        record_pushed_at(&path, std::iter::empty()).unwrap();
+        assert!(path.is_file());
+        assert!(!pushed_before_at(&path));
+        record_pushed_at(&path, &["a".to_string()]).unwrap();
+        assert!(pushed_before_at(&path));
     }
 
     #[test]
