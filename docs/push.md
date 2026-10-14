@@ -33,7 +33,7 @@ fragments, adds those rows to the search indexes, and deletes the old versions.
 **The wrong-memory guard.** A push to a memory that holds none of the chunks it would publish asks
 before uploading, and says which case it found: sessions named with `--sessions` that the memory
 lacks, an empty memory (a first publish), chunks from other hosts only (a new host of yours), or
-nothing in common with a memory this host has pushed to before (what the wrong memory looks like).
+nothing in common with a memory that held chunks from this host before (what the wrong memory looks like).
 Off a terminal it refuses rather than guess; `--yes` overrides. ([`funes add`](add.md) clears this
 for you by doing the first push interactively — once that machine has an index of its own to push.)
 

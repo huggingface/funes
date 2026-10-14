@@ -117,13 +117,13 @@ pub(crate) fn load_pushed(memory_uri: &str) -> Option<HashSet<String>> {
     load_pushed_from(&pushed_path(memory_uri))
 }
 
-/// Whether this host has pushed to the memory before: its receipt exists and is not empty.
-fn pushed_before_at(path: &Path) -> bool {
+/// Whether the memory has held chunks from this host before: its receipt exists and is not empty.
+fn held_before_at(path: &Path) -> bool {
     load_pushed_from(path).is_some_and(|pushed| !pushed.is_empty())
 }
 
-fn pushed_before(memory_uri: &str) -> bool {
-    pushed_before_at(&pushed_path(memory_uri))
+fn held_before(memory_uri: &str) -> bool {
+    held_before_at(&pushed_path(memory_uri))
 }
 
 fn record_pushed_at<'a>(path: &Path, ids: impl IntoIterator<Item = &'a String>) -> Result<()> {
@@ -345,7 +345,7 @@ pub enum Disjoint {
     FirstPublish,
     /// The target has rows, none from this host.
     NewHost { remote_chunks: usize },
-    /// The target has rows and this host has pushed there before, yet shares nothing with it.
+    /// The target has rows and held chunks from this host before, yet shares nothing with it now.
     Unexplained { remote_chunks: usize },
 }
 
@@ -530,7 +530,7 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
     let to_push: HashSet<String> = publishable.difference(&remote_ids).cloned().collect();
 
     // Read before the receipt write below, which can make this host look known.
-    let known_host = pushed_before(&uri);
+    let known_host = held_before(&uri);
 
     // Bootstrap/refresh the local receipt from facts the push comparison has already established.
     // This makes a no-op push enough to initialize status for a legacy remote, with no extra scan.
@@ -938,7 +938,7 @@ mod tests {
             disjoint(5, 5, 0, 100, false),
             Some(Disjoint::NewHost { remote_chunks: 100 })
         );
-        // A remote with rows this host has pushed to before, sharing nothing: the one to check.
+        // A remote with rows that held chunks from this host before, sharing nothing: the one to check.
         assert_eq!(
             disjoint(5, 5, 0, 100, true),
             Some(Disjoint::Unexplained { remote_chunks: 100 })
@@ -1325,16 +1325,16 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_receipt_does_not_count_as_a_push() {
+    fn an_empty_receipt_does_not_make_a_known_host() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("receipt");
-        assert!(!pushed_before_at(&path));
+        assert!(!held_before_at(&path));
         // The receipt bootstrap of a push that then stops at the prompt writes an empty file.
         record_pushed_at(&path, std::iter::empty()).unwrap();
         assert!(path.is_file());
-        assert!(!pushed_before_at(&path));
+        assert!(!held_before_at(&path));
         record_pushed_at(&path, &["a".to_string()]).unwrap();
-        assert!(pushed_before_at(&path));
+        assert!(held_before_at(&path));
     }
 
     #[test]
