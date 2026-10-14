@@ -77,6 +77,7 @@ jobs:
           expect {
               -re {Trust it\? \[y/N\] $} { send "y\r"; exp_continue }
               -re {Proceed\? \[Y/n\] $} { send "y\r"; exp_continue }
+              -re {\[E/m\] $} { send "\r"; exp_continue }
               eof
           }
           lassign [wait] pid spawn_id os_error status
