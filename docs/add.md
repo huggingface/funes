@@ -139,24 +139,14 @@ integration is a successful no-op.
 
 ## Converting by hand
 
-funes reads no agent's own transcripts, so indexing an agent's history on a machine that never ran
+funes reads no agent's own transcripts, so indexing an agent's history from a machine that never ran
 the automation — an archive, a colleague's export — is two steps: the bundle's converter into a
 directory of your own, then `funes index` on that directory. A directory you own keeps its files;
-only the spool is drained. The converter is each bundle's own, not part of the contract, so its
-usage is listed here for the maintained four (`<bundle>` is `~/.funes/agents/<id>` once `funes add
-<id>` has run on any machine, or `<id>/` in a checkout of huggingface/funes-integrations):
-
-| Agent | Converter |
-| --- | --- |
-| `claude` | `<bundle>/claude-plugin/funes/convert <transcript.jsonl> [out.funes.jsonl]` — needs jq; one argument prints to stdout |
-| `codex` | `<bundle>/codex-plugin/plugins/funes/convert <rollout.jsonl> [out.funes.jsonl]` — needs jq; one argument prints to stdout |
-| `pi` | `node <bundle>/convert.mjs <session.jsonl \| sessions-root> <out-dir>` — a root converts every session under it |
-| `hermes` | `python3 <bundle>/plugin/convert.py <state.db> <out-dir> [session-id]` — every session in the store unless one is named |
+only the spool is drained. The converter is each bundle's own, and how to run it is in
+[funes-integrations](https://github.com/huggingface/funes-integrations#converting-by-hand):
 
 ```bash
-for t in /archive/.claude/projects/*/*.jsonl; do
-    ~/.funes/agents/claude/claude-plugin/funes/convert "$t" ~/imports/"$(basename "$t" .jsonl)".funes.jsonl
-done
+<converter> /archive/session.jsonl ~/imports/session.funes.jsonl   # as the bundle's README says
 funes index ~/imports
 ```
 
