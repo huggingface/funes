@@ -184,8 +184,8 @@ enum Cmd {
         #[command(flatten)]
         memory: MemoryOpts,
     },
-    /// Show the local index, and each memory your agents are bound to with what this host has yet
-    /// to push there.
+    /// Show the local index, and the memory this host is bound to with what this host has yet to
+    /// push there.
     Status,
     /// Publish your local memory's new embedded chunks to a remote memory on the HF Hub.
     Push {
@@ -954,7 +954,8 @@ async fn bind_memory(spec: &str) -> Result<()> {
 
 /// Bind this host to `resolved`, `None` for its local memory: check its embedding model against
 /// the local memory's, record it, and run every installed agent's setup on it, `except` the one
-/// an add is about to install. The first push is the caller's.
+/// an add is about to install. The record stands whatever the setups do: an agent that fails to
+/// follow is reported, and `bind` again brings it along. The first push is the caller's.
 async fn bind_host(resolved: Option<Resolved>, except: Option<&str>) -> Result<()> {
     let memory = resolved.as_ref().map(|r| r.memory.as_str());
     if let (Some(memory), Some(here)) = (memory, index::local_memory_model().await?) {
@@ -994,7 +995,10 @@ async fn bind_host(resolved: Option<Resolved>, except: Option<&str>) -> Result<(
         println!("{bound}: {} follow.", followed.join(", "));
     }
     if !failed.is_empty() {
-        bail!("not bound: {}", failed.join(", "));
+        bail!(
+            "{} did not follow — fix what it says above, then run `funes bind` again",
+            failed.join(", ")
+        );
     }
     Ok(())
 }
@@ -1056,10 +1060,15 @@ async fn migrate_bindings(root: &Path, except: Option<&str>) -> Result<Option<St
 }
 
 /// The memories an older funes bound this host's agents to, each as first typed with the agents
-/// bound to it. A binding is kept as typed, so one memory may be noted under two spellings.
+/// bound to it. A binding is kept as typed, so one memory may be noted under two spellings. A
+/// note saying `local` is no binding: funes never wrote one, and taken as one it would be handed
+/// to the setups as a memory.
 fn legacy_bindings(root: &Path) -> Result<Vec<(String, Vec<String>)>> {
     let mut by_label: BTreeMap<String, (String, Vec<String>)> = BTreeMap::new();
     for (spec, ids) in registry::bindings(root)?.0 {
+        if spec == "local" {
+            continue;
+        }
         let label = memory::Memory::parse(&spec).label();
         by_label
             .entry(label)

@@ -1284,12 +1284,14 @@ fn the_memory_bound_through_one_agent_is_the_hosts() {
 
     // A host from before the binding: the memory an older funes bound an agent to becomes the
     // host's on the next bare add, every agent following, the one that older funes left local
-    // included, and the notes beside the agents go.
+    // included, and the notes beside the agents go. A note saying `local`, which funes never
+    // wrote, is no binding and no disagreement.
     fs::remove_file(&bound).unwrap();
     let older = |id: &str, memory: &str| {
         fs::write(home.join(format!(".funes/agents/{id}.memory")), format!("{memory}\n")).unwrap()
     };
     older("clyde", memory);
+    older("dotty", "local");
     fs::remove_file(&log).unwrap();
     let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde"]);
     let said = String::from_utf8_lossy(&out.stdout);
@@ -1311,6 +1313,7 @@ fn the_memory_bound_through_one_agent_is_the_hosts() {
         fs::read_to_string(&log).unwrap()
     );
     assert!(!home.join(".funes/agents/clyde.memory").exists());
+    assert!(!home.join(".funes/agents/dotty.memory").exists());
 
     // Unbound through one agent, such a host stays local: the note an older funes left beside
     // that agent goes with its setup, so nothing brings the memory back on the next bare add.
