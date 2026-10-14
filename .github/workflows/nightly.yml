@@ -36,7 +36,7 @@ jobs:
       - uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # v1
 
       - name: Install protoc and expect
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler expect
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler expect jq
 
       - name: Build funes
         run: cargo build --profile ci
@@ -87,3 +87,44 @@ jobs:
             "$FUNES" remove "$ID"
             rm -rf "$HOME"
           done
+
+      # An install a funes from before install records made: the files, a manifest naming no version
+      # and the old repository, and no record. A bare add brings it to the catalog's release and
+      # records it, asking nothing: the script answers no trust prompt, so one would time out and
+      # fail the job. Recorded, it removes unattended.
+      - name: Bring an install with no record to the release
+        env:
+          ID: ${{ matrix.id }}
+        run: |
+          set -eu
+          FUNES="$(pwd)/target/ci/funes"
+          unset FUNES_INTEGRATIONS
+          HOME="$(mktemp -d)"
+          export HOME
+          export FUNES_HOME="$HOME/.funes"
+          export HF_HOME="$HOME/.cache/huggingface"
+          REGISTRY="$HOME/.funes/agents"
+          cat > "$HOME/answers.exp" <<'EXPECT'
+          set timeout 120
+          spawn {*}$argv
+          expect {
+              -re {Proceed\? \[Y/n\] $} { send "y\r"; exp_continue }
+              -re {\[E/m\] $} { send "\r"; exp_continue }
+              eof
+          }
+          lassign [wait] pid spawn_id os_error status
+          exit $status
+          EXPECT
+
+          echo "== $ID from its release =="
+          expect -f "$HOME/answers.exp" -- "$FUNES" add "$ID" local
+          RELEASE="$(jq -r .version "$REGISTRY/$ID.json")"
+          rm "$REGISTRY/$ID.json"
+          jq 'del(.version) | .repo = "huggingface/funes"' "$REGISTRY/$ID/manifest.json" > "$REGISTRY/manifest.tmp"
+          mv "$REGISTRY/manifest.tmp" "$REGISTRY/$ID/manifest.json"
+
+          echo "== $ID again, with no record =="
+          expect -f "$HOME/answers.exp" -- "$FUNES" add "$ID"
+          jq -e --arg release "$RELEASE" '.origin.kind == "catalog" and .version == $release' "$REGISTRY/$ID.json"
+          "$FUNES" remove "$ID"
+          rm -rf "$HOME"
