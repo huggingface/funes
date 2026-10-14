@@ -447,9 +447,8 @@ fn a_relative_source_is_recorded_absolute() {
     assert_eq!(path.canonicalize().unwrap(), elsewhere.canonicalize().unwrap());
 }
 
-/// The memory bound is noted beside the install, so a bare re-run keeps it, and `local` is how it
-/// is unbound. A path stands in for a remote: nothing to check on the Hub, and the first push fails
-/// after setup ran, which is when the binding is noted.
+/// The memory bound is the host's, so a bare re-run keeps it, and `local` is how it is unbound.
+/// A path stands in for a remote: nothing to check on the Hub, and nothing is pushed to it.
 #[test]
 fn a_bare_re_add_keeps_the_memory_bound_and_local_unbinds() {
     let tmp = tempfile::tempdir().unwrap();
@@ -459,7 +458,7 @@ fn a_bare_re_add_keeps_the_memory_bound_and_local_unbinds() {
     bundle(&home.join("integrations/clyde"), "clyde", 1, "");
     fs::create_dir_all(home.join(".clyde")).unwrap();
     fs::write(home.join(".clyde/history.funes.jsonl"), format!("{HISTORY}\n")).unwrap();
-    let binding = home.join(".funes/agents/clyde.memory");
+    let binding = funes_home.join("bound");
     let bound = || fs::read_to_string(&binding).ok().map(|text| text.trim().to_string());
     let memory = tmp.path().join("team-memory");
     let memory = memory.to_str().unwrap();
@@ -498,10 +497,10 @@ fn a_bare_re_add_keeps_the_memory_bound_and_local_unbinds() {
     assert!(bound().is_none(), "unbound");
 }
 
-/// A setup that fails leaves the agent bound as it was, so what is noted is the last memory a
-/// setup ran with — not the last one asked for.
+/// A setup that fails leaves the host bound as asked: the binding is the host's, and the next run
+/// of the setup follows it.
 #[test]
-fn a_setup_that_failed_leaves_the_last_binding() {
+fn a_setup_that_fails_leaves_the_host_bound_as_asked() {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("home");
     let funes_home = tmp.path().join("funes");
@@ -509,7 +508,7 @@ fn a_setup_that_failed_leaves_the_last_binding() {
     let source = bundle(&home.join("integrations/clyde"), "clyde", 1, "");
     fs::create_dir_all(home.join(".clyde")).unwrap();
     fs::write(home.join(".clyde/history.funes.jsonl"), format!("{HISTORY}\n")).unwrap();
-    let binding = home.join(".funes/agents/clyde.memory");
+    let binding = funes_home.join("bound");
     let first = tmp.path().join("first-memory");
     let first = first.to_str().unwrap();
     let second = tmp.path().join("second-memory");
@@ -534,18 +533,16 @@ fn a_setup_that_failed_leaves_the_last_binding() {
             .starts_with(&format!("add {second}\n")),
         "setup ran"
     );
-    assert_eq!(
-        fs::read_to_string(&binding).unwrap().trim(),
-        first,
-        "bound as the agent is"
-    );
+    assert_eq!(fs::read_to_string(&binding).unwrap().trim(), second, "bound as asked");
 
-    // Working again, a bare re-run binds the first: the memory the agent was left with.
+    // Working again, a bare re-run follows the second: the host's.
     fs::write(source.join("setup"), working).unwrap();
     fs::remove_file(&log).unwrap();
     let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde"]);
     assert!(
-        fs::read_to_string(&log).unwrap().starts_with(&format!("add {first}\n")),
+        fs::read_to_string(&log)
+            .unwrap()
+            .starts_with(&format!("add {second}\n")),
         "{}",
         String::from_utf8_lossy(&out.stdout)
     );
@@ -1251,4 +1248,139 @@ fn update_brings_an_unrecorded_copy_to_its_source_or_leaves_it_as_placed() {
     let recorded: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(home.join(".funes/agents/clyde.json")).unwrap()).unwrap();
     assert_eq!(recorded["version"], "1.1.0");
+}
+
+/// The memory is the host's: bound through one agent, a bare add of another takes it, and a host
+/// from before the binding is bound as an older funes bound its agents, unless they disagree.
+#[test]
+fn the_memory_bound_through_one_agent_is_the_hosts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let funes_home = tmp.path().join("funes");
+    let log = tmp.path().join("setup.log");
+    bundle(&home.join("integrations/clyde"), "clyde", 1, "");
+    bundle(&home.join("integrations/dotty"), "dotty", 1, "");
+    let memory = tmp.path().join("team-memory");
+    let memory = memory.to_str().unwrap();
+    let bound = funes_home.join("bound");
+
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde", memory]);
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{said}");
+    assert!(said.contains(&format!("bound this host to {memory}.")), "{said}");
+    assert_eq!(fs::read_to_string(&bound).unwrap().trim(), memory);
+
+    // A bare add of a second agent installs it on the host's memory.
+    fs::remove_file(&log).unwrap();
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "dotty"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+    assert!(
+        fs::read_to_string(&log)
+            .unwrap()
+            .starts_with(&format!("add {memory}\n")),
+        "{}",
+        fs::read_to_string(&log).unwrap()
+    );
+
+    // A host from before the binding: the memory an older funes bound an agent to becomes the
+    // host's on the next bare add, every agent following, the one that older funes left local
+    // included, and the notes beside the agents go.
+    fs::remove_file(&bound).unwrap();
+    let older = |id: &str, memory: &str| {
+        fs::write(home.join(format!(".funes/agents/{id}.memory")), format!("{memory}\n")).unwrap()
+    };
+    older("clyde", memory);
+    fs::remove_file(&log).unwrap();
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde"]);
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{said}");
+    assert!(
+        said.contains(&format!(
+            "an older funes bound clyde to {memory}; binding this host to it."
+        )) && said.contains(&format!("bound this host to {memory}: dotty follow.")),
+        "{said}"
+    );
+    assert_eq!(fs::read_to_string(&bound).unwrap().trim(), memory);
+    assert_eq!(
+        fs::read_to_string(&log)
+            .unwrap()
+            .matches(&format!("add {memory}\n"))
+            .count(),
+        2,
+        "dotty followed, and clyde installed on the memory: {}",
+        fs::read_to_string(&log).unwrap()
+    );
+    assert!(!home.join(".funes/agents/clyde.memory").exists());
+
+    // Unbound through one agent, such a host stays local: the note an older funes left beside
+    // that agent goes with its setup, so nothing brings the memory back on the next bare add.
+    fs::remove_file(&bound).unwrap();
+    older("clyde", memory);
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde", "local"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+    assert!(!bound.exists() && !home.join(".funes/agents/clyde.memory").exists());
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+    assert!(!bound.exists(), "a bare add on a local host binds nothing");
+
+    // Agents bound to different memories leave such a host nothing to take.
+    older("clyde", memory);
+    older("dotty", "acme/other");
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde"]);
+    let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), stderr(&out));
+    assert!(!out.status.success(), "{said}");
+    assert!(
+        said.contains(&format!(
+            "clyde is bound to {memory}, dotty to acme/other; this host reads local until `funes bind <memory>` binds it to one"
+        )),
+        "{said}"
+    );
+    assert!(!bound.exists());
+}
+
+/// `funes bind` binds the host, every installed agent's setup follows, and `local` unbinds them the
+/// same way.
+#[test]
+fn bind_makes_every_installed_agent_follow() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let funes_home = tmp.path().join("funes");
+    let log = tmp.path().join("setup.log");
+    bundle(&home.join("integrations/clyde"), "clyde", 1, "");
+    bundle(&home.join("integrations/dotty"), "dotty", 1, "");
+    let memory = tmp.path().join("team-memory");
+    let memory = memory.to_str().unwrap();
+    let bound = funes_home.join("bound");
+    for id in ["clyde", "dotty"] {
+        let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", id]);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+    }
+    assert!(!bound.exists(), "a bare add on a local host binds nothing");
+
+    fs::remove_file(&log).unwrap();
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["bind", memory]);
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{said}");
+    assert!(
+        said.contains(&format!("bound this host to {memory}: clyde, dotty follow.")),
+        "{said}"
+    );
+    assert_eq!(fs::read_to_string(&bound).unwrap().trim(), memory);
+    assert_eq!(
+        fs::read_to_string(&log)
+            .unwrap()
+            .matches(&format!("add {memory}\n"))
+            .count(),
+        2,
+        "each agent's setup ran on the memory: {}",
+        fs::read_to_string(&log).unwrap()
+    );
+
+    fs::remove_file(&log).unwrap();
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["bind", "local"]);
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{said}");
+    assert!(said.contains("this host is local: clyde, dotty follow."), "{said}");
+    assert!(!bound.exists());
+    assert_eq!(fs::read_to_string(&log).unwrap().matches("add\n").count(), 2);
 }

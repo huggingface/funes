@@ -285,8 +285,9 @@ fn binding_path(root: &Path, id: &str) -> PathBuf {
     root.join(format!("{id}.memory"))
 }
 
-/// The memory `id`'s setup was last bound to, when one was. Judged as `setup` is — the user's
-/// own, writable by nobody else — since it is what `setup` is handed.
+/// The memory an older funes bound `id` to, when one did: the note it kept beside each agent,
+/// from before the host's own binding. Judged as `setup` is — the user's own, writable by nobody
+/// else — since it is what `setup` is handed.
 pub fn binding(root: &Path, id: &str) -> Result<Option<String>> {
     let path = binding_path(root, id);
     let text = match std::fs::read_to_string(&path) {
@@ -299,7 +300,8 @@ pub fn binding(root: &Path, id: &str) -> Result<Option<String>> {
     Ok((!memory.is_empty()).then(|| memory.to_string()))
 }
 
-/// Note `memory` as what `id`'s setup was bound to, once it has run with it; `None` unbinds.
+/// Note `memory` as what `id`'s setup was bound to; `None` forgets the note, once the host's own
+/// binding carries it.
 pub fn bind(root: &Path, id: &str, memory: Option<&str>) -> Result<()> {
     let path = binding_path(root, id);
     match memory {
@@ -311,9 +313,8 @@ pub fn bind(root: &Path, id: &str, memory: Option<&str>) -> Result<()> {
 /// Memories, each with the ids of the integrations bound to it.
 pub type Bound = Vec<(String, Vec<String>)>;
 
-/// Each memory the installed integrations are bound to, with the ids bound to it, and the ids
-/// installed with neither an install record nor a binding: placed by hand or by a funes older than
-/// both, so funes cannot say where, if anywhere, they publish.
+/// Each memory an older funes bound the installed integrations to, with the ids bound to it, and
+/// the ids installed with neither an install record nor such a binding.
 pub fn bindings(root: &Path) -> Result<(Bound, Vec<String>)> {
     let mut bound: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut unrecorded = Vec::new();

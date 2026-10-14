@@ -1648,41 +1648,37 @@ pub async fn status(target: impl Into<Target>) -> Result<String> {
     }
 }
 
-/// This host's status: the local memory, then each memory its integrations are bound to — `bound`
-/// pairs a memory spec with the ids bound to it — and the ids installed with no memory recorded.
-pub async fn host_status(bound: &[(String, Vec<String>)], unrecorded: &[String]) -> Result<String> {
+/// This host's status: the local memory, then the memory it is bound to with its push coverage.
+/// `note` is what a host without the binding is told about the memories an older funes bound its
+/// agents to.
+pub async fn host_status(bound: Option<&str>, note: Option<&str>) -> Result<String> {
     let mut out = status(Memory::local()).await?;
-    let local = Memory::local().open().await.ok();
-    let now = Utc::now();
-    for (spec, ids) in bound {
-        let memory = Memory::parse(spec);
-        let _ = writeln!(out, "\nmemory: {} (bound: {})", memory.label(), ids.join(", "));
-        let ds = match open_for_read(&memory).await {
-            Ok(ReadOutcome::Ready(ds)) => ds,
-            Ok(ReadOutcome::Offline) => {
-                out.push_str("unreachable\n");
-                continue;
-            }
-            Ok(ReadOutcome::NoIndex) => continue,
-            Err(e) => {
-                let _ = writeln!(out, "{e:#}");
-                continue;
-            }
-        };
-        let _ = writeln!(out, "chunks: {}", ds.count_rows(None).await?);
-        if let Memory::Remote { uri } = &memory {
-            out.push_str(&remote_lines(&ds, now).await);
-            if let Some(local) = &local {
-                out.push_str(&push_coverage_lines(local, &memory, uri).await);
-            }
-        }
+    if let Some(note) = note {
+        let _ = writeln!(out, "\n{note}");
     }
-    if !unrecorded.is_empty() {
-        let _ = writeln!(
-            out,
-            "\ninstalled with no memory recorded: {} — if one publishes, `funes add <agent> <memory>` records where",
-            unrecorded.join(", ")
-        );
+    let Some(spec) = bound else {
+        return Ok(out);
+    };
+    let memory = Memory::parse(spec);
+    let _ = writeln!(out, "\nmemory: {} (bound)", memory.label());
+    let ds = match open_for_read(&memory).await {
+        Ok(ReadOutcome::Ready(ds)) => ds,
+        Ok(ReadOutcome::Offline) => {
+            out.push_str("unreachable\n");
+            return Ok(out);
+        }
+        Ok(ReadOutcome::NoIndex) => return Ok(out),
+        Err(e) => {
+            let _ = writeln!(out, "{e:#}");
+            return Ok(out);
+        }
+    };
+    let _ = writeln!(out, "chunks: {}", ds.count_rows(None).await?);
+    if let Memory::Remote { uri } = &memory {
+        out.push_str(&remote_lines(&ds, Utc::now()).await);
+        if let Ok(local) = Memory::local().open().await {
+            out.push_str(&push_coverage_lines(&local, &memory, uri).await);
+        }
     }
     Ok(out)
 }
