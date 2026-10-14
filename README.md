@@ -28,7 +28,7 @@ verifies its tagged release checksum and version, and puts it on your PATH (`~/.
 default):
 
 ```bash
-curl -fsSL https://huggingface.co/buckets/huggingface/funes/resolve/install.sh | sh
+curl -fsSL "https://huggingface.co/buckets/huggingface/funes/resolve/install.sh?src=readme" | sh
 ```
 
 Then add it to your agent:
