@@ -840,19 +840,24 @@ async fn update_agents() -> Result<()> {
 /// Bring `id`'s install to what its source holds now and re-run its setup, bound as it was — only
 /// when that changed its files. What it did, as a line to print.
 async fn update_agent(root: &Path, id: &str) -> Result<String> {
-    if !registry::refreshes_on_every_run(root, id) {
-        return Ok(match registry::installed(root, id) {
-            Some(record) => format!(
-                "The {id} integration stays as installed from {} until `funes add {id} --from` names its source again.",
-                record.origin
-            ),
-            None => format!("The {id} integration stays as placed: funes has no record of installing it."),
-        });
+    // Named with `--from`, an install stays as named: the one copy not refreshed on every run.
+    let record = registry::installed(root, id);
+    if let Some(record) = record.as_ref().filter(|_| !registry::refreshes_on_every_run(root, id)) {
+        return Ok(format!(
+            "The {id} integration stays as installed from {} until `funes add {id} --from` names its source again.",
+            record.origin
+        ));
     }
     let previous = registry::installed_manifest(root, id);
     let ran = std::cell::Cell::new(false);
     let result: Result<String> = async {
-        let fetched = registry::provision(root, id, None).await?;
+        let fetched = match registry::provision(root, id, None).await {
+            // A copy nothing recorded, that its source does not list: nothing to bring it forward to.
+            Err(e) if record.is_none() && e.downcast_ref::<registry::Absent>().is_some() => {
+                return Ok(format!("The {id} integration stays as placed: {e}."));
+            }
+            fetched => fetched?,
+        };
         let Some(provisioned) = fetched.filter(|p| !registry::is_recorded(root, id, &p.origin, &p.files)) else {
             return Ok(format!("The {id} integration is up to date."));
         };

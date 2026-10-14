@@ -75,13 +75,13 @@ funes add claude local                     # back to the local memory
 `funes update` replaces the binary, then takes each installed integration to what its source now
 holds and re-runs its setup, bound as it was, only when that changed its files. None of an add's
 one-time steps run: no first index, no first push. An install named with `--from` stays as it is,
-and the update says so.
+and so does a copy no source lists. The update says so.
 
 Re-running `funes add <agent>` does the same for one agent, and more: it keeps the memory bound, or
 rebinds to the one you name, and re-runs the integration's setup, which clears what an older funes
-put where the current one no longer looks. An integration the catalog installed is brought to its
-newest release for this funes first. `funes remove` first is for a clean slate: it takes the install
-away in full, your memory aside.
+put where the current one no longer looks. An integration the catalog installed, or one funes has
+no record of installing, is brought to its newest release for this funes first. `funes remove`
+first is for a clean slate: it takes the install away in full, your memory aside.
 
 ```bash
 funes add codex                                                  # as bound, at the catalog's newest release
@@ -258,13 +258,13 @@ The source, in order: what `--from` names; the directory `$FUNES_INTEGRATIONS` n
 authoritative, consulted on every run, and nothing else is; the integrations catalog,
 `hf://buckets/huggingface/funes-integrations/catalog.json`, from which funes takes the newest
 release for its contract and checks the archive against the digest the catalog names. Installed
-from the catalog, a copy takes the catalog's newest release on every run, fetching nothing when that
-is the release installed; installed from `--from`, it runs as installed until named again; and a
-copy speaking a contract this funes cannot run is refreshed whatever its source. A source that
-cannot be reached leaves the installed copy to run. `funes remove` fetches nothing: it runs the
-installed copy, unless this funes cannot run it. An id with no files anywhere is an error naming
-what is installed. A refresh rewrites only the files that differ and prunes nothing; `funes remove`
-deletes the directory whole.
+from the catalog, or found with no record of what installed it, a copy takes the catalog's newest
+release on every run, fetching nothing when that is the release installed; installed from `--from`,
+it runs as installed until named again; and a copy speaking a contract this funes cannot run is
+refreshed whatever its source. A source that cannot be reached leaves the installed copy to run.
+`funes remove` fetches nothing: it runs the installed copy, unless this funes cannot run it. An id
+with no files anywhere is an error naming what is installed. A refresh rewrites only the files that
+differ and prunes nothing; `funes remove` deletes the directory whole.
 
 ### What funes vouches for
 
@@ -281,9 +281,10 @@ package as its manifest declared it — publisher, id, version, contract — whe
 its digest. That record is what lets a confirmed install run again unasked: before running an
 installed copy, funes checks the package's files against it, and asks again only when one changed,
 or when the same source hands it different files. Files it has no record of installing — a copy put
-in place by hand — are asked about every time. The record goes with the directory on `funes remove`.
-One publisher's files are never put where another's are installed: `funes remove <id>` first says
-you mean to replace it.
+in place by hand, or by a funes from before records — are replaced by the catalog's release on the
+next add or update, and asked about every time when the catalog lists no such id. The record goes
+with the directory on `funes remove`. One publisher's files are never put where another's are
+installed: `funes remove <id>` first says you mean to replace it.
 
 ### The integration contract
 

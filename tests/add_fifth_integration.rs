@@ -1216,3 +1216,39 @@ fn update_leaves_an_integration_named_with_from_as_installed() {
     );
     assert!(!log.exists(), "setup did not run");
 }
+
+/// A copy funes has no record of installing is brought to what its source holds, like the
+/// catalog's; one its source does not list stays as placed, and the update says so.
+#[test]
+fn update_brings_an_unrecorded_copy_to_its_source_or_leaves_it_as_placed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let funes_home = tmp.path().join("funes");
+    let log = tmp.path().join("setup.log");
+    install(&home, "clyde", 1);
+    let integrations = home.join("integrations");
+    fs::create_dir_all(&integrations).unwrap();
+
+    let out = update(&home, &funes_home, &log, Some(&integrations), false);
+    assert!(!stderr(&out).contains("could not be updated"), "{}", stderr(&out));
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        said.contains("The clyde integration stays as placed: $FUNES_INTEGRATIONS holds no clyde."),
+        "{said}"
+    );
+    assert!(!log.exists(), "setup did not run");
+
+    let source = bundle(&integrations.join("clyde"), "clyde", 1, "v2");
+    release(&source, "1.1.0");
+    let out = update(&home, &funes_home, &log, Some(&integrations), true);
+    let transcript = String::from_utf8_lossy(&out.stdout);
+    assert!(transcript.contains("Trust it? [y/N]"), "{transcript}");
+    assert!(
+        transcript.contains("Updated the clyde integration to 1.1.0."),
+        "{transcript}"
+    );
+    assert!(fs::read_to_string(&log).unwrap().starts_with("v2\nadd\n"));
+    let recorded: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(home.join(".funes/agents/clyde.json")).unwrap()).unwrap();
+    assert_eq!(recorded["version"], "1.1.0");
+}
