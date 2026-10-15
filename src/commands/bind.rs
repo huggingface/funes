@@ -77,6 +77,10 @@ pub(crate) async fn bind_host(resolved: Option<Resolved>, except: Option<&str>) 
     }
     memory::bind(memory)?;
     let root = registry::default_root()?;
+    // The record replaces what an older funes noted beside each agent, whatever its setup does.
+    for id in registry::registered_ids(&root) {
+        registry::bind(&root, &id, None)?;
+    }
     let mut followed = Vec::new();
     let mut failed = Vec::new();
     for id in registry::registered_ids(&root)
@@ -109,13 +113,12 @@ pub(crate) async fn bind_host(resolved: Option<Resolved>, except: Option<&str>) 
     Ok(())
 }
 
-/// Run `id`'s installed setup on `memory`, and forget the binding an older funes noted beside it.
+/// Run `id`'s installed setup on `memory`.
 async fn follow(root: &Path, id: &str, memory: Option<&str>) -> Result<()> {
     let integration = prepare_agent(id, registry::speaks_another_contract(root, id), None)
         .await?
         .install(root)?;
-    setup_add(&integration, memory)?;
-    registry::bind(root, id, None)
+    setup_add(&integration, memory)
 }
 
 /// Bind a host from before the binding as an older funes bound its agents: the one memory they

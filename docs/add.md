@@ -69,7 +69,7 @@ funes bind local                           # back to the local memory, every age
   instead. The next `funes update` or bare `funes add` binds the host to it when those agents all
   noted the same one, every installed agent following, and `funes status` says so until then.
   Agents that noted different memories were never meant to: the update names them, and
-  `funes bind <memory>` picks one.
+  `funes bind <memory>` picks one, or `funes bind local` none.
 - A memory that does not exist on the Hub yet: `funes add` offers to create it (default no, to
   catch typos). Repositories funes creates are **private by default**; changing that later is an
   explicit action on the Hub. An existing repository keeps its visibility.

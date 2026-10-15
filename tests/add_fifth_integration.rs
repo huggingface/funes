@@ -1456,3 +1456,26 @@ fn bind_makes_every_installed_agent_follow() {
     assert!(!bound.exists());
     assert_eq!(fs::read_to_string(&log).unwrap().matches("add\n").count(), 2);
 }
+
+/// `funes bind local` forgets what an older funes noted beside the agents, even beside one whose
+/// setup fails to follow: a note left would bind the host back on the next bare add or update.
+#[test]
+fn bind_local_forgets_the_older_notes_whatever_the_setups_do() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let funes_home = tmp.path().join("funes");
+    let log = tmp.path().join("setup.log");
+    let source = bundle(&home.join("integrations/clyde"), "clyde", 1, "");
+    let mut setup = fs::read_to_string(source.join("setup")).unwrap();
+    setup.push_str("[ \"$1\" != add ] || exit 7\n");
+    fs::write(source.join("setup"), setup).unwrap();
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde"]);
+    assert!(!out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+    let note = home.join(".funes/agents/clyde.memory");
+    fs::write(&note, "acme/memory\n").unwrap();
+
+    let out = funes(&home, &funes_home, &log, &["bind", "local"]);
+    let err = stderr(&out);
+    assert!(!out.status.success() && err.contains("clyde did not follow"), "{err}");
+    assert!(!note.exists());
+}
