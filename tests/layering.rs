@@ -98,15 +98,10 @@ fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     files
 }
 
-/// The sources the Lance rule covers: every command, and the sketch selector.
+/// The sources the Lance rule covers: every command.
 fn command_sources() -> Vec<std::path::PathBuf> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut files: Vec<_> = std::fs::read_dir(root.join("commands"))
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
-        .collect();
-    files.push(root.join("session_sketch.rs"));
+    let mut files = walk(&root.join("commands"));
     files.sort();
     files
 }

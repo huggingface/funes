@@ -75,9 +75,40 @@ pub struct Turn {
     pub harness: String,
 }
 
+/// Whether a user text block's start is injected scaffolding rather than the human's words. Harness
+/// wrappers are XML-ish tags (`<ide_opened_file>`, `<command-name>`, `<environment_context>`,
+/// `<system-reminder>`, …); codex/pi agent-notes open with a markdown heading (`# AGENTS.md
+/// instructions…`); a Claude skill loads with the `Base directory for this skill:` preamble; a
+/// compacted session replays its machine-written recap as a user turn opening `This session is being
+/// continued…`. All are recognizable from the block's start (a mid-block split can begin anywhere, so
+/// test split 0).
+pub(crate) fn is_scaffolding(block_start: &str) -> bool {
+    let t = block_start.trim_start();
+    t.starts_with('<')
+        || t.starts_with('#')
+        || t.starts_with("Base directory for this skill")
+        || t.starts_with("This session is being continued from a previous conversation")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_scaffolding_flags_wrappers_and_headings() {
+        assert!(is_scaffolding("<ide_opened_file>/foo/bar.rs</ide_opened_file>"));
+        assert!(is_scaffolding("<environment_context>\n  <cwd>/w</cwd>"));
+        assert!(is_scaffolding("   <system-reminder>be nice"));
+        assert!(is_scaffolding("# AGENTS.md instructions for /w\n\n<INSTRUCTIONS>"));
+        assert!(is_scaffolding(
+            "Base directory for this skill: /home/u/.claude/skills/funes\n\n# funes"
+        ));
+        assert!(is_scaffolding(
+            "This session is being continued from a previous conversation that ran out of context."
+        ));
+        assert!(!is_scaffolding("explain me again why funes push finds secrets"));
+        assert!(!is_scaffolding("why did we drop lancedb for funes"));
+    }
 
     /// A line of the spec's own example, minus `format`.
     const LINE: &str = r#"{"session_id":"s","turn_uuid":"t-1","seq":0,"ts":"2026-09-18T09:41:07Z","role":"user","harness":"opencode","blocks":[{"block_type":"text","text":"hi"}]}"#;

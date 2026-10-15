@@ -1,60 +1,35 @@
-//! Deterministic selection of the passages most distinctive within one session.
-//!
-//! Building a sketch never writes memory state; the cached entry is a derived local artifact.
+//! The selection behind a sketch: the passages most distinctive within one session, chosen from
+//! the vectors already stored, always keeping the opening ask and the last word of the range.
 
+use super::{Diagnostics, Evidence, RawRow, SessionSketch, SKETCH_SCHEMA_VERSION};
 use crate::chunk::OVERLAP;
-use crate::commands::recall;
-use crate::home;
-use crate::memory::dataset;
-use crate::memory::Memory;
-use anyhow::{bail, Context, Result};
-use serde::{Deserialize, Serialize};
+use crate::traces;
+use anyhow::{bail, Result};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::io::Write as _;
-use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-// What the selector selects when a caller states no budget; the CLI states its own.
-const DEFAULT_BUDGET: usize = 8;
-const DEFAULT_CHAR_BUDGET: usize = 16_000;
+/// Which selector built a sketch: a cached sketch from another is rebuilt.
+pub(super) const SELECTOR_VERSION: &str = "session-sketch-v2-experimental";
 const TOOL_RESULT_PREVIEW: usize = 2_000;
 const ELISION: &str = "\n\n[… shortened by session-sketch …]\n\n";
 
 /// The fewest characters a selected passage renders, whatever the budget divided by the unit count
 /// works out to. Below this a passage is not evidence, just a fragment.
-const MIN_UNIT_CHARS: usize = 240;
+pub(super) const MIN_UNIT_CHARS: usize = 240;
 const NEAR_DUPLICATE: f32 = 0.97;
 const VECTOR_EPSILON: f32 = 1e-7;
-// Exact all-pairs grouping preserves the original selector on ordinary sessions. Beyond this size,
-// deterministic random-hyperplane bands generate a bounded candidate set. At cosine 0.97, eight
-// independent 10-bit bands have about a 99% chance of sharing at least one band under the usual
-// SimHash model; a chronological window also catches locally repeated harness traffic.
+// Exact all-pairs grouping holds up to this many units. Beyond it, deterministic random-hyperplane
+// bands generate a bounded candidate set. At cosine 0.97, eight independent 10-bit bands have
+// about a 99% chance of sharing at least one band under the usual SimHash model; a chronological
+// window also catches locally repeated harness traffic.
 const EXACT_DUPLICATE_MAX_UNITS: usize = 3_000;
 const DUPLICATE_LSH_BANDS: usize = 8;
 const DUPLICATE_LSH_BITS: usize = 10;
 const DUPLICATE_BUCKET_HEAD: usize = 8;
 const DUPLICATE_BUCKET_RECENT: usize = 40;
 const DUPLICATE_TEMPORAL_WINDOW: usize = 16;
-const SKETCH_SCHEMA_VERSION: u32 = 1;
-const SELECTOR_VERSION: &str = "session-sketch-v2-experimental";
-
-#[derive(Clone)]
-struct RawRow {
-    session_id: String,
-    id: String,
-    text: String,
-    turn_uuid: String,
-    seq: i64,
-    ts: String,
-    role: String,
-    block_type: String,
-    tool_name: String,
-    block_idx: i64,
-    split_idx: i64,
-    vector: Option<Vec<f32>>,
-}
 
 #[derive(Clone)]
 struct Unit {
@@ -112,85 +87,6 @@ impl CandidatePool {
     }
 }
 
-/// Stable inputs to the deterministic selector: places to select, and characters they may render.
-#[derive(Clone, Copy, Debug)]
-pub struct SketchOptions {
-    pub budget: usize,
-    pub char_budget: usize,
-}
-
-impl Default for SketchOptions {
-    fn default() -> Self {
-        Self {
-            budget: DEFAULT_BUDGET,
-            char_budget: DEFAULT_CHAR_BUDGET,
-        }
-    }
-}
-
-/// Per-session results from one shared memory scan. One malformed session does not hide sketches
-/// for the others; its error is recorded in `failures` instead.
-#[derive(Default)]
-pub struct SketchBatch {
-    pub sketches: HashMap<String, SessionSketch>,
-    pub failures: HashMap<String, String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct SessionSketch {
-    pub schema_version: u32,
-    pub selector_version: String,
-    pub memory: String,
-    pub session_id: String,
-    pub source_fingerprint: String,
-    pub embedding_fingerprint: String,
-    pub source_chunks: usize,
-    pub eligible_units: usize,
-    pub selected_units: Vec<SelectedUnit>,
-    pub evidence: Vec<Evidence>,
-    pub diagnostics: Diagnostics,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct SelectedUnit {
-    pub id: String,
-    pub turn_uuid: String,
-    pub seq: i64,
-    pub block_idx: i64,
-    pub reasons: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct Evidence {
-    pub id: String,
-    pub turn_uuid: String,
-    pub seq: i64,
-    pub block_idx: i64,
-    pub ts: String,
-    pub role: String,
-    pub block_type: String,
-    pub tool_name: Option<String>,
-    pub selected: bool,
-    pub reasons: Vec<String>,
-    pub truncated: bool,
-    pub text: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct Diagnostics {
-    pub axes: usize,
-    pub transitions: usize,
-    pub near_duplicate_groups: usize,
-    pub duplicate_strategy: String,
-    pub duplicate_vector_comparisons: usize,
-    pub candidates: usize,
-    pub rendered_characters: usize,
-    pub budget: usize,
-    pub char_budget: usize,
-    pub elapsed_ms: u128,
-    pub fallback: Option<String>,
-}
-
 #[derive(Clone)]
 struct TurnInfo {
     units: Vec<usize>,
@@ -209,296 +105,7 @@ struct DuplicateStats {
     strategy: &'static str,
     vector_comparisons: usize,
 }
-
-/// Build one sketch of a session, or of the `from`..`to` window of it. Reads the memory and nothing
-/// else. `options` is taken as asked: clamp it with [`SketchOptions::clamp`] first if it came from a
-/// caller, so the narrowing can be reported.
-pub async fn generate(
-    memory: &Memory,
-    session_id: &str,
-    from: Option<i64>,
-    to: Option<i64>,
-    options: SketchOptions,
-) -> Result<SessionSketch> {
-    let ds = memory.open().await?;
-    let rows = read_sessions(&ds, &[session_id.to_string()]).await?;
-    if rows.is_empty() {
-        bail!("no session {session_id} in {}", memory.label());
-    }
-    let turns = rows.iter().map(|r| r.seq).collect::<HashSet<_>>().len();
-    let rows: Vec<RawRow> = rows
-        .into_iter()
-        .filter(|r| from.is_none_or(|f| r.seq >= f) && to.is_none_or(|t| r.seq <= t))
-        .collect();
-    if rows.is_empty() {
-        bail!("no turns in that range of session {session_id} (it holds {turns})");
-    }
-    build_sketch(
-        memory.label(),
-        session_id.to_string(),
-        rows,
-        embedding_fingerprint(&ds),
-        options.budget,
-        options.char_budget,
-        Instant::now(),
-    )
-}
-
-/// Build sketches for several exact session ids from one dataset scan. Session-local selector
-/// failures are isolated in the returned batch; opening or scanning the memory still fails the
-/// whole operation.
-pub async fn generate_many(memory: &Memory, session_ids: &[String], options: SketchOptions) -> Result<SketchBatch> {
-    generate_many_inner(memory, session_ids, options, None).await
-}
-
-/// Build or reuse sketches for whole sessions. Cache entries live under the funes home and are accepted
-/// only when the complete source/embedding fingerprints, selector version, schema, and budgets
-/// match. A corrupt or unwritable cache quietly degrades to deterministic generation.
-pub async fn generate_many_cached(
-    memory: &Memory,
-    session_ids: &[String],
-    options: SketchOptions,
-) -> Result<SketchBatch> {
-    let cache = home::sketch_cache_dir();
-    generate_many_inner(memory, session_ids, options, Some(&cache)).await
-}
-
-async fn generate_many_inner(
-    memory: &Memory,
-    session_ids: &[String],
-    options: SketchOptions,
-    cache_root: Option<&Path>,
-) -> Result<SketchBatch> {
-    let (options, _) = options.clamp();
-    if session_ids.is_empty() {
-        return Ok(SketchBatch::default());
-    }
-
-    let ds = memory.open().await?;
-    let embedding_fingerprint = embedding_fingerprint(&ds);
-    let rows = read_sessions(&ds, session_ids).await?;
-    let mut by_session: HashMap<String, Vec<RawRow>> = HashMap::new();
-    for row in rows {
-        by_session.entry(row.session_id.clone()).or_default().push(row);
-    }
-
-    let mut batch = SketchBatch::default();
-    let memory_label = memory.label();
-    for session_id in session_ids {
-        let Some(rows) = by_session.remove(session_id) else {
-            batch
-                .failures
-                .insert(session_id.clone(), format!("no session {session_id} in {memory_label}"));
-            continue;
-        };
-
-        let source_fingerprint = fingerprint(&rows);
-        let cache_path = cache_root.map(|root| cache_path(root, &memory_label, session_id));
-        if let Some(sketch) = cache_path.as_deref().and_then(|path| {
-            load_cached_sketch(
-                path,
-                &memory_label,
-                session_id,
-                &source_fingerprint,
-                &embedding_fingerprint,
-                options,
-            )
-        }) {
-            batch.sketches.insert(session_id.clone(), sketch);
-            continue;
-        }
-
-        match build_sketch(
-            memory_label.clone(),
-            session_id.clone(),
-            rows,
-            embedding_fingerprint.clone(),
-            options.budget,
-            options.char_budget,
-            Instant::now(),
-        ) {
-            Ok(sketch) => {
-                if let Some(path) = cache_path.as_deref() {
-                    let _ = store_cached_sketch(path, &sketch);
-                }
-                batch.sketches.insert(session_id.clone(), sketch);
-            }
-            Err(error) => {
-                batch.failures.insert(session_id.clone(), format!("{error:#}"));
-            }
-        }
-    }
-    Ok(batch)
-}
-
-fn cache_path(root: &Path, memory: &str, session_id: &str) -> PathBuf {
-    let mut hash = Sha256::new();
-    hash.update(memory.as_bytes());
-    hash.update([0]);
-    hash.update(session_id.as_bytes());
-    root.join(format!("{}.json", hex::encode(hash.finalize())))
-}
-
-fn load_cached_sketch(
-    path: &Path,
-    memory: &str,
-    session_id: &str,
-    source_fingerprint: &str,
-    embedding_fingerprint: &str,
-    options: SketchOptions,
-) -> Option<SessionSketch> {
-    let file = std::fs::File::open(path).ok()?;
-    let sketch: SessionSketch = serde_json::from_reader(file).ok()?;
-    cache_matches(
-        &sketch,
-        memory,
-        session_id,
-        source_fingerprint,
-        embedding_fingerprint,
-        options,
-    )
-    .then_some(sketch)
-}
-
-fn cache_matches(
-    sketch: &SessionSketch,
-    memory: &str,
-    session_id: &str,
-    source_fingerprint: &str,
-    embedding_fingerprint: &str,
-    options: SketchOptions,
-) -> bool {
-    sketch.schema_version == SKETCH_SCHEMA_VERSION
-        && sketch.selector_version == SELECTOR_VERSION
-        && sketch.memory == memory
-        && sketch.session_id == session_id
-        && sketch.source_fingerprint == source_fingerprint
-        && sketch.embedding_fingerprint == embedding_fingerprint
-        && sketch.diagnostics.budget == options.budget
-        && sketch.diagnostics.char_budget == options.char_budget
-}
-
-fn store_cached_sketch(path: &Path, sketch: &SessionSketch) -> Result<()> {
-    let parent = path.parent().context("session-sketch cache path has no parent")?;
-    std::fs::create_dir_all(parent)
-        .with_context(|| format!("creating session-sketch cache at {}", parent.display()))?;
-    let mut staged = tempfile::NamedTempFile::new_in(parent)
-        .with_context(|| format!("staging session-sketch cache in {}", parent.display()))?;
-    serde_json::to_writer(&mut staged, sketch).context("serializing session-sketch cache")?;
-    staged.flush().context("flushing session-sketch cache")?;
-    staged
-        .persist(path)
-        .map_err(|error| error.error)
-        .with_context(|| format!("replacing session-sketch cache at {}", path.display()))?;
-    Ok(())
-}
-
-/// The widest and cheapest a sketch may be asked to be. The upper bounds are a reply ceiling: past
-/// them the answer is one no caller receives, so a larger request is clamped and the clamp reported.
-pub const UNITS_MAX: usize = 40;
-pub const CHARS_MAX: usize = 40_000;
-pub const CHARS_MIN: usize = 1_000;
-
-/// What a request was narrowed to, so a caller that asked for more learns it did not get it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Clamped {
-    pub units: Option<usize>,
-    pub chars: Option<usize>,
-}
-
-impl SketchOptions {
-    /// Bring a request inside the bounds, reporting each value that moved. `units` is additionally
-    /// held to what the character budget can render at [`MIN_UNIT_CHARS`] apiece: asking for forty
-    /// places inside a thousand characters would return slivers, not evidence.
-    pub fn clamp(self) -> (Self, Clamped) {
-        let chars = self.char_budget.clamp(CHARS_MIN, CHARS_MAX);
-        let fits = (chars / MIN_UNIT_CHARS).max(1);
-        let units = self.budget.clamp(1, UNITS_MAX.min(fits));
-        (
-            SketchOptions {
-                budget: units,
-                char_budget: chars,
-            },
-            Clamped {
-                units: (units != self.budget).then_some(units),
-                chars: (chars != self.char_budget).then_some(chars),
-            },
-        )
-    }
-}
-
-async fn read_sessions(ds: &lance::Dataset, sessions: &[String]) -> Result<Vec<RawRow>> {
-    let columns = [
-        "session_id",
-        "id",
-        "text",
-        "turn_uuid",
-        "seq",
-        "ts",
-        "role",
-        "block_type",
-        "tool_name",
-        "block_idx",
-        "split_idx",
-        "vector",
-    ];
-    let filter = dataset::in_list("session_id", sessions.iter().map(String::as_str));
-    let batches = dataset::scan_rows(ds, &columns, Some(&filter), None).await?;
-    let mut rows = Vec::new();
-    for batch in &batches {
-        let s = |name: &str| dataset::strs(batch, name);
-        let n = |name: &str| dataset::ints(batch, name);
-        let (session_id, id, text, turn, ts, role, block_type, tool_name) = (
-            s("session_id"),
-            s("id"),
-            s("text"),
-            s("turn_uuid"),
-            s("ts"),
-            s("role"),
-            s("block_type"),
-            s("tool_name"),
-        );
-        let (seq, block_idx, split_idx) = (n("seq"), n("block_idx"), n("split_idx"));
-        let vectors = dataset::vectors(batch, "vector");
-        for i in 0..batch.num_rows() {
-            rows.push(RawRow {
-                session_id: session_id.get(i).to_string(),
-                id: id.get(i).to_string(),
-                text: text.get(i).to_string(),
-                turn_uuid: turn.get(i).to_string(),
-                seq: seq.get(i),
-                ts: ts.get(i).to_string(),
-                role: role.get(i).to_string(),
-                block_type: block_type.get(i).to_string(),
-                tool_name: tool_name.get(i).to_string(),
-                block_idx: block_idx.get(i),
-                split_idx: split_idx.get(i),
-                vector: vectors.get(i),
-            });
-        }
-    }
-    rows.sort_by(|a, b| {
-        (&a.session_id, a.seq, &a.turn_uuid, a.block_idx, a.split_idx, &a.id).cmp(&(
-            &b.session_id,
-            b.seq,
-            &b.turn_uuid,
-            b.block_idx,
-            b.split_idx,
-            &b.id,
-        ))
-    });
-    Ok(rows)
-}
-
-/// The embedding model a cached sketch's vectors came from, as a cache key.
-fn embedding_fingerprint(ds: &lance::Dataset) -> String {
-    match dataset::embedding_model(ds) {
-        Ok(model) => format!("embedding_model:{}", model.id()),
-        Err(_) => "unrecorded".to_string(),
-    }
-}
-
-fn build_sketch(
+pub(super) fn build_sketch(
     memory: String,
     session_id: String,
     rows: Vec<RawRow>,
@@ -541,27 +148,10 @@ fn build_sketch(
         (selected, pool, axes, transitions, None)
     };
 
-    // Selected units only: each carries a `→ get` coordinate, so reading around one is a follow-up
-    // call whose cost is the caller's to spend.
     let mut selected_sorted = selected.clone();
     selected_sorted.sort_by_key(|&i| unit_key(&units[i]));
     let unit_cap = per_unit_cap(budget, char_budget);
     let rendered_characters = context_chars(&units, selected_sorted.iter().copied(), unit_cap);
-    let selected_units = selected_sorted
-        .iter()
-        .map(|&i| {
-            let candidate = pool.by_unit.get(&i);
-            SelectedUnit {
-                id: units[i].id.clone(),
-                turn_uuid: units[i].turn_uuid.clone(),
-                seq: units[i].seq,
-                block_idx: units[i].block_idx,
-                reasons: candidate
-                    .map(|c| c.reasons.iter().cloned().collect())
-                    .unwrap_or_else(|| vec!["selected".to_string()]),
-            }
-        })
-        .collect();
     let evidence = selected_sorted
         .iter()
         .map(|&i| {
@@ -580,7 +170,6 @@ fn build_sketch(
                 role: units[i].role.clone(),
                 block_type: units[i].block_type.clone(),
                 tool_name: (!units[i].tool_name.is_empty()).then(|| units[i].tool_name.clone()),
-                selected: true,
                 reasons,
                 truncated,
                 text,
@@ -597,7 +186,6 @@ fn build_sketch(
         embedding_fingerprint,
         source_chunks,
         eligible_units: units.len(),
-        selected_units,
         evidence,
         diagnostics: Diagnostics {
             axes,
@@ -615,7 +203,8 @@ fn build_sketch(
     })
 }
 
-fn fingerprint(rows: &[RawRow]) -> String {
+/// The content hash of a session's rows: a cached sketch of other rows is rebuilt.
+pub(super) fn fingerprint(rows: &[RawRow]) -> String {
     let mut hash = Sha256::new();
     for row in rows {
         for field in [
@@ -696,7 +285,7 @@ fn reconstruct_units(rows: &[RawRow]) -> Result<Vec<Unit>> {
         if text.is_empty() || head.block_type == "thinking" {
             continue;
         }
-        if head.role == "user" && head.block_type == "text" && recall::is_scaffolding(&text) {
+        if head.role == "user" && head.block_type == "text" && traces::is_scaffolding(&text) {
             continue;
         }
         if head.block_type == "text" && is_harness_noise(&text) {
@@ -1366,34 +955,6 @@ mod tests {
         }
     }
 
-    fn cached_sketch_fixture() -> SessionSketch {
-        SessionSketch {
-            schema_version: SKETCH_SCHEMA_VERSION,
-            selector_version: SELECTOR_VERSION.into(),
-            memory: "local-memory".into(),
-            session_id: "session".into(),
-            source_fingerprint: "source".into(),
-            embedding_fingerprint: "embedding".into(),
-            source_chunks: 1,
-            eligible_units: 1,
-            selected_units: Vec::new(),
-            evidence: Vec::new(),
-            diagnostics: Diagnostics {
-                axes: 0,
-                transitions: 0,
-                near_duplicate_groups: 0,
-                duplicate_strategy: "exact".into(),
-                duplicate_vector_comparisons: 0,
-                candidates: 0,
-                rendered_characters: 0,
-                budget: DEFAULT_BUDGET,
-                char_budget: DEFAULT_CHAR_BUDGET,
-                elapsed_ms: 1,
-                fallback: None,
-            },
-        }
-    }
-
     fn unit(seq: i64, role: &str, vector: &[f32], text: &str) -> Unit {
         Unit {
             id: format!("id-{seq}-{role}"),
@@ -1430,38 +991,6 @@ mod tests {
         let mut rewritten = original;
         rewritten[0].text = "rewritten".into();
         assert_ne!(fingerprint(&rewritten), original_fingerprint);
-    }
-
-    #[test]
-    fn sketch_cache_round_trips_and_rejects_stale_keys() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = cache_path(temp.path(), "local-memory", "session");
-        let sketch = cached_sketch_fixture();
-        let options = SketchOptions::default();
-        store_cached_sketch(&path, &sketch).unwrap();
-
-        assert!(load_cached_sketch(&path, "local-memory", "session", "source", "embedding", options,).is_some());
-        assert!(load_cached_sketch(
-            &path,
-            "local-memory",
-            "session",
-            "rewritten-source",
-            "embedding",
-            options,
-        )
-        .is_none());
-        assert!(load_cached_sketch(
-            &path,
-            "local-memory",
-            "session",
-            "source",
-            "embedding",
-            SketchOptions {
-                budget: options.budget + 1,
-                ..options
-            },
-        )
-        .is_none());
     }
 
     #[test]

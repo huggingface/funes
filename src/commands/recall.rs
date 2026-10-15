@@ -9,6 +9,7 @@ use crate::chunk;
 use crate::inference::{self, Embedder, EmbeddingModel, Reranker};
 use crate::memory::dataset::{self, RecordBatch};
 use crate::memory::{Memory, MemoryState};
+use crate::traces;
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, NaiveDate, Utc};
 use lance::Dataset;
@@ -1022,21 +1023,6 @@ pub async fn list_sessions(mut pools: Vec<SessionPool>, filter: SessionFilter) -
     Ok(crate::ui::render::sessions_agent(&note, &shown, total, filter.offset))
 }
 
-/// Whether a user text block's start is injected scaffolding rather than the human's words. Harness
-/// wrappers are XML-ish tags (`<ide_opened_file>`, `<command-name>`, `<environment_context>`,
-/// `<system-reminder>`, …); codex/pi agent-notes open with a markdown heading (`# AGENTS.md
-/// instructions…`); a Claude skill loads with the `Base directory for this skill:` preamble; a
-/// compacted session replays its machine-written recap as a user turn opening `This session is being
-/// continued…`. All are recognizable from the block's start (a mid-block split can begin anywhere, so
-/// test split 0).
-pub(crate) fn is_scaffolding(block_start: &str) -> bool {
-    let t = block_start.trim_start();
-    t.starts_with('<')
-        || t.starts_with('#')
-        || t.starts_with("Base directory for this skill")
-        || t.starts_with("This session is being continued from a previous conversation")
-}
-
 /// The opening real prompt of each session in `ids` — its earliest `user` text block that isn't
 /// injected scaffolding, or its earliest text block of any role when it has no `user` turn at all.
 /// A session whose `user` turns are all scaffolding is absent from the map.
@@ -1077,7 +1063,7 @@ async fn first_prompts(ds: &Dataset, ids: &[String]) -> Result<HashMap<String, S
             let opening = best.entry(sid.get(i).to_string()).or_default();
             if role.get(i) == "user" {
                 opening.has_user = true;
-                if !is_scaffolding(&body) {
+                if !traces::is_scaffolding(&body) {
                     earliest(&mut opening.user, key, &body);
                 }
             }
@@ -1622,22 +1608,6 @@ mod tests {
     use arrow_array::RecordBatchIterator;
     use chrono::TimeZone;
     use std::path::Path;
-
-    #[test]
-    fn is_scaffolding_flags_wrappers_and_headings() {
-        assert!(is_scaffolding("<ide_opened_file>/foo/bar.rs</ide_opened_file>"));
-        assert!(is_scaffolding("<environment_context>\n  <cwd>/w</cwd>"));
-        assert!(is_scaffolding("   <system-reminder>be nice"));
-        assert!(is_scaffolding("# AGENTS.md instructions for /w\n\n<INSTRUCTIONS>"));
-        assert!(is_scaffolding(
-            "Base directory for this skill: /home/u/.claude/skills/funes\n\n# funes"
-        ));
-        assert!(is_scaffolding(
-            "This session is being continued from a previous conversation that ran out of context."
-        ));
-        assert!(!is_scaffolding("explain me again why funes push finds secrets"));
-        assert!(!is_scaffolding("why did we drop lancedb for funes"));
-    }
 
     #[test]
     fn age_picks_the_coarsest_readable_unit() {

@@ -5,7 +5,7 @@
 //! change. Every read verb answers an agent, so that is the only format here.
 
 use crate::commands::recall::{memory_hint, Hit, ScanCut, ScanResult, Session, Turn};
-use crate::session_sketch::{Clamped, SessionSketch};
+use crate::commands::sketch::{Clamped, SessionSketch};
 use std::fmt::Write as _;
 
 /// Turns each side of a hit that a `→ get` line reaches for.
