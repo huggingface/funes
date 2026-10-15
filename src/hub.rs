@@ -114,6 +114,16 @@ pub(crate) fn is_offline_error(e: &HFError) -> bool {
     }
 }
 
+/// Whether `err` is the Hub refusing a write — a 403/Forbidden, the token can't write to this repo.
+/// Matches the typed [`HFError`] preserved in the error chain.
+pub(crate) fn is_read_only(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| match cause.downcast_ref::<HFError>() {
+        Some(HFError::Forbidden { .. }) => true,
+        Some(HFError::Http { context }) => context.status.as_u16() == 403,
+        _ => false,
+    })
+}
+
 /// Build an hf-hub client — the one place the crate does. `retries` is false for the fail-fast
 /// reachability/status probes, where hf-hub's default backoff would drag a single offline check out
 /// for seconds, and for push, as [`compact`](crate::memory::remote::compact) requires.
@@ -301,6 +311,15 @@ pub(crate) fn sha256_file(path: &Path) -> Result<[u8; 32]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_read_only_matches_the_type_not_the_message() {
+        // We match the typed HFError, not the rendered text — a plain error that merely mentions
+        // 403/Forbidden is not a read-only signal. (HFError is #[non_exhaustive], so the positive
+        // path can't be built here; it's exercised by the gated round-trip.)
+        assert!(!is_read_only(&anyhow::anyhow!("server said 403 Forbidden")));
+        assert!(!is_read_only(&anyhow::anyhow!("no HF token")));
+    }
 
     #[test]
     fn user_agent_origin_defaults_to_versioned_funes() {

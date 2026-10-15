@@ -284,7 +284,7 @@ pub(crate) async fn first_push(remote: &str, created: bool) -> Result<()> {
             print!("{}", pushed.report);
             Ok(())
         }
-        Err(e) if push::is_read_only(&e) => {
+        Err(e) if hub::is_read_only(&e) => {
             eprintln!("{}.", push::read_only_error(remote));
             Ok(())
         }

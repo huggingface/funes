@@ -20,121 +20,28 @@
 //! What a push ships is the embedded chunks the remote doesn't hold, optionally restricted to the
 //! sessions named with `--sessions`. Rows awaiting embedding stay local until a later push.
 
-use crate::home;
+use super::compact;
 use crate::hub;
 use crate::memory::card::{self, CardAction, CardCtx};
 use crate::memory::dataset::{self, RecordBatch};
 use crate::memory::lock;
+use crate::memory::receipt;
 use crate::memory::remote::{self, Appended, Compacted};
 use crate::memory::{Memory, MemoryState};
 use crate::ui::prompt::confirm;
 use crate::{chunk, scan, ui};
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Result};
 use bytes::Bytes;
 use chrono::Utc;
-use hf_hub::{HFError, HFRepository, RepoTypeDataset};
 use lance::Dataset;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs::File;
-use std::io::{IsTerminal, Write as _};
-use std::path::{Path, PathBuf};
+use std::io::IsTerminal;
 
 /// Compact the remote once this many appended rows are sitting unindexed (answered by a
 /// brute-force scan until folded in). Bounds per-query cost, not push count, and is stateless —
 /// [`remote::append`] reads it straight from Lance's index stats. Nonzero so tiny per-push
 /// deltas don't pile up between compactions.
 const COMPACT_THRESHOLD: u64 = 500;
-
-/// Cap on CAS-conflict retries (the data append, and a forced compaction) when the branch head
-/// keeps moving under us, so a busy remote can't spin forever.
-const MAX_COMMIT_RETRIES: u32 = 10;
-
-/// Whether a publish error is the Hub refusing the write — a 403/Forbidden, i.e. the token can't
-/// write to this remote. Matches the typed [`HFError`] preserved in the error chain.
-pub(crate) fn is_read_only(err: &anyhow::Error) -> bool {
-    err.chain().any(|cause| match cause.downcast_ref::<HFError>() {
-        Some(HFError::Forbidden { .. }) => true,
-        Some(HFError::Http { context }) => context.status.as_u16() == 403,
-        _ => false,
-    })
-}
-
-/// Per-remote local receipt of chunk ids this host has observed on that remote. It is deliberately
-/// local: a shared remote's sessions from other hosts say nothing about this host's push backlog.
-fn pushed_path(memory_uri: &str) -> PathBuf {
-    home::pushed_dir().join(sanitize(memory_uri))
-}
-
-/// The file a publish to `memory_uri` locks for its whole run — not the receipt's lock, which
-/// [`record_pushed`] takes per write.
-fn push_lock_path(memory_uri: &str) -> PathBuf {
-    home::pushed_dir()
-        .join(".locks")
-        .join(format!("{}.push", sanitize(memory_uri)))
-}
-
-fn load_pushed_from(path: &Path) -> Option<HashSet<String>> {
-    let text = std::fs::read_to_string(path).ok()?;
-    Some(
-        text.lines()
-            .filter(|line| !line.is_empty())
-            .map(str::to_string)
-            .collect(),
-    )
-}
-
-pub(crate) fn load_pushed(memory_uri: &str) -> Option<HashSet<String>> {
-    load_pushed_from(&pushed_path(memory_uri))
-}
-
-/// Whether the memory has held chunks from this host before: its receipt exists and is not empty.
-fn held_before_at(path: &Path) -> bool {
-    load_pushed_from(path).is_some_and(|pushed| !pushed.is_empty())
-}
-
-fn held_before(memory_uri: &str) -> bool {
-    held_before_at(&pushed_path(memory_uri))
-}
-
-fn record_pushed_at<'a>(path: &Path, ids: impl IntoIterator<Item = &'a String>) -> Result<()> {
-    let dir = path.parent().context("push receipt has no parent directory")?;
-    std::fs::create_dir_all(dir).context("creating the push receipt directory")?;
-
-    // Lock a stable sibling rather than the receipt itself: the receipt is atomically replaced,
-    // so locking its inode would let a second writer lock the replacement and race the first.
-    let lock_dir = dir.join(".locks");
-    std::fs::create_dir_all(&lock_dir).context("creating the push receipt lock directory")?;
-    let lock_path = lock_dir.join(path.file_name().context("push receipt has no file name")?);
-    let lock = File::options()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)
-        .with_context(|| format!("opening push receipt lock at {}", lock_path.display()))?;
-    lock.lock().context("locking the push receipt")?;
-
-    let mut pushed = load_pushed_from(path).unwrap_or_default();
-    let before = pushed.len();
-    pushed.extend(ids.into_iter().cloned());
-    if pushed.len() == before && path.is_file() {
-        return Ok(());
-    }
-
-    let mut ids: Vec<_> = pushed.into_iter().collect();
-    ids.sort_unstable();
-    let mut temp = tempfile::NamedTempFile::new_in(dir).context("creating a push receipt")?;
-    for id in ids {
-        writeln!(temp, "{id}").context("writing the push receipt")?;
-    }
-    temp.flush().context("flushing the push receipt")?;
-    temp.persist(path)
-        .map_err(|e| anyhow::Error::new(e.error).context("saving the push receipt"))?;
-    Ok(())
-}
-
-fn record_pushed<'a>(memory_uri: &str, ids: impl IntoIterator<Item = &'a String>) -> Result<()> {
-    record_pushed_at(&pushed_path(memory_uri), ids)
-}
 
 /// This host's session-level push coverage for one remote. A session is fully pushed only when
 /// every chunk it currently has is in the local receipt, so a session that later grows returns to
@@ -158,7 +65,7 @@ fn push_coverage(by_session: &HashMap<String, Vec<String>>, pushed_ids: &HashSet
 }
 
 pub(crate) async fn local_push_coverage(local: &Dataset, memory_uri: &str) -> Option<PushCoverage> {
-    let pushed_ids = load_pushed(memory_uri)?;
+    let pushed_ids = receipt::load(memory_uri)?;
     let by_session = dataset::ids_by_session(local).await.ok()?;
     let mut coverage = push_coverage(&by_session, &pushed_ids);
     if coverage.pending > 0 {
@@ -171,36 +78,6 @@ pub(crate) async fn local_push_coverage(local: &Dataset, memory_uri: &str) -> Op
         coverage.held = held_among(local, &pending).await;
     }
     Some(coverage)
-}
-
-/// The local sessions holding rows `memory_uri` lacks, by this host's receipt.
-/// Empty when nothing is owed, including when this host never pushed there or has nothing indexed.
-pub(crate) async fn owed_sessions(memory_uri: &str) -> Result<HashSet<String>> {
-    let Some(pushed_ids) = load_pushed(memory_uri) else {
-        return Ok(HashSet::new());
-    };
-    let MemoryState::Ready(local) = Memory::local().state().await? else {
-        return Ok(HashSet::new());
-    };
-    Ok(dataset::ids_by_session(&local)
-        .await?
-        .into_iter()
-        .filter(|(_, ids)| ids.iter().any(|id| !pushed_ids.contains(id)))
-        .map(|(session, _)| session)
-        .collect())
-}
-
-/// Whether this host still owes `memory_uri` rows of `session_id` — reads that one session's ids,
-/// not the whole local memory.
-pub(crate) async fn owes_session(memory_uri: &str, session_id: &str) -> Result<bool> {
-    let Some(pushed_ids) = load_pushed(memory_uri) else {
-        return Ok(false);
-    };
-    let MemoryState::Ready(local) = Memory::local().state().await? else {
-        return Ok(false);
-    };
-    let ids = dataset::ids(&local, Some(&dataset::eq("session_id", session_id))).await?;
-    Ok(!ids.is_subset(&pushed_ids))
 }
 
 /// What the secret gate would hold back of the `pending` rows, scanned exactly as a push would.
@@ -313,19 +190,6 @@ fn disjoint(
     })
 }
 
-/// A memory URI as one path-safe filename — the push receipt's key.
-pub(crate) fn sanitize(uri: &str) -> String {
-    uri.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '.' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
 /// The chunk ids of exactly `sessions`, from a memory's rows grouped as `by_session`. Every named
 /// session must be in the memory: a mistyped id would otherwise publish a subset silently, and a
 /// publication is not a place to guess.
@@ -354,7 +218,13 @@ pub async fn run(spec: &str, compact: bool, yes: bool, sessions: &[String]) -> R
     };
     run_push(Memory::parse(spec), compact, confirm, sessions)
         .await
-        .map_err(|e| if is_read_only(&e) { read_only_error(spec) } else { e })
+        .map_err(|e| {
+            if hub::is_read_only(&e) {
+                read_only_error(spec)
+            } else {
+                e
+            }
+        })
 }
 
 /// The error for a token the Hub lets read `label` but not write to.
@@ -427,7 +297,7 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
     };
 
     // A push's delta is only valid against the head it read, so a concurrent one republishes those rows.
-    let Some(_push_lock) = lock::try_lock_file(&push_lock_path(&uri))? else {
+    let Some(_push_lock) = lock::try_lock_file(&receipt::push_lock_path(&uri))? else {
         return Ok(format!(
             "{}: another push to this memory is in flight — skipped\n",
             target.label()
@@ -493,12 +363,12 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
     let to_push: HashSet<String> = publishable.difference(&remote_ids).cloned().collect();
 
     // Read before the receipt write below, which can make this host look known.
-    let known_host = held_before(&uri);
+    let known_host = receipt::held_before(&uri);
 
     // Bootstrap/refresh the local receipt from facts the push comparison has already established.
     // This makes a no-op push enough to initialize status for a legacy remote, with no extra scan.
     if remote.is_some() {
-        record_pushed(&uri, candidates.intersection(&remote_ids))?;
+        receipt::record(&uri, candidates.intersection(&remote_ids))?;
     }
 
     // Nothing to push => done (no token needed), unless this is a first publish, which still gives
@@ -507,11 +377,9 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
         return Ok(format!("{}: already up to date ({} chunks)\n", target.label(), remote_ids.len()).into());
     }
 
-    // 2. HF repo handle. Resolve the target and token before the confirmation, so a bad URI or a
-    // missing token fails before we prompt for one.
-    let (owner, name, prefix) = hub::parse_hf(&uri)?;
-    let repo_id = format!("{owner}/{name}");
-    let token = hub::hf_token().context("no HF token (set HF_TOKEN) — required to push")?;
+    // 2. The write handle. Resolved before the confirmation, so a bad URI or a missing token fails
+    // before we prompt for one.
+    let w = remote::writable(&uri)?;
 
     // When required, ask for confirmation before publishing.
     if let Some(why) = disjoint(
@@ -526,17 +394,10 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
         }
     }
 
-    // No HTTP retries, as `remote::compact` requires.
-    let repo = hub::client(Some(token.as_str()), false)?.dataset(owner, name);
-    // No revision pinning: always the `main` branch head.
-    let rev = "main".to_string();
-    let dataset_uri = format!("{uri}/{}.lance", dataset::TABLE);
-    let opts = HashMap::from([("hf_token".to_string(), token), ("revision".to_string(), rev.clone())]);
-
     // 3. Forced compaction with no new data: just compact the remote and stop.
     if to_push.is_empty() && !first_publish {
         eprintln!("compacting the remote…");
-        let note = compact_remote(&repo, &dataset_uri, &opts, &rev, "funes push: compact").await?;
+        let note = compact::compact_remote(&w, "funes push: compact").await?;
         return Ok(format!("{}: up to date ({} chunks)\n{note}", target.label(), remote_ids.len()).into());
     }
 
@@ -583,13 +444,13 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
     let model = dataset::embedding_model(&local)?;
     let date = Utc::now().format("%Y-%m-%d").to_string();
     let ctx = CardCtx {
-        repo: &repo_id,
+        repo: &w.repo_id,
         chunks: remote_ids.len() as u64 + n_chunks as u64,
         embedding_model: model.id(),
         date: &date,
     };
-    let (card_body, card_note) = if prefix.is_empty() {
-        card_file(remote::fetch_readme(&repo, &rev).await, &ctx)
+    let (card_body, card_note) = if w.prefix.is_empty() {
+        card_file(remote::fetch_readme(&w.repo, &w.rev).await, &ctx)
     } else {
         (None, String::new())
     };
@@ -605,11 +466,11 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
     if first_publish {
         eprintln!("building the dataset to publish…");
         let oid = remote::first_publish(
-            &repo,
-            &prefix,
+            &w.repo,
+            &w.prefix,
             batches,
             schema.clone(),
-            &rev,
+            &w.rev,
             message,
             &extra,
             ui::index_progress,
@@ -618,7 +479,7 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
         let Some(oid) = oid else {
             return Ok(format!("{}: nothing new to upload\n", target.label()).into());
         };
-        record_pushed(&uri, &pushed_ids)?;
+        receipt::record(&uri, &pushed_ids)?;
         let pushed = match n_chunks {
             0 => format!("created with {}, no chunks yet", model.id()),
             n => format!("pushed {n} chunks"),
@@ -637,10 +498,10 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
     let mut attempts = 0u32;
     let (oid, unindexed, text_indexed) = loop {
         let attempt = remote::append(
-            &repo,
-            &dataset_uri,
-            opts.clone(),
-            &rev,
+            &w.repo,
+            &w.dataset_uri,
+            w.opts.clone(),
+            &w.rev,
             message.clone(),
             batches.clone(),
             schema.clone(),
@@ -655,13 +516,16 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
             } => break (oid, unindexed, text_indexed),
             Appended::Conflict => {
                 attempts += 1;
-                if attempts > MAX_COMMIT_RETRIES {
-                    bail!("data commit kept conflicting after {MAX_COMMIT_RETRIES} retries; re-run push");
+                if attempts > remote::MAX_COMMIT_RETRIES {
+                    bail!(
+                        "data commit kept conflicting after {} retries; re-run push",
+                        remote::MAX_COMMIT_RETRIES
+                    );
                 }
             }
         }
     };
-    record_pushed(&uri, &pushed_ids)?;
+    receipt::record(&uri, &pushed_ids)?;
     let mut out = format!("{}: pushed {n_chunks} chunks (commit {oid})\n", target.label());
     out.push_str(&card_note);
 
@@ -670,10 +534,10 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
     // index, which recall cannot do without.
     if compact {
         eprintln!("compacting the remote…");
-        out.push_str(&compact_remote(&repo, &dataset_uri, &opts, &rev, "funes push: compact").await?);
+        out.push_str(&compact::compact_remote(&w, "funes push: compact").await?);
     } else if unindexed >= COMPACT_THRESHOLD || !text_indexed {
         eprintln!("compacting the remote…");
-        out.push_str(&compact_auto(&repo, &dataset_uri, &opts, &rev).await);
+        out.push_str(&compact_auto(&w).await);
     }
     out.push_str(&skipped.warning());
     Ok(out.into())
@@ -779,54 +643,14 @@ fn drop_secret_rows(batches: Vec<RecordBatch>) -> Result<(Vec<RecordBatch>, Skip
     Ok((clean, Skipped { rows: dropped, summary }))
 }
 
-/// Forced compaction: ask [`remote::compact`] to compact and commit under `message`, retrying on a
-/// head-moved conflict (it re-reads the head each call) until it lands or [`MAX_COMMIT_RETRIES`] is
-/// exceeded.
-pub(crate) async fn compact_remote(
-    repo: &HFRepository<RepoTypeDataset>,
-    dataset_uri: &str,
-    opts: &HashMap<String, String>,
-    rev: &str,
-    message: &str,
-) -> Result<String> {
-    for _ in 0..=MAX_COMMIT_RETRIES {
-        match remote::compact(
-            repo,
-            dataset_uri,
-            opts.clone(),
-            rev,
-            message.to_string(),
-            ui::index_progress,
-        )
-        .await?
-        {
-            Compacted::Committed(oid) => return Ok(format!("  compacted (commit {oid})\n")),
-            Compacted::Uncleaned(oid, e) => {
-                return Ok(format!(
-                    "  compacted (commit {oid})\n  note: old versions not deleted ({e:#}); \
-                     compact it again\n"
-                ))
-            }
-            Compacted::AlreadyCompact => return Ok("  already compact\n".to_string()),
-            Compacted::Conflict => continue,
-        }
-    }
-    bail!("compaction still conflicting after {MAX_COMMIT_RETRIES} retries; compact it again")
-}
-
 /// Best-effort compaction during a normal push: one attempt, never retried. The data is already
 /// committed, so any failure here is a warning — the next push past the threshold tries again.
-async fn compact_auto(
-    repo: &HFRepository<RepoTypeDataset>,
-    dataset_uri: &str,
-    opts: &HashMap<String, String>,
-    rev: &str,
-) -> String {
+async fn compact_auto(w: &remote::Writable) -> String {
     match remote::compact(
-        repo,
-        dataset_uri,
-        opts.clone(),
-        rev,
+        &w.repo,
+        &w.dataset_uri,
+        w.opts.clone(),
+        &w.rev,
         "funes push: compact".to_string(),
         ui::index_progress,
     )
@@ -919,15 +743,6 @@ mod tests {
             disjoint(5, 5, 0, 100, true),
             Some(Disjoint::Unexplained { remote_chunks: 100 })
         );
-    }
-
-    #[test]
-    fn is_read_only_matches_the_type_not_the_message() {
-        // We match the typed HFError, not the rendered text — a plain error that merely mentions
-        // 403/Forbidden is not a read-only signal. (HFError is #[non_exhaustive], so the positive
-        // path can't be built here; it's exercised by the gated round-trip.)
-        assert!(!is_read_only(&anyhow::anyhow!("server said 403 Forbidden")));
-        assert!(!is_read_only(&anyhow::anyhow!("no HF token")));
     }
 
     /// Card context for the [`card_file`] tests.
@@ -1282,61 +1097,6 @@ mod tests {
         assert_eq!(drop_secret_rows(rows).unwrap().1.rows, 0, "clean rows are not held");
     }
 
-    #[test]
-    fn push_receipt_is_an_atomic_growing_set() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("receipt");
-        let first = ["b".to_string(), "a".to_string()];
-        record_pushed_at(&path, &first).unwrap();
-        let second = ["b".to_string(), "c".to_string()];
-        record_pushed_at(&path, &second).unwrap();
-        assert_eq!(
-            load_pushed_from(&path).unwrap(),
-            ["a", "b", "c"].into_iter().map(str::to_string).collect()
-        );
-        assert_eq!(std::fs::read_to_string(path).unwrap(), "a\nb\nc\n");
-    }
-
-    #[test]
-    fn an_empty_receipt_does_not_make_a_known_host() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("receipt");
-        assert!(!held_before_at(&path));
-        // The receipt bootstrap of a push that then stops at the prompt writes an empty file.
-        record_pushed_at(&path, std::iter::empty()).unwrap();
-        assert!(path.is_file());
-        assert!(!held_before_at(&path));
-        record_pushed_at(&path, &["a".to_string()]).unwrap();
-        assert!(held_before_at(&path));
-    }
-
-    #[test]
-    fn concurrent_push_receipt_updates_do_not_lose_ids() {
-        use std::sync::{Arc, Barrier};
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = Arc::new(dir.path().join("receipt"));
-        let writers = 16;
-        let barrier = Arc::new(Barrier::new(writers));
-        let threads: Vec<_> = (0..writers)
-            .map(|i| {
-                let path = Arc::clone(&path);
-                let barrier = Arc::clone(&barrier);
-                std::thread::spawn(move || {
-                    let id = format!("id-{i}");
-                    barrier.wait();
-                    record_pushed_at(&path, [&id]).unwrap();
-                })
-            })
-            .collect();
-        for thread in threads {
-            thread.join().unwrap();
-        }
-
-        let expected: HashSet<_> = (0..writers).map(|i| format!("id-{i}")).collect();
-        assert_eq!(load_pushed_from(&path).unwrap(), expected);
-    }
-
     #[tokio::test]
     async fn an_append_returns_only_the_included_delta() {
         let dir = tempfile::tempdir().unwrap();
@@ -1404,16 +1164,6 @@ mod tests {
         assert!(rows_with_ids(&ds, &HashSet::new()).await.unwrap().is_empty());
         let absent = HashSet::from(["not-present".to_string()]);
         assert!(rows_with_ids(&ds, &absent).await.unwrap().is_empty());
-    }
-
-    #[test]
-    fn a_push_locks_its_own_file_per_remote() {
-        let uri = "hf://datasets/acme/kb";
-        let receipt = pushed_path(uri);
-        let receipt_lock = receipt.parent().unwrap().join(".locks").join(sanitize(uri));
-        assert_ne!(push_lock_path(uri), receipt);
-        assert_ne!(push_lock_path(uri), receipt_lock);
-        assert_ne!(push_lock_path(uri), push_lock_path("hf://datasets/acme/other"));
     }
 
     #[tokio::test]

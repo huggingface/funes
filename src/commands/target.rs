@@ -6,9 +6,8 @@
 //! A read naming no memory reads the bound memory with those turns, so they are in reach without
 //! a push. A read naming a memory, the bound one included, reads it as it stands.
 
-use super::push;
 use super::recall::{memory_hint, Candidates, Search, SessionPool};
-use crate::memory::{self, Memory, MemoryState};
+use crate::memory::{self, receipt, Memory, MemoryState};
 use anyhow::Result;
 
 /// What a read verb reads, and the `--memory` a drill-down repeats to read the same.
@@ -121,7 +120,7 @@ impl Target {
             return Ok(vec![SessionPool::open(&self.memory).await?]);
         };
         let (pool, owed) = tokio::join!(SessionPool::open(&self.memory), async {
-            let owed = push::owed_sessions(uri).await?;
+            let owed = receipt::owed_sessions(uri).await?;
             if owed.is_empty() {
                 return Ok(None);
             }
@@ -141,7 +140,7 @@ impl Target {
     /// of it, since the local memory holds the session whole; else the memory itself.
     pub(crate) async fn holder(self, session_id: &str) -> Result<Memory> {
         if let Some(uri) = self.overlaid() {
-            if push::owes_session(uri, session_id).await? {
+            if receipt::owes_session(uri, session_id).await? {
                 return Ok(Memory::local());
             }
         }
@@ -154,7 +153,7 @@ impl Target {
 /// pushed there. The hits hint no memory, as a call naming none does; [`Target::candidates`] sets
 /// the hint of every pool it ranks.
 pub async fn unpushed(search: &Search, uri: &str) -> Result<Option<Candidates>> {
-    let Some(pushed) = push::load_pushed(uri) else {
+    let Some(pushed) = receipt::load(uri) else {
         return Ok(None);
     };
     // A local memory with no rows has nothing unpushed, and searching it is an error.

@@ -4,6 +4,7 @@
 //! `recall`/`get` return results rendered in the agent format;
 //! `recall_hits`/`get_turns` return the structured results for other renderings (see `render`).
 
+use super::push;
 use super::target::Target;
 use crate::chunk;
 use crate::inference::{self, Embedder, EmbeddingModel, Reranker};
@@ -1483,7 +1484,7 @@ async fn remote_lines(ds: &Dataset, now: DateTime<Utc>) -> String {
 /// how to start one.
 async fn push_coverage_lines(local: &Dataset, memory: &Memory, uri: &str) -> String {
     let mut out = String::new();
-    let Some(coverage) = super::push::local_push_coverage(local, uri).await else {
+    let Some(coverage) = push::local_push_coverage(local, uri).await else {
         let _ = writeln!(
             out,
             "local push coverage: unknown — run `funes push {}` once",

@@ -603,6 +603,42 @@ fn captured_deletes(wrapper: &CaptureWrapper) -> Vec<CommitOperation> {
         .collect()
 }
 
+/// Cap on CAS-conflict retries (the data append, and a forced compaction) when the branch head
+/// keeps moving under us, so a busy remote can't spin forever.
+pub(crate) const MAX_COMMIT_RETRIES: u32 = 10;
+
+/// A remote memory opened for a write: its repo handle, with no HTTP retries as [`compact`]
+/// requires, the branch reads pin to, its table's URI and the storage options a Lance open of it
+/// takes.
+pub(crate) struct Writable {
+    pub(crate) repo: HFRepository<RepoTypeDataset>,
+    /// `<owner>/<name>`.
+    pub(crate) repo_id: String,
+    /// Where the memory sits inside the repo; empty at its root.
+    pub(crate) prefix: String,
+    pub(crate) rev: String,
+    pub(crate) dataset_uri: String,
+    pub(crate) opts: HashMap<String, String>,
+}
+
+/// The remote memory at `uri`, opened for a write. Writing needs a Hugging Face token.
+pub(crate) fn writable(uri: &str) -> Result<Writable> {
+    let (owner, name, prefix) = hub::parse_hf(uri)?;
+    let token = hub::hf_token().with_context(|| format!("no HF token (set HF_TOKEN) — writing to {uri} needs one"))?;
+    let repo_id = format!("{owner}/{name}");
+    let repo = hub::client(Some(token.as_str()), false)?.dataset(owner, name);
+    let rev = super::READ_BRANCH.to_string();
+    let opts = HashMap::from([("hf_token".to_string(), token), ("revision".to_string(), rev.clone())]);
+    Ok(Writable {
+        repo,
+        repo_id,
+        prefix,
+        rev,
+        dataset_uri: dataset::table_uri(uri),
+        opts,
+    })
+}
+
 /// Read the commit at the tip of branch `rev` — the parent-commit guard for the next commit.
 async fn head_oid(repo: &HFRepository<RepoTypeDataset>, rev: &str) -> Result<String> {
     let refs = repo.list_refs().send().await.context("listing remote refs")?;

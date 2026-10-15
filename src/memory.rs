@@ -9,7 +9,8 @@
 //! Below it: [`dataset`], [`fetch_store`] and [`capture_store`] are **mechanics** — Lance and object
 //! stores, knowing nothing about the Hub. [`remote`] is **transport** — the pinned reads and the
 //! commits of an append or a compaction, over the Hub client in [`crate::hub`].
-//! [`card`] serves a published memory's dataset card, [`lock`] the local writer lock.
+//! [`card`] serves a published memory's dataset card, [`lock`] the local writer lock, [`receipt`]
+//! what this host pushed to each remote.
 //!
 //! The commands ask this module what state a memory is in; they never infer it from error shapes.
 
@@ -18,6 +19,7 @@ pub mod card;
 pub mod dataset;
 pub mod fetch_store;
 pub mod lock;
+pub mod receipt;
 pub mod remote;
 
 use std::collections::HashMap;
@@ -41,8 +43,7 @@ pub enum Memory {
     Remote { uri: String },
 }
 
-/// The branch reads pin to and resolve the head commit of. It must be the branch writes target, so a
-/// read sees the commits a push produced.
+/// The branch reads pin to and writes commit to, so a read sees the commits a push produced.
 const READ_BRANCH: &str = "main";
 
 impl Memory {
