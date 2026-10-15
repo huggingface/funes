@@ -203,10 +203,17 @@ async fn agent(root: &Path, id: &str) -> Result<String> {
         }
         fetched => fetched?,
     };
-    let Some(provisioned) = fetched.filter(|p| !registry::is_recorded(root, id, &p.origin, &p.files)) else {
+    // Recorded from the same source: confirmed already, and up to date unless the installed copy changed.
+    let recorded = fetched
+        .as_ref()
+        .is_some_and(|p| registry::is_recorded(root, id, &p.origin, &p.files));
+    let intact = recorded && registry::verify_installed(root, id)? == registry::Verification::Intact;
+    let Some(provisioned) = fetched.filter(|_| !intact) else {
         return Ok(format!("The {id} integration is up to date."));
     };
-    confirm_trust(&root.join(id), &provisioned.manifest, &provisioned.provenance)?;
+    if !recorded {
+        confirm_trust(&root.join(id), &provisioned.manifest, &provisioned.provenance)?;
+    }
     // Bound as the host is; on a host without the binding, as an older funes bound the agent.
     let bound = memory::binding()?.or(registry::binding(root, id)?);
     let integration = provisioned.install(root)?;

@@ -1204,6 +1204,31 @@ fn a_refused_refresh_leaves_every_installed_file_unchanged() {
     assert_eq!(files_under(&agents), installed);
 }
 
+/// An installed file changed since its install is put back on update, unasked: its source holds
+/// the files confirmed once.
+#[test]
+fn update_puts_back_an_installed_file_changed_since() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let funes_home = tmp.path().join("funes");
+    let log = tmp.path().join("setup.log");
+    let source = bundle(&home.join("integrations/clyde"), "clyde", 1, "v1");
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+
+    let setup = home.join(".funes/agents/clyde/setup");
+    let mut edited = fs::read_to_string(&setup).unwrap();
+    edited.push_str("# edited by hand\n");
+    fs::write(&setup, edited).unwrap();
+    let out = update(&home, &funes_home, &log, Some(&home.join("integrations")), false);
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(said.contains("Updated the clyde integration"), "{said}{}", stderr(&out));
+    assert_eq!(
+        fs::read_to_string(&setup).unwrap(),
+        fs::read_to_string(source.join("setup")).unwrap()
+    );
+}
+
 /// An integration whose update is refused stays as installed, and the others still update.
 #[test]
 fn a_refused_integration_update_leaves_it_as_installed_and_the_others_to_theirs() {
