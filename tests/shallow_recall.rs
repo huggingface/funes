@@ -93,5 +93,5 @@ async fn shallow_recall_returns_ranked_passages_and_neighbors() {
     let empty = recall::recall(Memory::parse(&memory), "quasar".into(), 5, 30, 1, Default::default())
         .await
         .unwrap();
-    assert_eq!(empty, "no results");
+    assert_eq!(empty, "no results\nrephrase in other words");
 }

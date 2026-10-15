@@ -46,6 +46,18 @@ pub fn recall_agent(note: &str, hits: &[(Hit, f64)]) -> String {
     out
 }
 
+/// What a `recall` reply closes with: the follow-ups that find a missed answer for the fewest tokens.
+const RECALL_MISS: &str = "if these miss: rephrase in the words the hits use, then raise --k; \
+                           a get line only reads around its own hit";
+
+/// A `recall` reply: the agent format closed by [`RECALL_MISS`], or `no results` and a hint. Byte-stable.
+pub fn recall_reply(note: &str, hits: &[(Hit, f64)]) -> String {
+    if hits.is_empty() {
+        return format!("{note}no results\nrephrase in other words");
+    }
+    format!("{}{RECALL_MISS}\n", recall_agent(note, hits))
+}
+
 /// The agent `scan` format: a header naming the needle, the session and the window, then one line
 /// per carrying block with the `→ get` that reads it. A cap is stated with the coordinate that
 /// continues past it. Byte-stable.
@@ -324,6 +336,23 @@ mod tests {
         assert!(
             bare.contains("  → get 0123456789abcdef --from 4 --to 10\n"),
             "got: {bare}"
+        );
+    }
+
+    #[test]
+    fn a_recall_reply_closes_with_what_to_try_on_a_miss() {
+        let h = || hit("2026-06-19T01:29:59.000Z", "text", "the decision was made");
+        assert_eq!(
+            recall_reply("", &[(h(), 0.5781)]),
+            format!(
+                "{}if these miss: rephrase in the words the hits use, then raise --k; \
+                 a get line only reads around its own hit\n",
+                recall_agent("", &[(h(), 0.5781)])
+            )
+        );
+        assert_eq!(
+            recall_reply("remote down\n", &[]),
+            "remote down\nno results\nrephrase in other words"
         );
     }
 

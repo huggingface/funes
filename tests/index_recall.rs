@@ -52,7 +52,7 @@ async fn index_then_read_surface() {
     )
     .await
     .unwrap();
-    assert_ne!(out, "no results", "recall returned nothing");
+    assert!(!out.starts_with("no results"), "recall returned nothing");
     assert!(
         out.contains(&session),
         "recall should surface the indexed session: {out}"

@@ -407,10 +407,7 @@ pub async fn recall(
 
 /// Recall results in the agent format, or the note and `no results` when nothing matched.
 pub fn rendered(note: &str, hits: &[(Hit, f64)]) -> String {
-    if hits.is_empty() {
-        return format!("{note}no results");
-    }
-    crate::ui::render::recall_agent(note, hits)
+    crate::ui::render::recall_reply(note, hits)
 }
 
 /// Run the recall pipeline over what `target` reads: hybrid retrieval, pooled with this host's
