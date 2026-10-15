@@ -269,7 +269,8 @@ release for its contract and checks the archive against the digest the catalog n
 from the catalog, or found with no record of what installed it, a copy takes the catalog's newest
 release on every run, fetching nothing when that is the release installed; installed from `--from`,
 it runs as installed until named again; and a copy speaking a contract this funes cannot run is
-refreshed whatever its source. A source that cannot be reached leaves the installed copy to run.
+refreshed whatever its source. A source that cannot be reached leaves the installed copy to run,
+unless `--from` named it.
 `funes remove` fetches nothing: it runs the installed copy, unless this funes cannot run it. An id
 with no files anywhere is an error naming what is installed. A refresh rewrites only the files that
 differ and prunes nothing; `funes remove` deletes the directory whole.

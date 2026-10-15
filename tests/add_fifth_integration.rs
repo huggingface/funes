@@ -394,6 +394,15 @@ fn an_integration_installs_from_a_directory_named_on_the_command_line() {
         serde_json::from_str(&fs::read_to_string(home.join(".funes/agents/clyde.json")).unwrap()).unwrap();
     assert_eq!(recorded["origin"]["path"], from);
 
+    // Neither a directory nor an archive URL is an error before anything runs.
+    let out = funes(&home, &funes_home, &log, &["add", "clyde", "--from", "/nowhere/clyde"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("is not a directory, nor an hf://buckets/… archive URL"),
+        "{}",
+        stderr(&out)
+    );
+
     // Another directory's files, off a terminal: refused, naming the same.
     let other = bundle(&tmp.path().join("other/clyde"), "clyde", 1, "other");
     fs::remove_file(&log).unwrap();
@@ -410,15 +419,6 @@ fn an_integration_installs_from_a_directory_named_on_the_command_line() {
         "{err}"
     );
     assert!(!log.exists(), "setup did not run");
-
-    // Neither a directory nor an archive URL is an error before anything runs.
-    let out = funes(&home, &funes_home, &log, &["add", "clyde", "--from", "/nowhere/clyde"]);
-    assert!(!out.status.success());
-    assert!(
-        stderr(&out).contains("is not a directory, nor an hf://buckets/… archive URL"),
-        "{}",
-        stderr(&out)
-    );
 }
 
 /// A directory named relative to where the command ran is recorded absolute: the record says

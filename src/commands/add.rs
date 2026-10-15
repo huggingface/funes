@@ -104,8 +104,8 @@ pub(crate) fn setup_add(integration: &registry::Integration, memory: Option<&str
 /// `add` touches a memory or `remove` runs anything. With `refresh`, its files are fetched into
 /// the registry first, so the script funes executes is the one it just wrote — unless the source
 /// holds the release already installed; a source that can't be reached leaves the installed copy
-/// to run. Without, the installed copy runs as installed. Says what it refreshed the files with,
-/// when it did.
+/// to run, unless `from` named it. Without, the installed copy runs as installed. Says what it
+/// refreshed the files with, when it did.
 pub(crate) async fn prepare_agent(
     id: &str,
     refresh: bool,
@@ -135,7 +135,7 @@ pub(crate) async fn prepare_agent(
             }
             // Another publisher's files are not a refresh the installed copy stands in for.
             Err(e) if e.downcast_ref::<registry::Takeover>().is_some() => return Err(e),
-            Err(e) if installed => {
+            Err(e) if installed && from.is_none() => {
                 // What failed and why, without the layers between: a request error names its URL
                 // at every one.
                 let why = match e.chain().count() {
