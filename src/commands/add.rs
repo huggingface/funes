@@ -16,60 +16,32 @@ use anyhow::{bail, Context, Result};
 use std::io::IsTerminal;
 use std::path::Path;
 
-/// Resolve `id`'s integration and the memory, and run its `setup add`. The registry's manifest
-/// says what `setup` last installed, and a refresh writes the new one first, so a run that stops
-/// short of `setup add` — a memory that does not resolve, a first index declined — puts the
-/// previous manifest back: what the agent runs is still the old install, and every read must keep
-/// saying so. A first install that stops there takes its files away instead: nothing ran them,
-/// so they are not an installed copy for the next run to ask about.
+/// Resolve `id`'s integration and the memory, and run its `setup add`. A refresh is installed only
+/// as `setup add` is about to run, so a run that stops short of it — trust declined, a memory that
+/// does not resolve, a first index declined — leaves the registry as it was: the agent's hooks run
+/// what is installed there.
 pub async fn run(id: &str, memory: Option<&str>, from: Option<&str>) -> Result<()> {
     if !spool::is_id(id) {
         bail!("{id:?} is not an integration id (lowercase [a-z0-9_-])");
     }
     let root = registry::default_root()?;
-    let previous = registry::installed_manifest(&root, id);
-    let fresh = !root.join(id).is_dir();
-    let installed = std::cell::Cell::new(false);
-    let ran = &installed;
-    let result = async {
-        let refresh = fresh || from.is_some() || registry::refreshes_on_every_run(&root, id);
-        let (integration, provisioned) = prepare_agent(id, refresh, from).await?;
-        // Naming a memory binds the host to it, as `funes bind` does. Naming none, the agent takes
-        // the host's.
-        let (resolved, binds) = match memory {
-            Some(spec) => (bind::resolve_named(spec).await?, true),
-            None => adopt_host_memory(&root, id).await?,
-        };
-        let record = provisioned.map(|(origin, files)| registry::Installed::new(&integration.manifest, origin, files));
-        let registry_root = &root;
-        let install = |memory: Option<String>| async move {
-            // Counted as run before it runs: a setup that fails part-way may have wired some of
-            // the agent to these files, and `remove` must find them recorded to run unasked.
-            ran.set(true);
-            setup_add(&integration, memory.as_deref())?;
-            // The note an older funes kept beside the agent is obsolete once its setup ran on the
-            // host's memory; left, a later bare add would bind the host to it again.
-            registry::bind(registry_root, id, None)
-        };
-        let outcome = bootstrap_add(id, resolved, binds, install).await;
-        // Recorded once setup has run, whatever came after: a first push that failed leaves the
-        // new files installed, and the record must say so.
-        if ran.get() {
-            if let Some(record) = record {
-                registry::record(&root, &record)?;
-            }
-        }
-        outcome
-    }
-    .await;
-    if !installed.get() {
-        if fresh {
-            registry::discard(&root, id)?;
-        } else if let Some(previous) = previous {
-            registry::restore_manifest(&root, id, &previous)?;
-        }
-    }
-    result
+    let refresh = !root.join(id).is_dir() || from.is_some() || registry::refreshes_on_every_run(&root, id);
+    let prepared = prepare_agent(id, refresh, from).await?;
+    // Naming a memory binds the host to it, as `funes bind` does. Naming none, the agent takes
+    // the host's.
+    let (resolved, binds) = match memory {
+        Some(spec) => (bind::resolve_named(spec).await?, true),
+        None => adopt_host_memory(&root, id).await?,
+    };
+    let registry_root = &root;
+    let install = |memory: Option<String>| async move {
+        let integration = prepared.install(registry_root)?;
+        setup_add(&integration, memory.as_deref())?;
+        // The note an older funes kept beside the agent is obsolete once its setup ran on the
+        // host's memory; left, a later bare add would bind the host to it again.
+        registry::bind(registry_root, id, None)
+    };
+    bootstrap_add(id, resolved, binds, install).await
 }
 
 /// Run `id`'s `setup remove`, then delete its files. Nothing installed is the state `remove`
@@ -85,7 +57,9 @@ pub async fn remove(id: &str) -> Result<()> {
         registry::discard(&root, id)?;
         return spool::forget_missing(id);
     }
-    let (integration, _) = prepare_agent(id, registry::speaks_another_contract(&root, id), None).await?;
+    let integration = prepare_agent(id, registry::speaks_another_contract(&root, id), None)
+        .await?
+        .install(&root)?;
     integration.remove()?;
     registry::discard(&root, id)?;
     // The hooks that asked for the spool are gone with the integration, so the refusals they left
@@ -100,39 +74,34 @@ pub(crate) fn setup_add(integration: &registry::Integration, memory: Option<&str
     spool::forget_missing(&integration.manifest.id)
 }
 
+/// An integration confirmed to run: the copy installed, or a refresh staged to replace it.
+pub(crate) enum Prepared {
+    Installed(registry::Integration),
+    Staged(registry::Provisioned),
+}
+
+impl Prepared {
+    /// The integration to run, a staged refresh installed first.
+    pub(crate) fn install(self, root: &Path) -> Result<registry::Integration> {
+        match self {
+            Prepared::Installed(integration) => Ok(integration),
+            Prepared::Staged(provisioned) => provisioned.install(root),
+        }
+    }
+}
+
 /// Resolve `id`'s integration for a run and confirm it when funes can't vouch for it — all before
-/// `add` touches a memory or `remove` runs anything. With `refresh`, its files are fetched into
-/// the registry first, so the script funes executes is the one it just wrote — unless the source
-/// holds the release already installed; a source that can't be reached leaves the installed copy
-/// to run, unless `from` named it. Without, the installed copy runs as installed. Says what it
-/// refreshed the files with, when it did.
-pub(crate) async fn prepare_agent(
-    id: &str,
-    refresh: bool,
-    from: Option<&str>,
-) -> Result<(registry::Integration, Option<(registry::Origin, registry::Files)>)> {
+/// `add` touches a memory or `remove` runs anything. With `refresh`, its files are fetched and
+/// staged, so the script funes executes is the one it just wrote — unless the source holds the
+/// release already installed; a source that can't be reached leaves the installed copy to run,
+/// unless `from` named it. Without, the installed copy runs as installed. Says what it refreshed
+/// the files with, when it did.
+pub(crate) async fn prepare_agent(id: &str, refresh: bool, from: Option<&str>) -> Result<Prepared> {
     let root = registry::default_root()?;
-    // Decided before the refresh: a first install that fails part-way is not an installed copy.
     let installed = root.join(id).is_dir();
-    let mut provisioned = None;
-    let provenance = if refresh {
+    let staged = if refresh {
         match registry::provision(&root, id, from).await {
-            Ok(None) => None,
-            Ok(Some(registry::Provisioned {
-                provenance,
-                origin,
-                files,
-            })) => {
-                // Files confirmed once, from the same source, unchanged since: confirmed still.
-                let provenance = match provenance {
-                    registry::Provenance::Unvouched(_) if registry::is_recorded(&root, id, &origin, &files) => {
-                        registry::Provenance::Vouched
-                    }
-                    provenance => provenance,
-                };
-                provisioned = Some((origin, files));
-                Some(provenance)
-            }
+            Ok(staged) => staged,
             // Another publisher's files are not a refresh the installed copy stands in for.
             Err(e) if e.downcast_ref::<registry::Takeover>().is_some() => return Err(e),
             Err(e) if installed && from.is_none() => {
@@ -146,7 +115,6 @@ pub(crate) async fn prepare_agent(
                 None
             }
             Err(e) => {
-                let _ = registry::discard(&root, id);
                 return Err(if e.downcast_ref::<registry::Absent>().is_some() {
                     unknown_agent(&root, id, e)
                 } else {
@@ -157,13 +125,17 @@ pub(crate) async fn prepare_agent(
     } else {
         None
     };
-    let provenance = match provenance {
-        Some(provenance) => provenance,
-        None => installed_provenance(&root, id)?,
+    let Some(provisioned) = staged else {
+        let provenance = installed_provenance(&root, id)?;
+        let integration = registry::open(&root, id)?;
+        confirm_trust(&integration.dir, &integration.manifest, &provenance)?;
+        return Ok(Prepared::Installed(integration));
     };
-    let integration = registry::open(&root, id)?;
-    confirm_trust(&integration, provenance)?;
-    Ok((integration, provisioned))
+    // Files confirmed once, from the same source, unchanged since: confirmed still.
+    if !registry::is_recorded(&root, id, &provisioned.origin, &provisioned.files) {
+        confirm_trust(&root.join(id), &provisioned.manifest, &provisioned.provenance)?;
+    }
+    Ok(Prepared::Staged(provisioned))
 }
 
 /// Whether funes vouches for the copy installed at `root/<id>`: it does for files it recorded
@@ -196,13 +168,17 @@ fn unknown_agent(root: &Path, id: &str, e: anyhow::Error) -> anyhow::Error {
     ))
 }
 
-/// Confirm before funes executes an integration it does not vouch for, saying what it is — the
-/// package by publisher and version — and where it came from. The default is no.
-pub(crate) fn confirm_trust(integration: &registry::Integration, provenance: registry::Provenance) -> Result<()> {
+/// Confirm before funes executes the integration `manifest` declares from `dir`, when it does not
+/// vouch for it, saying what it is — the package by publisher and version — and where it came
+/// from. The default is no.
+pub(crate) fn confirm_trust(
+    dir: &Path,
+    manifest: &registry::Manifest,
+    provenance: &registry::Provenance,
+) -> Result<()> {
     let registry::Provenance::Unvouched(origin) = provenance else {
         return Ok(());
     };
-    let manifest = &integration.manifest;
     let id = &manifest.id;
     let package = format!(
         "{id}{} by {} ({})",
@@ -214,13 +190,13 @@ pub(crate) fn confirm_trust(integration: &registry::Integration, provenance: reg
         bail!(
             "the {id} integration at {} — {package} — comes from {origin}, which funes can't vouch \
              for — run this in a terminal to confirm it",
-            integration.dir.display()
+            dir.display()
         );
     }
     if !confirm(
         &format!(
             "funes is about to run {}/setup — {package}, from {origin}. Trust it? [y/N] ",
-            integration.dir.display()
+            dir.display()
         ),
         false,
     ) {

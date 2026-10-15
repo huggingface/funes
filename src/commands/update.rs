@@ -196,44 +196,28 @@ async fn agent(root: &Path, id: &str) -> Result<String> {
             record.origin
         ));
     }
-    let previous = registry::installed_manifest(root, id);
-    let ran = std::cell::Cell::new(false);
-    let result: Result<String> = async {
-        let fetched = match registry::provision(root, id, None).await {
-            // A copy nothing recorded, that its source does not list: nothing to bring it forward to.
-            Err(e) if record.is_none() && e.downcast_ref::<registry::Absent>().is_some() => {
-                return Ok(format!("The {id} integration stays as placed: {e}."));
-            }
-            fetched => fetched?,
-        };
-        let Some(provisioned) = fetched.filter(|p| !registry::is_recorded(root, id, &p.origin, &p.files)) else {
-            return Ok(format!("The {id} integration is up to date."));
-        };
-        let integration = registry::open(root, id)?;
-        confirm_trust(&integration, provisioned.provenance)?;
-        let record = registry::Installed::new(&integration.manifest, provisioned.origin, provisioned.files);
-        // Bound as the host is; on a host without the binding, as an older funes bound the agent.
-        let bound = memory::binding()?.or(registry::binding(root, id)?);
-        ran.set(true);
-        let outcome = setup_add(&integration, bound.as_deref());
-        // Recorded however setup ended: `remove` must run what a failed setup may have wired in.
-        registry::record(root, &record)?;
-        outcome?;
-        let to = integration
-            .manifest
-            .version
-            .as_ref()
-            .map(|v| format!(" to {v}"))
-            .unwrap_or_default();
-        Ok(format!("Updated the {id} integration{to}."))
-    }
-    .await;
-    if !ran.get() {
-        if let Some(previous) = previous {
-            registry::restore_manifest(root, id, &previous)?;
+    let fetched = match registry::provision(root, id, None).await {
+        // A copy nothing recorded, that its source does not list: nothing to bring it forward to.
+        Err(e) if record.is_none() && e.downcast_ref::<registry::Absent>().is_some() => {
+            return Ok(format!("The {id} integration stays as placed: {e}."));
         }
-    }
-    result
+        fetched => fetched?,
+    };
+    let Some(provisioned) = fetched.filter(|p| !registry::is_recorded(root, id, &p.origin, &p.files)) else {
+        return Ok(format!("The {id} integration is up to date."));
+    };
+    confirm_trust(&root.join(id), &provisioned.manifest, &provisioned.provenance)?;
+    // Bound as the host is; on a host without the binding, as an older funes bound the agent.
+    let bound = memory::binding()?.or(registry::binding(root, id)?);
+    let integration = provisioned.install(root)?;
+    setup_add(&integration, bound.as_deref())?;
+    let to = integration
+        .manifest
+        .version
+        .as_ref()
+        .map(|v| format!(" to {v}"))
+        .unwrap_or_default();
+    Ok(format!("Updated the {id} integration{to}."))
 }
 
 /// Verify the staged binary, confirm its reported version, and atomically rename it over `exe`.

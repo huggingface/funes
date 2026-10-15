@@ -498,22 +498,6 @@ pub fn speaks_another_contract(root: &Path, id: &str) -> bool {
         .is_some_and(|manifest| manifest.contract_version != CONTRACT_VERSION)
 }
 
-/// Put `manifest` back as `root/<id>`'s: the registry's manifest says what its `setup` last
-/// installed, so a refresh whose `setup add` never ran must not leave the new one.
-pub fn restore_manifest(root: &Path, id: &str, manifest: &[u8]) -> Result<()> {
-    let dir = root.join(id);
-    if !dir.is_dir() {
-        return Ok(());
-    }
-    let path = dir.join("manifest.json");
-    if std::fs::read(&path).is_ok_and(|now| now == manifest) {
-        return Ok(());
-    }
-    let tmp = dir.join(format!(".manifest.json.funes-tmp{}", std::process::id()));
-    std::fs::write(&tmp, manifest).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, &path).with_context(|| format!("replacing {}", path.display()))
-}
-
 impl Integration {
     /// Install funes into the agent, bound to `memory`; absent is the local memory.
     pub fn add(&self, memory: Option<&str>) -> Result<()> {
@@ -595,13 +579,27 @@ pub enum Provenance {
     Unvouched(String),
 }
 
-/// What a provision resolved: whether funes vouches for the files, where they came from, and
-/// which files they are.
+/// What a provision resolved: whether funes vouches for the files, where they came from, which
+/// files they are and what they declare, staged outside the registry until they are installed.
 #[derive(Debug)]
 pub struct Provisioned {
     pub provenance: Provenance,
     pub origin: Origin,
     pub files: Files,
+    pub manifest: Manifest,
+    staged: tempfile::TempDir,
+}
+
+impl Provisioned {
+    /// Copy the staged files over `root/<id>`, resolve the integration there, and record it as
+    /// installed. Only a file that differs is rewritten, and nothing is pruned — an integration's
+    /// `setup` keeps its own state beside them.
+    pub fn install(self, root: &Path) -> Result<Integration> {
+        copy_into(self.staged.path(), &root.join(&self.manifest.id))?;
+        let integration = open(root, &self.manifest.id)?;
+        record(root, &Installed::new(&integration.manifest, self.origin, self.files))?;
+        Ok(integration)
+    }
 }
 
 /// Resolve `id`'s files: what `from` names, else `$FUNES_INTEGRATIONS` if set — authoritative, so
@@ -628,30 +626,33 @@ fn source_for(id: &str, from: Option<&str>) -> Result<Source> {
     Ok(Source::Catalog)
 }
 
-/// Install `id`'s files into the registry, from what `from` names when it names one. Only a file
-/// that differs is rewritten, and nothing is pruned — an integration's `setup` keeps its own state
-/// beside them. The id names the directory written, so it is checked here, before anything is.
-/// `None` when the catalog's newest release is the one recorded as installed: nothing is fetched,
-/// and the installed copy is judged as it stands.
+/// Stage `id`'s files outside the registry, from what `from` names when it names one: `root` is
+/// only read. The id names the directory they install into, so it is checked here, before anything
+/// is written. `None` when the catalog's newest release is the one recorded as installed: nothing
+/// is fetched, and the installed copy is judged as it stands.
 pub async fn provision(root: &Path, id: &str, from: Option<&str>) -> Result<Option<Provisioned>> {
     if !spool::is_id(id) {
         bail!("{id:?} is not an integration id (lowercase [a-z0-9_-])");
     }
     match source_for(id, from)? {
         Source::Redirected(src) => {
-            let files = install_from(root, id, &src)?;
+            let (manifest, files, staged) = stage(root, id, &src)?;
             Ok(Some(Provisioned {
                 provenance: Provenance::Unvouched(format!("$FUNES_INTEGRATIONS ({})", src.display())),
                 origin: Origin::Directory { path: src },
                 files,
+                manifest,
+                staged,
             }))
         }
         Source::Named(src) => {
-            let files = install_from(root, id, &src)?;
+            let (manifest, files, staged) = stage(root, id, &src)?;
             Ok(Some(Provisioned {
                 provenance: Provenance::Unvouched(src.display().to_string()),
                 origin: Origin::Directory { path: src },
                 files,
+                manifest,
+                staged,
             }))
         }
         Source::Archive(url) => {
@@ -660,11 +661,13 @@ pub async fn provision(root: &Path, id: &str, from: Option<&str>) -> Result<Opti
             validate_archive(&archive)?;
             let unpacked = staging.path().join("unpacked");
             unpack(&archive, &unpacked)?;
-            let files = install_from(root, id, &unpacked)?;
+            let (manifest, files, staged) = stage(root, id, &unpacked)?;
             Ok(Some(Provisioned {
                 provenance: Provenance::Unvouched(url.clone()),
                 origin: Origin::Archive { url, sha256 },
                 files,
+                manifest,
+                staged,
             }))
         }
         Source::Catalog => {
@@ -699,7 +702,7 @@ pub async fn provision(root: &Path, id: &str, from: Option<&str>) -> Result<Opti
                     release.version
                 );
             }
-            let files = install_from(root, id, &unpacked)?;
+            let (manifest, files, staged) = stage(root, id, &unpacked)?;
             Ok(Some(Provisioned {
                 provenance: Provenance::Vouched,
                 origin: Origin::Catalog {
@@ -707,6 +710,8 @@ pub async fn provision(root: &Path, id: &str, from: Option<&str>) -> Result<Opti
                     sha256,
                 },
                 files,
+                manifest,
+                staged,
             }))
         }
     }
@@ -730,15 +735,18 @@ fn is_installed_release(root: &Path, id: &str, release: &Release) -> bool {
     })
 }
 
-/// Copy `src` over `root/<id>` once what it declares checks out: a manifest that would be refused
-/// installed is refused here, before a byte moves, and so is another publisher's, and so is a
-/// package without its `setup` — the copy prunes nothing, so the installed one would run outside
-/// the record. The files copied, with their digests.
-fn install_from(root: &Path, id: &str, src: &Path) -> Result<Files> {
+/// Copy `src` into a staging directory once what it declares checks out: a manifest that would be
+/// refused installed is refused here, before a byte moves, and so is another publisher's than
+/// `root/<id>`'s, and so is a package without its `setup` — the install prunes nothing, so the
+/// installed one would run outside the record. What it declares, the files copied with their
+/// digests, and where.
+fn stage(root: &Path, id: &str, src: &Path) -> Result<(Manifest, Files, tempfile::TempDir)> {
     let incoming = read_manifest(&src.join("manifest.json"), id)?;
     require_executable(&src.join(SETUP))?;
     refuse_takeover(root, id, &incoming)?;
-    copy_into(src, &root.join(id))
+    let staged = tempfile::tempdir().context("creating a staging directory")?;
+    let files = copy_into(src, staged.path())?;
+    Ok((incoming, files, staged))
 }
 
 /// Refuse another publisher's files where `id`'s are installed. What funes recorded at install
@@ -1352,7 +1360,7 @@ mod tests {
             "echo bare",
         );
         std::fs::remove_file(bare.join(SETUP)).unwrap();
-        let err = format!("{:#}", install_from(&root, "pi", &bare).unwrap_err());
+        let err = format!("{:#}", stage(&root, "pi", &bare).unwrap_err());
         assert!(err.contains(&format!("no {SETUP} at")), "{err}");
         assert_eq!(installed_setup(), "#!/bin/sh\ntrue\n", "nothing copied");
 
@@ -1363,7 +1371,7 @@ mod tests {
             "echo inert",
         );
         std::fs::set_permissions(inert.join(SETUP), std::fs::Permissions::from_mode(0o644)).unwrap();
-        let err = install_from(&root, "pi", &inert).unwrap_err().to_string();
+        let err = stage(&root, "pi", &inert).unwrap_err().to_string();
         assert!(err.contains("not executable"), "{err}");
         assert_eq!(installed_setup(), "#!/bin/sh\ntrue\n", "nothing copied");
     }
@@ -1383,7 +1391,7 @@ mod tests {
             r#"{"contract_version": 1, "id": "pi", "label": "pi", "repo": "other/pi"}"#,
             "echo theirs",
         );
-        let err = install_from(&root, "pi", &theirs).unwrap_err();
+        let err = stage(&root, "pi", &theirs).unwrap_err();
         assert!(err.downcast_ref::<Takeover>().is_some(), "{err}");
         assert!(err.to_string().contains("`funes remove pi` first"), "{err}");
         assert_eq!(setup(), "#!/bin/sh\ntrue\n", "nothing copied");
@@ -1398,21 +1406,34 @@ mod tests {
             Files::new(),
         );
         record(&root, &rec).unwrap();
-        let err = install_from(&root, "pi", &theirs).unwrap_err().to_string();
+        let err = stage(&root, "pi", &theirs).unwrap_err().to_string();
         assert!(
             err.contains("acme's, from hf://buckets/huggingface/funes-integrations/pi/1.0.0/pi.tar.gz"),
             "{err}"
         );
 
-        // The same publisher's files replace it.
+        // The same publisher's files replace it, once installed.
         let mine = integration(
             &tmp.path().join("mine"),
             "pi",
             &manifest("pi", CONTRACT_VERSION),
             "echo mine",
         );
-        install_from(&root, "pi", &mine).unwrap();
+        let (declared, files, staged) = stage(&root, "pi", &mine).unwrap();
+        assert_eq!(setup(), "#!/bin/sh\ntrue\n", "staged, not installed");
+        let provisioned = Provisioned {
+            provenance: Provenance::Vouched,
+            origin: Origin::Directory { path: mine },
+            files,
+            manifest: declared,
+            staged,
+        };
+        provisioned.install(&root).unwrap();
         assert!(setup().contains("echo mine"));
+        assert!(matches!(
+            installed(&root, "pi").unwrap().origin,
+            Origin::Directory { .. }
+        ));
 
         // A manifest that would be refused installed is refused before the copy too.
         let bad = integration(
@@ -1421,7 +1442,7 @@ mod tests {
             &manifest("pi", CONTRACT_VERSION + 1),
             "echo bad",
         );
-        let err = install_from(&root, "pi", &bad).unwrap_err().to_string();
+        let err = stage(&root, "pi", &bad).unwrap_err().to_string();
         assert!(err.contains("contract version"), "{err}");
         assert!(setup().contains("echo mine"), "untouched");
     }
@@ -1547,23 +1568,6 @@ mod tests {
         assert!(speaks_another_contract(&root, "pi"));
         integration(&root, "pi", "not json", "true");
         assert!(!speaks_another_contract(&root, "pi"), "unreadable is open's to refuse");
-    }
-
-    /// The registry's manifest says what `setup` last installed: a refresh whose `setup add` never
-    /// ran puts the previous one back.
-    #[test]
-    fn a_manifest_is_restored_as_it_was() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("agents");
-        assert!(installed_manifest(&root, "pi").is_none(), "nothing installed");
-        restore_manifest(&root, "pi", b"{}").unwrap();
-        assert!(!root.join("pi").exists(), "nothing to restore into");
-
-        integration(&root, "pi", &manifest("pi", 1), "true");
-        let before = installed_manifest(&root, "pi").unwrap();
-        std::fs::write(root.join("pi/manifest.json"), manifest("pi", 2)).unwrap();
-        restore_manifest(&root, "pi", &before).unwrap();
-        assert_eq!(installed_manifest(&root, "pi").unwrap(), before);
     }
 
     /// A directory in the registry that is not an id is `open`'s to refuse, and never a note's

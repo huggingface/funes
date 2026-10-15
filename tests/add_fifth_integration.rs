@@ -268,6 +268,20 @@ fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
+/// Every file under `dir`, with its contents.
+fn files_under(dir: &Path) -> Vec<(PathBuf, String)> {
+    walkdir::WalkDir::new(dir)
+        .sort_by_file_name()
+        .into_iter()
+        .map(|entry| entry.unwrap().into_path())
+        .filter(|path| path.is_file())
+        .map(|path| {
+            let text = String::from_utf8_lossy(&fs::read(&path).unwrap()).into_owned();
+            (path, text)
+        })
+        .collect()
+}
+
 #[test]
 fn an_integration_supplied_outside_the_checkout_is_refreshed_each_run_and_removed_whole() {
     let tmp = tempfile::tempdir().unwrap();
@@ -1158,6 +1172,36 @@ fn update_runs_setup_only_for_changed_files_and_keeps_the_binding() {
     let recorded: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(home.join(".funes/agents/clyde.json")).unwrap()).unwrap();
     assert_eq!(recorded["version"], "1.1.0");
+}
+
+/// A refresh refused at the trust confirmation leaves every installed file as it was, for `add`
+/// and `update` alike: the agent's hooks run those files.
+#[test]
+fn a_refused_refresh_leaves_every_installed_file_unchanged() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let funes_home = tmp.path().join("funes");
+    let log = tmp.path().join("setup.log");
+    let source = bundle(&home.join("integrations/clyde"), "clyde", 1, "v1");
+    let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+    let agents = home.join(".funes/agents");
+    let installed = files_under(&agents);
+
+    bundle(&source, "clyde", 1, "v2");
+    release(&source, "1.1.0");
+    let out = funes_at_a_terminal_answering(&home, &funes_home, &log, &["add", "clyde"], DECLINE_TRUST);
+    let transcript = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !out.status.success() && transcript.contains("not confirmed"),
+        "{transcript}"
+    );
+    assert_eq!(files_under(&agents), installed);
+
+    let out = update(&home, &funes_home, &log, Some(&home.join("integrations")), false);
+    let err = stderr(&out);
+    assert!(err.contains("the clyde integration could not be updated"), "{err}");
+    assert_eq!(files_under(&agents), installed);
 }
 
 /// An integration whose update is refused stays as installed, and the others still update.
