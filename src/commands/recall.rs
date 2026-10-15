@@ -7,14 +7,11 @@
 use super::target::Target;
 use crate::chunk;
 use crate::inference::{self, Embedder, EmbeddingModel, Reranker};
-use crate::memory::dataset;
+use crate::memory::dataset::{self, RecordBatch};
 use crate::memory::{Memory, MemoryState};
 use anyhow::{anyhow, bail, Context, Result};
-use arrow_array::{Float32Array, Int64Array, RecordBatch, StringArray, UInt64Array};
 use chrono::{DateTime, NaiveDate, Utc};
-use futures::TryStreamExt;
-use lance::dataset::{Dataset, ROW_ID};
-use lance_index::scalar::FullTextSearchQuery;
+use lance::Dataset;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
@@ -153,27 +150,6 @@ pub struct Turn {
     pub blocks: Vec<String>,
 }
 
-fn scol<'a>(b: &'a RecordBatch, name: &str) -> Option<&'a StringArray> {
-    b.column_by_name(name)?.as_any().downcast_ref::<StringArray>()
-}
-
-fn icol<'a>(b: &'a RecordBatch, name: &str) -> Option<&'a Int64Array> {
-    b.column_by_name(name)?.as_any().downcast_ref::<Int64Array>()
-}
-
-fn sval(a: Option<&StringArray>, i: usize) -> String {
-    a.map(|c| c.value(i).to_string()).unwrap_or_default()
-}
-
-fn ival(a: Option<&Int64Array>, i: usize) -> i64 {
-    a.map(|c| c.value(i)).unwrap_or(0)
-}
-
-/// Escape a value for inlining into a Lance SQL filter string.
-pub(crate) fn esc(s: &str) -> String {
-    s.replace('\'', "''")
-}
-
 /// The day `ts` falls on: a `ts` is RFC 3339 in UTC, so its first ten characters.
 fn day(ts: &str) -> &str {
     ts.get(..10).unwrap_or(ts)
@@ -235,18 +211,15 @@ fn build_where(
 ) -> Result<Option<String>> {
     let mut clauses = Vec::new();
     if let Some(bt) = block_type {
-        clauses.push(format!("block_type = '{}'", esc(bt)));
+        clauses.push(dataset::eq("block_type", bt));
     }
     if let Some(r) = role {
-        clauses.push(format!("role = '{}'", esc(r)));
+        clauses.push(dataset::eq("role", r));
     }
     match harness {
         [] => {}
-        [h] => clauses.push(format!("harness = '{}'", esc(h))),
-        many => {
-            let list: Vec<String> = many.iter().map(|h| format!("'{}'", esc(h))).collect();
-            clauses.push(format!("harness IN ({})", list.join(", ")));
-        }
+        [h] => clauses.push(dataset::eq("harness", h)),
+        many => clauses.push(dataset::in_list("harness", many.iter().map(String::as_str))),
     }
     clauses.extend(days.clauses()?);
     Ok(if clauses.is_empty() {
@@ -555,7 +528,7 @@ impl Search {
         let read = open_read(memory).await?;
         // A `--harness` filter needs the column; on an un-migrated memory it would fail deep inside
         // Lance with an opaque schema error, so refuse with a clear message instead.
-        if self.harness_filtered && !has_harness_col(&read.ds) {
+        if self.harness_filtered && !dataset::has_column(&read.ds, "harness") {
             return Err(anyhow!(
                 "this memory predates the harness facet — reindex it, or drop --harness"
             ));
@@ -671,53 +644,19 @@ async fn hybrid_candidates(
     Ok(rrf_fuse(vector, fts, candidates))
 }
 
-/// Top-`limit` rows by vector distance, each with its `_rowid` (the fusion key).
+/// Top-`limit` rows by vector distance, each with its row id (the fusion key).
 async fn vector_candidates(ds: &Dataset, qv: &[f32], limit: usize, filter: Option<&str>) -> Result<Vec<(u64, Hit)>> {
-    let query = Float32Array::from(qv.to_vec());
-    let mut scan = ds.scan();
-    scan.nearest("vector", &query, limit)?;
-    if let Some(f) = filter {
-        // Prefilter: apply the filter before the ANN search, not as a post-filter on the top-`limit`
-        // nearest rows. A selective `--type`/`--harness` would otherwise drop most (or all) of a
-        // globally-nearest pool, returning far fewer than `limit` hits even when matches exist.
-        scan.prefilter(true);
-        scan.filter(f)?;
-    }
-    scan.project(&hit_cols(ds))?;
-    scan.with_row_id();
-    collect_hits(scan).await
+    hits_of(&dataset::nearest(ds, qv, limit, filter, &hit_cols(ds)).await?)
 }
 
-/// Top-`limit` rows by BM25 score, each with its `_rowid`. Errors if the memory has no FTS index.
+/// Top-`limit` rows by BM25 score, each with its row id. Errors if the memory has no FTS index.
 async fn fts_candidates(ds: &Dataset, query: &str, limit: usize, filter: Option<&str>) -> Result<Vec<(u64, Hit)>> {
-    let mut scan = ds.scan();
-    scan.full_text_search(FullTextSearchQuery::new(query.to_string()))?;
-    if let Some(f) = filter {
-        // Prefilter so the filter shapes the FTS result set before `limit`, not after.
-        scan.prefilter(true);
-        scan.filter(f)?;
-    }
-    scan.project(&hit_cols(ds))?;
-    scan.with_row_id();
-    scan.limit(Some(limit as i64), None)?;
-    collect_hits(scan).await
+    hits_of(&dataset::full_text(ds, query, limit, filter, &hit_cols(ds)).await?)
 }
 
-/// Whether the dataset carries `name`. Projecting a column a memory predates errors, so every
-/// migrated column is asked for before it is read.
-fn has_col(ds: &Dataset, name: &str) -> bool {
-    arrow_schema::Schema::from(ds.schema()).column_with_name(name).is_some()
-}
-
-/// Whether the memory carries the `harness` column — false for one built before the facet existed.
-fn has_harness_col(ds: &Dataset) -> bool {
-    has_col(ds, "harness")
-}
-
-/// `HIT_COLS`, minus `harness` on an un-migrated memory: projecting a column the dataset lacks errors,
-/// so drop it and let `collect_hits` default the field to "".
+/// `HIT_COLS`, minus `harness` on an un-migrated memory, which [`hits_of`] then reads as "".
 fn hit_cols(ds: &Dataset) -> Vec<&'static str> {
-    let has_harness = has_harness_col(ds);
+    let has_harness = dataset::has_column(ds, "harness");
     HIT_COLS
         .iter()
         .copied()
@@ -725,39 +664,35 @@ fn hit_cols(ds: &Dataset) -> Vec<&'static str> {
         .collect()
 }
 
-/// Drain a scan into `(rowid, Hit)` rows, preserving the scan's order (its rank).
-async fn collect_hits(scan: lance::dataset::scanner::Scanner) -> Result<Vec<(u64, Hit)>> {
-    let mut stream = scan.try_into_stream().await?;
+/// The `(row id, Hit)` of every row of `batches`, in their order (the search's rank).
+fn hits_of(batches: &[RecordBatch]) -> Result<Vec<(u64, Hit)>> {
     let mut out = Vec::new();
-    while let Some(batch) = stream.try_next().await? {
-        let rowid = batch
-            .column_by_name(ROW_ID)
-            .and_then(|c| c.as_any().downcast_ref::<UInt64Array>());
-        let (chunk_id, text, sess, proj, turn, ts, bt) = (
-            scol(&batch, "id"),
-            scol(&batch, "text"),
-            scol(&batch, "session_id"),
-            scol(&batch, "workdir"),
-            scol(&batch, "turn_uuid"),
-            scol(&batch, "ts"),
-            scol(&batch, "block_type"),
+    for batch in batches {
+        let row_ids = dataset::row_ids(batch)?;
+        let (chunk_id, text, sess, proj, turn, ts, bt, harness) = (
+            dataset::strs(batch, "id"),
+            dataset::strs(batch, "text"),
+            dataset::strs(batch, "session_id"),
+            dataset::strs(batch, "workdir"),
+            dataset::strs(batch, "turn_uuid"),
+            dataset::strs(batch, "ts"),
+            dataset::strs(batch, "block_type"),
+            dataset::strs(batch, "harness"),
         );
-        let seq = icol(&batch, "seq");
-        let harness = scol(&batch, "harness");
+        let seq = dataset::ints(batch, "seq");
         for i in 0..batch.num_rows() {
-            let id = rowid.map(|c| c.value(i)).unwrap_or(0);
             out.push((
-                id,
+                row_ids.get(i),
                 Hit {
-                    id: sval(chunk_id, i),
-                    text: sval(text, i),
-                    session_id: sval(sess, i),
-                    workdir: sval(proj, i),
-                    turn_uuid: sval(turn, i),
-                    seq: ival(seq, i),
-                    ts: sval(ts, i),
-                    block_type: sval(bt, i),
-                    harness: sval(harness, i),
+                    id: chunk_id.get(i).to_string(),
+                    text: text.get(i).to_string(),
+                    session_id: sess.get(i).to_string(),
+                    workdir: proj.get(i).to_string(),
+                    turn_uuid: turn.get(i).to_string(),
+                    seq: seq.get(i),
+                    ts: ts.get(i).to_string(),
+                    block_type: bt.get(i).to_string(),
+                    harness: harness.get(i).to_string(),
                     neighbors: Vec::new(),
                     memory: String::new(),
                     fused: 0.0,
@@ -804,8 +739,8 @@ async fn attach_neighbors(ds: &Dataset, hits: &mut [&mut Hit], window: i64) -> R
         .iter()
         .map(|h| {
             format!(
-                "(session_id = '{}' AND seq >= {} AND seq <= {})",
-                esc(&h.session_id),
+                "({} AND seq >= {} AND seq <= {})",
+                dataset::eq("session_id", &h.session_id),
                 h.seq - window,
                 h.seq + window
             )
@@ -826,29 +761,29 @@ async fn attach_neighbors(ds: &Dataset, hits: &mut [&mut Hit], window: i64) -> R
     let batches = dataset::scan_rows(ds, &cols, Some(pred.as_str()), None).await?;
 
     let mut rows: Vec<NeighborRow> = Vec::new();
-    for batch in batches {
+    for batch in &batches {
         let (sess, turn, role, bt, text) = (
-            scol(&batch, "session_id"),
-            scol(&batch, "turn_uuid"),
-            scol(&batch, "role"),
-            scol(&batch, "block_type"),
-            scol(&batch, "text"),
+            dataset::strs(batch, "session_id"),
+            dataset::strs(batch, "turn_uuid"),
+            dataset::strs(batch, "role"),
+            dataset::strs(batch, "block_type"),
+            dataset::strs(batch, "text"),
         );
         let (seq, bi, si) = (
-            icol(&batch, "seq"),
-            icol(&batch, "block_idx"),
-            icol(&batch, "split_idx"),
+            dataset::ints(batch, "seq"),
+            dataset::ints(batch, "block_idx"),
+            dataset::ints(batch, "split_idx"),
         );
         for i in 0..batch.num_rows() {
             rows.push((
-                sval(sess, i),
-                ival(seq, i),
-                sval(turn, i),
-                ival(bi, i),
-                ival(si, i),
-                sval(role, i),
-                sval(bt, i),
-                sval(text, i),
+                sess.get(i).to_string(),
+                seq.get(i),
+                turn.get(i).to_string(),
+                bi.get(i),
+                si.get(i),
+                role.get(i).to_string(),
+                bt.get(i).to_string(),
+                text.get(i).to_string(),
             ));
         }
     }
@@ -911,32 +846,32 @@ pub async fn get_turns(memory: Memory, session_id: String, range: TurnRange) -> 
     let ds = &read.ds;
 
     let cols = ["turn_uuid", "seq", "ts", "role", "text", "block_idx", "split_idx"];
-    let filter = format!("session_id = '{}'", esc(&session_id));
+    let filter = dataset::eq("session_id", &session_id);
     let batches = dataset::scan_rows(ds, &cols, Some(filter.as_str()), None).await?;
 
     // `text` is already the rendered chunk as stored by the indexer — do not re-render.
     let mut rows: Vec<TurnRow> = Vec::new();
-    for batch in batches {
+    for batch in &batches {
         let (turn, ts, role, text) = (
-            scol(&batch, "turn_uuid"),
-            scol(&batch, "ts"),
-            scol(&batch, "role"),
-            scol(&batch, "text"),
+            dataset::strs(batch, "turn_uuid"),
+            dataset::strs(batch, "ts"),
+            dataset::strs(batch, "role"),
+            dataset::strs(batch, "text"),
         );
         let (seq, bi, si) = (
-            icol(&batch, "seq"),
-            icol(&batch, "block_idx"),
-            icol(&batch, "split_idx"),
+            dataset::ints(batch, "seq"),
+            dataset::ints(batch, "block_idx"),
+            dataset::ints(batch, "split_idx"),
         );
         for i in 0..batch.num_rows() {
             rows.push((
-                ival(seq, i),
-                sval(turn, i),
-                sval(ts, i),
-                sval(role, i),
-                ival(bi, i),
-                ival(si, i),
-                sval(text, i),
+                seq.get(i),
+                turn.get(i).to_string(),
+                ts.get(i).to_string(),
+                role.get(i).to_string(),
+                bi.get(i),
+                si.get(i),
+                text.get(i).to_string(),
             ));
         }
     }
@@ -1109,11 +1044,10 @@ async fn first_prompts(ds: &Dataset, ids: &[String]) -> Result<HashMap<String, S
     if ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let list: Vec<String> = ids.iter().map(|id| format!("'{}'", esc(id))).collect();
     // Split 0 only: `is_scaffolding` reads a block's start, and a later split begins mid-text.
     let filter = format!(
-        "session_id IN ({}) AND block_type = 'text' AND split_idx = 0",
-        list.join(", ")
+        "{} AND block_type = 'text' AND split_idx = 0",
+        dataset::in_list("session_id", ids.iter().map(String::as_str))
     );
     let cols = ["session_id", "seq", "block_idx", "role", "text"];
     let batches = dataset::scan_rows(ds, &cols, Some(&filter), None).await?;
@@ -1131,13 +1065,17 @@ async fn first_prompts(ds: &Dataset, ids: &[String]) -> Result<HashMap<String, S
     }
     let mut best: HashMap<String, Opening> = HashMap::new();
     for batch in &batches {
-        let (sid, role, text) = (scol(batch, "session_id"), scol(batch, "role"), scol(batch, "text"));
-        let (seq, bi) = (icol(batch, "seq"), icol(batch, "block_idx"));
+        let (sid, role, text) = (
+            dataset::strs(batch, "session_id"),
+            dataset::strs(batch, "role"),
+            dataset::strs(batch, "text"),
+        );
+        let (seq, bi) = (dataset::ints(batch, "seq"), dataset::ints(batch, "block_idx"));
         for i in 0..batch.num_rows() {
-            let body = sval(text, i);
-            let key = (ival(seq, i), ival(bi, i));
-            let opening = best.entry(sval(sid, i)).or_default();
-            if sval(role, i) == "user" {
+            let body = text.get(i).to_string();
+            let key = (seq.get(i), bi.get(i));
+            let opening = best.entry(sid.get(i).to_string()).or_default();
+            if role.get(i) == "user" {
                 opening.has_user = true;
                 if !is_scaffolding(&body) {
                     earliest(&mut opening.user, key, &body);
@@ -1159,11 +1097,10 @@ async fn first_prompts(ds: &Dataset, ids: &[String]) -> Result<HashMap<String, S
 /// metadata only — the opening prompts cost a `text` read, so they are fetched separately.
 async fn scan_sessions(ds: &Dataset) -> Result<Vec<Session>> {
     let mut cols = vec!["session_id", "ts", "workdir", "turn_uuid", "seq"];
-    if has_harness_col(ds) {
-        cols.push("harness");
-    }
-    if has_col(ds, "repo") {
-        cols.push("repo");
+    for migrated in ["harness", "repo"] {
+        if dataset::has_column(ds, migrated) {
+            cols.push(migrated);
+        }
     }
     let batches = dataset::scan_rows(ds, &cols, None, None).await?;
 
@@ -1176,25 +1113,25 @@ async fn scan_sessions(ds: &Dataset) -> Result<Vec<Session>> {
     let mut by_id: HashMap<String, Fold> = HashMap::new();
     for batch in &batches {
         let (sid, ts, wd, turn, harness, repo) = (
-            scol(batch, "session_id"),
-            scol(batch, "ts"),
-            scol(batch, "workdir"),
-            scol(batch, "turn_uuid"),
-            scol(batch, "harness"),
-            scol(batch, "repo"),
+            dataset::strs(batch, "session_id"),
+            dataset::strs(batch, "ts"),
+            dataset::strs(batch, "workdir"),
+            dataset::strs(batch, "turn_uuid"),
+            dataset::strs(batch, "harness"),
+            dataset::strs(batch, "repo"),
         );
-        let seq = icol(batch, "seq");
+        let seq = dataset::ints(batch, "seq");
         for i in 0..batch.num_rows() {
-            let id = sval(sid, i);
-            let row_seq = ival(seq, i);
+            let id = sid.get(i).to_string();
+            let row_seq = seq.get(i);
             let fold = by_id.entry(id.clone()).or_insert_with(|| Fold {
                 session: Session {
                     session_id: id,
-                    ts: sval(ts, i),
-                    last_ts: sval(ts, i),
-                    workdir: sval(wd, i),
-                    harness: sval(harness, i),
-                    repo: sval(repo, i),
+                    ts: ts.get(i).to_string(),
+                    last_ts: ts.get(i).to_string(),
+                    workdir: wd.get(i).to_string(),
+                    harness: harness.get(i).to_string(),
+                    repo: repo.get(i).to_string(),
                     turns: 0,
                     first_prompt: String::new(),
                 },
@@ -1202,7 +1139,7 @@ async fn scan_sessions(ds: &Dataset) -> Result<Vec<Session>> {
                 last_seq: row_seq,
             });
             // Rows arrive in scan order, not time order, so the first one seen isn't the earliest.
-            let row_ts = sval(ts, i);
+            let row_ts = ts.get(i).to_string();
             if row_ts < fold.session.ts {
                 fold.session.ts = row_ts.clone();
             }
@@ -1212,7 +1149,7 @@ async fn scan_sessions(ds: &Dataset) -> Result<Vec<Session>> {
                 fold.last_seq = row_seq;
                 fold.session.last_ts = row_ts;
             }
-            fold.turns.insert((row_seq, sval(turn, i)));
+            fold.turns.insert((row_seq, turn.get(i).to_string()));
         }
     }
 
@@ -1286,7 +1223,7 @@ pub async fn scan(
 /// matched. Ordered by position in the session. Empty when the session isn't in the memory.
 async fn reassembled_blocks(ds: &Dataset, session_id: &str, from: Option<i64>, to: Option<i64>) -> Result<Vec<Block>> {
     let cols = ["turn_uuid", "seq", "ts", "block_type", "block_idx", "split_idx", "text"];
-    let mut filter = format!("session_id = '{}'", esc(session_id));
+    let mut filter = dataset::eq("session_id", session_id);
     if let Some(from) = from {
         filter.push_str(&format!(" AND seq >= {from}"));
     }
@@ -1300,28 +1237,32 @@ async fn reassembled_blocks(ds: &Dataset, session_id: &str, from: Option<i64>, t
     let mut blocks: BlockParts = HashMap::new();
     for batch in &batches {
         let (turn, ts, bt, text) = (
-            scol(batch, "turn_uuid"),
-            scol(batch, "ts"),
-            scol(batch, "block_type"),
-            scol(batch, "text"),
+            dataset::strs(batch, "turn_uuid"),
+            dataset::strs(batch, "ts"),
+            dataset::strs(batch, "block_type"),
+            dataset::strs(batch, "text"),
         );
-        let (seq, bi, si) = (icol(batch, "seq"), icol(batch, "block_idx"), icol(batch, "split_idx"));
+        let (seq, bi, si) = (
+            dataset::ints(batch, "seq"),
+            dataset::ints(batch, "block_idx"),
+            dataset::ints(batch, "split_idx"),
+        );
         for i in 0..batch.num_rows() {
-            let key = (ival(seq, i), sval(turn, i), ival(bi, i));
+            let key = (seq.get(i), turn.get(i).to_string(), bi.get(i));
             let entry = blocks.entry(key).or_insert_with(|| {
                 (
                     Block {
-                        turn_uuid: sval(turn, i),
-                        ts: sval(ts, i),
-                        block_type: sval(bt, i),
-                        seq: ival(seq, i),
-                        block_idx: ival(bi, i),
+                        turn_uuid: turn.get(i).to_string(),
+                        ts: ts.get(i).to_string(),
+                        block_type: bt.get(i).to_string(),
+                        seq: seq.get(i),
+                        block_idx: bi.get(i),
                         text: String::new(),
                     },
                     Vec::new(),
                 )
             });
-            entry.1.push((ival(si, i), sval(text, i)));
+            entry.1.push((si.get(i), text.get(i).to_string()));
         }
     }
     drop(batches);
@@ -1495,23 +1436,11 @@ fn age(t: DateTime<Utc>, now: DateTime<Utc>) -> String {
 /// scan omits the line rather than failing status. Never call this for a remote: even a projected
 /// column scan can download an enormous published memory.
 async fn session_count(ds: &Dataset) -> Option<usize> {
-    let batches = dataset::scan_rows(ds, &["session_id"], None, None).await.ok()?;
-    let mut sessions = HashSet::new();
-    for batch in &batches {
-        let col = batch
-            .column_by_name("session_id")?
-            .as_any()
-            .downcast_ref::<StringArray>()?;
-        for i in 0..batch.num_rows() {
-            sessions.insert(col.value(i).to_string());
-        }
-    }
-    Some(sessions.len())
+    dataset::distinct(ds, "session_id", None).await.ok().map(|s| s.len())
 }
 
 async fn pending_embeddings_line(ds: &Dataset) -> Result<String> {
-    let n = ds
-        .count_rows(Some("vector IS NULL".into()))
+    let n = dataset::count_rows(ds, Some(dataset::UNEMBEDDED))
         .await
         .context("counting chunks awaiting embedding")?;
     Ok(if n == 0 {
@@ -1542,8 +1471,7 @@ async fn index_lines(ds: &Dataset, now: DateTime<Utc>) -> Result<String> {
     if let Some(line) = index_coverage_line() {
         out.push_str(&line);
     }
-    let t = ds.version().timestamp;
-    if t.timestamp() > 0 {
+    if let Some(t) = dataset::last_write(ds) {
         let _ = writeln!(out, "last indexed: {}", stamp(t, now));
     }
     Ok(out)
@@ -1554,11 +1482,10 @@ async fn remote_lines(ds: &Dataset, now: DateTime<Utc>) -> String {
     let mut out = String::new();
     // Every write to a remote memory is a push or a compaction, so the head version's timestamp is
     // when it was last written to.
-    let t = ds.version().timestamp;
-    if t.timestamp() > 0 {
+    if let Some(t) = dataset::last_write(ds) {
         let _ = writeln!(out, "last write: {}", stamp(t, now));
     }
-    let unindexed = crate::memory::remote::max_unindexed_rows(ds).await;
+    let unindexed = dataset::max_unindexed_rows(ds).await;
     if unindexed > 0 {
         let _ = writeln!(
             out,
@@ -1612,7 +1539,7 @@ pub async fn status(target: impl Into<Target>) -> Result<String> {
     match open_for_read(&memory).await? {
         ReadOutcome::Ready(ds) => {
             let now = Utc::now();
-            let rows = ds.count_rows(None).await?;
+            let rows = dataset::count_rows(&ds, None).await?;
             let mut out = format!("memory: {}\nchunks: {rows}\n", memory.label());
             match &memory {
                 Memory::Local { .. } => out.push_str(&index_lines(&ds, now).await?),
@@ -1621,7 +1548,7 @@ pub async fn status(target: impl Into<Target>) -> Result<String> {
                     // The local index is what pushes here — show it alongside, so one status
                     // answers both "what's published" and "what's indexed on this machine".
                     if let Ok(local) = Memory::local().open().await {
-                        let local_rows = local.count_rows(None).await?;
+                        let local_rows = dataset::count_rows(&local, None).await?;
                         let _ = writeln!(
                             out,
                             "\nlocal index: {}\nchunks: {local_rows}",
@@ -1678,7 +1605,7 @@ pub async fn host_status(bound: Option<&str>, note: Option<&str>) -> Result<Stri
             return Ok(out);
         }
     };
-    let _ = writeln!(out, "chunks: {}", ds.count_rows(None).await?);
+    let _ = writeln!(out, "chunks: {}", dataset::count_rows(&ds, None).await?);
     if let Memory::Remote { uri } = &memory {
         out.push_str(&remote_lines(&ds, Utc::now()).await);
         if let Ok(local) = Memory::local().open().await {
@@ -1887,12 +1814,6 @@ mod tests {
         // The cut through a tie takes the same rows every run, not an arbitrary half of it.
         let (v, f) = lists();
         assert_eq!(ids(rrf_fuse(v, f, 5)), ["0", "1", "2", "3", "4"]);
-    }
-
-    #[test]
-    fn esc_doubles_single_quotes() {
-        assert_eq!(esc("o'brien"), "o''brien");
-        assert_eq!(esc("plain"), "plain");
     }
 
     #[test]

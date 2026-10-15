@@ -12,7 +12,7 @@ use super::compact;
 use crate::chunk::{self, Tier};
 use crate::hub;
 use crate::inference::{self, embed_batched, Embedder};
-use crate::memory::dataset::{self, build_batch, model, schema};
+use crate::memory::dataset::{self, build_batch, model};
 use crate::memory::lock;
 use crate::memory::Memory;
 use crate::scan;
@@ -20,9 +20,7 @@ use crate::traces::spool;
 use crate::traces::{self, repo, source};
 use crate::ui::prompt::confirm;
 use anyhow::{anyhow, Context, Result};
-use arrow_array::{Array, RecordBatchIterator, StringArray, UInt64Array};
-use futures::TryStreamExt;
-use lance::dataset::{Dataset, WriteParams, ROW_ID};
+use lance::Dataset;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -172,35 +170,6 @@ pub async fn ensure_local_memory(model: inference::EmbeddingModel) -> Result<()>
             Ok(())
         }
     }
-}
-
-/// Every chunk id already stored. Re-indexing keeps only the chunks whose id isn't here, so a grown
-/// session (the same memory) contributes just its new turns — nothing is re-embedded or deleted. (A
-/// rewritten turn arrives under new ids, i.e. as another memory.) Chunk ids are global, so one
-/// unfiltered scan dedups any unit, whether it holds one session or thousands.
-async fn stored_ids(ds: &Dataset) -> Result<HashSet<String>> {
-    let batches = dataset::scan_rows(ds, &["id"], None, None).await?;
-    let mut ids = HashSet::new();
-    for batch in batches {
-        if let Some(col) = batch
-            .column_by_name("id")
-            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-        {
-            for i in 0..batch.num_rows() {
-                ids.insert(col.value(i).to_string());
-            }
-        }
-    }
-    Ok(ids)
-}
-
-/// A batch's string column, row by row.
-fn str_column<'a>(batch: &'a arrow_array::RecordBatch, name: &str) -> Result<Vec<&'a str>> {
-    let col = batch
-        .column_by_name(name)
-        .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-        .with_context(|| format!("missing or non-string column {name}"))?;
-    Ok((0..batch.num_rows()).map(|i| col.value(i)).collect())
 }
 
 /// Elide every block's inline base64 `data:` URI payloads, before [`redact_units`] scans them: a
@@ -589,8 +558,11 @@ impl Indexer {
             Some(ds) => dataset::embedding_model(ds)?,
             None => model::ENGLISH,
         };
+        // Re-indexing keeps only the chunks whose id isn't stored, so a grown session contributes
+        // just its new turns — nothing is re-embedded or deleted (a rewritten turn arrives under
+        // new ids). Chunk ids are global, so one unfiltered scan dedups any unit.
         let existing = match &ds {
-            Some(d) => stored_ids(d).await?,
+            Some(d) => dataset::ids(d, None).await?,
             None => HashSet::new(),
         };
         let first_index = existing.is_empty();
@@ -828,17 +800,10 @@ impl Indexer {
         if chunks.is_empty() {
             return Ok(0);
         }
-        let model = self.embedder.model();
-        let batch = build_batch(model, chunks, None)?;
-        let reader = RecordBatchIterator::new(vec![Ok(batch)], schema(model));
-        let uri = self.uri.clone();
+        let batch = build_batch(self.embedder.model(), chunks, None)?;
         match &mut self.ds {
-            Some(d) => {
-                d.append(reader, None).await?;
-            }
-            None => {
-                self.ds = Some(Dataset::write(reader, &uri, Some(WriteParams::default())).await?);
-            }
+            Some(d) => dataset::append(d, batch).await?,
+            None => self.ds = Some(dataset::create(&self.uri, batch).await?),
         }
         self.existing.extend(chunks.iter().map(|c| c.id.clone()));
         Ok(chunks.len() as u64)
@@ -967,9 +932,10 @@ async fn embed_pending(
 
 /// Embed stored text and fill the vectors at `row_ids` in place.
 async fn fill(ds: &mut Dataset, embedder: &mut dyn Embedder, row_ids: &[u64]) -> Result<()> {
-    let rows = ds.take_rows(row_ids, ds.schema().project(&["id", "text"])?).await?;
-    let ids = str_column(&rows, "id")?;
-    let texts = str_column(&rows, "text")?;
+    let rows = dataset::take_rows(ds, row_ids, &["id", "text"]).await?;
+    let (id, text) = (dataset::strs(&rows, "id"), dataset::strs(&rows, "text"));
+    let ids: Vec<&str> = (0..rows.num_rows()).map(|i| id.get(i)).collect();
+    let texts: Vec<&str> = (0..rows.num_rows()).map(|i| text.get(i)).collect();
     let n = texts.len();
     let vectors = embed_batched(embedder, &texts, |done| {
         eprint!("\r    embedding {done}/{n}   ");
@@ -980,24 +946,15 @@ async fn fill(ds: &mut Dataset, embedder: &mut dyn Embedder, row_ids: &[u64]) ->
 }
 
 async fn pending_embeddings(ds: &Dataset) -> Result<PendingEmbeddings> {
-    let mut scan = ds.scan();
-    scan.project(&["session_id", "block_type"])?;
-    scan.with_row_id();
-    scan.filter("vector IS NULL")?;
-    let mut stream = scan.try_into_stream().await?;
     let mut pending = PendingEmbeddings::default();
-    while let Some(batch) = stream.try_next().await? {
-        let sessions = str_column(&batch, "session_id")?;
-        let block_types = str_column(&batch, "block_type")?;
-        let row_ids = batch
-            .column_by_name(ROW_ID)
-            .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
-            .context("pending rows: missing or non-u64 row ids")?;
+    for batch in dataset::scan_rows_with_ids(ds, &["session_id", "block_type"], Some(dataset::UNEMBEDDED)).await? {
+        let (sessions, block_types) = (dataset::strs(&batch, "session_id"), dataset::strs(&batch, "block_type"));
+        let row_ids = dataset::row_ids(&batch)?;
         for i in 0..batch.num_rows() {
-            let sessions_of_tier = pending.by_tier.entry(Tier::of_block(block_types[i])).or_default();
+            let sessions_of_tier = pending.by_tier.entry(Tier::of_block(block_types.get(i))).or_default();
             match sessions_of_tier.last_mut() {
-                Some((session, rows)) if session == sessions[i] => rows.push(row_ids.value(i)),
-                _ => sessions_of_tier.push((sessions[i].to_string(), vec![row_ids.value(i)])),
+                Some((session, rows)) if session == sessions.get(i) => rows.push(row_ids.get(i)),
+                _ => sessions_of_tier.push((sessions.get(i).to_string(), vec![row_ids.get(i)])),
             }
             pending.total += 1;
         }
@@ -1395,11 +1352,12 @@ mod tests {
                 })
             })
             .collect();
-        let reader = RecordBatchIterator::new(
-            [Ok(build_batch(model::ENGLISH, &chunks, None).unwrap())],
-            schema(model::ENGLISH),
-        );
-        Dataset::write(reader, path.to_str().unwrap(), None).await.unwrap()
+        dataset::create(
+            path.to_str().unwrap(),
+            build_batch(model::ENGLISH, &chunks, None).unwrap(),
+        )
+        .await
+        .unwrap()
     }
 
     #[tokio::test]

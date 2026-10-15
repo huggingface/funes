@@ -3,13 +3,11 @@
 //! re-indexing cannot. Operates only on the local memory; it does not touch a published remote.
 
 use crate::inference::{self, embed_batched, Embedder};
-use crate::memory::dataset::{self, build_batch, schema};
+use crate::memory::dataset::{self, build_batch};
 use crate::memory::lock;
 use crate::{chunk, scan, ui};
 use anyhow::Result;
-use arrow_array::{BooleanArray, RecordBatch, RecordBatchIterator};
-use arrow_select::filter::filter_record_batch;
-use lance::dataset::{Dataset, WriteMode, WriteParams};
+use lance::Dataset;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io::Write as _;
@@ -32,7 +30,7 @@ pub async fn run() -> Result<()> {
 
     eprintln!("loading the local memory…");
     let batches = dataset::scan_rows(&ds, &[], None, None).await?;
-    let chunks = chunk::chunks_from_batches(&batches);
+    let chunks = dataset::chunks(&batches);
     let total = chunks.len();
     if total == 0 {
         sweep(&ds).await?;
@@ -112,29 +110,18 @@ pub async fn run() -> Result<()> {
     // `cid` hashes only coordinates, so a same-piece-count re-split reuses the old ids and a later
     // delete couldn't tell the fresh rows from the stale ones. (Cost: scrub rewrites the whole table,
     // fine for a rare remediation.)
-    let schema = schema(model);
-    let mut out: Vec<RecordBatch> = Vec::new();
+    let mut out = Vec::new();
     let mut base = 0usize;
     for b in &batches {
-        let mask: BooleanArray = (0..b.num_rows()).map(|i| !remove[base + i]).collect();
-        let kept = filter_record_batch(b, &mask)?;
+        let kept = dataset::keep_rows(b, |i| !remove[base + i])?;
         if kept.num_rows() > 0 {
-            out.push(RecordBatch::try_new(schema.clone(), kept.columns().to_vec())?);
+            out.push(kept);
         }
         base += b.num_rows();
     }
     out.extend(replacement_batch);
     eprintln!("rewriting the memory…");
-    let reader = RecordBatchIterator::new(out.into_iter().map(Ok), schema.clone());
-    let mut ds = Dataset::write(
-        reader,
-        &uri,
-        Some(WriteParams {
-            mode: WriteMode::Overwrite,
-            ..Default::default()
-        }),
-    )
-    .await?;
+    let mut ds = dataset::overwrite(&uri, out, model).await?;
     dataset::build_indexes(&mut ds, ui::index_progress).await?;
     sweep(&ds).await?;
 

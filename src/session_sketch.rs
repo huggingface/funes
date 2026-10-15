@@ -7,7 +7,6 @@ use crate::commands::recall;
 use crate::memory::dataset;
 use crate::memory::Memory;
 use anyhow::{bail, Context, Result};
-use arrow_array::{Array, FixedSizeListArray, Float32Array, Int64Array, RecordBatch, StringArray};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
@@ -442,46 +441,38 @@ async fn read_sessions(ds: &lance::Dataset, sessions: &[String]) -> Result<Vec<R
         "split_idx",
         "vector",
     ];
-    let quoted = sessions
-        .iter()
-        .map(|session| format!("'{}'", session.replace('\'', "''")))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let filter = format!("session_id IN ({quoted})");
+    let filter = dataset::in_list("session_id", sessions.iter().map(String::as_str));
     let batches = dataset::scan_rows(ds, &columns, Some(&filter), None).await?;
     let mut rows = Vec::new();
     for batch in &batches {
-        let session_id = str_col(batch, "session_id")?;
-        let id = str_col(batch, "id")?;
-        let text = str_col(batch, "text")?;
-        let turn = str_col(batch, "turn_uuid")?;
-        let seq = int_col(batch, "seq")?;
-        let ts = str_col(batch, "ts")?;
-        let role = str_col(batch, "role")?;
-        let block_type = str_col(batch, "block_type")?;
-        let tool_name = str_col(batch, "tool_name")?;
-        let block_idx = int_col(batch, "block_idx")?;
-        let split_idx = int_col(batch, "split_idx")?;
-        let vectors = batch
-            .column_by_name("vector")
-            .context("memory has no `vector` column")?
-            .as_any()
-            .downcast_ref::<FixedSizeListArray>()
-            .context("`vector` column is not a fixed-size list")?;
+        let s = |name: &str| dataset::strs(batch, name);
+        let n = |name: &str| dataset::ints(batch, name);
+        let (session_id, id, text, turn, ts, role, block_type, tool_name) = (
+            s("session_id"),
+            s("id"),
+            s("text"),
+            s("turn_uuid"),
+            s("ts"),
+            s("role"),
+            s("block_type"),
+            s("tool_name"),
+        );
+        let (seq, block_idx, split_idx) = (n("seq"), n("block_idx"), n("split_idx"));
+        let vectors = dataset::vectors(batch, "vector");
         for i in 0..batch.num_rows() {
             rows.push(RawRow {
-                session_id: str_value(session_id, i),
-                id: str_value(id, i),
-                text: str_value(text, i),
-                turn_uuid: str_value(turn, i),
-                seq: int_value(seq, i),
-                ts: str_value(ts, i),
-                role: str_value(role, i),
-                block_type: str_value(block_type, i),
-                tool_name: str_value(tool_name, i),
-                block_idx: int_value(block_idx, i),
-                split_idx: int_value(split_idx, i),
-                vector: vector_value(vectors, i)?,
+                session_id: session_id.get(i).to_string(),
+                id: id.get(i).to_string(),
+                text: text.get(i).to_string(),
+                turn_uuid: turn.get(i).to_string(),
+                seq: seq.get(i),
+                ts: ts.get(i).to_string(),
+                role: role.get(i).to_string(),
+                block_type: block_type.get(i).to_string(),
+                tool_name: tool_name.get(i).to_string(),
+                block_idx: block_idx.get(i),
+                split_idx: split_idx.get(i),
+                vector: vectors.get(i),
             });
         }
     }
@@ -498,63 +489,12 @@ async fn read_sessions(ds: &lance::Dataset, sessions: &[String]) -> Result<Vec<R
     Ok(rows)
 }
 
-fn str_col<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a StringArray> {
-    batch
-        .column_by_name(name)
-        .with_context(|| format!("memory has no `{name}` column"))?
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .with_context(|| format!("`{name}` column is not utf8"))
-}
-
-fn int_col<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a Int64Array> {
-    batch
-        .column_by_name(name)
-        .with_context(|| format!("memory has no `{name}` column"))?
-        .as_any()
-        .downcast_ref::<Int64Array>()
-        .with_context(|| format!("`{name}` column is not int64"))
-}
-
-fn str_value(col: &StringArray, i: usize) -> String {
-    if col.is_null(i) {
-        String::new()
-    } else {
-        col.value(i).to_string()
-    }
-}
-
-fn int_value(col: &Int64Array, i: usize) -> i64 {
-    if col.is_null(i) {
-        0
-    } else {
-        col.value(i)
-    }
-}
-
-fn vector_value(col: &FixedSizeListArray, i: usize) -> Result<Option<Vec<f32>>> {
-    if col.is_null(i) {
-        return Ok(None);
-    }
-    let value = col.value(i);
-    let floats = value
-        .as_any()
-        .downcast_ref::<Float32Array>()
-        .context("`vector` items are not float32")?;
-    if floats.null_count() > 0 {
-        return Ok(None);
-    }
-    Ok(Some((0..floats.len()).map(|j| floats.value(j)).collect()))
-}
-
+/// The embedding model a cached sketch's vectors came from, as a cache key.
 fn embedding_fingerprint(ds: &lance::Dataset) -> String {
-    let schema = arrow_schema::Schema::from(ds.schema());
-    for key in ["embedding_fingerprint", "embedding_model"] {
-        if let Some(value) = schema.metadata().get(key) {
-            return format!("{key}:{value}");
-        }
+    match dataset::embedding_model(ds) {
+        Ok(model) => format!("embedding_model:{}", model.id()),
+        Err(_) => "unrecorded".to_string(),
     }
-    "unrecorded".to_string()
 }
 
 fn build_sketch(

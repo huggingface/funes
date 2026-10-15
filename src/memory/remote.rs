@@ -52,7 +52,6 @@ use hf_hub::{HFError, HFRepository, RepoTypeDataset};
 use lance::dataset::builder::DatasetBuilder;
 use lance::dataset::transaction::{Operation, Transaction};
 use lance::dataset::{ColumnAlteration, CommitBuilder, Dataset, NewColumnTransform, WriteParams};
-use lance::index::DatasetIndexExt;
 use lance::Error as LanceError;
 use lance_io::object_store::WrappingObjectStore;
 use object_store::ObjectStore as OSObjectStore;
@@ -121,7 +120,7 @@ pub(crate) async fn append(
     // Snapshot the captured writes before reading index stats: `index_statistics` can write a stats
     // migration through the same wrapper, and that must not leak into the data commit.
     let mut files = captured_files(&wrapper);
-    let unindexed = max_unindexed_rows(&ds).await;
+    let unindexed = dataset::max_unindexed_rows(&ds).await;
     let text_indexed = dataset::sub_index_counts(&ds).await?.contains_key(dataset::FTS_INDEX);
     for (path, body) in extra_files {
         files.insert(path.clone(), body.clone());
@@ -602,26 +601,6 @@ fn captured_deletes(wrapper: &CaptureWrapper) -> Vec<CommitOperation> {
         })
         .map(|path| CommitOperation::delete(path.clone()))
         .collect()
-}
-
-/// The largest `num_unindexed_rows` across the dataset's indexes — how many rows aren't yet folded
-/// into an index (and so are answered by a brute-force scan at query time). 0 when there are no
-/// indexes. Best-effort: a stats read that errors is skipped rather than failing the caller.
-pub(crate) async fn max_unindexed_rows(ds: &Dataset) -> u64 {
-    let Ok(indices) = ds.load_indices().await else {
-        return 0;
-    };
-    let mut max = 0u64;
-    for idx in indices.iter() {
-        if let Ok(json) = ds.index_statistics(&idx.name).await {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) {
-                if let Some(n) = v.get("num_unindexed_rows").and_then(|x| x.as_u64()) {
-                    max = max.max(n);
-                }
-            }
-        }
-    }
-    max
 }
 
 /// Read the commit at the tip of branch `rev` — the parent-commit guard for the next commit.

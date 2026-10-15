@@ -66,11 +66,11 @@ pub(crate) async fn compact_local(ds: &mut Dataset) -> Result<()> {
     dataset::build_indexes(ds, ui::index_progress).await?;
 
     // Best-effort: a failed cleanup waits for the next compaction.
-    match ds.cleanup_old_versions(chrono::Duration::minutes(10), None, None).await {
-        Ok(stats) if stats.bytes_removed > 0 => eprintln!(
+    match dataset::delete_versions_before(ds, chrono::Duration::minutes(10)).await {
+        Ok(freed) if freed.bytes > 0 => eprintln!(
             "reclaimed {:.1} MB from {} old version(s)",
-            stats.bytes_removed as f64 / 1e6,
-            stats.old_versions
+            freed.bytes as f64 / 1e6,
+            freed.versions
         ),
         Ok(_) => {}
         Err(e) => eprintln!("note: version cleanup skipped — {e}"),

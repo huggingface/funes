@@ -1,30 +1,43 @@
-//! Shared memory helpers: the local memory location, the `chunks` table's schema and rows, opening a
-//! dataset, plain scans, and building the FTS/IVF indexes. funes's home is `$FUNES_HOME`/`~/.funes` —
-//! it holds the incremental state and the local memory at `…/memory` (the `chunks` Lance dataset).
+//! Every Lance call funes makes: the local memory location, the `chunks` table's schema and rows,
+//! opening a dataset, scans and searches, the columns of what they return, writes, and building
+//! the FTS/IVF indexes. A command holds the [`Dataset`] and [`RecordBatch`] values these hand out
+//! and hands them back; it names no Lance or arrow API itself. funes's home is
+//! `$FUNES_HOME`/`~/.funes` — it holds the incremental state and the local memory at `…/memory`
+//! (the `chunks` Lance dataset).
 
-use crate::chunk;
+use crate::chunk::{self, Chunk};
 use crate::inference::EmbeddingModel;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use arrow_array::types::Float32Type;
-use arrow_array::{FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator, StringArray};
+use arrow_array::{
+    Array, BooleanArray, FixedSizeListArray, Float32Array, Int64Array, RecordBatchIterator, StringArray, UInt64Array,
+};
 use arrow_schema::{DataType, Field, Schema};
+use arrow_select::filter::filter_record_batch;
+use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
 use lance::dataset::builder::DatasetBuilder;
 use lance::dataset::optimize::{compact_files, plan_compaction, CompactionOptions};
-use lance::dataset::{Dataset, MergeInsertBuilder, MergeInsertWriteMode, WhenMatched, WhenNotMatched};
+use lance::dataset::scanner::Scanner;
+use lance::dataset::{
+    Dataset, MergeInsertBuilder, MergeInsertWriteMode, WhenMatched, WhenNotMatched, WriteMode, WriteParams, ROW_ID,
+};
 use lance::index::vector::VectorIndexParams;
 use lance::index::{DatasetIndexExt, DatasetIndexInternalExt};
 use lance_index::optimize::OptimizeOptions;
-use lance_index::scalar::InvertedIndexParams;
+use lance_index::scalar::{FullTextSearchQuery, InvertedIndexParams};
 use lance_index::vector::ivf::IvfBuildParams;
 use lance_index::vector::pq::PQBuildParams;
 use lance_index::{IndexParams, IndexType};
 use lance_io::object_store::{ObjectStoreParams, WrappingObjectStore};
 use lance_linalg::distance::MetricType;
+
+/// The rows a scan hands out and a write takes back, as a command holds them.
+pub use arrow_array::RecordBatch;
 
 /// The table (Lance dataset) name within a memory.
 pub const TABLE: &str = "chunks";
@@ -126,12 +139,397 @@ pub async fn scan_rows(
         scan.filter(f)?;
     }
     scan.limit(limit, None)?;
+    collect(scan).await
+}
+
+/// [`scan_rows`], every row with its Lance row id ([`row_ids`]), the handle [`take_rows`] and
+/// [`fill_vectors`] take.
+pub async fn scan_rows_with_ids(ds: &Dataset, columns: &[&str], filter: Option<&str>) -> Result<Vec<RecordBatch>> {
+    let mut scan = ds.scan();
+    scan.project(columns)?;
+    scan.with_row_id();
+    if let Some(f) = filter {
+        scan.filter(f)?;
+    }
+    collect(scan).await
+}
+
+/// The `limit` rows nearest to `query` by vector distance, nearest first, each with its row id.
+/// `filter` is applied before the search, not to its result: a selective filter would otherwise
+/// drop most of a globally-nearest pool and return far fewer than `limit` rows when matches exist.
+pub async fn nearest(
+    ds: &Dataset,
+    query: &[f32],
+    limit: usize,
+    filter: Option<&str>,
+    columns: &[&str],
+) -> Result<Vec<RecordBatch>> {
+    let query = Float32Array::from(query.to_vec());
+    let mut scan = ds.scan();
+    scan.nearest("vector", &query, limit)?;
+    if let Some(f) = filter {
+        scan.prefilter(true);
+        scan.filter(f)?;
+    }
+    scan.project(columns)?;
+    scan.with_row_id();
+    collect(scan).await
+}
+
+/// The `limit` rows best matching `query` by BM25, best first, each with its row id. `filter` is
+/// applied before the search, as in [`nearest`]. Errors on a memory with no text index.
+pub async fn full_text(
+    ds: &Dataset,
+    query: &str,
+    limit: usize,
+    filter: Option<&str>,
+    columns: &[&str],
+) -> Result<Vec<RecordBatch>> {
+    let mut scan = ds.scan();
+    scan.full_text_search(FullTextSearchQuery::new(query.to_string()))?;
+    if let Some(f) = filter {
+        scan.prefilter(true);
+        scan.filter(f)?;
+    }
+    scan.project(columns)?;
+    scan.with_row_id();
+    scan.limit(Some(limit as i64), None)?;
+    collect(scan).await
+}
+
+/// Drain `scan` in its order.
+async fn collect(scan: Scanner) -> Result<Vec<RecordBatch>> {
     let mut stream = scan.try_into_stream().await?;
     let mut batches = Vec::new();
     while let Some(batch) = stream.try_next().await? {
         batches.push(batch);
     }
     Ok(batches)
+}
+
+/// The rows at `row_ids`, projected to `columns` (every column for `&[]`).
+pub async fn take_rows(ds: &Dataset, row_ids: &[u64], columns: &[&str]) -> Result<RecordBatch> {
+    let projection = if columns.is_empty() {
+        ds.schema().clone()
+    } else {
+        ds.schema().project(columns)?
+    };
+    ds.take_rows(row_ids, projection).await.context("reading rows by id")
+}
+
+/// How many rows `filter` keeps (all rows for `None`).
+pub async fn count_rows(ds: &Dataset, filter: Option<&str>) -> Result<usize> {
+    ds.count_rows(filter.map(str::to_string)).await.context("counting rows")
+}
+
+/// When the memory was last written, from its head version; `None` when the version records no
+/// time.
+pub fn last_write(ds: &Dataset) -> Option<DateTime<Utc>> {
+    let t = ds.version().timestamp;
+    (t.timestamp() > 0).then_some(t)
+}
+
+/// Whether the memory carries `column`: one from before a migration lacks it, and projecting it
+/// would error, so every migrated column is asked for before it is read.
+pub fn has_column(ds: &Dataset, column: &str) -> bool {
+    Schema::from(ds.schema()).column_with_name(column).is_some()
+}
+
+/// The memory's schema, metadata included, as a value to hand back to a write.
+pub fn schema_of(ds: &Dataset) -> Arc<Schema> {
+    Arc::new(Schema::from(ds.schema()))
+}
+
+/// The most rows any index leaves unindexed, from the index stats; 0 when they cannot be read.
+pub async fn max_unindexed_rows(ds: &Dataset) -> u64 {
+    let Ok(indices) = ds.load_indices().await else {
+        return 0;
+    };
+    let mut max = 0u64;
+    for idx in indices.iter() {
+        if let Ok(json) = ds.index_statistics(&idx.name).await {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) {
+                if let Some(n) = v.get("num_unindexed_rows").and_then(|x| x.as_u64()) {
+                    max = max.max(n);
+                }
+            }
+        }
+    }
+    max
+}
+
+// ---- filters ----------------------------------------------------------------------------------
+
+/// Rows awaiting a vector.
+pub const UNEMBEDDED: &str = "vector IS NULL";
+/// Rows holding a vector.
+pub const EMBEDDED: &str = "vector IS NOT NULL";
+
+/// `value` as a filter literal: quoted, a quote in it doubled.
+pub fn quoted(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+/// The filter clause `column = 'value'`.
+pub fn eq(column: &str, value: &str) -> String {
+    format!("{column} = {}", quoted(value))
+}
+
+/// The filter clause `column IN ('…', …)`. `values` must not be empty.
+pub fn in_list<'a>(column: &str, values: impl IntoIterator<Item = &'a str>) -> String {
+    let list: Vec<String> = values.into_iter().map(quoted).collect();
+    debug_assert!(!list.is_empty(), "an IN list needs a value");
+    format!("{column} IN ({})", list.join(", "))
+}
+
+// ---- columns ----------------------------------------------------------------------------------
+//
+// A column a batch lacks reads as all-null: a memory from before a column existed reads like one
+// where the column is unset.
+
+/// A string column of a scanned batch, read by row.
+pub struct Strs<'a>(Option<&'a StringArray>);
+
+/// The string column `name` of `batch`.
+pub fn strs<'a>(batch: &'a RecordBatch, name: &str) -> Strs<'a> {
+    Strs(batch.column_by_name(name).and_then(|c| c.as_any().downcast_ref()))
+}
+
+impl<'a> Strs<'a> {
+    /// The value at `i`, `""` for a null.
+    pub fn get(&self, i: usize) -> &'a str {
+        self.opt(i).unwrap_or_default()
+    }
+
+    /// The value at `i`, `None` for a null.
+    pub fn opt(&self, i: usize) -> Option<&'a str> {
+        self.0.filter(|c| !c.is_null(i)).map(|c| c.value(i))
+    }
+}
+
+/// An integer column of a scanned batch, read by row.
+pub struct Ints<'a>(Option<&'a Int64Array>);
+
+/// The integer column `name` of `batch`.
+pub fn ints<'a>(batch: &'a RecordBatch, name: &str) -> Ints<'a> {
+    Ints(batch.column_by_name(name).and_then(|c| c.as_any().downcast_ref()))
+}
+
+impl Ints<'_> {
+    /// The value at `i`, 0 for a null.
+    pub fn get(&self, i: usize) -> i64 {
+        self.0.filter(|c| !c.is_null(i)).map(|c| c.value(i)).unwrap_or(0)
+    }
+}
+
+/// The vector column of a scanned batch, read by row.
+pub struct Vectors<'a>(Option<&'a FixedSizeListArray>);
+
+/// The vector column `name` of `batch`.
+pub fn vectors<'a>(batch: &'a RecordBatch, name: &str) -> Vectors<'a> {
+    Vectors(batch.column_by_name(name).and_then(|c| c.as_any().downcast_ref()))
+}
+
+impl Vectors<'_> {
+    /// The vector at `i`, `None` for a null or one with a null element.
+    pub fn get(&self, i: usize) -> Option<Vec<f32>> {
+        let col = self.0.filter(|c| !c.is_null(i))?;
+        let value = col.value(i);
+        let floats = value.as_any().downcast_ref::<Float32Array>()?;
+        if floats.null_count() > 0 {
+            return None;
+        }
+        Some(floats.values().to_vec())
+    }
+}
+
+/// The row ids of a batch scanned with them.
+pub struct RowIds<'a>(&'a UInt64Array);
+
+/// The row ids of `batch`; an error for a batch scanned without them.
+pub fn row_ids(batch: &RecordBatch) -> Result<RowIds<'_>> {
+    batch
+        .column_by_name(ROW_ID)
+        .and_then(|c| c.as_any().downcast_ref())
+        .map(RowIds)
+        .context("a scan without row ids")
+}
+
+impl RowIds<'_> {
+    /// The row id at `i`.
+    pub fn get(&self, i: usize) -> u64 {
+        self.0.value(i)
+    }
+}
+
+/// The `id` of every row of `batches`.
+pub fn ids_in(batches: &[RecordBatch]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for batch in batches {
+        let ids = strs(batch, "id");
+        out.extend((0..batch.num_rows()).map(|i| ids.get(i).to_string()));
+    }
+    out
+}
+
+/// The `id` of every row `filter` keeps (all rows for `None`).
+pub async fn ids(ds: &Dataset, filter: Option<&str>) -> Result<HashSet<String>> {
+    Ok(ids_in(&scan_rows(ds, &["id"], filter, None).await?))
+}
+
+/// Every distinct value of `column` among the rows `filter` keeps.
+pub async fn distinct(ds: &Dataset, column: &str, filter: Option<&str>) -> Result<HashSet<String>> {
+    let mut out = HashSet::new();
+    for batch in scan_rows(ds, &[column], filter, None).await? {
+        let values = strs(&batch, column);
+        out.extend((0..batch.num_rows()).map(|i| values.get(i).to_string()));
+    }
+    Ok(out)
+}
+
+/// Every row's `id`, grouped by its session, in scan order.
+pub async fn ids_by_session(ds: &Dataset) -> Result<HashMap<String, Vec<String>>> {
+    let mut by_session: HashMap<String, Vec<String>> = HashMap::new();
+    for batch in scan_rows(ds, &["id", "session_id"], None, None).await? {
+        let (ids, sessions) = (strs(&batch, "id"), strs(&batch, "session_id"));
+        for i in 0..batch.num_rows() {
+            by_session
+                .entry(sessions.get(i).to_string())
+                .or_default()
+                .push(ids.get(i).to_string());
+        }
+    }
+    Ok(by_session)
+}
+
+/// The [`Chunk`]s of `batches` (all columns), so a memory can be rewritten without its source.
+/// The `vector` column is dropped — rewritten rows are re-embedded.
+pub fn chunks(batches: &[RecordBatch]) -> Vec<Chunk> {
+    let mut out = Vec::new();
+    for b in batches {
+        let s = |name: &str| strs(b, name);
+        let n = |name: &str| ints(b, name);
+        let (
+            id,
+            text,
+            session_id,
+            workdir,
+            turn_uuid,
+            parent_uuid,
+            ts,
+            role,
+            block_type,
+            tool_name,
+            source_path,
+            harness,
+            repo,
+        ) = (
+            s("id"),
+            s("text"),
+            s("session_id"),
+            s("workdir"),
+            s("turn_uuid"),
+            s("parent_uuid"),
+            s("ts"),
+            s("role"),
+            s("block_type"),
+            s("tool_name"),
+            s("source_path"),
+            s("harness"),
+            s("repo"),
+        );
+        let (seq, block_idx, split_idx) = (n("seq"), n("block_idx"), n("split_idx"));
+        for i in 0..b.num_rows() {
+            out.push(Chunk {
+                id: id.get(i).to_string(),
+                text: text.get(i).to_string(),
+                session_id: session_id.get(i).to_string(),
+                workdir: workdir.get(i).to_string(),
+                turn_uuid: turn_uuid.get(i).to_string(),
+                parent_uuid: parent_uuid.opt(i).map(str::to_string),
+                seq: seq.get(i),
+                ts: ts.get(i).to_string(),
+                role: role.get(i).to_string(),
+                block_type: block_type.get(i).to_string(),
+                tool_name: tool_name.opt(i).map(str::to_string),
+                source_path: source_path.get(i).to_string(),
+                block_idx: block_idx.get(i),
+                split_idx: split_idx.get(i),
+                harness: harness.get(i).to_string(),
+                repo: repo.get(i).to_string(),
+            });
+        }
+    }
+    out
+}
+
+// ---- writes -----------------------------------------------------------------------------------
+
+/// Append `batch`'s rows.
+pub async fn append(ds: &mut Dataset, batch: RecordBatch) -> Result<()> {
+    let schema = batch.schema();
+    ds.append(RecordBatchIterator::new([Ok(batch)], schema), None)
+        .await
+        .context("appending rows")?;
+    Ok(())
+}
+
+/// Create the dataset at `uri` holding `batch`'s rows.
+pub async fn create(uri: &str, batch: RecordBatch) -> Result<Dataset> {
+    let schema = batch.schema();
+    Dataset::write(RecordBatchIterator::new([Ok(batch)], schema), uri, None)
+        .await
+        .context("creating the memory")
+}
+
+/// Rewrite the memory at `uri` as `batches`, every row re-stamped with `model`'s schema, in one
+/// commit.
+pub async fn overwrite(uri: &str, batches: Vec<RecordBatch>, model: EmbeddingModel) -> Result<Dataset> {
+    let schema = schema(model);
+    let batches = restamped(&schema, batches)?;
+    let params = WriteParams {
+        mode: WriteMode::Overwrite,
+        ..Default::default()
+    };
+    Dataset::write(
+        RecordBatchIterator::new(batches.into_iter().map(Ok), schema),
+        uri,
+        Some(params),
+    )
+    .await
+    .context("rewriting the memory")
+}
+
+/// `batches` carrying `schema`, metadata included: a scan's batches drop it.
+pub fn restamped(schema: &Arc<Schema>, batches: Vec<RecordBatch>) -> Result<Vec<RecordBatch>> {
+    batches
+        .into_iter()
+        .map(|b| RecordBatch::try_new(schema.clone(), b.columns().to_vec()).context("re-stamping rows"))
+        .collect()
+}
+
+/// The rows of `batch` that `keep` accepts, by position.
+pub fn keep_rows(batch: &RecordBatch, keep: impl Fn(usize) -> bool) -> Result<RecordBatch> {
+    let mask: BooleanArray = (0..batch.num_rows()).map(keep).collect();
+    filter_record_batch(batch, &mask).context("filtering rows")
+}
+
+/// What a version cleanup freed.
+pub struct Reclaimed {
+    pub bytes: u64,
+    pub versions: u64,
+}
+
+/// Delete the versions older than `age` and the files only they reference.
+pub async fn delete_versions_before(ds: &Dataset, age: chrono::Duration) -> Result<Reclaimed> {
+    let stats = ds
+        .cleanup_old_versions(age, None, None)
+        .await
+        .context("deleting old versions")?;
+    Ok(Reclaimed {
+        bytes: stats.bytes_removed,
+        versions: stats.old_versions,
+    })
 }
 
 /// lance's default `<column>_idx` names, so an index lance named is refreshed, not rebuilt beside.
@@ -455,8 +853,7 @@ fn ivf_pq_params(ds: &Dataset) -> Option<VectorIndexParams> {
 }
 
 pub(crate) async fn create_empty(uri: &str, model: EmbeddingModel) -> Result<Dataset> {
-    let reader = RecordBatchIterator::new(std::iter::empty(), schema(model));
-    Dataset::write(reader, uri, None).await.context("creating the memory")
+    create(uri, build_batch(model, &[], None)?).await
 }
 
 /// The table schema (column order is load-bearing for Lance).
@@ -580,6 +977,13 @@ pub(crate) async fn fill_vectors(ds: &Dataset, ids: &[&str], vectors: &[Vec<f32>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_filter_literal_doubles_its_quotes() {
+        assert_eq!(quoted("o'brien"), "'o''brien'");
+        assert_eq!(eq("role", "user"), "role = 'user'");
+        assert_eq!(in_list("harness", ["claude", "pi"]), "harness IN ('claude', 'pi')");
+    }
     use crate::traces::{Block, Turn, FORMAT_VERSION};
     use arrow_array::RecordBatchIterator;
     use lance::dataset::WriteParams;

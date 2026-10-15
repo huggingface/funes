@@ -22,26 +22,21 @@
 
 use crate::hub;
 use crate::memory::card::{self, CardAction, CardCtx};
-use crate::memory::dataset;
+use crate::memory::dataset::{self, RecordBatch};
 use crate::memory::lock;
 use crate::memory::remote::{self, Appended, Compacted};
 use crate::memory::{Memory, MemoryState};
 use crate::ui::prompt::confirm;
 use crate::{chunk, scan, ui};
 use anyhow::{anyhow, bail, Context, Result};
-use arrow_array::{BooleanArray, RecordBatch, StringArray, UInt64Array};
-use arrow_select::filter::filter_record_batch;
 use bytes::Bytes;
 use chrono::Utc;
-use futures::TryStreamExt;
 use hf_hub::{HFError, HFRepository, RepoTypeDataset};
-use lance::dataset::ROW_ID;
 use lance::Dataset;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::io::{IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 /// Compact the remote once this many appended rows are sitting unindexed (answered by a
 /// brute-force scan until folded in). Bounds per-query cost, not push count, and is stateless —
@@ -53,15 +48,6 @@ const COMPACT_THRESHOLD: u64 = 500;
 /// keeps moving under us, so a busy remote can't spin forever.
 const MAX_COMMIT_RETRIES: u32 = 10;
 
-/// Every chunk id in a memory, or empty if it can't be opened (absent local index, not-yet-created
-/// or inaccessible remote).
-pub async fn memory_ids(memory: &Memory) -> HashSet<String> {
-    match memory.open().await {
-        Ok(ds) => all_ids(&ds).await.unwrap_or_default(),
-        Err(_) => HashSet::new(),
-    }
-}
-
 /// Whether a publish error is the Hub refusing the write — a 403/Forbidden, i.e. the token can't
 /// write to this remote. Matches the typed [`HFError`] preserved in the error chain.
 pub(crate) fn is_read_only(err: &anyhow::Error) -> bool {
@@ -70,23 +56,6 @@ pub(crate) fn is_read_only(err: &anyhow::Error) -> bool {
         Some(HFError::Http { context }) => context.status.as_u16() == 403,
         _ => false,
     })
-}
-
-/// Every chunk id in a memory (a plain `id`-column scan; plain scans aren't limit-capped).
-async fn all_ids(ds: &Dataset) -> Result<HashSet<String>> {
-    let batches = dataset::scan_rows(ds, &["id"], None, None).await?;
-    let mut ids = HashSet::new();
-    for batch in batches {
-        if let Some(col) = batch
-            .column_by_name("id")
-            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-        {
-            for i in 0..batch.num_rows() {
-                ids.insert(col.value(i).to_string());
-            }
-        }
-    }
-    Ok(ids)
 }
 
 /// Per-remote local receipt of chunk ids this host has observed on that remote. It is deliberately
@@ -176,38 +145,29 @@ pub(crate) struct PushCoverage {
     pub held: Option<Skipped>,
 }
 
-fn push_coverage(batches: &[RecordBatch], pushed_ids: &HashSet<String>) -> Option<PushCoverage> {
-    let mut complete: HashMap<String, bool> = HashMap::new();
-    for batch in batches {
-        let ids = batch.column_by_name("id")?.as_any().downcast_ref::<StringArray>()?;
-        let sessions = batch
-            .column_by_name("session_id")?
-            .as_any()
-            .downcast_ref::<StringArray>()?;
-        for i in 0..batch.num_rows() {
-            let present = pushed_ids.contains(ids.value(i));
-            complete
-                .entry(sessions.value(i).to_string())
-                .and_modify(|all| *all &= present)
-                .or_insert(present);
-        }
-    }
-    let pushed = complete.values().filter(|&&all| all).count();
-    Some(PushCoverage {
-        total: complete.len(),
-        pending: complete.len() - pushed,
+fn push_coverage(by_session: &HashMap<String, Vec<String>>, pushed_ids: &HashSet<String>) -> PushCoverage {
+    let complete = by_session
+        .values()
+        .filter(|ids| ids.iter().all(|id| pushed_ids.contains(id)))
+        .count();
+    PushCoverage {
+        total: by_session.len(),
+        pending: by_session.len() - complete,
         held: None,
-    })
+    }
 }
 
 pub(crate) async fn local_push_coverage(local: &Dataset, memory_uri: &str) -> Option<PushCoverage> {
     let pushed_ids = load_pushed(memory_uri)?;
-    let batches = dataset::scan_rows(local, &["id", "session_id"], None, None)
-        .await
-        .ok()?;
-    let mut coverage = push_coverage(&batches, &pushed_ids)?;
+    let by_session = dataset::ids_by_session(local).await.ok()?;
+    let mut coverage = push_coverage(&by_session, &pushed_ids);
     if coverage.pending > 0 {
-        let pending: HashSet<String> = ids_in_batches(&batches).difference(&pushed_ids).cloned().collect();
+        let pending: HashSet<String> = by_session
+            .values()
+            .flatten()
+            .filter(|id| !pushed_ids.contains(*id))
+            .cloned()
+            .collect();
         coverage.held = held_among(local, &pending).await;
     }
     Some(coverage)
@@ -222,19 +182,12 @@ pub(crate) async fn owed_sessions(memory_uri: &str) -> Result<HashSet<String>> {
     let MemoryState::Ready(local) = Memory::local().state().await? else {
         return Ok(HashSet::new());
     };
-    let mut owed = HashSet::new();
-    for batch in dataset::scan_rows(&local, &["id", "session_id"], None, None).await? {
-        let column = |name| batch.column_by_name(name)?.as_any().downcast_ref::<StringArray>();
-        let (Some(ids), Some(sessions)) = (column("id"), column("session_id")) else {
-            continue;
-        };
-        for i in 0..batch.num_rows() {
-            if !pushed_ids.contains(ids.value(i)) {
-                owed.insert(sessions.value(i).to_string());
-            }
-        }
-    }
-    Ok(owed)
+    Ok(dataset::ids_by_session(&local)
+        .await?
+        .into_iter()
+        .filter(|(_, ids)| ids.iter().any(|id| !pushed_ids.contains(id)))
+        .map(|(session, _)| session)
+        .collect())
 }
 
 /// Whether this host still owes `memory_uri` rows of `session_id` — reads that one session's ids,
@@ -246,9 +199,8 @@ pub(crate) async fn owes_session(memory_uri: &str, session_id: &str) -> Result<b
     let MemoryState::Ready(local) = Memory::local().state().await? else {
         return Ok(false);
     };
-    let filter = format!("session_id = '{}'", crate::commands::recall::esc(session_id));
-    let batches = dataset::scan_rows(&local, &["id"], Some(&filter), None).await?;
-    Ok(!ids_in_batches(&batches).is_subset(&pushed_ids))
+    let ids = dataset::ids(&local, Some(&dataset::eq("session_id", session_id))).await?;
+    Ok(!ids.is_subset(&pushed_ids))
 }
 
 /// What the secret gate would hold back of the `pending` rows, scanned exactly as a push would.
@@ -261,31 +213,14 @@ async fn held_among(local: &Dataset, pending: &HashSet<String>) -> Option<Skippe
     (skipped.rows > 0).then_some(skipped)
 }
 
-fn ids_in_batches(batches: &[RecordBatch]) -> HashSet<String> {
-    let mut ids = HashSet::new();
-    for batch in batches {
-        if let Some(col) = batch
-            .column_by_name("id")
-            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-        {
-            for i in 0..batch.num_rows() {
-                ids.insert(col.value(i).to_string());
-            }
-        }
-    }
-    ids
-}
-
 /// Every embedded row of the local memory, whole — a publish ships each row as it stands.
 async fn all_rows(local: &Dataset) -> Result<Vec<RecordBatch>> {
-    dataset::scan_rows(local, &[], Some("vector IS NOT NULL"), None).await
+    dataset::scan_rows(local, &[], Some(dataset::EMBEDDED), None).await
 }
 
 /// The ids of the local chunks that carry a vector — the only ones a push may publish.
 async fn embedded_ids(local: &Dataset) -> Result<HashSet<String>> {
-    Ok(ids_in_batches(
-        &dataset::scan_rows(local, &["id"], Some("vector IS NOT NULL"), None).await?,
-    ))
+    dataset::ids(local, Some(dataset::EMBEDDED)).await
 }
 
 /// Don't make this a scan filter. On a memory that hasn't been pushed in a while, that filter lists
@@ -295,28 +230,15 @@ async fn rows_with_ids(local: &Dataset, ids: &HashSet<String>) -> Result<Vec<Rec
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    let mut scan = local.scan();
-    scan.project(&["id"])?;
-    scan.with_row_id();
-    let mut stream = scan.try_into_stream().await?;
     let mut selected = Vec::new();
-    while let Some(batch) = stream.try_next().await? {
-        let chunk_ids = batch
-            .column_by_name("id")
-            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-            .context("selecting push rows: missing or non-string id column")?;
-        let row_ids = batch
-            .column_by_name(ROW_ID)
-            .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
-            .context("selecting push rows: missing or non-u64 row ids")?;
-        let matching: Vec<u64> = chunk_ids
-            .iter()
-            .zip(row_ids.values())
-            .filter(|(id, _)| id.is_some_and(|id| ids.contains(id)))
-            .map(|(_, &row_id)| row_id)
+    for batch in dataset::scan_rows_with_ids(local, &["id"], None).await? {
+        let (chunk_ids, row_ids) = (dataset::strs(&batch, "id"), dataset::row_ids(&batch)?);
+        let matching: Vec<u64> = (0..batch.num_rows())
+            .filter(|&i| ids.contains(chunk_ids.get(i)))
+            .map(|i| row_ids.get(i))
             .collect();
         if !matching.is_empty() {
-            selected.push(local.take_rows(&matching, local.schema().clone()).await?);
+            selected.push(dataset::take_rows(local, &matching, &[]).await?);
         }
     }
     Ok(selected)
@@ -402,30 +324,6 @@ pub(crate) fn sanitize(uri: &str) -> String {
             }
         })
         .collect()
-}
-
-/// A memory's rows as session → chunk ids, the shape a selection is resolved against.
-pub(crate) async fn ids_by_session(ds: &Dataset) -> Result<HashMap<String, Vec<String>>> {
-    let batches = dataset::scan_rows(ds, &["id", "session_id"], None, None).await?;
-    let mut by_session: HashMap<String, Vec<String>> = HashMap::new();
-    for batch in batches {
-        let ids = batch
-            .column_by_name("id")
-            .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-        let sessions = batch
-            .column_by_name("session_id")
-            .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-        let (Some(ids), Some(sessions)) = (ids, sessions) else {
-            continue;
-        };
-        for i in 0..batch.num_rows() {
-            by_session
-                .entry(sessions.value(i).to_string())
-                .or_default()
-                .push(ids.value(i).to_string());
-        }
-    }
-    Ok(by_session)
 }
 
 /// The chunk ids of exactly `sessions`, from a memory's rows grouped as `by_session`. Every named
@@ -579,7 +477,7 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
 
     eprintln!("comparing local and remote indexes…");
     let remote_ids = match &remote {
-        Some(ds) => all_ids(ds).await?,
+        Some(ds) => dataset::ids(ds, None).await?,
         None => HashSet::new(),
     };
     let first_publish = remote.is_none();
@@ -588,10 +486,10 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
     // publish. Otherwise everything local is a candidate, and the remote's own ids decide what of
     // it is new.
     let candidates = if sessions.is_empty() {
-        all_ids(&local).await?
+        dataset::ids(&local, None).await?
     } else {
         eprintln!("publishing {} named session(s)", sessions.len());
-        named_ids(&ids_by_session(&local).await?, sessions)?
+        named_ids(&dataset::ids_by_session(&local).await?, sessions)?
     };
     let publishable: HashSet<String> = candidates.intersection(&embedded_ids(&local).await?).cloned().collect();
     let to_push: HashSet<String> = publishable.difference(&remote_ids).cloned().collect();
@@ -647,7 +545,7 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
     // 4. Rows, then hold back any that still contain a secret. Re-stamp each batch with the local
     // dataset's schema so its metadata (the embedding-model id) rides along — scan-result batches
     // drop it, and on first publish that schema is what the new dataset persists.
-    let schema: arrow_schema::SchemaRef = Arc::new(arrow_schema::Schema::from(local.schema()));
+    let schema = dataset::schema_of(&local);
     // Only a first publish with nothing named ships the whole memory; anything else, `to_push`
     // is the answer — including a first publish of a selection.
     let rows = if first_publish && sessions.is_empty() {
@@ -655,10 +553,7 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
     } else {
         rows_with_ids(&local, &to_push).await?
     };
-    let batches: Vec<RecordBatch> = rows
-        .into_iter()
-        .map(|b| RecordBatch::try_new(schema.clone(), b.columns().to_vec()))
-        .collect::<std::result::Result<_, _>>()?;
+    let batches = dataset::restamped(&schema, rows)?;
 
     // Drop any row whose text still holds a secret — hold it back from the Hub rather than block the
     // whole push. `funes scrub` redacts it in the local memory; the next push then ships it.
@@ -679,7 +574,7 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
             blocked: true,
         });
     }
-    let pushed_ids = ids_in_batches(&batches);
+    let pushed_ids = dataset::ids_in(&batches);
 
     // The dataset card rides the data commit — created when the repo has none, refreshed when it
     // carries the funes markers, a hand-written card left alone (see `card_file`). Root stores
@@ -687,11 +582,12 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
     // (and two stores sharing a repo would fight over one card's stats) — under a prefix it's
     // the owner's. The chunk count is the post-push total — best-effort: rows another writer
     // lands concurrently are missed until the next push refreshes the card.
+    let model = dataset::embedding_model(&local)?;
     let date = Utc::now().format("%Y-%m-%d").to_string();
     let ctx = CardCtx {
         repo: &repo_id,
         chunks: remote_ids.len() as u64 + n_chunks as u64,
-        embedding_model: embedding_model(&schema),
+        embedding_model: model.id(),
         date: &date,
     };
     let (card_body, card_note) = if prefix.is_empty() {
@@ -726,7 +622,7 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
         };
         record_pushed(&uri, &pushed_ids)?;
         let pushed = match n_chunks {
-            0 => format!("created with {}, no chunks yet", embedding_model(&schema)),
+            0 => format!("created with {}, no chunks yet", model.id()),
             n => format!("pushed {n} chunks"),
         };
         return Ok(format!(
@@ -783,16 +679,6 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
     }
     out.push_str(&skipped.warning());
     Ok(out.into())
-}
-
-/// The memory's pinned embedding model, from the schema metadata `index` stamps. A pre-metadata
-/// memory has no id to show.
-fn embedding_model(schema: &arrow_schema::Schema) -> &str {
-    schema
-        .metadata()
-        .get("embedding_model")
-        .map(String::as_str)
-        .unwrap_or("unknown")
 }
 
 /// What a push does about the dataset card, from the remote README fetch (`Err` = unreadable):
@@ -856,7 +742,7 @@ fn drop_secret_rows(batches: Vec<RecordBatch>) -> Result<(Vec<RecordBatch>, Skip
     }
     let scanner = scan::Trufflehog::find()?;
     // Row order across batches matches `chunks_from_batches`, so a chunk's index is its global row.
-    let chunks = chunk::chunks_from_batches(&batches);
+    let chunks = dataset::chunks(&batches);
     let blocks = chunk::reconstruct_blocks(&chunks);
     let texts: Vec<&str> = blocks.iter().map(|(_, text)| text.as_str()).collect();
     let found = scan::scan_blocks(&texts, &scanner)?;
@@ -888,8 +774,7 @@ fn drop_secret_rows(batches: Vec<RecordBatch>) -> Result<(Vec<RecordBatch>, Skip
     let mut clean = Vec::with_capacity(batches.len());
     let mut base = 0usize;
     for b in &batches {
-        let mask: BooleanArray = (0..b.num_rows()).map(|i| !dirty[base + i]).collect();
-        clean.push(filter_record_batch(b, &mask)?);
+        clean.push(dataset::keep_rows(b, |i| !dirty[base + i])?);
         base += b.num_rows();
     }
     let summary = scan::summary(detectors.iter().map(String::as_str));
@@ -977,8 +862,9 @@ fn same_model(local: &Dataset, remote: &Dataset, label: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow_array::RecordBatchIterator;
+    use arrow_array::{RecordBatchIterator, StringArray, UInt64Array};
     use lance::dataset::WriteParams;
+    use std::sync::Arc;
 
     #[test]
     fn the_push_prompt_says_which_case_it_found() {
@@ -1272,7 +1158,7 @@ mod tests {
     async fn ids_by_session_groups_the_scan() {
         let dir = tempfile::tempdir().unwrap();
         let ds = two_session_ds(dir.path()).await;
-        let by_session = ids_by_session(&ds).await.unwrap();
+        let by_session = dataset::ids_by_session(&ds).await.unwrap();
         assert_eq!(by_session.len(), 2, "one entry per session");
         assert!(by_session.contains_key("reviewed") && by_session.contains_key("private"));
         assert!(by_session.values().all(|ids| !ids.is_empty()));
@@ -1302,7 +1188,7 @@ mod tests {
         let embedded = HashSet::from([chunks[0].id.clone()]);
         assert_eq!(embedded_ids(&ds).await.unwrap(), embedded);
         assert_eq!(
-            ids_in_batches(&all_rows(&ds).await.unwrap()),
+            dataset::ids_in(&all_rows(&ds).await.unwrap()),
             embedded,
             "a first publish ships no nulls"
         );
@@ -1312,12 +1198,9 @@ mod tests {
     async fn push_coverage_requires_every_current_chunk_of_a_session() {
         let dir = tempfile::tempdir().unwrap();
         let ds = two_session_ds(dir.path()).await;
-        let by_session = ids_by_session(&ds).await.unwrap();
+        let by_session = dataset::ids_by_session(&ds).await.unwrap();
         let pushed: HashSet<String> = by_session["reviewed"].iter().cloned().collect();
-        let batches = dataset::scan_rows(&ds, &["id", "session_id"], None, None)
-            .await
-            .unwrap();
-        let coverage = push_coverage(&batches, &pushed).unwrap();
+        let coverage = push_coverage(&by_session, &pushed);
         assert_eq!(coverage.total, 2);
         assert_eq!(coverage.pending, 1);
     }
@@ -1341,7 +1224,7 @@ mod tests {
             .await
             .unwrap();
         let ds = dataset::open(&uri, HashMap::new()).await.unwrap();
-        let by_session = ids_by_session(&ds).await.unwrap();
+        let by_session = dataset::ids_by_session(&ds).await.unwrap();
 
         let all: HashSet<String> = by_session.values().flatten().cloned().collect();
         let held = held_among(&ds, &all)
@@ -1387,7 +1270,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let by_session = ids_by_session(&ds).await.unwrap();
+        let by_session = dataset::ids_by_session(&ds).await.unwrap();
 
         let all: HashSet<String> = by_session.values().flatten().cloned().collect();
         let rows = rows_with_ids(&ds, &all).await.unwrap();
@@ -1396,7 +1279,7 @@ mod tests {
         assert!(held.summary.contains("PrivateKey"), "summary: {}", held.summary);
 
         let clean_only: HashSet<String> = by_session["clean"].iter().cloned().collect();
-        assert_eq!(ids_in_batches(&clean), clean_only, "unrelated clean rows survive");
+        assert_eq!(dataset::ids_in(&clean), clean_only, "unrelated clean rows survive");
         let rows = rows_with_ids(&ds, &clean_only).await.unwrap();
         assert_eq!(drop_secret_rows(rows).unwrap().1.rows, 0, "clean rows are not held");
     }
@@ -1460,7 +1343,7 @@ mod tests {
     async fn an_append_returns_only_the_included_delta() {
         let dir = tempfile::tempdir().unwrap();
         let ds = two_session_ds(dir.path()).await;
-        let reviewed = ids_by_session(&ds).await.unwrap()["reviewed"].clone();
+        let reviewed = dataset::ids_by_session(&ds).await.unwrap()["reviewed"].clone();
         let to_push: HashSet<String> = reviewed.iter().cloned().collect();
         let rows = rows_with_ids(&ds, &to_push).await.unwrap();
         let pushed: usize = rows.iter().map(|b| b.num_rows()).sum();
@@ -1510,7 +1393,7 @@ mod tests {
             .collect();
         let rows = rows_with_ids(&ds, &wanted).await.unwrap();
         assert_eq!(rows.iter().map(|b| b.num_rows()).sum::<usize>(), wanted.len() + 1);
-        assert_eq!(ids_in_batches(&rows), wanted);
+        assert_eq!(dataset::ids_in(&rows), wanted);
         for batch in rows {
             assert_eq!(batch.schema().fields(), schema.fields());
             let ids = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
@@ -1540,7 +1423,7 @@ mod tests {
         // Naming a session publishes exactly its rows — the sibling stays local.
         let dir = tempfile::tempdir().unwrap();
         let ds = two_session_ds(dir.path()).await;
-        let by_session = ids_by_session(&ds).await.unwrap();
+        let by_session = dataset::ids_by_session(&ds).await.unwrap();
 
         let selected = named_ids(&by_session, &["reviewed".to_string()]).unwrap();
         let reviewed: HashSet<String> = by_session["reviewed"].iter().cloned().collect();
@@ -1561,7 +1444,7 @@ mod tests {
         // caller would read success and never learn what stayed behind.
         let dir = tempfile::tempdir().unwrap();
         let ds = two_session_ds(dir.path()).await;
-        let by_session = ids_by_session(&ds).await.unwrap();
+        let by_session = dataset::ids_by_session(&ds).await.unwrap();
         let err = named_ids(&by_session, &["reviewed".to_string(), "reviewd".to_string()])
             .expect_err("an unknown session id must be an error");
         let msg = format!("{err}");
