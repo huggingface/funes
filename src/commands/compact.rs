@@ -7,7 +7,7 @@ use crate::memory::dataset;
 use crate::memory::lock;
 use crate::memory::{Memory, MemoryState};
 use crate::ui;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, Context, Result};
 use lance::Dataset;
 use std::collections::HashMap;
 
@@ -25,10 +25,7 @@ pub async fn run(target: Memory) -> Result<String> {
 
 async fn compact(target: Memory) -> Result<String> {
     match target.state().await? {
-        MemoryState::Offline => bail!(
-            "{} is unreachable — can't compact it while offline (check your connection)",
-            target.label()
-        ),
+        MemoryState::Offline => return Err(target.offline_error()),
         MemoryState::Missing => return Err(target.missing_error()),
         MemoryState::Unauthorized => return Err(target.unauthorized_error()),
         MemoryState::Empty => return Ok(format!("{}: nothing to compact\n", target.label())),

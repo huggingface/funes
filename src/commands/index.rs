@@ -149,11 +149,13 @@ pub async fn run(args: IndexArgs) -> Result<()> {
     }
 }
 
+/// The embedding model the local memory records, `None` when there is no local memory yet.
 pub async fn local_memory_model() -> Result<Option<inference::EmbeddingModel>> {
-    match dataset::open(&dataset::table_uri(home::memory_dir()), HashMap::new()).await {
-        Ok(ds) => Ok(Some(dataset::embedding_model(&ds)?)),
-        Err(_) => Ok(None),
-    }
+    Memory::local()
+        .dataset()
+        .await?
+        .map(|ds| dataset::embedding_model(&ds))
+        .transpose()
 }
 
 pub async fn ensure_local_memory(model: inference::EmbeddingModel) -> Result<()> {
@@ -552,7 +554,7 @@ impl Indexer {
         let _lock = acquire_lock(interactive).await?;
 
         let uri = dataset::table_uri(home::memory_dir());
-        let ds = dataset::open(&uri, HashMap::new()).await.ok();
+        let ds = Memory::local().dataset().await?;
 
         let model = match &ds {
             Some(ds) => dataset::embedding_model(ds)?,

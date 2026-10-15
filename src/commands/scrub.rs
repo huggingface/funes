@@ -6,10 +6,10 @@ use crate::home;
 use crate::inference::{self, embed_batched, Embedder};
 use crate::memory::dataset::{self, build_batch};
 use crate::memory::lock;
+use crate::memory::Memory;
 use crate::{chunk, scan, ui};
 use anyhow::Result;
 use lance::Dataset;
-use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::time::Instant;
@@ -22,7 +22,7 @@ pub async fn run() -> Result<()> {
     // scrub rewrites the whole table, so hold the memory lock to be the sole writer.
     let _lock = lock::MemoryLock::acquire()?;
     let uri = dataset::table_uri(home::memory_dir());
-    let Ok(ds) = dataset::open(&uri, HashMap::new()).await else {
+    let Some(ds) = Memory::local().dataset().await? else {
         println!("no local memory to scrub");
         return Ok(());
     };

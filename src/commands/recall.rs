@@ -288,10 +288,7 @@ pub async fn check_readable(memory: &Memory) -> Result<()> {
     match open_for_read(memory).await? {
         ReadOutcome::Ready(_) => Ok(()),
         ReadOutcome::NoIndex => Err(no_index_error()),
-        ReadOutcome::Offline => Err(anyhow!(
-            "{} is unreachable right now — try again once you're back online",
-            memory.label()
-        )),
+        ReadOutcome::Offline => Err(memory.offline_error()),
     }
 }
 
@@ -1533,7 +1530,7 @@ pub async fn status(target: impl Into<Target>) -> Result<String> {
                     out.push_str(&remote_lines(&ds, now).await);
                     // The local index is what pushes here — show it alongside, so one status
                     // answers both "what's published" and "what's indexed on this machine".
-                    if let Ok(local) = Memory::local().open().await {
+                    if let Some(local) = Memory::local().dataset().await? {
                         let local_rows = dataset::count_rows(&local, None).await?;
                         let _ = writeln!(
                             out,
@@ -1594,7 +1591,7 @@ pub async fn host_status(bound: Option<&str>, note: Option<&str>) -> Result<Stri
     let _ = writeln!(out, "chunks: {}", dataset::count_rows(&ds, None).await?);
     if let Memory::Remote { uri } = &memory {
         out.push_str(&remote_lines(&ds, Utc::now()).await);
-        if let Ok(local) = Memory::local().open().await {
+        if let Some(local) = Memory::local().dataset().await? {
             out.push_str(&push_coverage_lines(&local, &memory, uri).await);
         }
     }

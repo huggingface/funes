@@ -154,6 +154,25 @@ impl Memory {
             Err(e) => Err(e),
         }
     }
+
+    /// The memory's dataset, with rows or without: a memory with no rows yet still records its
+    /// embedding model. `None` when it holds no dataset. A memory that can't be read is an error,
+    /// worded by its state.
+    pub async fn dataset(&self) -> Result<Option<Dataset>> {
+        match self.state().await? {
+            MemoryState::Ready(ds) => Ok(Some(ds)),
+            // A remote's `Empty` is a repo with no dataset; a local one may be a dataset with no rows.
+            MemoryState::Empty if matches!(self, Memory::Local { .. }) => match self.open().await {
+                Ok(ds) => Ok(Some(ds)),
+                Err(e) if dataset_absent(&e) => Ok(None),
+                Err(e) => Err(e),
+            },
+            MemoryState::Empty => Ok(None),
+            MemoryState::Missing => Err(self.missing_error()),
+            MemoryState::Unauthorized => Err(self.unauthorized_error()),
+            MemoryState::Offline => Err(self.offline_error()),
+        }
+    }
 }
 
 /// How the states that always refuse read to the user. One method per [`MemoryState`] variant that
@@ -165,6 +184,14 @@ impl Memory {
         anyhow!(
             "{} doesn't exist on the Hub, and funes won't create it — create the dataset repo \
              first (https://huggingface.co/new-dataset)",
+            self.label()
+        )
+    }
+
+    /// [`MemoryState::Offline`]: the remote can't be reached right now.
+    pub fn offline_error(&self) -> anyhow::Error {
+        anyhow!(
+            "{} is unreachable right now — check your connection, then try again",
             self.label()
         )
     }

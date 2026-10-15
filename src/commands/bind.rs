@@ -246,9 +246,9 @@ pub(crate) async fn bound_model(memory: &str, takes: bool) -> Result<Option<Embe
         let ds = match target.state().await? {
             MemoryState::Ready(ds) => ds,
             // A dataset with no rows still records its model.
-            MemoryState::Empty => match target.open().await {
-                Ok(ds) => ds,
-                Err(_) => return Ok(None),
+            MemoryState::Empty => match target.dataset().await? {
+                Some(ds) => ds,
+                None => return Ok(None),
             },
             MemoryState::Offline if takes => bail!(
                 "it is unreachable, and the local memory takes its embedding model: run `funes add` again once it is back"

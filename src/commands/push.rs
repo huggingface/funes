@@ -446,9 +446,7 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
         ))
     })?;
     let remote = match state {
-        MemoryState::Offline => {
-            bail!("{uri} is unreachable — can't push while offline (check your connection)")
-        }
+        MemoryState::Offline => return Err(target.offline_error()),
         MemoryState::Missing => return Err(target.missing_error()),
         MemoryState::Unauthorized => return Err(target.unauthorized_error()),
         MemoryState::Empty => None,
@@ -461,7 +459,7 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
     // next host to bind it embeds with the same.
     let local = match Memory::local().state().await? {
         MemoryState::Ready(ds) => Some(ds),
-        MemoryState::Empty if remote.is_none() => Memory::local().open().await.ok(),
+        MemoryState::Empty if remote.is_none() => Memory::local().dataset().await?,
         _ => None,
     };
     let Some(local) = local else {

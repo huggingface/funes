@@ -600,7 +600,7 @@ fn a_failed_first_push_still_records_the_install() {
     let out = funes_offline_at_a_terminal(&home, &funes_home, &log, &["add", "clyde", "acme/memory"]);
     let transcript = String::from_utf8_lossy(&out.stdout);
     assert!(!out.status.success(), "{transcript}");
-    assert!(transcript.contains("can't push while offline"), "{transcript}");
+    assert!(transcript.contains("is unreachable right now"), "{transcript}");
     assert!(fs::read_to_string(&log).unwrap().starts_with("v1\nadd"), "setup ran");
     assert!(record.exists(), "recorded all the same");
 

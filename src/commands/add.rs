@@ -330,7 +330,7 @@ where
             );
         }
     }
-    let first_add = !matches!(Memory::local().state().await, Ok(MemoryState::Ready(_)));
+    let first_add = !matches!(Memory::local().state().await?, MemoryState::Ready(_));
     if first_add
         && !confirm(
             &format!("funes will index your existing {agent} sessions, if any, so recall works (about a minute). Proceed? [Y/n] "),
