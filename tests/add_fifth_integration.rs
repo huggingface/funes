@@ -7,6 +7,7 @@
 mod support;
 
 use funes::inference::EmbeddingModel;
+use funes::memory::dataset;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -839,6 +840,30 @@ fn an_empty_bound_memory_gives_its_model() {
         &log,
         &["index", "--multilingual", "--harness", "clyde"],
     ));
+}
+
+/// Bound with no local memory, a host takes the memory's model as an add does: the next index, a
+/// hook's included, embeds as the memory does.
+#[tokio::test]
+async fn binding_a_host_with_no_local_memory_gives_it_the_memorys_model() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let funes_home = tmp.path().join("funes");
+    let log = tmp.path().join("setup.log");
+    let e5 = tmp.path().join("e5-memory");
+    support::memory_of(EmbeddingModel::MultilingualE5Small, &["给表加上索引"], &e5).await;
+    let e5 = e5.to_str().unwrap();
+
+    let out = funes(&home, &funes_home, &log, &["bind", e5]);
+    support::assert_success(&out);
+    assert!(stderr(&out).contains(&format!("the model of {e5}")), "{}", stderr(&out));
+    let local = dataset::open(&dataset::table_uri(funes_home.join("memory")), Default::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        dataset::embedding_model(&local).unwrap(),
+        EmbeddingModel::MultilingualE5Small
+    );
 }
 
 #[test]

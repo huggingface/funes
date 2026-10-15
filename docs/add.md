@@ -75,7 +75,8 @@ funes bind local                           # back to the local memory, every age
   explicit action on the Hub. An existing repository keeps its visibility.
 - A memory holds one [embedding model](index.md#sessions-not-in-english), so `funes bind` and
   `funes add` refuse a memory embedded with another model than your local memory, before anything
-  is bound.
+  is bound. On a host with no local memory yet, they create it with the memory's model, and stop
+  if they can't read that memory.
 - Publishing needs [TruffleHog](https://github.com/trufflesecurity/trufflehog): the first push
   `add` performs and every push the automation runs fail closed unless funes can scan the content
   for credentials, which agent traces commonly capture. funes looks for it on `PATH`, or at the

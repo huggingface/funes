@@ -59,20 +59,28 @@ pub async fn run(spec: &str) -> Result<()> {
 }
 
 /// Bind this host to `resolved`, `None` for its local memory: check its embedding model against
-/// the local memory's, record it, and run every installed agent's setup on it, `except` the one
-/// an add is about to install. The record stands whatever the setups do: an agent that fails to
-/// follow is reported, and `bind` again brings it along. The first push is the caller's.
+/// the local memory's (a host with none takes it), record it, and run every installed agent's
+/// setup on it, `except` the one an add is about to install. The record stands whatever the setups
+/// do: an agent that fails to follow is reported, and `bind` again brings it along. The first push
+/// is the caller's.
 pub(crate) async fn bind_host(resolved: Option<Resolved>, except: Option<&str>) -> Result<()> {
     let memory = resolved.as_ref().map(|r| r.memory.as_str());
-    if let (Some(memory), Some(here)) = (memory, index::local_memory_model().await?) {
-        if let Some(there) = bound_model(memory, false).await? {
-            if there != here {
-                bail!(
-                    "{memory} is embedded with {}, and the local memory with {}: a memory takes one embedding model",
-                    there.id(),
-                    here.id()
+    if let Some(memory) = memory {
+        let here = index::local_memory_model().await?;
+        match (bound_model(memory, here.is_none()).await?, here) {
+            (Some(there), Some(here)) if there != here => bail!(
+                "{memory} is embedded with {}, and the local memory with {}: a memory takes one embedding model",
+                there.id(),
+                here.id()
+            ),
+            (Some(there), None) => {
+                eprintln!(
+                    "funes: embedding the local memory with {}, the model of {memory}.",
+                    there.id()
                 );
+                index::ensure_local_memory(there).await?;
             }
+            _ => {}
         }
     }
     memory::bind(memory)?;
@@ -246,9 +254,9 @@ pub(crate) async fn bound_model(memory: &str, takes: bool) -> Result<Option<Embe
                 Some(ds) => ds,
                 None => return Ok(None),
             },
-            MemoryState::Offline if takes => bail!(
-                "it is unreachable, and the local memory takes its embedding model: run `funes add` again once it is back"
-            ),
+            MemoryState::Offline if takes => {
+                bail!("it is unreachable, and the local memory takes its embedding model: try again once it is back")
+            }
             MemoryState::Offline => {
                 eprintln!("note: can't reach {memory} right now — proceeding; it'll be used once it's back.");
                 return Ok(None);
