@@ -7,6 +7,7 @@
 //! `FUNES_HOME`, and cargo runs a file's tests concurrently — two such tests would clobber each
 //! other's memory.
 
+use funes::home;
 use std::collections::HashMap;
 use std::io::Write;
 
@@ -31,7 +32,7 @@ async fn recall_tolerates_a_memory_without_the_harness_column() {
         .unwrap();
 
     // Drop the harness column in place — the schema an un-migrated memory has.
-    let uri = funes::memory::dataset::table_uri(&funes::memory::dataset::local_memory_dir());
+    let uri = funes::memory::dataset::table_uri(home::memory_dir());
     let mut ds = funes::memory::dataset::open(&uri, HashMap::new()).await.unwrap();
     ds.drop_columns(&["harness"]).await.unwrap();
     assert!(

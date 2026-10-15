@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use funes::home;
 use funes::memory::dataset;
 
 fn fixture(name: &str) -> PathBuf {
@@ -15,7 +16,7 @@ fn fixture(name: &str) -> PathBuf {
 
 /// The rows the local memory holds.
 async fn stored_rows() -> usize {
-    let ds = dataset::open(&dataset::table_uri(&dataset::local_memory_dir()), Default::default())
+    let ds = dataset::open(&dataset::table_uri(home::memory_dir()), Default::default())
         .await
         .expect("the memory exists");
     dataset::scan_rows(&ds, &["id"], None, None)

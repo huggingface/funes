@@ -28,6 +28,7 @@ use anyhow::{anyhow, Context, Result};
 use hf_hub::HFError;
 use lance::dataset::Dataset;
 
+use crate::home;
 use crate::hub::{client, hf_token, is_offline_error, is_remote_shorthand, parse_hf};
 use dataset::DIM;
 
@@ -48,7 +49,7 @@ impl Memory {
     /// The default local memory (`$FUNES_HOME` / `~/.funes` → `…/memory`).
     pub fn local() -> Self {
         Memory::Local {
-            path: PathBuf::from(dataset::local_memory_dir()),
+            path: home::memory_dir(),
         }
     }
 
@@ -83,7 +84,7 @@ impl Memory {
     /// True only for the default local memory (`$FUNES_HOME`/`~/.funes`), so the hello-world
     /// fallback fires only there — never masking a missing explicit memory.
     pub fn is_default_local(&self) -> bool {
-        matches!(self, Memory::Local { path } if path.as_path() == Path::new(&dataset::local_memory_dir()))
+        matches!(self, Memory::Local { path } if *path == home::memory_dir())
     }
 
     /// Short label for output/provenance.
@@ -99,9 +100,7 @@ impl Memory {
     /// matching dimension doesn't prove a matching embedding model.
     pub async fn open(&self) -> Result<Dataset> {
         let ds = match self {
-            Memory::Local { path } => {
-                dataset::open(&dataset::table_uri(&path.to_string_lossy()), HashMap::new()).await?
-            }
+            Memory::Local { path } => dataset::open(&dataset::table_uri(path), HashMap::new()).await?,
             Memory::Remote { uri } => {
                 let (owner, name, _) = parse_hf(uri)?;
                 let token = hf_token();
@@ -296,20 +295,15 @@ fn check_compat(ds: &Dataset) -> Result<()> {
     }
 }
 
-/// The file naming the memory this host is bound to, under funes's home, as typed to `funes add`.
-/// Absent when the host is local.
-const BINDING_FILE: &str = "bound";
-
 /// The memory this host is bound to: the one `funes add` installs every agent to read and publish
 /// to, as typed to it. `None` when the host is local.
 pub fn binding() -> Result<Option<String>> {
-    binding_at(&dataset::funes_dir())
+    binding_at(&home::bound_file())
 }
 
-/// [`binding`], with funes's home at `dir`.
-pub fn binding_at(dir: &Path) -> Result<Option<String>> {
-    let path = dir.join(BINDING_FILE);
-    match std::fs::read_to_string(&path) {
+/// [`binding`], read from the file at `path`.
+pub fn binding_at(path: &Path) -> Result<Option<String>> {
+    match std::fs::read_to_string(path) {
         Ok(text) => Ok(Some(text.trim().to_string()).filter(|s| !s.is_empty())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(anyhow::Error::new(e).context(format!("reading {}", path.display()))),
@@ -318,18 +312,19 @@ pub fn binding_at(dir: &Path) -> Result<Option<String>> {
 
 /// Bind this host to `memory`, as typed; `None` makes it local.
 pub fn bind(memory: Option<&str>) -> Result<()> {
-    bind_at(&dataset::funes_dir(), memory)
+    bind_at(&home::bound_file(), memory)
 }
 
-/// [`bind`], with funes's home at `dir`.
-pub fn bind_at(dir: &Path, memory: Option<&str>) -> Result<()> {
-    let path = dir.join(BINDING_FILE);
+/// [`bind`], written to the file at `path`.
+pub fn bind_at(path: &Path, memory: Option<&str>) -> Result<()> {
     match memory {
         Some(memory) => {
-            std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-            std::fs::write(&path, format!("{memory}\n")).with_context(|| format!("writing {}", path.display()))
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+            }
+            std::fs::write(path, format!("{memory}\n")).with_context(|| format!("writing {}", path.display()))
         }
-        None => match std::fs::remove_file(&path) {
+        None => match std::fs::remove_file(path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(anyhow::Error::new(e).context(format!("removing {}", path.display()))),
@@ -345,14 +340,14 @@ mod tests {
     #[test]
     fn the_host_binding_is_kept_as_typed_until_unbound() {
         let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path().join("funes");
-        assert_eq!(binding_at(&home).unwrap(), None);
-        bind_at(&home, Some("acme/kb")).unwrap();
-        assert_eq!(binding_at(&home).unwrap().as_deref(), Some("acme/kb"));
-        bind_at(&home, None).unwrap();
-        assert_eq!(binding_at(&home).unwrap(), None);
+        let bound = tmp.path().join("funes").join("bound");
+        assert_eq!(binding_at(&bound).unwrap(), None);
+        bind_at(&bound, Some("acme/kb")).unwrap();
+        assert_eq!(binding_at(&bound).unwrap().as_deref(), Some("acme/kb"));
+        bind_at(&bound, None).unwrap();
+        assert_eq!(binding_at(&bound).unwrap(), None);
         // A local host has nothing to unbind.
-        bind_at(&home, None).unwrap();
+        bind_at(&bound, None).unwrap();
     }
 
     use arrow_array::types::Float32Type;

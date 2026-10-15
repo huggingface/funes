@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 
-use super::dataset;
+use crate::home;
 
 /// An exclusive advisory lock on a local memory, released on drop (and on process death).
 #[derive(Debug)]
@@ -60,7 +60,7 @@ impl MemoryLock {
     /// Try to take the lock of the home's own memory without blocking: `Some` if acquired, `None` if
     /// another operation holds it. A caller that wants to wait retries this itself.
     pub fn try_acquire() -> Result<Option<Self>> {
-        Ok(try_lock_file(&lockfile_path(Path::new(&dataset::local_memory_dir())))?.map(Self))
+        Ok(try_lock_file(&lockfile_path(&home::memory_dir()))?.map(Self))
     }
 
     /// Take the lock of the home's own memory, or fail if another memory operation holds it. Never
@@ -85,7 +85,7 @@ fn in_progress() -> anyhow::Error {
 /// Whether a funes up to 1.6 is writing the home's memory: those lock `store.lock` in the funes
 /// home rather than in the memory.
 pub(crate) fn older_writer_running() -> Result<bool> {
-    let path = dataset::funes_dir().join("store.lock");
+    let path = home::legacy_lock_file();
     Ok(path.exists() && try_lock_file(&path)?.is_none())
 }
 

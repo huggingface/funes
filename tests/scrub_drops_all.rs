@@ -3,6 +3,7 @@
 //! all-dropped path that the mixed-block test does not. Skipped unless trufflehog and ssh-keygen
 //! are available.
 
+use funes::home;
 use std::collections::HashMap;
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -71,7 +72,7 @@ async fn scrub_dropping_every_block_leaves_a_valid_empty_memory() {
     funes::commands::scrub::run().await.unwrap();
 
     // The empty Overwrite must leave a valid, reopenable memory with zero rows.
-    let uri = funes::memory::dataset::table_uri(&funes::memory::dataset::local_memory_dir());
+    let uri = funes::memory::dataset::table_uri(home::memory_dir());
     let ds = funes::memory::dataset::open(&uri, HashMap::new())
         .await
         .expect("memory must reopen after an all-dropped scrub");

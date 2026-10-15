@@ -52,7 +52,7 @@ async fn upload_without_indexes(repo: &HFRepository<RepoTypeDataset>, path: &str
     let staging = tempfile::tempdir().unwrap();
     let base = staging.path().join(path).join("lancedb");
     std::fs::create_dir_all(&base).unwrap();
-    let table = dataset::table_uri(&base.to_string_lossy());
+    let table = dataset::table_uri(&base);
     Dataset::write(
         RecordBatchIterator::new(batches.into_iter().map(Ok), schema),
         &table,

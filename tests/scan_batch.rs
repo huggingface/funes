@@ -8,11 +8,12 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
+use funes::home;
 use funes::memory::dataset;
 
 /// The rows the local memory holds.
 async fn stored_rows() -> usize {
-    let ds = dataset::open(&dataset::table_uri(&dataset::local_memory_dir()), Default::default())
+    let ds = dataset::open(&dataset::table_uri(home::memory_dir()), Default::default())
         .await
         .expect("the memory exists");
     dataset::scan_rows(&ds, &["id"], None, None)

@@ -173,7 +173,7 @@ pub(crate) async fn first_publish(
         staging.path().join(prefix)
     };
     std::fs::create_dir_all(&db_dir)?;
-    let table_uri = dataset::table_uri(&db_dir.to_string_lossy());
+    let table_uri = dataset::table_uri(&db_dir);
     let reader = RecordBatchIterator::new(batches.into_iter().map(Ok), schema);
     let mut ds = Dataset::write(reader, &table_uri, Some(WriteParams::default()))
         .await

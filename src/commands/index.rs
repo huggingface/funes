@@ -10,6 +10,7 @@
 
 use super::compact;
 use crate::chunk::{self, Tier};
+use crate::home;
 use crate::hub;
 use crate::inference::{self, embed_batched, Embedder};
 use crate::memory::dataset::{self, build_batch, model};
@@ -137,7 +138,7 @@ pub async fn run(args: IndexArgs) -> Result<()> {
         println!(
             "no agent converts its sessions here yet — `funes add <agent>` sets that up, \
              and funes indexes what lands in {}.",
-            spool::spool_root().display()
+            home::spool_root().display()
         );
         return Ok(());
     }
@@ -149,14 +150,14 @@ pub async fn run(args: IndexArgs) -> Result<()> {
 }
 
 pub async fn local_memory_model() -> Result<Option<inference::EmbeddingModel>> {
-    match dataset::open(&dataset::table_uri(&dataset::local_memory_dir()), HashMap::new()).await {
+    match dataset::open(&dataset::table_uri(home::memory_dir()), HashMap::new()).await {
         Ok(ds) => Ok(Some(dataset::embedding_model(&ds)?)),
         Err(_) => Ok(None),
     }
 }
 
 pub async fn ensure_local_memory(model: inference::EmbeddingModel) -> Result<()> {
-    std::fs::create_dir_all(dataset::funes_dir())?;
+    std::fs::create_dir_all(home::dir())?;
     let _lock = acquire_lock(std::io::stdin().is_terminal()).await?;
     match local_memory_model().await? {
         Some(current) if current != model => Err(anyhow!(
@@ -166,7 +167,7 @@ pub async fn ensure_local_memory(model: inference::EmbeddingModel) -> Result<()>
         )),
         Some(_) => Ok(()),
         None => {
-            dataset::create_empty(&dataset::table_uri(&dataset::local_memory_dir()), model).await?;
+            dataset::create_empty(&dataset::table_uri(home::memory_dir()), model).await?;
             Ok(())
         }
     }
@@ -465,7 +466,7 @@ fn write_index_coverage(
 
 /// Source sessions with rows still owed, as recorded by the last indexing sweep.
 pub(crate) fn local_index_coverage() -> Option<IndexCoverage> {
-    let path = dataset::funes_dir().join("index-coverage.json");
+    let path = home::index_coverage_file();
     path.is_file().then(|| IndexCoverage {
         pending: read_index_coverage(&path).pending.len(),
     })
@@ -545,13 +546,12 @@ impl Indexer {
     /// Acquire the memory lock, open (or plan to create) the dataset, load incremental state, bring
     /// up the embedder and secret scanner, and enumerate `sources`' units.
     async fn open(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: bool) -> Result<Indexer> {
-        let dir = dataset::funes_dir();
-        std::fs::create_dir_all(&dir)?;
+        std::fs::create_dir_all(home::dir())?;
         let interactive = std::io::stdin().is_terminal();
         // Held for the whole run so the stored-id read and the appends see one stable version.
         let _lock = acquire_lock(interactive).await?;
 
-        let uri = dataset::table_uri(&dataset::local_memory_dir());
+        let uri = dataset::table_uri(home::memory_dir());
         let ds = dataset::open(&uri, HashMap::new()).await.ok();
 
         let model = match &ds {
@@ -570,8 +570,8 @@ impl Indexer {
         // Incremental state: path -> {change stamp, level/refusal}; an unreadable or old-schema file →
         // empty. A first index (memory missing or empty) owes everything, whatever an old state.json
         // says — a stale one would silently skip every unit against the empty memory.
-        let state_path = dir.join("state.json");
-        let coverage_path = dir.join("index-coverage.json");
+        let state_path = home::index_state_file();
+        let coverage_path = home::index_coverage_file();
         let mut state: HashMap<String, UnitState> = if first_index {
             HashMap::new()
         } else {
@@ -1991,7 +1991,7 @@ mod tests {
     fn a_vanished_spool_key_is_retired() {
         let tmp = tempfile::tempdir().unwrap();
         let snapshot = tmp.path().join("index-coverage.json");
-        let gone = spool::spool_root().join("nobody/gone.funes.jsonl");
+        let gone = home::spool_root().join("nobody/gone.funes.jsonl");
         let kept = tmp.path().join("mine/kept.funes.jsonl");
         std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
         std::fs::write(&kept, "").unwrap();

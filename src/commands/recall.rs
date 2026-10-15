@@ -1699,7 +1699,7 @@ mod tests {
         let chunks = chunk::chunks_from_turns(&turns, &chunk::Tier::ALL, true);
         let batch = dataset::build_batch(dataset::model::ENGLISH, &chunks, None).unwrap();
         let reader = RecordBatchIterator::new([Ok(batch)], dataset::schema(dataset::model::ENGLISH));
-        let mut ds = Dataset::write(reader, &dataset::table_uri(&memory.label()), None)
+        let mut ds = Dataset::write(reader, &dataset::table_uri(memory.label()), None)
             .await
             .unwrap();
         let prefix = format!("memory: {}\nchunks: 2\nsessions: 1\n", memory.label());

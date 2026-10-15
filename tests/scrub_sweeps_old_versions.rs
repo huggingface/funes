@@ -7,6 +7,7 @@ use std::io::Write;
 use std::sync::Arc;
 
 use arrow_array::RecordBatchIterator;
+use funes::home;
 use funes::memory::{dataset, Memory};
 use lance::dataset::{Dataset, WriteMode, WriteParams};
 
@@ -42,7 +43,7 @@ async fn scrub_with_nothing_to_redact_deletes_old_versions() {
     let schema = Arc::new(arrow_schema::Schema::from(ds.schema()));
     Dataset::write(
         RecordBatchIterator::new(kept.into_iter().map(Ok), schema),
-        &dataset::table_uri(&dataset::local_memory_dir()),
+        &dataset::table_uri(home::memory_dir()),
         Some(WriteParams {
             mode: WriteMode::Overwrite,
             ..Default::default()

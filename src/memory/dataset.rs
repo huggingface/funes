@@ -1,14 +1,12 @@
 //! Every Lance call funes makes: the local memory location, the `chunks` table's schema and rows,
 //! opening a dataset, scans and searches, the columns of what they return, writes, and building
 //! the FTS/IVF indexes. A command holds the [`Dataset`] and [`RecordBatch`] values these hand out
-//! and hands them back; it names no Lance or arrow API itself. funes's home is
-//! `$FUNES_HOME`/`~/.funes` — it holds the incremental state and the local memory at `…/memory`
-//! (the `chunks` Lance dataset).
+//! and hands them back; it names no Lance or arrow API itself.
 
 use crate::chunk::{self, Chunk};
 use crate::inference::EmbeddingModel;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
@@ -63,32 +61,9 @@ const fn stored(id: &str) -> EmbeddingModel {
     }
 }
 
-/// funes's home directory: `$FUNES_HOME`, else `~/.funes`. Holds the incremental state and the
-/// local memory.
-pub fn funes_dir() -> PathBuf {
-    if let Ok(d) = std::env::var("FUNES_HOME") {
-        return PathBuf::from(d);
-    }
-    let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".funes")
-}
-
-/// Directory holding the local memory (the `chunks` dataset is at `<dir>/chunks.lance`).
-pub fn local_memory_dir() -> String {
-    let dir = funes_dir().join("memory");
-    // Migrate a pre-rename layout in place: an earlier funes kept the local memory at `<home>/store`.
-    // Rename it once, when the current path doesn't exist yet. Best-effort — a failed rename just
-    // leaves the old memory unfound, which reads as "no index yet".
-    let legacy = funes_dir().join("store");
-    if legacy.is_dir() && !dir.exists() {
-        let _ = std::fs::rename(&legacy, &dir);
-    }
-    dir.to_string_lossy().into_owned()
-}
-
 /// The `chunks` dataset URI under a memory base (a local directory or a remote URI prefix).
-pub fn table_uri(base: &str) -> String {
-    format!("{base}/{TABLE}.lance")
+pub fn table_uri(base: impl AsRef<Path>) -> String {
+    format!("{}/{TABLE}.lance", base.as_ref().display())
 }
 
 /// Open the `chunks` dataset at `uri`; `storage_options` carries the backend credentials/revision a
@@ -977,6 +952,7 @@ pub(crate) async fn fill_vectors(ds: &Dataset, ids: &[&str], vectors: &[Vec<f32>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn a_filter_literal_doubles_its_quotes() {
@@ -1045,7 +1021,7 @@ mod tests {
     #[tokio::test]
     async fn build_indexes_reports_an_fts_creation_failure() {
         let dir = tempfile::tempdir().unwrap();
-        let uri = table_uri(&dir.path().to_string_lossy());
+        let uri = table_uri(dir.path());
         let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Int64, false)]));
         let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![1]))]).unwrap();
         let mut ds = Dataset::write(RecordBatchIterator::new([Ok(batch)], schema), &uri, None)
@@ -1060,7 +1036,7 @@ mod tests {
     #[tokio::test]
     async fn fts_coverage_detects_rows_left_by_an_unfinished_finalization() {
         let dir = tempfile::tempdir().unwrap();
-        let uri = table_uri(&dir.path().to_string_lossy());
+        let uri = table_uri(dir.path());
         let chunks = chunk::chunks_from_turns(&turns(0, 2), &chunk::Tier::ALL, true);
         let mut ds = Dataset::write(
             reader(build_batch(model::ENGLISH, &chunks[..1], None).unwrap()),
@@ -1098,7 +1074,7 @@ mod tests {
     #[tokio::test]
     async fn vector_training_threshold_counts_embedded_rows() {
         let dir = tempfile::tempdir().unwrap();
-        let uri = table_uri(&dir.path().to_string_lossy());
+        let uri = table_uri(dir.path());
         let mut ds = Dataset::write(reader(embedded(&turns(0, 255))), &uri, None)
             .await
             .unwrap();
@@ -1133,7 +1109,7 @@ mod tests {
     #[tokio::test]
     async fn build_indexes_refreshes_an_existing_index_instead_of_rebuilding_it() {
         let dir = tempfile::tempdir().unwrap();
-        let uri = table_uri(&dir.path().to_string_lossy());
+        let uri = table_uri(dir.path());
         let mut ds = Dataset::write(
             reader(embedded(&turns(0, TRAINABLE))),
             &uri,
@@ -1234,7 +1210,7 @@ mod tests {
             max_rows_per_file: TRAINABLE / 2,
             ..Default::default()
         };
-        let uri = table_uri(&dir.to_string_lossy());
+        let uri = table_uri(dir);
         let mut ds = Dataset::write(reader(embedded(&turns(0, TRAINABLE))), &uri, Some(params))
             .await
             .unwrap();
@@ -1279,7 +1255,7 @@ mod tests {
     #[tokio::test]
     async fn compact_fragments_leaves_a_large_fragment_with_deletions_alone() {
         let dir = tempfile::tempdir().unwrap();
-        let uri = table_uri(&dir.path().to_string_lossy());
+        let uri = table_uri(dir.path());
         let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
         let text: Vec<String> = (0..3 * FRAGMENT_ROWS).map(|i| format!("row {i}")).collect();
         let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(StringArray::from(text))]).unwrap();
@@ -1318,7 +1294,7 @@ mod tests {
         let chunks = chunk::chunks_from_turns(&zh, &chunk::Tier::ALL, true);
         for (model, found) in [(model::ENGLISH, false), (EmbeddingModel::MultilingualE5Small, true)] {
             let dir = tempfile::tempdir().unwrap();
-            let uri = table_uri(&dir.path().to_string_lossy());
+            let uri = table_uri(dir.path());
             let batch = build_batch(model, &chunks, None).unwrap();
             let mut ds = Dataset::write(RecordBatchIterator::new(vec![Ok(batch)], schema(model)), &uri, None)
                 .await
@@ -1340,7 +1316,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let columns = build_batch(model, &chunks, None).unwrap().columns().to_vec();
             let batch = RecordBatch::try_new(stamp.clone(), columns).unwrap();
-            let uri = table_uri(&dir.path().to_string_lossy());
+            let uri = table_uri(dir.path());
             let ds = Dataset::write(RecordBatchIterator::new(vec![Ok(batch)], stamp), &uri, None)
                 .await
                 .unwrap();
@@ -1352,9 +1328,7 @@ mod tests {
     async fn an_empty_memory_is_stamped_with_its_model() {
         let dir = tempfile::tempdir().unwrap();
         let e5 = EmbeddingModel::MultilingualE5Small;
-        let ds = create_empty(&table_uri(&dir.path().to_string_lossy()), e5)
-            .await
-            .unwrap();
+        let ds = create_empty(&table_uri(dir.path()), e5).await.unwrap();
         assert_eq!(ds.count_rows(None).await.unwrap(), 0);
         assert_eq!(embedding_model(&ds).unwrap(), e5);
     }
@@ -1453,7 +1427,7 @@ mod tests {
     #[tokio::test]
     async fn build_indexes_rebuilds_an_index_whole_when_its_refresh_fails() {
         let dir = tempfile::tempdir().unwrap();
-        let uri = table_uri(&dir.path().to_string_lossy());
+        let uri = table_uri(dir.path());
         let mut ds = Dataset::write(
             reader(embedded(&turns(0, TRAINABLE))),
             &uri,
@@ -1605,7 +1579,7 @@ mod tests {
     #[tokio::test]
     async fn fill_vectors_lands_the_embeddings_without_moving_rows() {
         let dir = tempfile::tempdir().unwrap();
-        let uri = table_uri(&dir.path().to_string_lossy());
+        let uri = table_uri(dir.path());
         let chunks = chunk::chunks_from_turns(&turns(0, 3), &chunk::Tier::ALL, true);
         let unembedded = build_batch(model::ENGLISH, &chunks, None).unwrap();
         let ds = Dataset::write(reader(unembedded), &uri, Some(WriteParams::default()))

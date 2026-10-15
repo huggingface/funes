@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use arrow_array::{Array, StringArray};
+use funes::home;
 use funes::memory::dataset;
 
 fn fixture(name: &str) -> PathBuf {
@@ -22,7 +23,7 @@ async fn index(path: &Path) -> anyhow::Result<()> {
 
 /// The `session_id` of every row the local memory holds.
 async fn stored_rows() -> Vec<String> {
-    let ds = dataset::open(&dataset::table_uri(&dataset::local_memory_dir()), Default::default())
+    let ds = dataset::open(&dataset::table_uri(home::memory_dir()), Default::default())
         .await
         .expect("the memory exists");
     let mut out = Vec::new();
@@ -39,7 +40,7 @@ async fn stored_sessions() -> BTreeSet<String> {
 
 /// `(turn_uuid, repo)` of every row the local memory holds.
 async fn stored_repos() -> Vec<(String, String)> {
-    let ds = dataset::open(&dataset::table_uri(&dataset::local_memory_dir()), Default::default())
+    let ds = dataset::open(&dataset::table_uri(home::memory_dir()), Default::default())
         .await
         .expect("the memory exists");
     let mut out = Vec::new();
@@ -158,7 +159,7 @@ async fn turns_files_are_indexed_and_invalid_ones_rejected() {
 }
 
 async fn stored_blocks(home: &Path) -> Vec<String> {
-    let uri = dataset::table_uri(&home.join("memory").to_string_lossy());
+    let uri = dataset::table_uri(home.join("memory"));
     let ds = dataset::open(&uri, Default::default()).await.unwrap();
     let mut blocks = Vec::new();
     for batch in dataset::scan_rows(&ds, &["block_type"], None, None).await.unwrap() {

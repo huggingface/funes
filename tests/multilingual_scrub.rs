@@ -6,6 +6,7 @@ mod support;
 use std::process::Command;
 
 use arrow_array::{Array, FixedSizeListArray, Float32Array, StringArray};
+use funes::home;
 use funes::inference::{self, EmbeddingModel};
 use funes::memory::dataset;
 
@@ -31,7 +32,7 @@ async fn scrub_rewrites_with_the_memorys_model() {
     std::fs::remove_file(&keyfile).unwrap();
 
     let e5 = EmbeddingModel::MultilingualE5Small;
-    support::memory_of(e5, &["给表加上索引"], dataset::local_memory_dir().as_ref()).await;
+    support::memory_of(e5, &["给表加上索引"], &home::memory_dir()).await;
     let turns = home.path().join("zh.funes.jsonl");
     let line = serde_json::json!({
         "session_id": "zh", "turn_uuid": "t0", "seq": 0, "ts": "2026-01-02T00:00:00Z",
@@ -44,7 +45,7 @@ async fn scrub_rewrites_with_the_memorys_model() {
     std::env::remove_var("FUNES_TRUFFLEHOG");
     funes::commands::scrub::run().await.unwrap();
 
-    let ds = dataset::open(&dataset::table_uri(&dataset::local_memory_dir()), Default::default())
+    let ds = dataset::open(&dataset::table_uri(home::memory_dir()), Default::default())
         .await
         .unwrap();
     assert_eq!(dataset::embedding_model(&ds).unwrap(), e5);

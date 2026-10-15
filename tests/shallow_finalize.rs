@@ -107,7 +107,7 @@ async fn text_matches(ds: &Dataset) -> Vec<String> {
 async fn an_empty_index_run_repairs_missing_fts_and_then_is_a_noop() {
     let home = tempfile::tempdir().unwrap();
     let source = tempfile::tempdir().unwrap();
-    let uri = dataset::table_uri(&home.path().join("memory").to_string_lossy());
+    let uri = dataset::table_uri(home.path().join("memory"));
     let row = memory_row(ROW_ID, 0, true);
     let reader = RecordBatchIterator::new([Ok(row.clone())], row.schema());
     let before = Dataset::write(reader, &uri, None).await.unwrap();
@@ -138,7 +138,7 @@ async fn an_empty_index_run_repairs_missing_fts_and_then_is_a_noop() {
 async fn an_embedding_only_run_refreshes_the_existing_vector_index() {
     let home = tempfile::tempdir().unwrap();
     let source = tempfile::tempdir().unwrap();
-    let uri = dataset::table_uri(&home.path().join("memory").to_string_lossy());
+    let uri = dataset::table_uri(home.path().join("memory"));
     // Lance needs at least 256 embedded rows to train PQ. All rows share one fragment, including
     // the null vector, so filling it later must refresh coverage over that existing fragment.
     let mut rows: Vec<_> = (0..300).map(|i| memory_row(&format!("{i:016x}"), i, true)).collect();

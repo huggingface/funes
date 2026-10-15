@@ -61,6 +61,43 @@ fn commands_leave_lance_to_dataset() {
     );
 }
 
+/// `home.rs` is the one reader of `$FUNES_HOME`: every path under the home comes from it.
+#[test]
+fn only_home_reads_funes_home() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut offences = Vec::new();
+    for entry in walk(&root) {
+        if entry.ends_with("home.rs") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&entry).unwrap();
+        for (n, line) in text.lines().enumerate() {
+            if line.contains("var(\"FUNES_HOME\")") || line.contains("var_os(\"FUNES_HOME\")") {
+                offences.push(format!("{}:{}", entry.display(), n + 1));
+            }
+        }
+    }
+    assert!(
+        offences.is_empty(),
+        "$FUNES_HOME read outside home.rs:\n{}",
+        offences.join("\n")
+    );
+}
+
+/// Every `.rs` file under `dir`.
+fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            files.extend(walk(&path));
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            files.push(path);
+        }
+    }
+    files
+}
+
 /// The sources the Lance rule covers: every command, and the sketch selector.
 fn command_sources() -> Vec<std::path::PathBuf> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");

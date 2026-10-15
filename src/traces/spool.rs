@@ -6,7 +6,7 @@
 use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
 
-use crate::memory::dataset;
+use crate::home;
 
 /// Whether `s` is an id funes accepts: lowercase `[a-z0-9_-]`, non-empty. One charset serves the
 /// integration id, which names a directory funes creates, and the `harness` facet a turn carries,
@@ -17,14 +17,9 @@ pub fn is_id(s: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
 }
 
-/// The directory holding every integration's spool, `$FUNES_HOME/spool`.
-pub fn spool_root() -> PathBuf {
-    dataset::funes_dir().join("spool")
-}
-
 /// Where the integration `id` writes its turns files.
 pub fn spool_dir(id: &str) -> PathBuf {
-    spool_root().join(id)
+    home::spool_root().join(id)
 }
 
 /// Whether `path` is a spool directory itself, not a link to one: funes drains only what resolves
@@ -36,14 +31,14 @@ fn is_spool_dir(path: &Path) -> bool {
 /// Whether `path` names a place in the spool, by its spelling alone: what a record of a file that
 /// may be gone can say. Ownership of a file that exists is `is_spool`'s to decide.
 pub fn names_spool(path: &Path) -> bool {
-    path.starts_with(spool_root())
+    path.starts_with(home::spool_root())
 }
 
 /// Whether `path` is inside a spool funes resolved for itself, rather than a path someone named.
 /// funes deletes what it owns here, so the answer is by what the paths resolve to: a `..` or a
 /// symlink cannot make a file elsewhere look like the spool's.
 pub fn is_spool(path: &Path) -> bool {
-    is_under(&spool_root(), path)
+    is_under(&home::spool_root(), path)
 }
 
 fn is_under(root: &Path, path: &Path) -> bool {
@@ -70,7 +65,7 @@ pub fn select(id: &str) -> Result<PathBuf> {
 /// The stamp a refused `--harness <id>` leaves, `<root>/<id>.missing`: a file, which the sweep
 /// (listing directories) never sees.
 fn missing_stamp(id: &str) -> PathBuf {
-    spool_root().join(format!("{id}.missing"))
+    home::spool_root().join(format!("{id}.missing"))
 }
 
 /// Record that `id`'s spool was asked for and does not exist. Only a hook asks unattended, and only
@@ -80,7 +75,7 @@ pub fn note_missing(id: &str) -> Result<()> {
     if !is_id(id) {
         bail!("{id:?} is not an integration id (lowercase [a-z0-9_-])");
     }
-    std::fs::create_dir_all(spool_root())?;
+    std::fs::create_dir_all(home::spool_root())?;
     std::fs::write(missing_stamp(id), "")?;
     Ok(())
 }
@@ -97,7 +92,7 @@ pub fn forget_missing(id: &str) -> Result<()> {
 
 /// The ids asked for whose spool still does not exist, in id order.
 pub fn missing() -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(spool_root()) else {
+    let Ok(entries) = std::fs::read_dir(home::spool_root()) else {
         return Vec::new();
     };
     let mut ids: Vec<String> = entries
@@ -112,7 +107,7 @@ pub fn missing() -> Vec<String> {
 
 /// Every spool a producer has created, in id order — what a no-argument `funes index` sweeps.
 pub fn spools() -> Vec<PathBuf> {
-    spools_in(&spool_root())
+    spools_in(&home::spool_root())
 }
 
 fn spools_in(root: &Path) -> Vec<PathBuf> {

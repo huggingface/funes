@@ -2,6 +2,7 @@
 //! rows themselves — so it cleans sessions whose source transcripts are already gone, which
 //! re-indexing cannot. Operates only on the local memory; it does not touch a published remote.
 
+use crate::home;
 use crate::inference::{self, embed_batched, Embedder};
 use crate::memory::dataset::{self, build_batch};
 use crate::memory::lock;
@@ -20,7 +21,7 @@ use std::time::Instant;
 pub async fn run() -> Result<()> {
     // scrub rewrites the whole table, so hold the memory lock to be the sole writer.
     let _lock = lock::MemoryLock::acquire()?;
-    let uri = dataset::table_uri(&dataset::local_memory_dir());
+    let uri = dataset::table_uri(home::memory_dir());
     let Ok(ds) = dataset::open(&uri, HashMap::new()).await else {
         println!("no local memory to scrub");
         return Ok(());

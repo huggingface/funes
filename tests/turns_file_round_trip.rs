@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use arrow_array::{Array, ArrayRef, Int64Array, StringArray};
 use funes::commands::index::run_index;
 use funes::commands::recall::{self, SessionFilter};
+use funes::home;
 use funes::memory::{dataset, Memory};
 use funes::traces::{funes_jsonl, Turn};
 use tokio::sync::Mutex;
@@ -74,7 +75,7 @@ fn cell(col: &ArrayRef, i: usize) -> String {
 
 /// The local memory's rows over [`COLS`], one tab-joined line each, sorted.
 async fn rows() -> Vec<String> {
-    let ds = dataset::open(&dataset::table_uri(&dataset::local_memory_dir()), Default::default())
+    let ds = dataset::open(&dataset::table_uri(home::memory_dir()), Default::default())
         .await
         .expect("the memory exists");
     let mut out = Vec::new();

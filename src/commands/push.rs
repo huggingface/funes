@@ -20,6 +20,7 @@
 //! What a push ships is the embedded chunks the remote doesn't hold, optionally restricted to the
 //! sessions named with `--sessions`. Rows awaiting embedding stay local until a later push.
 
+use crate::home;
 use crate::hub;
 use crate::memory::card::{self, CardAction, CardCtx};
 use crate::memory::dataset::{self, RecordBatch};
@@ -61,14 +62,13 @@ pub(crate) fn is_read_only(err: &anyhow::Error) -> bool {
 /// Per-remote local receipt of chunk ids this host has observed on that remote. It is deliberately
 /// local: a shared remote's sessions from other hosts say nothing about this host's push backlog.
 fn pushed_path(memory_uri: &str) -> PathBuf {
-    dataset::funes_dir().join("pushed").join(sanitize(memory_uri))
+    home::pushed_dir().join(sanitize(memory_uri))
 }
 
 /// The file a publish to `memory_uri` locks for its whole run — not the receipt's lock, which
 /// [`record_pushed`] takes per write.
 fn push_lock_path(memory_uri: &str) -> PathBuf {
-    dataset::funes_dir()
-        .join("pushed")
+    home::pushed_dir()
         .join(".locks")
         .join(format!("{}.push", sanitize(memory_uri)))
 }
@@ -1121,7 +1121,7 @@ mod tests {
             turn_sess("reviewed", 0, "a decision we can share"),
             turn_sess("private", 1, "an internal discussion"),
         ]);
-        let uri = dataset::table_uri(&dir.to_string_lossy());
+        let uri = dataset::table_uri(dir);
         let schema = b.schema();
         let reader = RecordBatchIterator::new(vec![Ok(b)], schema);
         Dataset::write(reader, &uri, Some(WriteParams::default()))
@@ -1137,7 +1137,7 @@ mod tests {
         let e5_model = crate::inference::EmbeddingModel::MultilingualE5Small;
         let chunks = chunk::chunks_from_turns(&[turn_sess("s", 0, "un passage")], &chunk::Tier::ALL, true);
         let b = dataset::build_batch(e5_model, &chunks, None).unwrap();
-        let uri = dataset::table_uri(&other.path().to_string_lossy());
+        let uri = dataset::table_uri(other.path());
         let e5 = Dataset::write(
             RecordBatchIterator::new(vec![Ok(b)], dataset::schema(e5_model)),
             &uri,
@@ -1179,7 +1179,7 @@ mod tests {
             vec![Ok(dataset::build_batch(dataset::model::ENGLISH, &chunks, None).unwrap())],
             dataset::schema(dataset::model::ENGLISH),
         );
-        let uri = dataset::table_uri(&dir.path().to_string_lossy());
+        let uri = dataset::table_uri(dir.path());
         let ds = Dataset::write(reader, &uri, None).await.unwrap();
         let ds = dataset::fill_vectors(&ds, &[&chunks[0].id], &[vec![1.0; dataset::DIM as usize]])
             .await
@@ -1217,7 +1217,7 @@ mod tests {
         };
         let dir = tempfile::tempdir().unwrap();
         let (b, _) = batch(&[turn_sess("clean", 0, "notes on parsers"), turn_sess("dirty", 1, &key)]);
-        let uri = dataset::table_uri(&dir.path().to_string_lossy());
+        let uri = dataset::table_uri(dir.path());
         let schema = b.schema();
         let reader = RecordBatchIterator::new(vec![Ok(b)], schema);
         Dataset::write(reader, &uri, Some(WriteParams::default()))
@@ -1257,7 +1257,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (b, _) = batch(&[turn_sess("clean", 0, "notes on parsers"), turn_sess("dirty", 1, &key)]);
         assert!(b.num_rows() > 2, "the secret must span multiple chunks");
-        let uri = dataset::table_uri(&dir.path().to_string_lossy());
+        let uri = dataset::table_uri(dir.path());
         let schema = b.schema();
         let reader = RecordBatchIterator::new(vec![Ok(b.slice(0, 1))], schema.clone());
         let mut ds = Dataset::write(reader, &uri, Some(WriteParams::default()))
@@ -1357,7 +1357,7 @@ mod tests {
         // Many fragments and many ids: the shape whose `id IN (…)` filter blew up, so the selection
         // must stay correct where it matters most.
         let dir = tempfile::tempdir().unwrap();
-        let uri = dataset::table_uri(&dir.path().to_string_lossy());
+        let uri = dataset::table_uri(dir.path());
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("payload", DataType::UInt64, false),

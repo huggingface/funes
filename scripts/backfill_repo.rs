@@ -11,6 +11,7 @@
 use anyhow::{Context, Result};
 use arrow_array::{RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
+use funes::home;
 use funes::memory::{dataset, lock};
 use funes::traces::repo;
 use lance::dataset::{BatchUDF, Dataset, NewColumnTransform};
@@ -22,7 +23,7 @@ use std::sync::Arc;
 async fn main() -> Result<()> {
     // add_columns is a schema-evolution commit — hold the memory lock to be the sole writer.
     let _lock = lock::MemoryLock::acquire()?;
-    let uri = dataset::table_uri(&dataset::local_memory_dir());
+    let uri = dataset::table_uri(home::memory_dir());
     let Ok(mut ds) = dataset::open(&uri, HashMap::new()).await else {
         println!("no local memory to backfill");
         return Ok(());

@@ -4,6 +4,7 @@
 
 use crate::chunk::OVERLAP;
 use crate::commands::recall;
+use crate::home;
 use crate::memory::dataset;
 use crate::memory::Memory;
 use anyhow::{bail, Context, Result};
@@ -258,7 +259,7 @@ pub async fn generate_many_cached(
     session_ids: &[String],
     options: SketchOptions,
 ) -> Result<SketchBatch> {
-    let cache = dataset::funes_dir().join("cache/session-sketch");
+    let cache = home::sketch_cache_dir();
     generate_many_inner(memory, session_ids, options, Some(&cache)).await
 }
 

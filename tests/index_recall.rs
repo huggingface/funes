@@ -26,7 +26,7 @@ fn write_transcript(source: &std::path::Path) -> (String, String) {
 async fn index_then_read_surface() {
     let db_dir = tempfile::tempdir().unwrap();
     let source = tempfile::tempdir().unwrap();
-    // db::funes_dir() reads $FUNES_HOME; point the whole read/write surface at the temp dir.
+    // home::dir() reads $FUNES_HOME; point the whole read/write surface at the temp dir.
     std::env::set_var("FUNES_HOME", db_dir.path());
     let (session, workdir) = write_transcript(source.path());
 

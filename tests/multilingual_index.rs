@@ -3,11 +3,12 @@
 
 use arrow_array::{Array, FixedSizeListArray, Float32Array, StringArray};
 use funes::commands::index;
+use funes::home;
 use funes::inference::{self, EmbeddingModel};
 use funes::memory::dataset;
 
 async fn memory() -> lance::Dataset {
-    dataset::open(&dataset::table_uri(&dataset::local_memory_dir()), Default::default())
+    dataset::open(&dataset::table_uri(home::memory_dir()), Default::default())
         .await
         .unwrap()
 }
@@ -54,7 +55,7 @@ async fn a_multilingual_memory_is_created_then_kept() {
     assert!(err.contains(e5.id()), "{err}");
 
     // The incremental state still records the directory as indexed.
-    std::fs::remove_dir_all(dataset::local_memory_dir()).unwrap();
+    std::fs::remove_dir_all(home::memory_dir()).unwrap();
     index::ensure_local_memory(e5).await.unwrap();
     index::run_index(&turns, false, None).await.unwrap();
     assert_eq!(memory().await.count_rows(None).await.unwrap(), 1);

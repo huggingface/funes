@@ -105,7 +105,7 @@ async fn migrate_one(spec: &str, apply: bool) -> Result<String> {
     let memory = Memory::parse(spec.trim());
     match &memory {
         Memory::Local { path } => {
-            let uri = dataset::table_uri(&path.to_string_lossy());
+            let uri = dataset::table_uri(path);
             migrate_local(&uri, memory.is_default_local(), apply).await
         }
         Memory::Remote { uri } => migrate_remote(uri, apply).await,

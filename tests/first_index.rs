@@ -4,6 +4,7 @@
 //! other integration tests'.
 
 use funes::commands::recall;
+use funes::home;
 use funes::memory::Memory;
 use funes::traces::spool;
 use std::io::Write;
@@ -50,8 +51,8 @@ async fn seed_finishes_a_small_history_and_a_rerun_is_a_noop() {
     // that exists.
     let src = spool::spool_dir("clyde");
     std::fs::create_dir_all(&src).unwrap();
-    std::fs::create_dir_all(spool::spool_root().join("Not An Id")).unwrap();
-    std::fs::write(spool::spool_root().join(".DS_Store"), b"").unwrap();
+    std::fs::create_dir_all(home::spool_root().join("Not An Id")).unwrap();
+    std::fs::write(home::spool_root().join(".DS_Store"), b"").unwrap();
     assert_eq!(spool::spools(), vec![src.clone()]);
     assert_eq!(spool::select("clyde").unwrap(), src);
     // Refused as an install this funes does not match; the wording is stale_install_notice's.

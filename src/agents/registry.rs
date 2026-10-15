@@ -14,8 +14,8 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
+use crate::home;
 use crate::hub;
-use crate::memory::dataset;
 use crate::traces::spool;
 
 /// The integration contract this funes speaks.
@@ -537,7 +537,7 @@ impl Integration {
         let status = Command::new(&setup)
             .args(args)
             .env("FUNES_BIN", &funes)
-            .env("FUNES_HOME", dataset::funes_dir())
+            .env("FUNES_HOME", home::dir())
             .env("FUNES_AGENT_ID", &self.manifest.id)
             .status()
             .with_context(|| format!("running `{command}`"))?;
@@ -1592,7 +1592,7 @@ mod tests {
         let ran = std::fs::read_to_string(dir.join("ran")).unwrap();
         let lines: Vec<&str> = ran.lines().collect();
         assert_eq!(&lines[..3], &["add", "acme/kb", "pi"]);
-        assert_eq!(lines[3], dataset::funes_dir().to_string_lossy());
+        assert_eq!(lines[3], home::dir().to_string_lossy());
         assert_eq!(lines[4], "funes", "the command an integration records");
     }
 
