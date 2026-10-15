@@ -7,12 +7,23 @@ use crate::memory::dataset;
 use crate::memory::lock;
 use crate::memory::{Memory, MemoryState};
 use crate::ui;
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use lance::Dataset;
 use std::collections::HashMap;
 
 /// Compact `target`, local or remote, and report the outcome.
 pub async fn run(target: Memory) -> Result<String> {
+    let label = target.label();
+    compact(target).await.map_err(|e| {
+        if push::is_read_only(&e) {
+            anyhow!("{label} is read-only for your token — compacting it needs write access (check your HF token)")
+        } else {
+            e
+        }
+    })
+}
+
+async fn compact(target: Memory) -> Result<String> {
     match target.state().await? {
         MemoryState::Offline => bail!(
             "{} is unreachable — can't compact it while offline (check your connection)",

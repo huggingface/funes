@@ -1,12 +1,13 @@
-//! The `ask` wait animation harness: a background thread that plays an [`Animation`] in a fixed
-//! band of stderr while the agent works, then erases it without trace once the answer is ready.
+//! The wait display: a background thread that redraws a status line with a spinner and a live
+//! label on stderr while a command works, under an [`Animation`] band when the wait is long
+//! (`ask`), then erases it without trace once the result is ready.
 //!
 //! The harness is animation-agnostic — it owns the thread, the live status line, palette
 //! detection, the TTY gating, the compact fallbacks, and the erase. Each visual lives behind the
 //! [`Animation`] trait in its own module ([`drift`], [`emoji`], [`sine`]); [`animation`] picks
 //! one per run. To add another, implement the trait in a new module and fold it into that
 //! choice. Drawing is plain ANSI on the normal screen — no raw mode, no alternate screen — so an
-//! interrupt mid-ask can't wedge the terminal.
+//! interrupt mid-wait can't wedge the terminal.
 
 mod drift;
 mod emoji;
@@ -65,8 +66,9 @@ trait Animation: Send {
     fn render(&self, width: usize, palette: Palette) -> Vec<String>;
 }
 
-/// The animated wait display; the status label is swapped live via [`Banner::set`], and each
-/// swap excites the animation. Dropping it stops and erases the animation.
+/// The wait display; the status label is swapped live via [`Banner::set`], and each swap excites
+/// the animation. Dropping it stops and erases the display. Off a terminal nothing is drawn, so
+/// piped and scripted runs stay silent.
 pub struct Banner {
     label: Arc<Mutex<String>>,
     pulse: Arc<AtomicBool>,
@@ -75,39 +77,57 @@ pub struct Banner {
 }
 
 impl Banner {
-    pub fn start(label: &str) -> Option<Banner> {
-        if !std::io::stderr().is_terminal() {
-            return None;
-        }
+    /// The long wait: an animation band over the status line.
+    pub fn start(label: &str) -> Banner {
+        Banner::play(label, Some(animation()))
+    }
+
+    /// The short wait: the status line alone.
+    pub fn spinner(label: &str) -> Banner {
+        Banner::play(label, None)
+    }
+
+    fn play(label: &str, mut anim: Option<Box<dyn Animation>>) -> Banner {
         let label = Arc::new(Mutex::new(label.to_string()));
         let pulse = Arc::new(AtomicBool::new(false));
         let stop = Arc::new(AtomicBool::new(false));
+        if !std::io::stderr().is_terminal() {
+            return Banner {
+                label,
+                pulse,
+                stop,
+                handle: None,
+            };
+        }
         let (l, p, s) = (label.clone(), pulse.clone(), stop.clone());
         let palette = Palette::detect();
         let handle = std::thread::spawn(move || {
-            let mut anim = animation();
             let mut t = 0.0f64;
             let mut drawn = 0usize;
             let mut last = Instant::now();
             while !s.load(Ordering::Relaxed) {
                 if p.swap(false, Ordering::Relaxed) {
-                    anim.excite();
+                    if let Some(anim) = anim.as_mut() {
+                        anim.excite();
+                    }
                 }
                 let label = l.lock().map(|g| g.clone()).unwrap_or_default();
-                redraw(&mut drawn, &compose(&*anim, t, term_width(), palette, &label));
+                redraw(&mut drawn, &compose(anim.as_deref(), t, term_width(), palette, &label));
                 std::thread::sleep(FRAME);
                 let dt = std::mem::replace(&mut last, Instant::now()).elapsed().as_secs_f64();
                 t += dt;
-                anim.advance(dt);
+                if let Some(anim) = anim.as_mut() {
+                    anim.advance(dt);
+                }
             }
             finish(drawn);
         });
-        Some(Banner {
+        Banner {
             label,
             pulse,
             stop,
             handle: Some(handle),
-        })
+        }
     }
 
     /// Swap the label; the next frame shows it, and a changed label excites the animation.
@@ -130,12 +150,12 @@ impl Drop for Banner {
     }
 }
 
-/// One frame: the animation's rows indented under the status line, or — off truecolor or on a
-/// narrow terminal — just the one-line spinner, no animation.
-fn compose(anim: &dyn Animation, t: f64, width: usize, palette: Palette, label: &str) -> Vec<String> {
-    if palette == Palette::Mono || width < MIN_FULL_W {
+/// One frame: the animation's rows indented under the status line, or — with no animation, off
+/// truecolor or on a narrow terminal — just the one-line spinner.
+fn compose(anim: Option<&dyn Animation>, t: f64, width: usize, palette: Palette, label: &str) -> Vec<String> {
+    let Some(anim) = anim.filter(|_| palette != Palette::Mono && width >= MIN_FULL_W) else {
         return vec![status_line(t, palette, width, label)];
-    }
+    };
     let cw = band_cols(width);
     let mut lines: Vec<String> = anim
         .render(cw, palette)
@@ -347,7 +367,7 @@ mod tests {
 
     #[test]
     fn full_frame_is_indented_animation_then_status() {
-        let lines = compose(&Still(2), 2.0, 100, Palette::True, "recalling…");
+        let lines = compose(Some(&Still(2)), 2.0, 100, Palette::True, "recalling…");
         assert_eq!(lines.len(), 3, "two animation rows plus the status line");
         for row in &lines[..2] {
             assert!(
@@ -365,14 +385,26 @@ mod tests {
 
     #[test]
     fn narrow_terminal_falls_back_to_one_line() {
-        let lines = compose(&Still(2), 0.0, MIN_FULL_W - 1, Palette::True, "thinking…");
+        let lines = compose(Some(&Still(2)), 0.0, MIN_FULL_W - 1, Palette::True, "thinking…");
         assert_eq!(lines.len(), 1);
         assert!(plain(&lines[0]).contains("thinking…"));
     }
 
     #[test]
+    fn a_spinner_is_the_status_line_alone() {
+        let lines = compose(None, 2.0, 100, Palette::True, "recalling…");
+        assert_eq!(lines.len(), 1);
+        let status = plain(&lines[0]);
+        assert!(!status.starts_with(INDENT), "no band, no indent");
+        assert!(
+            status.contains("recalling…") && status.trim_end().ends_with("2s"),
+            "{status}"
+        );
+    }
+
+    #[test]
     fn mono_gets_plain_text() {
-        let lines = compose(&Still(2), 0.0, 120, Palette::Mono, "x");
+        let lines = compose(Some(&Still(2)), 0.0, 120, Palette::Mono, "x");
         assert_eq!(lines.len(), 1);
         assert_eq!(plain(&lines[0]), lines[0], "no escapes under NO_COLOR");
     }

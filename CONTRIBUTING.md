@@ -72,8 +72,8 @@ fine; CI runs them with the repository secret.
 - Doc-comment the public surface; comments carry the non-obvious *why*, not a restatement of
   the code.
 
-- **One directory per layer**, each with one job — `src/` holds `main.rs`, `lib.rs` and the layer
-  roots, nothing else:
+- **One directory per layer**, each with one job — `src/` holds `main.rs` (dispatch only), `lib.rs`
+  and the layer roots, nothing else:
 
   | Layer | Job |
   |---|---|
@@ -89,6 +89,8 @@ fine; CI runs them with the repository secret.
   Where does a new function go? Names an HF concept → transport. Names Lance → mechanics.
   Answers *what is this memory, what state is it in* → domain. Decides *what to do about it* →
   command.
+
+  `tests/layering.rs` checks the placement rules a build does not.
 
   Commands **ask** the domain for state — `Memory::state()` returns a `MemoryState`, and the
   message for a state a command can only stop on comes from the memory itself

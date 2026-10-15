@@ -14,9 +14,11 @@ use crate::hub;
 use crate::inference::{self, embed_batched, Embedder};
 use crate::memory::dataset::{self, build_batch, model, schema};
 use crate::memory::lock;
+use crate::memory::Memory;
 use crate::scan;
 use crate::traces::spool;
 use crate::traces::{self, repo, source};
+use crate::ui::prompt::confirm;
 use anyhow::{anyhow, Context, Result};
 use arrow_array::{Array, RecordBatchIterator, StringArray, UInt64Array};
 use futures::TryStreamExt;
@@ -48,6 +50,104 @@ async fn acquire_lock(interactive: bool) -> Result<lock::MemoryLock> {
     Err(anyhow!(
         "another funes memory operation is in progress; retry in a moment"
     ))
+}
+
+/// What `funes index` was asked, as the CLI help describes each.
+pub struct IndexArgs {
+    pub path: Option<String>,
+    pub harness: Option<String>,
+    pub check: bool,
+    pub no_thinking: bool,
+    pub limit: Option<usize>,
+    pub yes: bool,
+    pub multilingual: bool,
+}
+
+/// `funes index`: validate a path, or index a path, a Hub trace repo, one integration's spool, or
+/// every spool. A spool refresh (no path: the per-turn hook, or a terminal's "keep me fresh") is
+/// budgeted and rows-first; an explicit path or Hub repo is indexed in full.
+pub async fn run(args: IndexArgs) -> Result<()> {
+    let IndexArgs {
+        path,
+        harness,
+        check,
+        no_thinking,
+        limit,
+        yes,
+        multilingual,
+    } = args;
+    // `--harness` selects a spool; a path's turns name their own harness.
+    if let (Some(p), Some(_)) = (&path, &harness) {
+        return Err(anyhow!(
+            "`--harness` selects an integration's spool and does not apply to {p}: a turns file names its own harness"
+        ));
+    }
+    if check {
+        let path = path.ok_or_else(|| anyhow!("`--check` validates a PATH, and none was given"))?;
+        let report = self::check(&PathBuf::from(&path), no_thinking, limit)?;
+        print!("{}", report.text);
+        if !report.all_accepted() {
+            return Err(anyhow!("{} unit(s) rejected", report.rejected));
+        }
+        return Ok(());
+    }
+    let budgeted = path.is_none();
+    let roots: Vec<PathBuf> = match (path, harness) {
+        // An existing local path wins over reading the same string as a repo ref.
+        (Some(p), _) if PathBuf::from(&p).exists() => vec![PathBuf::from(p)],
+        (Some(p), _) if p.starts_with("hf://") || hub::is_remote_shorthand(&p) => {
+            // A Hub trace dataset: resolve to `hf://datasets/<owner>/<name>` and index its
+            // auto-converted parquet.
+            let Memory::Remote { uri } = Memory::parse(&p) else {
+                return Err(anyhow!("expected a Hub repo, got {p:?}"));
+            };
+            if multilingual {
+                ensure_local_memory(model::MULTILINGUAL).await?;
+            }
+            return run_index_remote(&uri, no_thinking).await;
+        }
+        (Some(p), _) => return Err(anyhow!("no such path: {p}")),
+        (None, Some(id)) => match spool::select(&id) {
+            Ok(dir) => vec![dir],
+            Err(e) => {
+                // Off a terminal this is a hook, and a hook asking for a spool nothing writes is
+                // an install older than the spool: leave the stamp the read verbs report. At a
+                // terminal the error itself is read, and a typo must not leave one.
+                if !std::io::stdin().is_terminal() && spool::is_id(&id) {
+                    spool::note_missing(&id)?;
+                }
+                return Err(e);
+            }
+        },
+        // No target at all: index every spool — but only in a terminal. An automated run (no TTY)
+        // must name a target, so a session-end hook indexes just its own spool — a Claude
+        // session-end shouldn't pull in Codex or pi sessions.
+        (None, None) => {
+            if !std::io::stdin().is_terminal() {
+                return Err(anyhow!(
+                    "automated `funes index` needs a target — pass a path or `--harness <id>`; \
+                     refusing to index every spool unattended"
+                ));
+            }
+            spool::spools()
+        }
+    };
+    if multilingual {
+        ensure_local_memory(model::MULTILINGUAL).await?;
+    }
+    if roots.is_empty() {
+        println!(
+            "no agent converts its sessions here yet — `funes add <agent>` sets that up, \
+             and funes indexes what lands in {}.",
+            spool::spool_root().display()
+        );
+        return Ok(());
+    }
+    if budgeted {
+        run_index_budgeted(&roots, no_thinking, limit, yes).await
+    } else {
+        run_index_roots(&roots, no_thinking, limit, yes).await
+    }
 }
 
 pub async fn local_memory_model() -> Result<Option<inference::EmbeddingModel>> {
@@ -1203,29 +1303,13 @@ pub async fn run_index(path: &Path, no_thinking: bool, max_sessions: Option<usiz
 /// A first interactive index estimated at ≥ this many seconds prompts before continuing.
 const FIRST_INDEX_PROMPT_SECS: u64 = 120;
 
-/// Ask `prompt` on stderr and read one stdin line. Enter takes the default; anything but `y`/`yes`
-/// is a no, and EOF or a read error declines — never start long work off a wedged stdin.
-fn confirm(prompt: &str, default_yes: bool) -> bool {
-    eprint!("{prompt} ");
-    let _ = std::io::stderr().flush();
-    let mut answer = String::new();
-    match std::io::stdin().read_line(&mut answer) {
-        Ok(n) if n > 0 => match answer.trim().to_ascii_lowercase().as_str() {
-            "" => default_yes,
-            "y" | "yes" => true,
-            _ => false,
-        },
-        _ => false,
-    }
-}
-
 /// Prompt before a long first embedding pass (interactive only); rows already written stay
 /// available and a later run resumes any embeddings left pending.
 fn confirm_full_index(chunks: usize, est: Duration) -> bool {
     confirm(
         &format!(
             "embedding {chunks} chunks is estimated at ~{} (rough, from the first batch). Continue? [y/N]  \
-             (the rows are in and searchable; a later `funes index` embeds the rest)",
+             (the rows are in and searchable; a later `funes index` embeds the rest) ",
             fmt_eta(est)
         ),
         false,
@@ -1241,7 +1325,7 @@ fn confirm_continue(remaining: Duration) -> bool {
         format!(" (~{} left, rough)", fmt_eta(remaining))
     };
     confirm(
-        &format!("more to index{estimate}. Finish it now? [Y/n]  (or let per-turn indexing catch up)"),
+        &format!("more to index{estimate}. Finish it now? [Y/n]  (or let per-turn indexing catch up) "),
         true,
     )
 }

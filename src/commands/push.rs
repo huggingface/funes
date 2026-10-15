@@ -26,8 +26,9 @@ use crate::memory::dataset;
 use crate::memory::lock;
 use crate::memory::remote::{self, Appended, Compacted};
 use crate::memory::{Memory, MemoryState};
+use crate::ui::prompt::confirm;
 use crate::{chunk, scan, ui};
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use arrow_array::{BooleanArray, RecordBatch, StringArray, UInt64Array};
 use arrow_select::filter::filter_record_batch;
 use bytes::Bytes;
@@ -38,7 +39,7 @@ use lance::dataset::ROW_ID;
 use lance::Dataset;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
-use std::io::Write as _;
+use std::io::{IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -63,7 +64,7 @@ pub async fn memory_ids(memory: &Memory) -> HashSet<String> {
 
 /// Whether a publish error is the Hub refusing the write — a 403/Forbidden, i.e. the token can't
 /// write to this remote. Matches the typed [`HFError`] preserved in the error chain.
-pub fn is_read_only(err: &anyhow::Error) -> bool {
+pub(crate) fn is_read_only(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| match cause.downcast_ref::<HFError>() {
         Some(HFError::Forbidden { .. }) => true,
         Some(HFError::Http { context }) => context.status.as_u16() == 403,
@@ -443,6 +444,72 @@ fn named_ids(by_session: &HashMap<String, Vec<String>>, sessions: &[String]) -> 
         );
     }
     Ok(sessions.iter().flat_map(|s| by_session[s].iter().cloned()).collect())
+}
+
+/// `funes push`: publish to the memory `spec` names. Unless `yes`, a memory that holds none of the
+/// chunks to publish is confirmed at a terminal first, and refused off one.
+pub async fn run(spec: &str, compact: bool, yes: bool, sessions: &[String]) -> Result<Pushed> {
+    let confirm = if yes {
+        Confirm::Yes
+    } else {
+        Confirm::Ask(prompt_new_memory)
+    };
+    run_push(Memory::parse(spec), compact, confirm, sessions)
+        .await
+        .map_err(|e| if is_read_only(&e) { read_only_error(spec) } else { e })
+}
+
+/// The error for a token the Hub lets read `label` but not write to.
+pub(crate) fn read_only_error(label: &str) -> anyhow::Error {
+    anyhow!("{label} is read-only for your token — recall can read it, but publishing needs write access (check your HF token)")
+}
+
+/// The push confirmation for a target holding none of the chunks to publish. Fails closed (returns
+/// false) off a terminal, so an unattended push can't silently publish to the wrong memory — there it
+/// must be re-run with `--yes`.
+pub(crate) fn prompt_new_memory(label: &str, chunks: usize, why: Disjoint) -> bool {
+    if !std::io::stdin().is_terminal() {
+        eprintln!("{}", disjoint_refusal(label, chunks, why));
+        return false;
+    }
+    confirm(&disjoint_prompt(label, chunks, why), false)
+}
+
+/// What the push found about the target and the chunks to publish, in the words of that case.
+fn disjoint_finding(label: &str, chunks: usize, why: Disjoint) -> String {
+    match why {
+        Disjoint::Selection { sessions } => {
+            format!("{label} holds none of the {chunks} chunk(s) of the {sessions} named session(s)")
+        }
+        Disjoint::FirstPublish => {
+            format!("{label} is empty, so these {chunks} chunk(s) would be its first publish")
+        }
+        Disjoint::NewHost { remote_chunks } => {
+            format!("{label} holds {remote_chunks} chunk(s), none from this host: a new host of yours")
+        }
+        Disjoint::Unexplained { remote_chunks } => format!(
+            "{label} holds {remote_chunks} chunk(s) and none of the {chunks} to publish, although it held \
+             chunks from this host before: check that it is the right memory"
+        ),
+    }
+}
+
+/// The question put to the user at a terminal: the finding, then a question that fits it.
+fn disjoint_prompt(label: &str, chunks: usize, why: Disjoint) -> String {
+    let question = match why {
+        Disjoint::Selection { .. } => "Publish them?",
+        Disjoint::FirstPublish => "Publish?",
+        Disjoint::NewHost { .. } | Disjoint::Unexplained { .. } => "Publish anyway?",
+    };
+    format!("{}. {question} [y/N] ", disjoint_finding(label, chunks, why))
+}
+
+/// The refusal off a terminal, where no question can be asked.
+fn disjoint_refusal(label: &str, chunks: usize, why: Disjoint) -> String {
+    format!(
+        "refusing to push: {}. Re-run with `--yes` to confirm.",
+        disjoint_finding(label, chunks, why)
+    )
 }
 
 /// Publish the local memory's new embedded chunks to `target` (a remote memory on the HF Hub). With
@@ -912,6 +979,31 @@ mod tests {
     use super::*;
     use arrow_array::RecordBatchIterator;
     use lance::dataset::WriteParams;
+
+    #[test]
+    fn the_push_prompt_says_which_case_it_found() {
+        let label = "hf://datasets/acme/memory";
+        assert_eq!(
+            disjoint_prompt(label, 1339, Disjoint::Selection { sessions: 3 }),
+            "hf://datasets/acme/memory holds none of the 1339 chunk(s) of the 3 named session(s). Publish them? [y/N] "
+        );
+        assert_eq!(
+            disjoint_prompt(label, 40, Disjoint::FirstPublish),
+            "hf://datasets/acme/memory is empty, so these 40 chunk(s) would be its first publish. Publish? [y/N] "
+        );
+        assert_eq!(
+            disjoint_prompt(label, 40, Disjoint::NewHost { remote_chunks: 67339 }),
+            "hf://datasets/acme/memory holds 67339 chunk(s), none from this host: a new host of yours. Publish anyway? [y/N] "
+        );
+        assert_eq!(
+            disjoint_prompt(label, 40, Disjoint::Unexplained { remote_chunks: 67339 }),
+            "hf://datasets/acme/memory holds 67339 chunk(s) and none of the 40 to publish, although it held chunks from this host before: check that it is the right memory. Publish anyway? [y/N] "
+        );
+        assert_eq!(
+            disjoint_refusal(label, 1339, Disjoint::Selection { sessions: 3 }),
+            "refusing to push: hf://datasets/acme/memory holds none of the 1339 chunk(s) of the 3 named session(s). Re-run with `--yes` to confirm."
+        );
+    }
 
     #[test]
     fn a_push_asks_only_when_the_overlap_is_empty_and_there_is_work() {

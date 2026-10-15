@@ -2,8 +2,8 @@
 //!
 //! Pipeline: parse transcripts → chunk → embed → store (lance), then read via
 //! `recall` (hybrid → neighbors, reranked when the pool is several times the hits), `get`, `status`.
-//! The binary ([`main`]) is a thin CLI over these modules; integration tests drive
-//! them directly.
+//! The binary (`main.rs`) is the CLI's definitions and dispatch, nothing else; integration
+//! tests drive the commands directly.
 //!
 //! One directory per layer, each with one job:
 //!

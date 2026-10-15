@@ -82,11 +82,7 @@ pub async fn claude(question: String, target: impl Into<Target>) -> Result<()> {
     // The binary probe comes first — grounding pays for a model load.
     preflight("claude")?;
     let banner = Banner::start("recalling…");
-    let progress = |label: &str| {
-        if let Some(b) = &banner {
-            b.set(label);
-        }
-    };
+    let progress = |label: &str| banner.set(label);
     let prompt = grounding(target, &question, &progress).await?;
     progress("waking claude…");
     let run = run_streaming("claude", &claude_args(&prompt), claude_event, &progress)?;
@@ -99,11 +95,7 @@ pub async fn codex(question: String, target: impl Into<Target>) -> Result<()> {
     // The binary probe comes first — grounding pays for a model load.
     preflight("codex")?;
     let banner = Banner::start("recalling…");
-    let progress = |label: &str| {
-        if let Some(b) = &banner {
-            b.set(label);
-        }
-    };
+    let progress = |label: &str| banner.set(label);
     let prompt = grounding(target, &question, &progress).await?;
     progress("waking codex…");
     let run = run_streaming("codex", &codex_args(&prompt), codex_event, &progress)?;
