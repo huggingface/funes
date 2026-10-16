@@ -54,7 +54,7 @@ jobs:
           shared-key: ci
 
       # Faster, lower-memory linker — keeps the heavy lance link in budget.
-      - uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # v1
+      - uses: rui314/setup-mold@da13e0b42e392e3a45d1215033a2270b849d7d36 # v1
         if: runner.os == 'Linux'
 
       # lance-encoding (via lancedb) compiles protobuf in its build script.
@@ -160,7 +160,7 @@ jobs:
         with:
           shared-key: ci
 
-      - uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # v1
+      - uses: rui314/setup-mold@da13e0b42e392e3a45d1215033a2270b849d7d36 # v1
         if: runner.os == 'Linux'
 
       # expect drives `funes add` at a pty, so the tests can answer the prompts that are only
@@ -236,7 +236,7 @@ jobs:
           # default jobs' `ci` key, so sharing would evict one to store the other.
           shared-key: ci-onnx
 
-      - uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # v1
+      - uses: rui314/setup-mold@da13e0b42e392e3a45d1215033a2270b849d7d36 # v1
 
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
