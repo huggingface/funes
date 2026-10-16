@@ -15,12 +15,12 @@ async fn compact_merges_a_fragmented_local_memory() {
     let report = compact::run(Memory::resolve(None)).await.unwrap();
     assert!(report.ends_with(": nothing to compact\n"), "{report}");
 
-    support::index_fragmented(src.path()).await;
+    support::index_fragmented(db.path(), src.path()).await;
 
     let report = compact::run(Memory::resolve(None)).await.unwrap();
     assert!(report.ends_with(": compacted\n"), "{report}");
     assert_eq!(
-        support::fragments().await,
+        support::fragments(db.path()).await,
         2,
         "the 257 fragments indexed together merge"
     );

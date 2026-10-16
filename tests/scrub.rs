@@ -1,5 +1,6 @@
 //! Gated end-to-end: `funes scrub` redacts a secret already sitting in the memory, in place, without
-//! its source. Skipped unless trufflehog and ssh-keygen are available.
+//! its source, and re-embeds what it rewrote with the memory's own model (multilingual-e5-small
+//! here). Skipped unless trufflehog and ssh-keygen are available.
 //!
 //! A dirty memory is created by indexing with `FUNES_TRUFFLEHOG=/usr/bin/true` — `true` ignores its
 //! args and exits 0, so the scan finds nothing and the secret is stored unredacted (simulating a
@@ -7,11 +8,16 @@
 
 mod support;
 
-use std::io::Write;
 use std::process::Command;
 
+use arrow_array::{Array, FixedSizeListArray, Float32Array, StringArray};
+use funes::commands::recall::{self, TurnRange};
+use funes::home;
+use funes::inference::{self, EmbeddingModel};
+use funes::memory::{dataset, Memory};
+
 #[tokio::test]
-async fn scrub_redacts_an_existing_secret_in_place() {
+async fn scrub_redacts_an_existing_secret_in_place_with_the_memorys_model() {
     if funes::scan::Trufflehog::find().is_err() {
         eprintln!("skip: trufflehog not found");
         return;
@@ -30,8 +36,7 @@ async fn scrub_redacts_an_existing_secret_in_place() {
         .args(["-t", "ed25519", "-N", "", "-q", "-f"])
         .arg(&keyfile)
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+        .is_ok_and(|s| s.success());
     if !made {
         eprintln!("skip: ssh-keygen unavailable");
         return;
@@ -40,36 +45,19 @@ async fn scrub_redacts_an_existing_secret_in_place() {
     std::fs::remove_file(&keyfile).unwrap();
     let key_body = key.lines().nth(1).unwrap().to_string();
 
+    let e5 = EmbeddingModel::MultilingualE5Small;
+    support::memory_of(e5, &["给表加上索引"], &home::memory_dir()).await;
     let session = "scrub-session-0001";
-
-    let content = format!("deploy key:\n{key}");
-    let line = serde_json::json!({
-        "format": 1,
-        "session_id": session,
-        "cwd": "/home/u/dev/demo",
-        "turn_uuid": "t1",
-        "seq": 0,
-        "ts": "2026-01-01T00:00:00Z",
-        "role": "user",
-        "blocks": [{"block_type": "text", "text": content}],
-        "harness": "claude",
-    })
-    .to_string();
-    let mut f = std::fs::File::create(source.path().join(format!("{session}.funes.jsonl"))).unwrap();
-    writeln!(f, "{line}").unwrap();
+    support::write_session(source.path(), session, &[format!("部署密钥：\n{key}")]);
 
     // Index with a no-op scanner so the secret lands in the memory unredacted.
     std::env::set_var("FUNES_TRUFFLEHOG", "/usr/bin/true");
     funes::commands::index::run_index(source.path(), false, None)
         .await
         .unwrap();
-    let dirty = funes::commands::recall::get(
-        funes::memory::Memory::local(),
-        session.into(),
-        funes::commands::recall::TurnRange::default(),
-    )
-    .await
-    .unwrap();
+    let dirty = recall::get(Memory::local(), session.into(), TurnRange::default())
+        .await
+        .unwrap();
     assert!(
         dirty.contains(&key_body),
         "setup: the key should be in the memory before scrub"
@@ -83,13 +71,9 @@ async fn scrub_redacts_an_existing_secret_in_place() {
     // Scrub with the real scanner: it must redact the key in place.
     std::env::remove_var("FUNES_TRUFFLEHOG");
     funes::commands::scrub::run().await.unwrap();
-    let clean = funes::commands::recall::get(
-        funes::memory::Memory::local(),
-        session.into(),
-        funes::commands::recall::TurnRange::default(),
-    )
-    .await
-    .unwrap();
+    let clean = recall::get(Memory::local(), session.into(), TurnRange::default())
+        .await
+        .unwrap();
     assert!(
         clean.contains("[REDACTED:PrivateKey]"),
         "expected a redaction marker after scrub: {clean}"
@@ -97,4 +81,29 @@ async fn scrub_redacts_an_existing_secret_in_place() {
     assert!(!clean.contains(&key_body), "key body survived scrub: {clean}");
     let residue = support::files_containing(&memdir, &key_body);
     assert!(residue.is_empty(), "key body still on disk after scrub: {residue:?}");
+
+    // What it rewrote is embedded by the memory's model, which it keeps.
+    let ds = dataset::open(&dataset::table_uri(home::memory_dir()), Default::default())
+        .await
+        .unwrap();
+    assert_eq!(dataset::embedding_model(&ds).unwrap(), e5);
+    let mut embedder = inference::embedder(e5).unwrap();
+    let filter = format!("session_id = '{session}'");
+    let mut redacted = false;
+    for batch in dataset::scan_rows(&ds, &["text", "vector"], Some(filter.as_str()), None)
+        .await
+        .unwrap()
+    {
+        let texts = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+        let vectors = batch.column(1).as_any().downcast_ref::<FixedSizeListArray>().unwrap();
+        for i in 0..batch.num_rows() {
+            redacted |= texts.value(i).contains("[REDACTED:PrivateKey]");
+            let stored = vectors.value(i);
+            let stored = stored.as_any().downcast_ref::<Float32Array>().unwrap();
+            let expected = embedder.embed(&[texts.value(i)]).unwrap().remove(0);
+            let cosine: f32 = stored.values().iter().zip(&expected).map(|(a, b)| a * b).sum();
+            assert!(cosine > 0.9999, "{cosine}: {}", texts.value(i));
+        }
+    }
+    assert!(redacted, "the rewritten row is among those checked");
 }

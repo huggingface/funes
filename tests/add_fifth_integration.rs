@@ -1114,6 +1114,11 @@ fn an_installed_only_integration_adds_and_removes_once_trusted_at_a_terminal() {
     assert!(stderr(&out).starts_with("nothing to remove"), "{}", stderr(&out));
     assert!(!log.exists(), "no setup ran");
     assert!(!stamp.exists(), "and forgets the refusals all the same");
+
+    // Without `$FUNES_INTEGRATIONS` too: `remove` runs the installed copy, so no source is asked.
+    let out = funes_pinned(&home, &funes_home, &log, &["remove", "clyde"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stderr(&out), "nothing to remove — no clyde integration is installed.\n");
 }
 
 #[test]

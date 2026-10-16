@@ -1,8 +1,8 @@
-//! What indexing a turns file must hold to: a grown file adds only its new turns, and a thread no
-//! agent wrote — a tracker's roles, no `assistant`, no `thinking`, no `cwd`, an edit as a new turn —
-//! indexes and lists. Each integration round-trips its own converter against its own fixture, in
-//! its bundle, which is where a native transcript is compared with the turns file it becomes.
-//! Own test binary, one test at a time: `$FUNES_HOME` is process-global.
+//! What indexing a turns file must hold to: a grown file in a turns directory adds only its new
+//! turns, and a thread no agent wrote — a tracker's roles, no `assistant`, no `thinking`, no `cwd`,
+//! an edit as a new turn — indexes and lists. Each integration round-trips its own converter
+//! against its own fixture, in its bundle, which is where a native transcript is compared with the
+//! turns file it becomes. Own test binary, one test at a time: `$FUNES_HOME` is process-global.
 
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -115,13 +115,16 @@ async fn a_grown_turns_file_adds_only_its_new_turns() {
     write_turns(&whole, &turns);
     let (_whole_home, from_whole) = index_fresh(&whole).await;
 
-    let grown = out.path().join("grown.funes.jsonl");
+    // In a directory, whose files are stamped: the second run re-reads the file because it grew.
+    let dir = out.path().join("grown");
+    std::fs::create_dir(&dir).unwrap();
+    let grown = dir.join("grown.funes.jsonl");
     write_turns(&grown, head);
-    let (home, first) = index_fresh(&grown).await;
+    let (home, first) = index_fresh(&dir).await;
     assert!(first.len() < from_whole.len());
     append_turns(&grown, tail);
     std::env::set_var("FUNES_HOME", home.path());
-    run_index(&grown, false, None).await.unwrap();
+    run_index(&dir, false, None).await.unwrap();
     let second = rows().await;
     assert_eq!(
         second, from_whole,

@@ -1,11 +1,12 @@
-//! An interrupted index build is retried even when no rows or embeddings remain to write.
-//! Once the indexes are current, revisiting an empty turns directory leaves the dataset alone.
+//! What an index run leaves the memory in, whatever it wrote: an interrupted index build is retried
+//! even when no rows or embeddings remain to write, and once the indexes are current, revisiting an
+//! empty turns directory leaves the dataset alone. The fragments a run wrote are merged, and a
+//! memory of many small indexed fragments is compacted even when nothing is new. Each test runs
+//! `funes index` under a home of its own, so they share one binary.
 
 mod support;
 
 use std::collections::HashMap;
-use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 
 use arrow_array::types::Float32Type;
@@ -68,16 +69,6 @@ fn memory_row(id: &str, seed: u32, embedded: bool) -> RecordBatch {
     RecordBatch::try_new(schema, columns.into_iter().map(|(_, array)| array).collect()).unwrap()
 }
 
-fn index(home: &Path, source: &Path) {
-    let output = Command::new(env!("CARGO_BIN_EXE_funes"))
-        .arg("index")
-        .arg(source)
-        .env("FUNES_HOME", home)
-        .output()
-        .unwrap();
-    support::assert_success(&output);
-}
-
 async fn all_rows(ds: &Dataset) -> RecordBatch {
     let batches = dataset::scan_rows(ds, &[], None, None).await.unwrap();
     concat_batches(&Arc::new(Schema::from(ds.schema())), &batches).unwrap()
@@ -116,14 +107,14 @@ async fn an_empty_index_run_repairs_missing_fts_and_then_is_a_noop() {
     let before_rows = all_rows(&before).await;
 
     // The source has no units and the stored row owes no embedding. Only finalization is pending.
-    index(home.path(), source.path());
+    support::index(home.path(), source.path());
     let repaired = dataset::open(&uri, HashMap::new()).await.unwrap();
     assert_eq!(text_matches(&repaired).await, vec![ROW_ID.to_string()]);
     assert_eq!(all_rows(&repaired).await.columns(), before_rows.columns());
     assert!(repaired.version().version > before.version().version);
 
     let version = repaired.version().version;
-    index(home.path(), source.path());
+    support::index(home.path(), source.path());
     let unchanged = dataset::open(&uri, HashMap::new()).await.unwrap();
     assert_eq!(
         unchanged.version().version,
@@ -160,7 +151,7 @@ async fn an_embedding_only_run_refreshes_the_existing_vector_index() {
     assert_eq!(before.count_rows(Some("vector IS NULL".to_string())).await.unwrap(), 1);
     let before_rows = all_rows(&before).await;
 
-    index(home.path(), source.path());
+    support::index(home.path(), source.path());
     let refreshed = dataset::open(&uri, HashMap::new()).await.unwrap();
     assert_eq!(
         refreshed.count_rows(Some("vector IS NULL".to_string())).await.unwrap(),
@@ -186,4 +177,45 @@ async fn an_embedding_only_run_refreshes_the_existing_vector_index() {
             assert_eq!(after_rows.column(i), before_rows.column(i), "{} changed", field.name());
         }
     }
+}
+
+#[tokio::test]
+async fn an_index_run_merges_the_fragments_it_wrote() {
+    let home = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    let write = |ids: &[&str]| {
+        for id in ids {
+            support::write_session(
+                source.path(),
+                id,
+                &[format!("session {id} about compacting lance fragments")],
+            );
+        }
+    };
+
+    write(&["s1", "s2", "s3"]);
+    support::index(home.path(), source.path());
+    assert_eq!(support::fragments(home.path()).await, 1, "three sessions, one fragment");
+
+    write(&["s4", "s5"]);
+    support::index(home.path(), source.path());
+    assert_eq!(
+        support::fragments(home.path()).await,
+        2,
+        "the indexed fragment stays, the new two merge"
+    );
+}
+
+#[tokio::test]
+async fn an_index_run_with_nothing_new_compacts_a_fragmented_memory() {
+    let home = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    support::index_fragmented(home.path(), source.path()).await;
+
+    support::index(home.path(), source.path());
+    assert_eq!(
+        support::fragments(home.path()).await,
+        2,
+        "the 257 fragments indexed together merge"
+    );
 }

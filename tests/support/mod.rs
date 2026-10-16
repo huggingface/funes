@@ -109,17 +109,35 @@ pub async fn chunk_count() -> usize {
         .expect("status reports a chunk count")
 }
 
-/// The fragments the local memory spans.
-pub async fn fragments() -> usize {
-    Memory::local().open().await.unwrap().get_fragments().len()
+/// `funes index <source>` as a child process, with `home` as its `$FUNES_HOME`.
+pub fn index(home: &Path, source: &Path) {
+    let output = Command::new(env!("CARGO_BIN_EXE_funes"))
+        .arg("index")
+        .arg(source)
+        .env("FUNES_HOME", home)
+        .output()
+        .unwrap();
+    assert_success(&output);
 }
 
-/// Index a one-turn session `s1` from `source` into the local memory, then append its rows 257
-/// more times, each its own fragment, and index them all: 258 small indexed fragments.
-pub async fn index_fragmented(source: &Path) {
+/// The local memory under `home`.
+pub async fn open_memory(home: &Path) -> Dataset {
+    dataset::open(&dataset::table_uri(home.join("memory")), HashMap::new())
+        .await
+        .unwrap()
+}
+
+/// The fragments the local memory under `home` spans.
+pub async fn fragments(home: &Path) -> usize {
+    open_memory(home).await.get_fragments().len()
+}
+
+/// Index a one-turn session `s1` from `source` into the local memory under `home`, then append its
+/// rows 257 more times, each its own fragment, and index them all: 258 small indexed fragments.
+pub async fn index_fragmented(home: &Path, source: &Path) {
     write_session(source, "s1", &["a memory split into many small fragments"]);
-    funes::commands::index::run_index(source, false, None).await.unwrap();
-    let mut ds = Memory::local().open().await.unwrap();
+    index(home, source);
+    let mut ds = open_memory(home).await;
     let rows = dataset::scan_rows(&ds, &[], None, None).await.unwrap();
     let schema = Arc::new(Schema::from(ds.schema()));
     for _ in 0..257 {
@@ -127,7 +145,7 @@ pub async fn index_fragmented(source: &Path) {
         ds.append(reader, None).await.unwrap();
     }
     dataset::build_indexes(&mut ds, |_| {}).await.unwrap();
-    assert_eq!(fragments().await, 258);
+    assert_eq!(fragments(home).await, 258);
 }
 
 /// A recall of the remote memory at `uri`, or the error it gave as the reply.
