@@ -1277,8 +1277,8 @@ mod tests {
         assert!(err.contains("writable by other users"), "{err}");
     }
 
-    /// The memory noted beside an install is what a bare re-run binds: none until a setup ran
-    /// with one, gone when unbound, and refused — like the record — when others could write it.
+    /// A note an older funes kept beside an install reads back as its memory, goes when forgotten,
+    /// and is refused, like the record, when others could write it.
     #[test]
     fn the_binding_is_noted_beside_the_install() {
         let tmp = tempfile::tempdir().unwrap();
