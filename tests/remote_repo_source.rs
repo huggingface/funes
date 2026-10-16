@@ -5,8 +5,7 @@
 //!   export HF_FUNES_TEST_TOKEN=<your HF token>   # or a CI secret
 //!   cargo test --test remote_repo_source -- --nocapture
 //!
-//! Reads at the source level (resolve + download + parse), not the full index pipeline — the
-//! end-to-end `funes index` + status run is `tests/index_real_repo.rs`.
+//! Reads at the source level (resolve + download + parse), not the full index pipeline.
 
 use funes::traces::source;
 

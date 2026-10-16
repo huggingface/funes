@@ -999,7 +999,6 @@ mod tests {
         dir
     }
 
-    /// The whole `add` contract in one run: the argv, then the environment.
     #[test]
     fn a_setup_others_could_have_written_is_refused() {
         let root = tempfile::tempdir().unwrap();

@@ -42,7 +42,7 @@ async fn scrub_redacts_an_escaped_key_in_place() {
     assert!(!escaped.contains('\n') && escaped.contains(&key_body));
 
     let session = "scrub-drop-0001";
-    // Two turns: a clean one (must survive) and the escaped-key one (must be dropped).
+    // Two turns: a clean one (must survive) and the escaped-key one (must be redacted in place).
     let mut f = std::fs::File::create(source.path().join(format!("{session}.funes.jsonl"))).unwrap();
     for (seq, (uuid, content)) in [
         ("t1", "just chatting about parsers"),

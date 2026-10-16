@@ -1719,9 +1719,6 @@ mod tests {
         assert!(!prompts.contains_key("scaffold"), "{prompts:?}");
     }
 
-    /// The `limit` cut usually lands inside a tie, and `scores` is a HashMap whose order is seeded
-    /// per process, so fusion has to impose a total order of its own: same lists, same rows, same
-    /// order, every run.
     #[test]
     fn a_pool_several_times_the_hits_is_reranked() {
         assert_eq!(
@@ -1738,6 +1735,9 @@ mod tests {
         assert!(!reranks(30, 30));
     }
 
+    /// The `limit` cut usually lands inside a tie, and `scores` is a HashMap whose order is seeded
+    /// per process, so fusion has to impose a total order of its own: same lists, same rows, same
+    /// order, every run.
     #[test]
     fn rrf_fuse_settles_ties_by_row_id() {
         let hit = |id: u64| Hit {
