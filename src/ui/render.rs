@@ -290,7 +290,8 @@ pub fn dim(s: &str, color: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::recall::Neighbor;
+    use crate::commands::recall::{Neighbor, ScanHit};
+    use crate::commands::sketch::{Diagnostics, Evidence};
 
     fn hit(ts: &str, block_type: &str, text: &str) -> Hit {
         Hit {
@@ -394,6 +395,110 @@ mod tests {
             get_agent("", &[t], 70),
             "[2026-06-19T01:29:59.000Z] assistant seq3 turn=t-1\nfirst\n\nsecond\n---\n\
              turns 3-3 of 70\n"
+        );
+    }
+
+    #[test]
+    fn scan_agent_is_byte_stable() {
+        let r = ScanResult {
+            needle: "fold".to_string(),
+            session_id: "0123456789abcdef".to_string(),
+            hits: vec![ScanHit {
+                turn_uuid: "t-5".to_string(),
+                ts: "2026-06-19T01:29:59.000Z".to_string(),
+                block_type: "text".to_string(),
+                seq: 5,
+                at: 4,
+                len: 4,
+                text: "the fold streams every batch".to_string(),
+            }],
+            dropped: 2,
+            cut: Some(ScanCut::Resume(9)),
+            from: Some(2),
+            to: None,
+        };
+        assert_eq!(
+            scan_agent("", " --memory hf://datasets/acme/kb", &r, 6),
+            "scan \"fold\" in 0123456789abcdef turns 2 on — 3 hits\n\
+             [2026-06-19T01:29:59.000Z] text seq5\n\
+             \x20 → get 0123456789abcdef --from 2 --to 8 --memory hf://datasets/acme/kb\n\
+             \x20 the fold strea …\n\
+             2 more hits not shown — continue with --from 9\n\
+             ---\n"
+        );
+        let none = ScanResult {
+            hits: vec![],
+            dropped: 0,
+            cut: None,
+            to: Some(4),
+            ..r
+        };
+        assert_eq!(
+            scan_agent("", "", &none, 6),
+            "no matches for \"fold\" in 0123456789abcdef turns 2-4\n---\n"
+        );
+    }
+
+    #[test]
+    fn sketch_agent_is_byte_stable() {
+        let evidence = |seq: i64, block_type: &str, tool_name: Option<&str>, truncated: bool, text: &str| Evidence {
+            id: format!("c{seq}"),
+            turn_uuid: format!("t-{seq}"),
+            seq,
+            block_idx: 0,
+            ts: "2026-06-19T01:29:59.000Z".to_string(),
+            role: "assistant".to_string(),
+            block_type: block_type.to_string(),
+            tool_name: tool_name.map(str::to_string),
+            reasons: vec![],
+            truncated,
+            text: text.to_string(),
+        };
+        let sketch = SessionSketch {
+            schema_version: 1,
+            selector_version: "v".to_string(),
+            memory: "hf://datasets/acme/kb".to_string(),
+            session_id: "0123456789abcdef".to_string(),
+            source_fingerprint: String::new(),
+            embedding_fingerprint: String::new(),
+            source_chunks: 40,
+            eligible_units: 12,
+            evidence: vec![
+                evidence(1, "text", None, false, "we settle on a fold"),
+                evidence(7, "tool_use", Some("Bash"), true, "cargo test --lib …"),
+            ],
+            diagnostics: Diagnostics {
+                axes: 0,
+                transitions: 0,
+                near_duplicate_groups: 0,
+                duplicate_strategy: String::new(),
+                duplicate_vector_comparisons: 0,
+                candidates: 0,
+                rendered_characters: 37,
+                budget: 6,
+                char_budget: 1000,
+                elapsed_ms: 0,
+                fallback: Some("no embeddings: picked by position".to_string()),
+            },
+        };
+        let clamped = Clamped {
+            units: Some(6),
+            chars: Some(1000),
+        };
+        assert_eq!(
+            sketch_agent("", " --memory hf://datasets/acme/kb", &sketch, clamped),
+            "sketch 0123456789abcdef — 2 of 6 places · 37 of 1000 chars · 12 eligible units\n\
+             \x20 (units clamped to 6)\n\
+             \x20 (max-chars clamped to 1000)\n\
+             \x20 (no embeddings: picked by position)\n\
+             [2026-06-19T01:29:59.000Z] assistant text seq1\n\
+             \x20 → get 0123456789abcdef --from 0 --to 4 --memory hf://datasets/acme/kb\n\
+             we settle on a fold\n\
+             [2026-06-19T01:29:59.000Z] assistant tool_use (Bash) seq7 · shortened\n\
+             \x20 → get 0123456789abcdef --from 4 --to 10 --memory hf://datasets/acme/kb\n\
+             cargo test --lib …\n\
+             ---\n\
+             a sketch samples: it shows what it selected, not that anything is absent — scan a literal for that\n"
         );
     }
 

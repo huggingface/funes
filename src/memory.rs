@@ -564,4 +564,22 @@ mod tests {
             MemoryState::Empty
         ));
     }
+
+    /// An empty local memory still hands out its dataset, which records the model: none only when
+    /// there is no dataset at all.
+    #[tokio::test]
+    async fn an_empty_local_memory_hands_out_its_dataset_once_it_has_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_string_lossy().into_owned();
+        let memory = Memory::parse(&path);
+        assert!(
+            memory.dataset().await.unwrap().is_none(),
+            "no dataset, nothing to hand out"
+        );
+
+        let e5 = crate::inference::EmbeddingModel::MultilingualE5Small;
+        dataset::create_empty(&dataset::table_uri(&path), e5).await.unwrap();
+        let ds = memory.dataset().await.unwrap().expect("a dataset with no rows");
+        assert_eq!(dataset::embedding_model(&ds).unwrap(), e5);
+    }
 }

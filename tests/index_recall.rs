@@ -59,7 +59,17 @@ async fn index_then_read_surface() {
     )
     .await
     .unwrap();
-    assert!(tu.contains("tool_use"), "type filter should keep tool_use rows: {tu}");
+    // Five hits asked of four rows: the filter alone leaves the one tool_use.
+    let kinds: Vec<&str> = tu
+        .lines()
+        .filter_map(|l| l.split_once("  score="))
+        .map(|(head, _)| head.rsplit(' ').next().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        ["tool_use"],
+        "type filter should keep the tool_use row alone: {tu}"
+    );
 
     // scan: an exhaustive literal search of one session, and a zero that names what it cleared.
     let scanned = funes::commands::recall::scan(
