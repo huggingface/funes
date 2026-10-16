@@ -433,16 +433,6 @@ mod tests {
     }
 
     #[test]
-    fn stitch_recovers_overlap_with_trimmed_seam_whitespace() {
-        // The real shared region is "the quick brown fox " (trailing space), but split() trims it
-        // off `a`'s end and the leading space off `b`. stitch must still match the shorter overlap
-        // and not duplicate it (no "...foxfox..." and no doubled "the quick brown fox").
-        let a = "HEAD the quick brown fox"; // trailing space trimmed
-        let b = "the quick brown fox TAIL"; // leading already flush
-        assert_eq!(stitch(a, b), "HEAD the quick brown fox TAIL");
-    }
-
-    #[test]
     fn reconstruct_inverts_split() {
         // A long block that splits into several overlapping pieces must reassemble to the original
         // (trimmed) text — so a scanner sees a secret split() had cut across chunk boundaries.

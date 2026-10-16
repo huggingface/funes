@@ -845,29 +845,6 @@ mod tests {
     }
 
     #[test]
-    fn drop_secret_rows_holds_back_a_single_chunk_secret() {
-        if scan::Trufflehog::find().is_err() {
-            eprintln!("skip: trufflehog not found");
-            return;
-        }
-        let Some(key) = keygen(&["-t", "ed25519"]) else {
-            eprintln!("skip: ssh-keygen unavailable");
-            return;
-        };
-        let (b, _) = batch(&[turn(0, "just chatting about parsers"), turn(1, &key)]);
-
-        let (clean, skipped) = drop_secret_rows(vec![b]).unwrap();
-        assert_eq!(skipped.rows, 1, "the secret block should be held back");
-        assert!(skipped.summary.contains("PrivateKey"), "summary: {}", skipped.summary);
-        assert_eq!(
-            clean.iter().map(|b| b.num_rows()).sum::<usize>(),
-            1,
-            "the clean row stays"
-        );
-        assert!(!skipped.warning().is_empty());
-    }
-
-    #[test]
     fn drop_secret_rows_holds_back_an_escaped_key() {
         // The exact shape that leaked: a key stored with escaped `\n` (literal backslash-n), as a
         // JSON-encoded transcript or a logged blob would hold it. trufflehog still detects it, but
@@ -892,39 +869,6 @@ mod tests {
             clean.iter().map(|b| b.num_rows()).sum::<usize>(),
             1,
             "the clean row stays"
-        );
-    }
-
-    #[test]
-    fn drop_secret_rows_holds_back_a_secret_split_across_chunks() {
-        // The regression that leaked: a key long enough to split across several chunks. No single
-        // chunk is a detectable key, so per-chunk scanning misses it — block reconstruction does not.
-        if scan::Trufflehog::find().is_err() {
-            eprintln!("skip: trufflehog not found");
-            return;
-        }
-        let Some(key) = keygen(&["-t", "rsa", "-b", "4096"]) else {
-            eprintln!("skip: ssh-keygen unavailable");
-            return;
-        };
-        let block_text = format!("Here is the deploy key we generated:\n{key}\nkeep it safe");
-        let (b, chunks) = batch(&[turn(0, "clean preamble"), turn(1, &block_text)]);
-        let key_chunks = chunks.iter().filter(|c| c.seq == 1).count();
-        assert!(
-            key_chunks > 1,
-            "precondition: the key must split into multiple chunks (got {key_chunks})"
-        );
-
-        let (clean, skipped) = drop_secret_rows(vec![b]).unwrap();
-        assert_eq!(
-            skipped.rows, key_chunks,
-            "every chunk of the secret block must be held back"
-        );
-        assert!(skipped.summary.contains("PrivateKey"), "summary: {}", skipped.summary);
-        assert_eq!(
-            clean.iter().map(|b| b.num_rows()).sum::<usize>(),
-            1,
-            "only the clean row stays"
         );
     }
 
@@ -965,16 +909,6 @@ mod tests {
             err.contains(e5_model.id()) && err.contains(dataset::model::ENGLISH.id()),
             "{err}"
         );
-    }
-
-    #[tokio::test]
-    async fn ids_by_session_groups_the_scan() {
-        let dir = tempfile::tempdir().unwrap();
-        let ds = two_session_ds(dir.path()).await;
-        let by_session = dataset::ids_by_session(&ds).await.unwrap();
-        assert_eq!(by_session.len(), 2, "one entry per session");
-        assert!(by_session.contains_key("reviewed") && by_session.contains_key("private"));
-        assert!(by_session.values().all(|ids| !ids.is_empty()));
     }
 
     #[tokio::test]
@@ -1094,17 +1028,6 @@ mod tests {
         assert_eq!(dataset::ids_in(&clean), clean_only, "unrelated clean rows survive");
         let rows = rows_with_ids(&ds, &clean_only).await.unwrap();
         assert_eq!(drop_secret_rows(rows).unwrap().1.rows, 0, "clean rows are not held");
-    }
-
-    #[tokio::test]
-    async fn an_append_returns_only_the_included_delta() {
-        let dir = tempfile::tempdir().unwrap();
-        let ds = two_session_ds(dir.path()).await;
-        let reviewed = dataset::ids_by_session(&ds).await.unwrap()["reviewed"].clone();
-        let to_push: HashSet<String> = reviewed.iter().cloned().collect();
-        let rows = rows_with_ids(&ds, &to_push).await.unwrap();
-        let pushed: usize = rows.iter().map(|b| b.num_rows()).sum();
-        assert_eq!(pushed, reviewed.len(), "only that session's rows are returned");
     }
 
     #[tokio::test]

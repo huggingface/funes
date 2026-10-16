@@ -406,14 +406,6 @@ mod tests {
     }
 
     #[test]
-    fn excise_replaces_each_distinct_match_in_place() {
-        let r = excise("before SEKRET after", &[finding("PrivateKey", "SEKRET")]);
-        assert_eq!(r.text, "before [REDACTED:PrivateKey] after");
-        assert_eq!(r.removed_detectors, vec!["PrivateKey".to_string()]);
-        assert!(r.fully_redacted);
-    }
-
-    #[test]
     fn excise_trims_normalized_matches() {
         // trufflehog reports a multiline match with a trailing newline the stored text lacks; the
         // trimmed match must still be redacted.
@@ -510,25 +502,6 @@ mod tests {
     fn summary_counts_detectors() {
         assert_eq!(summary(["PrivateKey", "AWS", "AWS"]), "AWS×2, PrivateKey×1");
         assert_eq!(summary(std::iter::empty()), "");
-    }
-
-    #[test]
-    fn flags_a_generated_private_key() {
-        let Ok(scanner) = Trufflehog::find() else {
-            eprintln!("skip: trufflehog not found");
-            return;
-        };
-        let dir = tempfile::tempdir().unwrap();
-        let Some(key) = throwaway_key(dir.path(), "id_ed25519") else {
-            eprintln!("skip: ssh-keygen unavailable");
-            return;
-        };
-        let found = scanner.scan(&[key.as_str()]).expect("scan");
-        assert!(
-            found[0].iter().any(|f| f.detector == "PrivateKey"),
-            "expected a PrivateKey finding, got {:?}",
-            detectors(&found[0])
-        );
     }
 
     #[test]

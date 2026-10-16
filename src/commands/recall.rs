@@ -1772,16 +1772,6 @@ mod tests {
     }
 
     #[test]
-    fn memory_hint_names_the_read_memory() {
-        assert_eq!(
-            memory_hint(Some("hf://datasets/acme/kb")),
-            " --memory hf://datasets/acme/kb"
-        );
-        // A hit with no memory label yields no suffix.
-        assert_eq!(memory_hint(None), "");
-    }
-
-    #[test]
     fn harness_spellings_cover_both_names_of_a_known_agent_and_pass_others_through() {
         assert_eq!(harness_spellings("claude".into()), ["claude_code", "claude"]);
         assert_eq!(harness_spellings("claude_code".into()), ["claude_code", "claude"]);

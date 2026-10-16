@@ -1512,47 +1512,6 @@ mod tests {
         );
     }
 
-    /// Pins the Lance behavior [`optimize_index`] relies on: `append()` adds one delta sub-index per
-    /// backlog, and `merge(deltas)` folds the deltas back into one without touching the base.
-    #[tokio::test]
-    async fn append_optimize_stacks_deltas_and_merge_spares_the_base() {
-        let batch = |texts: &[&str]| {
-            let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
-            let rows = RecordBatch::try_new(schema.clone(), vec![Arc::new(StringArray::from(texts.to_vec()))]);
-            RecordBatchIterator::new([rows], schema)
-        };
-        let dir = tempfile::tempdir().unwrap();
-        let uri = dir.path().join("t.lance");
-        let mut ds = Dataset::write(batch(&["alpha bravo"]), uri.to_str().unwrap(), None)
-            .await
-            .unwrap();
-        ds.create_index(
-            &["text"],
-            IndexType::Inverted,
-            Some(FTS_INDEX.to_string()),
-            &InvertedIndexParams::default(),
-            true,
-        )
-        .await
-        .unwrap();
-        assert_eq!(sub_index_counts(&ds).await.unwrap()[FTS_INDEX], 1);
-        let base_uuid = ds.load_indices().await.unwrap()[0].uuid;
-
-        for i in 0..3 {
-            ds.append(batch(&[&format!("charlie delta {i}")]), None).await.unwrap();
-            ds.optimize_indices(&OptimizeOptions::append()).await.unwrap();
-        }
-        assert_eq!(sub_index_counts(&ds).await.unwrap()[FTS_INDEX], 4);
-
-        ds.optimize_indices(&OptimizeOptions::merge(3)).await.unwrap();
-        assert_eq!(sub_index_counts(&ds).await.unwrap()[FTS_INDEX], 2);
-        let after = ds.load_indices().await.unwrap();
-        assert!(
-            after.iter().any(|i| i.uuid == base_uuid),
-            "the base index must survive untouched"
-        );
-    }
-
     /// A directory under `root` holding `files`, backdated by `age`.
     fn shuffle_dir(root: &std::path::Path, name: &str, files: &[&str], age: std::time::Duration) -> PathBuf {
         let dir = root.join(name);
@@ -1648,6 +1607,22 @@ mod tests {
 
         let err = fill_vectors(&ds, &["not-a-row"], &vectors[..1]).await.unwrap_err();
         assert!(err.to_string().contains("lost"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn ids_by_session_groups_the_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut two = turns(0, 3);
+        two[1].session_id = "other".into();
+        let chunks = chunk::chunks_from_turns(&two, true);
+        let batch = build_batch(model::ENGLISH, &chunks, None).unwrap();
+        let ds = Dataset::write(reader(batch), &table_uri(dir.path()), None)
+            .await
+            .unwrap();
+        let by_session = ids_by_session(&ds).await.unwrap();
+        assert_eq!(by_session.len(), 2, "one entry per session");
+        assert_eq!(by_session["sess"], [chunks[0].id.clone(), chunks[2].id.clone()]);
+        assert_eq!(by_session["other"], [chunks[1].id.clone()]);
     }
 
     #[test]

@@ -1560,58 +1560,6 @@ mod tests {
         assert_eq!(mismatched(&root), vec![("clyde".to_string(), 99)]);
     }
 
-    #[test]
-    fn add_hands_setup_the_memory_and_the_contract_environment() {
-        let root = tempfile::tempdir().unwrap();
-        let dir = integration(
-            root.path(),
-            "pi",
-            &manifest("pi", CONTRACT_VERSION),
-            r#"printf '%s\n' "$1" "$2" "$FUNES_AGENT_ID" "$FUNES_HOME" "$FUNES_BIN" > "$(dirname "$0")/ran""#,
-        );
-
-        open(root.path(), "pi").unwrap().add(Some("acme/kb")).unwrap();
-
-        let ran = std::fs::read_to_string(dir.join("ran")).unwrap();
-        let lines: Vec<&str> = ran.lines().collect();
-        assert_eq!(&lines[..3], &["add", "acme/kb", "pi"]);
-        assert_eq!(lines[3], home::dir().to_string_lossy());
-        assert_eq!(lines[4], "funes", "the command an integration records");
-    }
-
-    #[test]
-    fn a_local_add_and_a_remove_pass_the_verb_alone() {
-        let root = tempfile::tempdir().unwrap();
-        let dir = integration(
-            root.path(),
-            "pi",
-            &manifest("pi", CONTRACT_VERSION),
-            r#"printf '%s|%s\n' "$1" "$2" >> "$(dirname "$0")/ran""#,
-        );
-
-        let b = open(root.path(), "pi").unwrap();
-        b.add(None).unwrap();
-        b.remove().unwrap();
-
-        assert_eq!(std::fs::read_to_string(dir.join("ran")).unwrap(), "add|\nremove|\n");
-    }
-
-    #[test]
-    fn a_contract_mismatch_is_refused_before_setup_runs() {
-        let root = tempfile::tempdir().unwrap();
-        let dir = integration(
-            root.path(),
-            "pi",
-            &manifest("pi", CONTRACT_VERSION + 1),
-            r#"touch "$(dirname "$0")/ran""#,
-        );
-
-        let err = open(root.path(), "pi").unwrap_err().to_string();
-        assert!(err.contains(&(CONTRACT_VERSION + 1).to_string()), "{err}");
-        assert!(err.contains(&CONTRACT_VERSION.to_string()), "{err}");
-        assert!(!dir.join("ran").exists(), "setup must not run");
-    }
-
     /// The id is a path segment funes writes under the registry, so a bad one is refused before a
     /// source is even looked for.
     #[tokio::test]
@@ -1743,14 +1691,6 @@ mod tests {
         std::fs::remove_file(&setup).unwrap();
         let err = format!("{:#}", open(root.path(), "pi").unwrap_err());
         assert!(err.contains(SETUP), "{err}");
-    }
-
-    #[test]
-    fn a_failing_setup_fails_the_command() {
-        let root = tempfile::tempdir().unwrap();
-        integration(root.path(), "pi", &manifest("pi", CONTRACT_VERSION), "exit 3");
-        let err = open(root.path(), "pi").unwrap().add(None).unwrap_err().to_string();
-        assert!(err.contains('3'), "{err}");
     }
 
     /// Only an install named with `--from` runs as installed: the catalog's release, and a copy

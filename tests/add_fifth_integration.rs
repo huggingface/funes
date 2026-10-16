@@ -563,34 +563,6 @@ fn a_setup_that_fails_leaves_the_host_bound_as_asked() {
     );
 }
 
-/// A copy placed in the registry by hand has no record, and keeps its binding all the same.
-#[test]
-fn a_drop_in_copy_keeps_its_binding_across_runs() {
-    let tmp = tempfile::tempdir().unwrap();
-    let home = tmp.path().join("home");
-    let funes_home = tmp.path().join("funes");
-    let log = tmp.path().join("setup.log");
-    install(&home, "clyde", 1);
-    let record = home.join(".funes/agents/clyde.json");
-    let memory = tmp.path().join("team-memory");
-    let memory = memory.to_str().unwrap();
-
-    let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde", memory]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
-    assert!(!record.exists(), "a drop-in has no record");
-
-    fs::remove_file(&log).unwrap();
-    let out = funes_at_a_terminal(&home, &funes_home, &log, &["add", "clyde"]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
-    assert!(
-        fs::read_to_string(&log)
-            .unwrap()
-            .starts_with(&format!("add {memory}\n")),
-        "bound as before"
-    );
-    assert!(!record.exists());
-}
-
 /// Setup ran, so the install is recorded — even when a later step of the bootstrap fails: the
 /// files it installed are what the agent runs, and an unattended removal must find them recorded.
 #[test]

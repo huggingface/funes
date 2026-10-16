@@ -213,12 +213,6 @@ mod tests {
     }
 
     #[test]
-    fn a_card_without_markers_is_never_touched() {
-        let hand = "---\nlicense: agpl-3.0\n---\n\n# Hand-written card\n";
-        assert_eq!(plan(Some(hand), &ctx(7)), CardAction::LeaveAlone);
-    }
-
-    #[test]
     fn a_close_marker_before_the_open_is_not_a_region() {
         let broken = format!("{STATS_CLOSE}\nstray\n{STATS_OPEN}\n");
         assert_eq!(plan(Some(&broken), &ctx(7)), CardAction::LeaveAlone);

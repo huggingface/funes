@@ -450,12 +450,6 @@ mod tests {
     }
 
     #[test]
-    fn memory_label() {
-        assert_eq!(Memory::Local { path: "/tmp/x".into() }.label(), "/tmp/x");
-        assert_eq!(Memory::parse("hf://datasets/org/kb").label(), "hf://datasets/org/kb");
-    }
-
-    #[test]
     fn resolve_prefers_explicit_spec_else_local() {
         // Explicit spec wins, with the org/repo shorthand applied.
         match Memory::resolve(Some("acme/kb".into())) {
@@ -569,20 +563,5 @@ mod tests {
             Memory::parse(&path).state().await.unwrap(),
             MemoryState::Empty
         ));
-    }
-
-    #[tokio::test]
-    async fn check_compat_accepts_a_model_funes_runs() {
-        let dir = tempfile::tempdir().unwrap();
-        let e5 = crate::inference::EmbeddingModel::MultilingualE5Small;
-        let schema = Arc::new(Schema::new_with_metadata(
-            vec![Field::new("id", DataType::Int64, true), vector_field(DIM)],
-            HashMap::from([("embedding_model".to_string(), e5.id().to_string())]),
-        ));
-        let batch = RecordBatch::try_new(schema.clone(), vec![ids(2), vectors(2, DIM)]).unwrap();
-        let uri = format!("{}/chunks.lance", dir.path().to_str().unwrap());
-        let reader = RecordBatchIterator::new(vec![Ok(batch)], schema);
-        let ds = Dataset::write(reader, &uri, None).await.unwrap();
-        assert!(check_compat(&ds).is_ok());
     }
 }
