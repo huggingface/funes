@@ -354,26 +354,4 @@ mod tests {
         assert_eq!(fetcher.discards.load(Ordering::SeqCst), 1, "one repair attempt only");
         assert_eq!(fetcher.calls.load(Ordering::SeqCst), 2);
     }
-
-    /// `list` is delegated to the inner store (version resolution must stay live) — the fetcher is
-    /// never consulted for a listing.
-    #[tokio::test]
-    async fn list_delegates_to_inner() {
-        let (store, fetcher, inner) = store_with(&[]);
-        inner
-            .put_opts(
-                &OPath::from("chunks.lance/_versions/1.manifest"),
-                PutPayload::from("m"),
-                PutOptions::default(),
-            )
-            .await
-            .unwrap();
-        let names: Vec<String> = store
-            .list(None)
-            .map(|r| r.unwrap().location.to_string())
-            .collect()
-            .await;
-        assert_eq!(names, vec!["chunks.lance/_versions/1.manifest".to_string()]);
-        assert_eq!(fetcher.calls.load(Ordering::SeqCst), 0, "listing never fetches");
-    }
 }

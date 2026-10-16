@@ -365,6 +365,48 @@ mod tests {
         }
     }
 
+    /// Display cells of a row once its escapes are stripped: the emoji the animations draw take two.
+    fn cells(row: &str) -> usize {
+        plain(row)
+            .chars()
+            .map(|c| {
+                if c >= '\u{1F000}' || ('\u{2600}'..='\u{27BF}').contains(&c) {
+                    2
+                } else {
+                    1
+                }
+            })
+            .sum()
+    }
+
+    /// The harness repaints by row count and lays the band out by width, so every animation keeps
+    /// its height through frames and events, and draws within the columns it is handed.
+    #[test]
+    fn every_animation_keeps_its_height_within_its_width() {
+        let animations: [Box<dyn Animation>; 4] = [
+            Box::new(drift::Drift::new()),
+            Box::new(emoji::Emoji::new()),
+            Box::new(sine::Sine::single()),
+            Box::new(sine::Sine::triple()),
+        ];
+        for mut anim in animations {
+            let height = anim.render(BAND_W, Palette::True).len();
+            for frame in 0..100 {
+                if frame % 30 == 0 {
+                    anim.excite();
+                }
+                anim.advance(0.08);
+                for width in [band_cols(MIN_FULL_W), BAND_W] {
+                    let rows = anim.render(width, Palette::True);
+                    assert_eq!(rows.len(), height, "frame {frame} at {width} columns");
+                    for row in &rows {
+                        assert!(cells(row) <= width, "frame {frame}: {row:?} overflows {width} columns");
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn full_frame_is_indented_animation_then_status() {
         let lines = compose(Some(&Still(2)), 2.0, 100, Palette::True, "recalling…");

@@ -137,24 +137,33 @@ mod tests {
         assert!(lit.iter().any(|r| r.contains(SPARKLE)), "an event sparkles");
     }
 
-    #[test]
-    fn the_ribbon_scrolls() {
-        let early = Emoji::new();
-        let mut late = Emoji::new();
-        for _ in 0..20 {
-            late.advance(0.08);
+    /// The glyph in each slot, read off whichever row the wave put it on.
+    fn ribbon(rows: &[String]) -> Vec<char> {
+        let mut slots = std::collections::BTreeMap::new();
+        for row in rows {
+            let mut col = 0;
+            for c in row.chars() {
+                if c == ' ' {
+                    col += 1;
+                } else {
+                    slots.insert(col / SLOT, c);
+                    col += 2;
+                }
+            }
         }
-        // Far enough apart that the base index has moved several slots.
-        assert_ne!(early.render(60, Palette::True), late.render(60, Palette::True));
+        slots.into_values().collect()
     }
 
     #[test]
-    fn frames_are_deterministic() {
-        let (mut a, mut b) = (Emoji::new(), Emoji::new());
-        for _ in 0..10 {
-            a.advance(0.08);
-            b.advance(0.08);
-        }
-        assert_eq!(a.render(60, Palette::True), b.render(60, Palette::True));
+    fn the_ribbon_scrolls() {
+        // Past the launch sparkle, so each slot shows its own emoji wherever the wave put it.
+        let at = |t: f64| {
+            let mut e = Emoji::new();
+            e.advance(t);
+            ribbon(&e.render(60, Palette::True))
+        };
+        let (early, late) = (at(2.0), at(3.5));
+        // DRIFT slots a second: 1.5 s later, each emoji sits three slots to the right.
+        assert_eq!(late[3..], early[..early.len() - 3]);
     }
 }

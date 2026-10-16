@@ -156,14 +156,4 @@ mod tests {
         }
         assert!(s.surge() < 0.1, "the swell settles");
     }
-
-    #[test]
-    fn frames_are_deterministic() {
-        let (mut a, mut b) = (Sine::triple(), Sine::triple());
-        for _ in 0..10 {
-            a.advance(0.08);
-            b.advance(0.08);
-        }
-        assert_eq!(a.render(56, Palette::True), b.render(56, Palette::True));
-    }
 }

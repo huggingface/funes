@@ -400,11 +400,19 @@ mod tests {
         assert!(pieces[0].contains(&head), "consecutive pieces should overlap");
     }
 
+    /// A re-indexed turn dedups against the memory by id, so ids are frozen: a change to how one is
+    /// derived would append every turn indexed again as new rows.
     #[test]
-    fn cid_is_stable_and_distinct() {
-        assert_eq!(cid("s", "u", 0, 0), cid("s", "u", 0, 0));
-        assert_ne!(cid("s", "u", 0, 0), cid("s", "u", 0, 1));
-        assert_eq!(cid("s", "u", 0, 0).len(), 16);
+    fn chunk_ids_are_frozen() {
+        let t = turn(vec![
+            block("text", "a decision", None),
+            block("tool_use", "{}", Some("Bash")),
+        ]);
+        let ids: Vec<String> = chunks_from_turns(std::slice::from_ref(&t), true)
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(ids, ["088ee3e13e4321bc", "4bbd19dac6de8612"]);
     }
 
     #[test]
@@ -417,14 +425,12 @@ mod tests {
 
     #[test]
     fn stitch_does_not_over_merge_repetitive_text() {
-        // Periodic text: many suffix==prefix lengths match. The seam is bounded by OVERLAP, so a
-        // longer spurious match must not swallow real content.
+        // Periodic text: a suffix of `a` matches a prefix of `b` at every multiple of the period, up
+        // to all of it. The seam is bounded by OVERLAP, so the longest it takes is OVERLAP chars.
         let unit = "abcabcabc ";
-        let a = unit.repeat(60); // > OVERLAP chars, all periodic
+        let a = unit.repeat(60);
         let b = unit.repeat(60);
-        let joined = stitch(&a, &b);
-        // Reassembly must not be shorter than the longer input (no content dropped).
-        assert!(joined.chars().count() >= a.chars().count());
+        assert_eq!(stitch(&a, &b), format!("{a}{}", &b[OVERLAP..]));
     }
 
     #[test]

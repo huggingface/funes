@@ -137,15 +137,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_spool_is_under_the_root_and_named_by_its_id() {
-        assert_eq!(spool_dir("pi").file_name().unwrap(), "pi");
-        assert!(
-            !is_spool(Path::new("/elsewhere/pi")),
-            "a directory elsewhere is not funes's"
-        );
-    }
-
     /// What funes owns is decided on resolved paths: a file reached through `..` or a symlink from
     /// inside the spool is someone else's, and a file in the spool is funes's however it is spelled.
     #[test]

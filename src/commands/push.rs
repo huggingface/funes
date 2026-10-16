@@ -940,15 +940,18 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn push_coverage_requires_every_current_chunk_of_a_session() {
-        let dir = tempfile::tempdir().unwrap();
-        let ds = two_session_ds(dir.path()).await;
-        let by_session = dataset::ids_by_session(&ds).await.unwrap();
-        let pushed: HashSet<String> = by_session["reviewed"].iter().cloned().collect();
+    #[test]
+    fn push_coverage_requires_every_current_chunk_of_a_session() {
+        let ids = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+        let by_session = HashMap::from([
+            ("pushed".to_string(), ids(&["a", "b"])),
+            ("partly".to_string(), ids(&["c", "d"])),
+            ("local".to_string(), ids(&["e"])),
+        ]);
+        let pushed: HashSet<String> = ids(&["a", "b", "c"]).into_iter().collect();
         let coverage = push_coverage(&by_session, &pushed);
-        assert_eq!(coverage.total, 2);
-        assert_eq!(coverage.pending, 1);
+        assert_eq!(coverage.total, 3);
+        assert_eq!(coverage.pending, 2, "a session pushed in part is still owed");
     }
 
     #[tokio::test]

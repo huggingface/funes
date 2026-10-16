@@ -241,7 +241,7 @@ fn redact_units(
 fn sanitize_units(
     units: &mut [&mut [traces::Turn]],
     include_thinking: bool,
-    scanner: Option<&scan::Trufflehog>,
+    scanner: Option<&impl scan::SecretScanner>,
 ) -> Result<()> {
     for turns in units.iter_mut() {
         elide_turns(turns);
@@ -1712,58 +1712,21 @@ mod tests {
     }
 
     #[test]
-    fn redact_units_replaces_secrets_in_block_text() {
-        struct Fake(Vec<scan::Finding>);
-        impl scan::SecretScanner for Fake {
-            fn scan(&self, texts: &[&str]) -> Result<Vec<Vec<scan::Finding>>> {
-                Ok(texts.iter().map(|_| self.0.clone()).collect())
-            }
-        }
-        let scanner = Fake(vec![
-            scan::Finding {
-                detector: "PrivateKey".into(),
-                raw: "TOPSECRET".into(),
-                decoder: "PLAIN".into(),
-            },
-            scan::Finding {
-                detector: "VirusTotal".into(),
-                raw: "cafef00d".into(),
-                decoder: "PLAIN".into(),
-            },
-        ]);
-        let mut turns = vec![traces::Turn {
-            format: traces::FORMAT_VERSION,
-            session_id: "sess".into(),
-            cwd: None,
-            workdir: "proj".into(),
-            turn_uuid: "turn".into(),
-            parent_uuid: None,
-            seq: 0,
-            ts: String::new(),
-            role: "user".into(),
-            blocks: vec![traces::Block {
-                block_type: "text".into(),
-                text: "key=TOPSECRET hash=cafef00d".into(),
-                tool_name: None,
-                tool_use_id: None,
-            }],
-            source_path: String::new(),
-            harness: "claude_code".into(),
-        }];
-        redact_units(&mut [&mut turns], &scanner, true).unwrap();
-        assert_eq!(
-            turns[0].blocks[0].text,
-            "key=[REDACTED:PrivateKey] hash=[REDACTED:VirusTotal]"
-        );
-    }
-
-    #[test]
-    fn elide_turns_strips_payloads_before_anything_scans_them() {
+    fn sanitize_elides_payloads_before_the_scanner_sees_them() {
+        // Records what it is shown, and finds the key wherever it is.
         struct Recorder(std::cell::RefCell<String>);
         impl scan::SecretScanner for Recorder {
             fn scan(&self, texts: &[&str]) -> Result<Vec<Vec<scan::Finding>>> {
                 self.0.borrow_mut().push_str(&texts.join("\n"));
-                Ok(texts.iter().map(|_| Vec::new()).collect())
+                let key = scan::Finding {
+                    detector: "PrivateKey".into(),
+                    raw: "TOPSECRET".into(),
+                    decoder: "PLAIN".into(),
+                };
+                Ok(texts
+                    .iter()
+                    .map(|t| t.contains("TOPSECRET").then(|| key.clone()).into_iter().collect())
+                    .collect())
             }
         }
         let mut turns = vec![traces::Turn {
@@ -1778,7 +1741,7 @@ mod tests {
             role: "tool".into(),
             blocks: vec![traces::Block {
                 block_type: "tool_result".into(),
-                text: r#"{"image_url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUg=="}"#.into(),
+                text: r#"{"image_url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUg=="} key=TOPSECRET"#.into(),
                 tool_name: None,
                 tool_use_id: None,
             }],
@@ -1786,11 +1749,10 @@ mod tests {
             harness: "codex".into(),
         }];
         let scanner = Recorder(std::cell::RefCell::new(String::new()));
-        elide_turns(&mut turns);
-        redact_units(&mut [&mut turns], &scanner, true).unwrap();
+        sanitize_units(&mut [&mut turns], true, Some(&scanner)).unwrap();
         assert_eq!(
             turns[0].blocks[0].text,
-            r#"{"image_url":"data:image/png;base64,[elided]"}"#
+            r#"{"image_url":"data:image/png;base64,[elided]"} key=[REDACTED:PrivateKey]"#
         );
         assert!(
             !scanner.0.borrow().contains("iVBORw0KGgo"),

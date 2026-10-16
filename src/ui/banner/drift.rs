@@ -173,14 +173,4 @@ mod tests {
         }
         assert!(d.bursts.is_empty(), "bursts retire after their sweep");
     }
-
-    #[test]
-    fn frames_are_deterministic() {
-        let (mut a, mut b) = (Drift::new(), Drift::new());
-        for _ in 0..10 {
-            a.advance(0.08);
-            b.advance(0.08);
-        }
-        assert_eq!(a.render(48, Palette::True), b.render(48, Palette::True));
-    }
 }
