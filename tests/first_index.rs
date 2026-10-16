@@ -3,6 +3,8 @@
 //! from a source that still holds the session. Own test binary so its `$FUNES_HOME` can't race the
 //! other integration tests'.
 
+mod support;
+
 use funes::commands::recall;
 use funes::home;
 use funes::memory::Memory;
@@ -20,16 +22,6 @@ fn write_session(source: &std::path::Path) {
     ] {
         writeln!(f, "{l}").unwrap();
     }
-}
-
-async fn chunk_count() -> usize {
-    let s = funes::commands::recall::status(funes::memory::Memory::local())
-        .await
-        .unwrap();
-    s.lines()
-        .find_map(|l| l.strip_prefix("chunks: "))
-        .and_then(|n| n.trim().parse().ok())
-        .expect("status reports a chunk count")
 }
 
 fn state_level(home: &std::path::Path) -> String {
@@ -65,7 +57,7 @@ async fn seed_finishes_a_small_history_and_a_rerun_is_a_noop() {
     // The seed `funes add` runs: budgeted, rows first. This history fits the budget, so every row
     // lands and is embedded, and the unit is stamped at the top tier.
     funes::commands::index::run_index_seed(&src).await.unwrap();
-    let full = chunk_count().await;
+    let full = support::chunk_count().await;
     assert!(full > 0, "seed indexed the session");
     assert_eq!(
         state_level(home.path()),
@@ -98,7 +90,7 @@ async fn seed_finishes_a_small_history_and_a_rerun_is_a_noop() {
     funes::commands::index::run_index_budgeted(&roots, false, None, false)
         .await
         .unwrap();
-    assert_eq!(chunk_count().await, full, "rerun adds nothing");
+    assert_eq!(support::chunk_count().await, full, "rerun adds nothing");
 
     // A deleted memory self-heals: the memory dir is gone but state.json survived — the next run
     // must re-index everything, not trust the stale state and skip against an empty memory. The
@@ -111,12 +103,16 @@ async fn seed_finishes_a_small_history_and_a_rerun_is_a_noop() {
     funes::commands::index::run_index_budgeted(&roots, false, None, false)
         .await
         .unwrap();
-    assert_eq!(chunk_count().await, full, "the same session is the same chunks");
+    assert_eq!(
+        support::chunk_count().await,
+        full,
+        "the same session is the same chunks"
+    );
     assert!(kept.join("sess-0001.funes.jsonl").exists(), "and it is left alone");
 
     std::fs::remove_dir_all(home.path().join("memory")).unwrap();
     funes::commands::index::run_index_budgeted(&roots, false, None, false)
         .await
         .unwrap();
-    assert_eq!(chunk_count().await, full, "deleted memory rebuilt in full");
+    assert_eq!(support::chunk_count().await, full, "deleted memory rebuilt in full");
 }

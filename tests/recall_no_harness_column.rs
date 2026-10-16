@@ -7,9 +7,10 @@
 //! `FUNES_HOME`, and cargo runs a file's tests concurrently — two such tests would clobber each
 //! other's memory.
 
+mod support;
+
 use funes::home;
 use std::collections::HashMap;
-use std::io::Write;
 
 #[tokio::test]
 async fn recall_tolerates_a_memory_without_the_harness_column() {
@@ -17,16 +18,7 @@ async fn recall_tolerates_a_memory_without_the_harness_column() {
     let source = tempfile::tempdir().unwrap();
     std::env::set_var("FUNES_HOME", db_dir.path());
 
-    // A minimal session so read → chunk → embed → store produces a real recallable row.
-    let session = "test-session-0001";
-    let mut f = std::fs::File::create(source.path().join(format!("{session}.funes.jsonl"))).unwrap();
-    for l in [
-        r#"{"format":1,"session_id":"test-session-0001","cwd":"/home/u/dev/demo","turn_uuid":"t1","seq":0,"ts":"2026-01-01T00:00:00Z","role":"user","blocks":[{"block_type":"text","text":"how do we parse transcripts into turns"}],"harness":"claude"}"#,
-        r#"{"format":1,"session_id":"test-session-0001","cwd":"/home/u/dev/demo","turn_uuid":"t2","parent_uuid":"t1","seq":1,"ts":"2026-01-01T00:00:05Z","role":"assistant","blocks":[{"block_type":"text","text":"We parse each JSONL line into a turn with typed blocks."}],"harness":"claude"}"#,
-    ] {
-        writeln!(f, "{l}").unwrap();
-    }
-
+    let (session, _) = support::write_transcript(source.path());
     funes::commands::index::run_index(source.path(), false, None)
         .await
         .unwrap();
@@ -53,7 +45,7 @@ async fn recall_tolerates_a_memory_without_the_harness_column() {
     .await
     .expect("recall over a memory without the harness column");
     assert!(
-        out.contains(session),
+        out.contains(&session),
         "recall should surface the session even without a harness column: {out}"
     );
 

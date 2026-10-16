@@ -1,16 +1,10 @@
 //! `since`/`until` on a recall keep the turns of those days, both ends inclusive, before the
 //! ranking. Own test binary: it sets `$FUNES_HOME`.
 
-use std::path::{Path, PathBuf};
+mod support;
 
 use funes::commands::recall::{self, RecallFilter};
 use funes::memory::Memory;
-
-fn fixture(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/funes_jsonl")
-        .join(name)
-}
 
 /// The distinct days the hits of one recall fall on.
 async fn days(filter: RecallFilter) -> Vec<String> {
@@ -36,10 +30,10 @@ async fn since_and_until_keep_the_turns_of_those_days() {
     let home = tempfile::tempdir().unwrap();
     std::env::set_var("FUNES_HOME", home.path());
     // An issue thread of 2026-06-02 and 2026-06-03, and an agent session of 2026-09-18.
-    funes::commands::index::run_index(&fixture("github_issue.funes.jsonl"), false, None)
+    funes::commands::index::run_index(&support::fixture("github_issue.funes.jsonl"), false, None)
         .await
         .unwrap();
-    funes::commands::index::run_index(&fixture("valid.funes.jsonl"), false, None)
+    funes::commands::index::run_index(&support::fixture("valid.funes.jsonl"), false, None)
         .await
         .unwrap();
 

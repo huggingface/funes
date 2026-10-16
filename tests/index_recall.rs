@@ -3,24 +3,7 @@
 //! BGE embedder + reranker (downloaded to the fastembed cache on first run) against a
 //! real Lance memory under a temp `$FUNES_HOME`.
 
-use std::io::Write;
-
-/// Write a turns file carrying one session, the shape any integration's converter produces. The
-/// `workdir` facet is the munged `cwd` its turns record.
-fn write_transcript(source: &std::path::Path) -> (String, String) {
-    let workdir = "-home-u-dev-demo";
-    let session = "test-session-0001";
-    let mut f = std::fs::File::create(source.join(format!("{session}.funes.jsonl"))).unwrap();
-    let lines = [
-        r#"{"format":1,"session_id":"test-session-0001","cwd":"/home/u/dev/demo","turn_uuid":"t1","seq":0,"ts":"2026-01-01T00:00:00Z","role":"user","blocks":[{"block_type":"text","text":"how do we parse transcripts into turns"}],"harness":"claude"}"#,
-        r#"{"format":1,"session_id":"test-session-0001","cwd":"/home/u/dev/demo","turn_uuid":"t2","parent_uuid":"t1","seq":1,"ts":"2026-01-01T00:00:05Z","role":"assistant","blocks":[{"block_type":"text","text":"We parse each JSONL line into a turn with typed blocks."},{"block_type":"tool_use","text":"{\"command\":\"cargo test\"}","tool_name":"Bash","tool_use_id":"c1"}],"harness":"claude"}"#,
-        r#"{"format":1,"session_id":"test-session-0001","cwd":"/home/u/dev/demo","turn_uuid":"t3","parent_uuid":"t2","seq":2,"ts":"2026-01-01T00:00:10Z","role":"user","blocks":[{"block_type":"tool_result","text":"22 passed","tool_name":"Bash","tool_use_id":"c1"}],"harness":"claude"}"#,
-    ];
-    for l in lines {
-        writeln!(f, "{l}").unwrap();
-    }
-    (session.to_string(), workdir.to_string())
-}
+mod support;
 
 #[tokio::test]
 async fn index_then_read_surface() {
@@ -28,7 +11,7 @@ async fn index_then_read_surface() {
     let source = tempfile::tempdir().unwrap();
     // home::dir() reads $FUNES_HOME; point the whole read/write surface at the temp dir.
     std::env::set_var("FUNES_HOME", db_dir.path());
-    let (session, workdir) = write_transcript(source.path());
+    let (session, workdir) = support::write_transcript(source.path());
 
     // Build the index for real: parse → chunk → embed → Lance + FTS.
     funes::commands::index::run_index(source.path(), false, None)

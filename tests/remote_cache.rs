@@ -11,9 +11,9 @@
 //!   export HF_FUNES_TEST_TOKEN=<your HF token>
 //!   RUST_MIN_STACK=16777216 cargo test --test remote_cache -- --nocapture
 
-use std::io::Write;
+mod support;
+
 use std::path::Path;
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use funes::commands::push::Confirm;
@@ -22,24 +22,6 @@ use hf_hub::{HFClient, RepoTypeDataset};
 
 const OWNER: &str = "optimum-internal-testing";
 const MARKER: &str = "CACHESMOKE";
-
-/// Write a turns file with one user turn.
-fn write_session(source: &Path, text: &str) {
-    let mut f = std::fs::File::create(source.join("sess.funes.jsonl")).unwrap();
-    writeln!(
-        f,
-        r#"{{"format":1,"session_id":"sess","cwd":"/cachetest/proj","turn_uuid":"s1","seq":0,"ts":"2026-02-01T00:00:00Z","role":"user","blocks":[{{"block_type":"text","text":"{text}"}}],"harness":"claude"}}"#
-    )
-    .unwrap();
-}
-
-fn tool_ok(bin: &str, arg: &str) -> bool {
-    Command::new(bin)
-        .arg(arg)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
 
 /// (entry count, total bytes) under `dir`, recursively.
 fn cache_footprint(dir: &Path) -> (usize, u64) {
@@ -78,7 +60,7 @@ async fn warm_recall_is_served_from_cache_without_downloading() {
         eprintln!("skip: HF_FUNES_TEST_TOKEN not set");
         return;
     }
-    if !tool_ok("trufflehog", "--version") {
+    if !support::tool_ok("trufflehog", "--version") {
         eprintln!("skip: trufflehog not installed (push's secret gate is fail-closed)");
         return;
     }
@@ -89,7 +71,7 @@ async fn warm_recall_is_served_from_cache_without_downloading() {
     let home = tempfile::tempdir().unwrap();
     let src = tempfile::tempdir().unwrap();
     std::env::set_var("FUNES_HOME", home.path());
-    write_session(src.path(), &format!("{MARKER} the only turn"));
+    support::write_session(src.path(), "sess", &[format!("{MARKER} the only turn")]);
     funes::commands::index::run_index(src.path(), false, None)
         .await
         .unwrap();

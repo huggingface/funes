@@ -3,26 +3,12 @@
 //! at all by a rerun that owes nothing. Own test binary: it sets `$FUNES_HOME` and
 //! `$FUNES_TRUFFLEHOG`.
 
+mod support;
+
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
-
-use funes::home;
-use funes::memory::dataset;
-
-/// The rows the local memory holds.
-async fn stored_rows() -> usize {
-    let ds = dataset::open(&dataset::table_uri(home::memory_dir()), Default::default())
-        .await
-        .expect("the memory exists");
-    dataset::scan_rows(&ds, &["id"], None, None)
-        .await
-        .unwrap()
-        .iter()
-        .map(|b| b.num_rows())
-        .sum()
-}
 
 /// Write `line` to `path`, stamped `age` seconds before `now` — a directory lists its files
 /// newest first, so the stamp fixes where the unit sits.
@@ -108,10 +94,10 @@ async fn a_directory_is_scanned_a_batch_at_a_time() {
         .await
         .unwrap();
     assert_eq!(spawned(), 4);
-    assert_eq!(stored_rows().await, units as usize);
+    assert_eq!(support::stored_rows().await, units as usize);
     funes::commands::index::run_index(source.path(), false, None)
         .await
         .unwrap();
     assert_eq!(spawned(), 4, "an unchanged rerun spawns no scanner");
-    assert_eq!(stored_rows().await, units as usize, "and adds no rows");
+    assert_eq!(support::stored_rows().await, units as usize, "and adds no rows");
 }

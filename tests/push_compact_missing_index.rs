@@ -9,7 +9,8 @@
 //!   export HF_FUNES_TEST_TOKEN=<your HF token>
 //!   RUST_MIN_STACK=16777216 cargo test --test push_compact_missing_index -- --nocapture
 
-use std::io::Write;
+mod support;
+
 use std::process::Command;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -24,23 +25,9 @@ use lance::Dataset;
 const OWNER: &str = "optimum-internal-testing";
 const NAME: &str = "funes-test";
 
-async fn recall_remote(uri: &str, query: &str) -> String {
-    funes::commands::recall::recall(Memory::parse(uri), query.into(), 5, 30, 0, Default::default())
-        .await
-        .unwrap_or_else(|e| format!("<recall error: {e}>"))
-}
-
 /// Write a turns file with the given user turns, one a second, and index it.
 async fn index_turns(source: &std::path::Path, texts: &[&str]) {
-    let mut f = std::fs::File::create(source.join("sess.funes.jsonl")).unwrap();
-    for (i, text) in texts.iter().enumerate() {
-        writeln!(
-            f,
-            r#"{{"format":1,"session_id":"sess","cwd":"/synctest/proj","turn_uuid":"s{i}","seq":{i},"ts":"2026-02-01T00:00:{i:02}Z","role":"user","blocks":[{{"block_type":"text","text":"{text}"}}],"harness":"claude"}}"#
-        )
-        .unwrap();
-    }
-    drop(f);
+    support::write_session(source, "sess", texts);
     funes::commands::index::run_index(source, false, None).await.unwrap();
 }
 
@@ -111,11 +98,11 @@ async fn push_builds_the_indexes_a_remote_lacks() {
     upload_without_indexes(&repo, &format!("{prefix}/forced")).await;
     upload_without_indexes(&repo, &format!("{prefix}/auto")).await;
 
-    let before = recall_remote(&forced, "NOINDEXSMOKE").await;
+    let before = support::recall_remote(&forced, "NOINDEXSMOKE").await;
 
     // `funes compact`, with nothing pushed.
     let compaction = funes::commands::compact::run(Memory::parse(&forced)).await;
-    let after_forced = recall_remote(&forced, "NOINDEXSMOKE").await;
+    let after_forced = support::recall_remote(&forced, "NOINDEXSMOKE").await;
 
     // One new chunk, pushed without forcing.
     index_turns(
@@ -127,7 +114,7 @@ async fn push_builds_the_indexes_a_remote_lacks() {
     )
     .await;
     let append = funes::commands::push::run_push(Memory::parse(&auto), false, Confirm::Yes, &[]).await;
-    let after_auto = recall_remote(&auto, "NOINDEXSMOKE").await;
+    let after_auto = support::recall_remote(&auto, "NOINDEXSMOKE").await;
 
     // Cleanup before asserting, so a failed assertion can't leave the scratch path behind.
     let _ = repo

@@ -11,46 +11,16 @@
 //!   export HF_FUNES_TEST_TOKEN=<your HF token>
 //!   RUST_MIN_STACK=16777216 cargo test --test push_card -- --nocapture
 
-use std::io::Write;
-use std::process::Command;
+mod support;
+
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use funes::commands::push::Confirm;
 use funes::memory::Memory;
 use hf_hub::repository::CommitOperation;
-use hf_hub::{HFClient, HFError, HFRepository, RepoTypeDataset};
+use hf_hub::{HFClient, RepoTypeDataset};
 
 const OWNER: &str = "optimum-internal-testing";
-
-/// Write a turns file with the given (uuid, text) user turns.
-fn write_session(source: &std::path::Path, turns: &[(&str, &str)]) {
-    let mut f = std::fs::File::create(source.join("sess.funes.jsonl")).unwrap();
-    for (i, (uuid, text)) in turns.iter().enumerate() {
-        writeln!(
-            f,
-            r#"{{"format":1,"session_id":"sess","cwd":"/cardtest/proj","turn_uuid":"{uuid}","seq":{i},"ts":"2026-02-01T00:00:{i:02}Z","role":"user","blocks":[{{"block_type":"text","text":"{text}"}}],"harness":"claude"}}"#
-        )
-        .unwrap();
-    }
-}
-
-fn tool_ok(bin: &str, arg: &str) -> bool {
-    Command::new(bin)
-        .arg(arg)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-/// The repo-root README, or None when the repo has none. Any other failure panics: a transport
-/// error must fail the test loudly, not masquerade as "no README".
-async fn root_readme(repo: &HFRepository<RepoTypeDataset>) -> Option<String> {
-    match repo.download_file_to_bytes().filename("README.md").send().await {
-        Ok(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
-        Err(HFError::EntryNotFound { .. }) => None,
-        Err(e) => panic!("querying the repo-root README: {e}"),
-    }
-}
 
 #[tokio::test]
 async fn card_created_refreshed_and_a_hand_card_respected() {
@@ -62,7 +32,7 @@ async fn card_created_refreshed_and_a_hand_card_respected() {
         eprintln!("skip: HF_FUNES_TEST_TOKEN not set");
         return;
     }
-    if !tool_ok("trufflehog", "--version") {
+    if !support::tool_ok("trufflehog", "--version") {
         eprintln!("skip: trufflehog not installed (push's secret gate is fail-closed)");
         return;
     }
@@ -83,25 +53,26 @@ async fn card_created_refreshed_and_a_hand_card_respected() {
     let db_dir = tempfile::tempdir().unwrap();
     let src = tempfile::tempdir().unwrap();
     std::env::set_var("FUNES_HOME", db_dir.path());
-    write_session(src.path(), &[("s1", "CARDSMOKE the first turn")]);
+    support::write_session(src.path(), "sess", &["CARDSMOKE the first turn"]);
     funes::commands::index::run_index(src.path(), false, None)
         .await
         .unwrap();
 
     // First publish → the card rides the initial commit.
     let create = funes::commands::push::run_push(Memory::parse(&uri), false, Confirm::Yes, &[]).await;
-    let card_created = root_readme(&repo).await;
+    let card_created = support::root_readme(&repo).await;
 
     // Grow by one turn → the append must refresh the stats in the same data commit.
-    write_session(
+    support::write_session(
         src.path(),
-        &[("s1", "CARDSMOKE the first turn"), ("s2", "CARDSMOKE2 the second turn")],
+        "sess",
+        &["CARDSMOKE the first turn", "CARDSMOKE2 the second turn"],
     );
     funes::commands::index::run_index(src.path(), false, None)
         .await
         .unwrap();
     let append = funes::commands::push::run_push(Memory::parse(&uri), false, Confirm::Yes, &[]).await;
-    let card_refreshed = root_readme(&repo).await;
+    let card_refreshed = support::root_readme(&repo).await;
 
     // Hand-write the README: from here on funes must keep its hands off.
     let hand = "# hand-written card\n";
@@ -115,19 +86,20 @@ async fn card_created_refreshed_and_a_hand_card_respected() {
         .await
         .expect("hand-editing the card");
 
-    write_session(
+    support::write_session(
         src.path(),
+        "sess",
         &[
-            ("s1", "CARDSMOKE the first turn"),
-            ("s2", "CARDSMOKE2 the second turn"),
-            ("s3", "CARDSMOKE3 the third turn"),
+            "CARDSMOKE the first turn",
+            "CARDSMOKE2 the second turn",
+            "CARDSMOKE3 the third turn",
         ],
     );
     funes::commands::index::run_index(src.path(), false, None)
         .await
         .unwrap();
     let append_past_hand = funes::commands::push::run_push(Memory::parse(&uri), false, Confirm::Yes, &[]).await;
-    let card_after_hand = root_readme(&repo).await;
+    let card_after_hand = support::root_readme(&repo).await;
 
     // Cleanup before asserting, so a failed assertion can't leave the scratch repo behind.
     let _ = client

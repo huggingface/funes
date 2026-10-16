@@ -15,8 +15,8 @@
 //!   export HF_FUNES_TEST_TOKEN=<your HF token>
 //!   RUST_MIN_STACK=16777216 cargo test --test push_round_trip -- --nocapture
 
-use std::io::Write;
-use std::process::Command;
+mod support;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -24,7 +24,7 @@ use funes::commands::push::{Confirm, Disjoint};
 use funes::commands::recall;
 use funes::commands::target::Target;
 use funes::memory::Memory;
-use hf_hub::{HFClient, HFError, HFRepository, RepoTypeDataset};
+use hf_hub::HFClient;
 
 const OWNER: &str = "optimum-internal-testing";
 const NAME: &str = "funes-test";
@@ -50,36 +50,6 @@ async fn remote_rows_and_ids(uri: &str) -> (usize, usize) {
     (rows, ids.len())
 }
 
-/// Write a turns file with the given (uuid, text) user turns.
-fn write_session(source: &std::path::Path, turns: &[(&str, &str)]) {
-    let mut f = std::fs::File::create(source.join("sess.funes.jsonl")).unwrap();
-    for (i, (uuid, text)) in turns.iter().enumerate() {
-        writeln!(
-            f,
-            r#"{{"format":1,"session_id":"sess","cwd":"/synctest/proj","turn_uuid":"{uuid}","seq":{i},"ts":"2026-02-01T00:00:{i:02}Z","role":"user","blocks":[{{"block_type":"text","text":"{text}"}}],"harness":"claude"}}"#
-        )
-        .unwrap();
-    }
-}
-
-fn tool_ok(bin: &str, arg: &str) -> bool {
-    Command::new(bin)
-        .arg(arg)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-/// The repo-root README, or None when the repo has none. Any other failure panics: a transport
-/// error must fail the test loudly, not masquerade as "no README".
-async fn root_readme(repo: &HFRepository<RepoTypeDataset>) -> Option<String> {
-    match repo.download_file_to_bytes().filename("README.md").send().await {
-        Ok(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
-        Err(HFError::EntryNotFound { .. }) => None,
-        Err(e) => panic!("querying the repo-root README: {e}"),
-    }
-}
-
 /// A recall of `uri` as this host's bound memory, pooled with its turns not yet pushed there: what
 /// a read naming no memory runs on a host bound to it.
 async fn recall_bound(uri: &str, query: &str) -> String {
@@ -93,13 +63,6 @@ async fn recall_bound(uri: &str, query: &str) -> String {
     )
     .await
     .unwrap()
-}
-
-/// A recall of `uri` as it stands: what a read naming it runs.
-async fn recall_remote(uri: &str, query: &str) -> String {
-    recall::recall(Memory::parse(uri), query.into(), 5, 30, 0, Default::default())
-        .await
-        .unwrap_or_else(|e| format!("<recall error: {e}>"))
 }
 
 /// Push confirmations, recorded so the test can assert whether — and with what pending-chunk count —
@@ -132,7 +95,7 @@ async fn push_round_trip_create_append_recall() {
         eprintln!("skip: HF_FUNES_TEST_TOKEN not set");
         return;
     }
-    if !tool_ok("trufflehog", "--version") {
+    if !support::tool_ok("trufflehog", "--version") {
         eprintln!("skip: trufflehog not installed (push's secret gate is fail-closed)");
         return;
     }
@@ -142,7 +105,7 @@ async fn push_round_trip_create_append_recall() {
 
     // The memory lives under a prefix, so no push here may ever touch the repo-root README (the
     // dataset card is root-stores-only). Snapshot it now, compare after every push ran.
-    let readme_before = root_readme(&repo).await;
+    let readme_before = support::root_readme(&repo).await;
 
     // Unique scratch path so concurrent/repeated runs don't collide.
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
@@ -153,7 +116,7 @@ async fn push_round_trip_create_append_recall() {
     let db_dir = tempfile::tempdir().unwrap();
     let src = tempfile::tempdir().unwrap();
     std::env::set_var("FUNES_HOME", db_dir.path());
-    write_session(src.path(), &[("s1", "SYNCSMOKE parsing transcripts into turns")]);
+    support::write_session(src.path(), "sess", &["SYNCSMOKE parsing transcripts into turns"]);
     funes::commands::index::run_index(src.path(), false, None)
         .await
         .unwrap();
@@ -175,11 +138,12 @@ async fn push_round_trip_create_append_recall() {
     // recall both. The appended turn is left unindexed, so recalling it back exercises Lance's
     // brute-force fallback. Then force a compaction and recall it again, now served by the index.
     let create = funes::commands::push::run_push(Memory::parse(&uri), false, Confirm::Ask(accept), &[]).await;
-    write_session(
+    support::write_session(
         src.path(),
+        "sess",
         &[
-            ("s1", "SYNCSMOKE parsing transcripts into turns"),
-            ("s2", "SYNCSMOKE2 the continuation adds only this new turn"),
+            "SYNCSMOKE parsing transcripts into turns",
+            "SYNCSMOKE2 the continuation adds only this new turn",
         ],
     );
     funes::commands::index::run_index(src.path(), false, None)
@@ -190,23 +154,24 @@ async fn push_round_trip_create_append_recall() {
     let prompts_before_append = PROMPTS.load(Ordering::SeqCst);
     let append = funes::commands::push::run_push(Memory::parse(&uri), false, Confirm::Ask(decline), &[]).await;
     let prompts_after_append = PROMPTS.load(Ordering::SeqCst);
-    let recall_base = recall_remote(&uri, "SYNCSMOKE parsing").await;
-    let recall_new = recall_remote(&uri, "SYNCSMOKE2 continuation").await;
+    let recall_base = support::recall_remote(&uri, "SYNCSMOKE parsing").await;
+    let recall_new = support::recall_remote(&uri, "SYNCSMOKE2 continuation").await;
     // Nothing new to push, so this is a pure forced compaction: fold the unindexed appended turn
     // into the index in commits of its own, then recall it again.
     let compaction = funes::commands::push::run_push(Memory::parse(&uri), true, Confirm::Yes, &[]).await;
-    let recall_compacted = recall_remote(&uri, "SYNCSMOKE2 continuation").await;
+    let recall_compacted = support::recall_remote(&uri, "SYNCSMOKE2 continuation").await;
     let versions_compacted = match Memory::parse(&uri).open().await {
         Ok(ds) => ds.versions().await.map(|v| v.len()).unwrap_or(0),
         Err(_) => 0,
     };
     // Two pushes at once — what N subagents ending together do.
-    write_session(
+    support::write_session(
         src.path(),
+        "sess",
         &[
-            ("s1", "SYNCSMOKE parsing transcripts into turns"),
-            ("s2", "SYNCSMOKE2 the continuation adds only this new turn"),
-            ("s3", "SYNCSMOKE3 the turn two pushes race to publish"),
+            "SYNCSMOKE parsing transcripts into turns",
+            "SYNCSMOKE2 the continuation adds only this new turn",
+            "SYNCSMOKE3 the turn two pushes race to publish",
         ],
     );
     funes::commands::index::run_index(src.path(), false, None)
@@ -219,20 +184,21 @@ async fn push_round_trip_create_append_recall() {
     let (remote_rows, remote_ids) = remote_rows_and_ids(&uri).await;
     // A turn indexed after the last push: read as the bound memory, the remote recalls it from the
     // local memory; read as it stands, it does not.
-    write_session(
+    support::write_session(
         src.path(),
+        "sess",
         &[
-            ("s1", "SYNCSMOKE parsing transcripts into turns"),
-            ("s2", "SYNCSMOKE2 the continuation adds only this new turn"),
-            ("s3", "SYNCSMOKE3 the turn two pushes race to publish"),
-            ("s4", "SYNCSMOKE4 indexed here but not yet pushed"),
+            "SYNCSMOKE parsing transcripts into turns",
+            "SYNCSMOKE2 the continuation adds only this new turn",
+            "SYNCSMOKE3 the turn two pushes race to publish",
+            "SYNCSMOKE4 indexed here but not yet pushed",
         ],
     );
     funes::commands::index::run_index(src.path(), false, None)
         .await
         .unwrap();
     let recall_pooled = recall_bound(&uri, "SYNCSMOKE4 not yet pushed").await;
-    let recall_exact = recall_remote(&uri, "SYNCSMOKE4 not yet pushed").await;
+    let recall_exact = support::recall_remote(&uri, "SYNCSMOKE4 not yet pushed").await;
     // The session it grew is owed, so the bound memory lists and reads it from the local memory,
     // whole; read as it stands, the remote shows its shorter copy.
     let all_sessions = || recall::SessionFilter {
@@ -257,7 +223,7 @@ async fn push_round_trip_create_append_recall() {
     let status_bound = recall::status(Target::bound(Memory::parse(&uri))).await.unwrap();
     let status_unbound = recall::status(Memory::parse(&uri)).await.unwrap();
 
-    let readme_after = root_readme(&repo).await;
+    let readme_after = support::root_readme(&repo).await;
     // The model id must travel with the memory (stamped in the schema metadata, uploaded by push).
     let remote_model = match Memory::parse(&uri).open().await {
         Ok(t) => t.schema().metadata.get("embedding_model").cloned(),
