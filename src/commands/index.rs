@@ -190,22 +190,20 @@ fn elide_turns(turns: &mut [traces::Turn]) {
 /// Redact secrets from `units`' turns *before* chunking — so a long key that chunking would split
 /// across pieces is whole when scanned, and never reaches the embedding, the local memory, or (via
 /// push) the Hub. One scanner run covers every unit given: the spawn costs ~1 s, the scan itself
-/// milliseconds. Scans exactly the blocks the pass will store ([`chunk::block_selected`]), so
-/// deferred tiers aren't scanned now and a tier-major backfill doesn't re-scan each session per
-/// tier. Best-effort: removes a secret whose value byte-matches the stored text (the common case,
-/// real newlines); anything that resists is caught downstream by the fail-closed push gate.
-/// Reports to stderr what it removed, per unit.
+/// milliseconds. Scans exactly the blocks the memory stores ([`chunk::block_selected`]).
+/// Best-effort: removes a secret whose value byte-matches the stored text (the common case, real
+/// newlines); anything that resists is caught downstream by the fail-closed push gate. Reports to
+/// stderr what it removed, per unit.
 fn redact_units(
     units: &mut [&mut [traces::Turn]],
     scanner: &dyn scan::SecretScanner,
-    tiers: &[Tier],
     include_thinking: bool,
 ) -> Result<()> {
     let n_units = units.len();
     let mut blocks: Vec<(usize, &mut traces::Block)> = Vec::new();
     for (u, turns) in units.iter_mut().enumerate() {
         for b in turns.iter_mut().flat_map(|t| t.blocks.iter_mut()) {
-            if chunk::block_selected(&b.block_type, tiers, include_thinking) {
+            if chunk::block_selected(&b.block_type, include_thinking) {
                 blocks.push((u, b));
             }
         }
@@ -242,7 +240,6 @@ fn redact_units(
 /// change the text a block splits into.
 fn sanitize_units(
     units: &mut [&mut [traces::Turn]],
-    tiers: &[Tier],
     include_thinking: bool,
     scanner: Option<&scan::Trufflehog>,
 ) -> Result<()> {
@@ -250,7 +247,7 @@ fn sanitize_units(
         elide_turns(turns);
     }
     if let Some(scanner) = scanner {
-        redact_units(units, scanner, tiers, include_thinking)?;
+        redact_units(units, scanner, include_thinking)?;
     }
     Ok(())
 }
@@ -705,7 +702,7 @@ impl Indexer {
     ) -> Result<Vec<Option<Vec<traces::Turn>>>> {
         let mut read = take_batch(units, |n, &i| self.read_unit(i, &label(n)))?;
         let mut all: Vec<&mut [traces::Turn]> = read.iter_mut().flatten().map(Vec::as_mut_slice).collect();
-        sanitize_units(&mut all, &Tier::ALL, self.include_thinking, self.scanner.as_ref())?;
+        sanitize_units(&mut all, self.include_thinking, self.scanner.as_ref())?;
         Ok(read)
     }
 
@@ -718,7 +715,7 @@ impl Indexer {
             (unit.key.clone(), unit.signature.clone())
         };
         let (sessions, label) = unit_summary(turns, &key);
-        let mut chunks = chunk::chunks_from_turns(turns, &Tier::ALL, self.include_thinking);
+        let mut chunks = chunk::chunks_from_turns(turns, self.include_thinking);
         let mut repo_by_turn: HashMap<(&str, &str), String> = HashMap::new();
         for t in turns {
             if let Some(cwd) = &t.cwd {
@@ -1209,7 +1206,7 @@ pub fn check(path: &Path, no_thinking: bool, limit: Option<usize>) -> Result<Che
             }
         })?;
         let mut all: Vec<&mut [traces::Turn]> = read.iter_mut().flatten().map(Vec::as_mut_slice).collect();
-        sanitize_units(&mut all, &Tier::ALL, !no_thinking, scanner.as_ref())?;
+        sanitize_units(&mut all, !no_thinking, scanner.as_ref())?;
         let mut rejections = rejections.into_iter();
         for (n, unit_turns) in read.iter().enumerate() {
             let Some(unit_turns) = unit_turns else {
@@ -1221,7 +1218,7 @@ pub fn check(path: &Path, no_thinking: bool, limit: Option<usize>) -> Result<Che
                 );
                 continue;
             };
-            let unit_chunks = chunk::chunks_from_turns(unit_turns, &Tier::ALL, !no_thinking);
+            let unit_chunks = chunk::chunks_from_turns(unit_turns, !no_thinking);
             text.push_str(&format!(
                 "  {} — {} turns, {} chunks\n",
                 units[from + n].key,
@@ -1753,58 +1750,10 @@ mod tests {
             source_path: String::new(),
             harness: "claude_code".into(),
         }];
-        redact_units(&mut [&mut turns], &scanner, &chunk::Tier::ALL, true).unwrap();
+        redact_units(&mut [&mut turns], &scanner, true).unwrap();
         assert_eq!(
             turns[0].blocks[0].text,
             "key=[REDACTED:PrivateKey] hash=[REDACTED:VirusTotal]"
-        );
-    }
-
-    #[test]
-    fn redact_only_scans_the_pass_tier_blocks() {
-        struct Fake;
-        impl scan::SecretScanner for Fake {
-            fn scan(&self, texts: &[&str]) -> Result<Vec<Vec<scan::Finding>>> {
-                let hit = scan::Finding {
-                    detector: "PrivateKey".into(),
-                    raw: "SECRET".into(),
-                    decoder: "PLAIN".into(),
-                };
-                Ok(texts.iter().map(|_| vec![hit.clone()]).collect())
-            }
-        }
-        let block = |bt: &str, text: &str| traces::Block {
-            block_type: bt.into(),
-            text: text.into(),
-            tool_name: None,
-            tool_use_id: None,
-        };
-        let mut turns = vec![traces::Turn {
-            format: traces::FORMAT_VERSION,
-            session_id: "sess".into(),
-            cwd: None,
-            workdir: "proj".into(),
-            turn_uuid: "turn".into(),
-            parent_uuid: None,
-            seq: 0,
-            ts: String::new(),
-            role: "user".into(),
-            blocks: vec![
-                block("text", "note SECRET here"),
-                block("tool_result", "output SECRET dump"),
-            ],
-            source_path: String::new(),
-            harness: "claude_code".into(),
-        }];
-        // A text-only pass redacts the text block but leaves the tool_result it won't store untouched.
-        redact_units(&mut [&mut turns], &Fake, &[chunk::Tier::Text], true).unwrap();
-        assert!(
-            turns[0].blocks[0].text.contains("[REDACTED:PrivateKey]"),
-            "text block redacted"
-        );
-        assert_eq!(
-            turns[0].blocks[1].text, "output SECRET dump",
-            "unindexed tool_result untouched"
         );
     }
 
@@ -1838,7 +1787,7 @@ mod tests {
         }];
         let scanner = Recorder(std::cell::RefCell::new(String::new()));
         elide_turns(&mut turns);
-        redact_units(&mut [&mut turns], &scanner, &chunk::Tier::ALL, true).unwrap();
+        redact_units(&mut [&mut turns], &scanner, true).unwrap();
         assert_eq!(
             turns[0].blocks[0].text,
             r#"{"image_url":"data:image/png;base64,[elided]"}"#
@@ -1902,7 +1851,7 @@ mod tests {
         ])];
         let mut b = vec![turn(vec![block("tool_result", "output TOKEN dump")])];
         let scanner = Counting(std::cell::Cell::new(0));
-        redact_units(&mut [&mut a, &mut b], &scanner, &chunk::Tier::ALL, false).unwrap();
+        redact_units(&mut [&mut a, &mut b], &scanner, false).unwrap();
         assert_eq!(scanner.0.get(), 1, "one scanner run for both units");
         assert_eq!(a[0].blocks[0].text, "note [REDACTED:PrivateKey] here");
         assert_eq!(

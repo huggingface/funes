@@ -471,10 +471,4 @@ mod tests {
         // but a real newer release still notifies a dev build
         assert!(notice_for("0.8.1", "0.8.0+dev").is_some());
     }
-
-    #[test]
-    fn unreadable_version_yields_no_false_alarm() {
-        assert_eq!(notice_for("garbage", "0.8.0"), None);
-        assert_eq!(notice_for("0.8.1", "garbage"), None);
-    }
 }

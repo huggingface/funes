@@ -179,7 +179,7 @@ pub fn legacy_note(bound: Option<&str>) -> Result<Option<String>> {
 /// to the setups as a memory.
 fn legacy_bindings(root: &Path) -> Result<Vec<(String, Vec<String>)>> {
     let mut by_label: BTreeMap<String, (String, Vec<String>)> = BTreeMap::new();
-    for (spec, ids) in registry::bindings(root)?.0 {
+    for (spec, ids) in registry::bindings(root)? {
         if spec == "local" {
             continue;
         }

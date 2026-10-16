@@ -462,8 +462,6 @@ pub struct Search {
     candidates: usize,
     harness_filtered: bool,
     where_clause: Option<String>,
-    /// Whether `rank` reranks the pool. Unset, [`reranks`] decides from the pool and `k`.
-    rerank: Option<bool>,
 }
 
 /// One memory's candidates for a [`Search`], before the rerank.
@@ -507,14 +505,7 @@ impl Search {
             query,
             qv: OnceCell::new(),
             candidates,
-            rerank: None,
         })
-    }
-
-    /// Rerank the pool or not, whatever the pool and `k` would decide.
-    pub fn with_rerank(mut self, rerank: bool) -> Self {
-        self.rerank = Some(rerank);
-        self
     }
 
     /// Hybrid retrieval over one memory: a vector ANN scan and a BM25 scan, fused by reciprocal
@@ -586,7 +577,7 @@ impl Search {
             return Ok((note, Vec::new()));
         }
 
-        let mut scored: Vec<(usize, f64)> = if self.rerank.unwrap_or_else(|| reranks(k, self.candidates)) {
+        let mut scored: Vec<(usize, f64)> = if reranks(k, self.candidates) {
             let docs: Vec<&str> = hits.iter().map(|(_, h)| h.text.as_str()).collect();
             progress(&format!("reranking {} candidates…", docs.len()));
             let scores = models()
@@ -1629,7 +1620,7 @@ mod tests {
 
     /// A memory holding `turns`, written to a temp dir.
     async fn memory_of(turns: &[Turn], dir: &Path) -> Dataset {
-        let chunks = chunk::chunks_from_turns(turns, &chunk::Tier::ALL, true);
+        let chunks = chunk::chunks_from_turns(turns, true);
         let vectors = vec![vec![0.0f32; dataset::DIM as usize]; chunks.len()];
         let batch = dataset::build_batch(dataset::model::ENGLISH, &chunks, Some(&vectors)).unwrap();
         let reader = RecordBatchIterator::new(vec![Ok(batch)], dataset::schema(dataset::model::ENGLISH));
@@ -1660,7 +1651,7 @@ mod tests {
             text_turn("session", 0, "user", "A narwhal parses transcripts."),
             text_turn("session", 1, "assistant", "Each line becomes a typed turn."),
         ];
-        let chunks = chunk::chunks_from_turns(&turns, &chunk::Tier::ALL, true);
+        let chunks = chunk::chunks_from_turns(&turns, true);
         let batch = dataset::build_batch(dataset::model::ENGLISH, &chunks, None).unwrap();
         let reader = RecordBatchIterator::new([Ok(batch)], dataset::schema(dataset::model::ENGLISH));
         let mut ds = Dataset::write(reader, &dataset::table_uri(memory.label()), None)

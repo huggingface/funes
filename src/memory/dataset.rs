@@ -1034,7 +1034,7 @@ mod tests {
     }
 
     fn embedded(turns: &[Turn]) -> RecordBatch {
-        let chunks = chunk::chunks_from_turns(turns, &chunk::Tier::ALL, true);
+        let chunks = chunk::chunks_from_turns(turns, true);
         build_batch(model::ENGLISH, &chunks, Some(&vectors(chunks.len()))).unwrap()
     }
 
@@ -1064,7 +1064,7 @@ mod tests {
     async fn fts_coverage_detects_rows_left_by_an_unfinished_finalization() {
         let dir = tempfile::tempdir().unwrap();
         let uri = table_uri(dir.path());
-        let chunks = chunk::chunks_from_turns(&turns(0, 2), &chunk::Tier::ALL, true);
+        let chunks = chunk::chunks_from_turns(&turns(0, 2), true);
         let mut ds = Dataset::write(
             reader(build_batch(model::ENGLISH, &chunks[..1], None).unwrap()),
             &uri,
@@ -1105,7 +1105,7 @@ mod tests {
         let mut ds = Dataset::write(reader(embedded(&turns(0, 255))), &uri, None)
             .await
             .unwrap();
-        let pending = chunk::chunks_from_turns(&turns(255, 3), &chunk::Tier::ALL, true);
+        let pending = chunk::chunks_from_turns(&turns(255, 3), true);
         ds.append(reader(build_batch(model::ENGLISH, &pending, None).unwrap()), None)
             .await
             .unwrap();
@@ -1160,7 +1160,7 @@ mod tests {
             .unwrap()
             .value(0);
         ds.append(reader(appended), None).await.unwrap();
-        let pending = chunk::chunks_from_turns(&turns(TRAINABLE + 4, 1), &chunk::Tier::ALL, true);
+        let pending = chunk::chunks_from_turns(&turns(TRAINABLE + 4, 1), true);
         ds.append(reader(build_batch(model::ENGLISH, &pending, None).unwrap()), None)
             .await
             .unwrap();
@@ -1318,7 +1318,7 @@ mod tests {
     async fn an_e5_memory_indexes_chinese_words() {
         let mut zh = turns(0, 1);
         zh[0].blocks[0].text = "我们修改了向量索引的构建方式".into();
-        let chunks = chunk::chunks_from_turns(&zh, &chunk::Tier::ALL, true);
+        let chunks = chunk::chunks_from_turns(&zh, true);
         for (model, found) in [(model::ENGLISH, false), (EmbeddingModel::MultilingualE5Small, true)] {
             let dir = tempfile::tempdir().unwrap();
             let uri = table_uri(dir.path());
@@ -1336,7 +1336,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_memory_names_its_embedding_model() {
-        let chunks = chunk::chunks_from_turns(&turns(0, 1), &chunk::Tier::ALL, true);
+        let chunks = chunk::chunks_from_turns(&turns(0, 1), true);
         let e5 = EmbeddingModel::MultilingualE5Small;
         let unstamped = Arc::new(Schema::new(schema(model::ENGLISH).fields().clone()));
         for (stamp, model) in [(schema(e5), e5), (unstamped, EmbeddingModel::BgeSmallEn)] {
@@ -1589,7 +1589,7 @@ mod tests {
 
     #[test]
     fn build_batch_preserves_rows_without_embeddings() {
-        let chunks = chunk::chunks_from_turns(&turns(0, 3), &chunk::Tier::ALL, true);
+        let chunks = chunk::chunks_from_turns(&turns(0, 3), true);
         let pending = build_batch(model::ENGLISH, &chunks, None).unwrap();
         let embedded = embedded(&turns(0, 3));
         assert_eq!(pending.num_rows(), 3);
@@ -1607,7 +1607,7 @@ mod tests {
     async fn fill_vectors_lands_the_embeddings_without_moving_rows() {
         let dir = tempfile::tempdir().unwrap();
         let uri = table_uri(dir.path());
-        let chunks = chunk::chunks_from_turns(&turns(0, 3), &chunk::Tier::ALL, true);
+        let chunks = chunk::chunks_from_turns(&turns(0, 3), true);
         let unembedded = build_batch(model::ENGLISH, &chunks, None).unwrap();
         let ds = Dataset::write(reader(unembedded), &uri, Some(WriteParams::default()))
             .await

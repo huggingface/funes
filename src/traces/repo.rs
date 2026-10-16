@@ -69,12 +69,6 @@ pub fn of_cwd(cwd: &str) -> String {
     ids.join(" ")
 }
 
-/// The repo identities for a session, resolved from its `transcript`'s recorded cwd. `""` when the
-/// transcript records no cwd or the checkout can't be resolved.
-pub fn of_transcript(path: &Path) -> String {
-    cwd_of_transcript(path).map(|cwd| of_cwd(&cwd)).unwrap_or_default()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

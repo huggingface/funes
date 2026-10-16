@@ -139,7 +139,7 @@ fn validate(t: &Turn) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chunk::{self, Tier};
+    use crate::chunk;
     use crate::traces::Block;
 
     const LINE: &str = r#"{"session_id":"s","turn_uuid":"t-1","seq":0,"ts":"2026-09-18T09:41:07Z","role":"user","harness":"opencode","cwd":"/home/me/x","blocks":[{"block_type":"text","text":"hi"}]}"#;
@@ -251,7 +251,7 @@ mod tests {
         assert_eq!(turns[0].blocks[0].tool_name, None);
 
         let chunks = |t: &[Turn]| -> Vec<(String, String)> {
-            chunk::chunks_from_turns(t, &Tier::ALL, true)
+            chunk::chunks_from_turns(t, true)
                 .into_iter()
                 .map(|c| (c.id, c.text))
                 .collect()

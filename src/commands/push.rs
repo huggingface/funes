@@ -836,7 +836,7 @@ mod tests {
 
     /// Build a to-push batch the way the memory stores it: chunk the turns, stamp zero vectors.
     fn batch(turns: &[Turn]) -> (RecordBatch, Vec<chunk::Chunk>) {
-        let chunks = chunk::chunks_from_turns(turns, &chunk::Tier::ALL, true);
+        let chunks = chunk::chunks_from_turns(turns, true);
         let vectors = vec![vec![0.0f32; dataset::DIM as usize]; chunks.len()];
         (
             dataset::build_batch(dataset::model::ENGLISH, &chunks, Some(&vectors)).unwrap(),
@@ -948,7 +948,7 @@ mod tests {
         let (dir, other) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let bge = two_session_ds(dir.path()).await;
         let e5_model = crate::inference::EmbeddingModel::MultilingualE5Small;
-        let chunks = chunk::chunks_from_turns(&[turn_sess("s", 0, "un passage")], &chunk::Tier::ALL, true);
+        let chunks = chunk::chunks_from_turns(&[turn_sess("s", 0, "un passage")], true);
         let b = dataset::build_batch(e5_model, &chunks, None).unwrap();
         let uri = dataset::table_uri(other.path());
         let e5 = Dataset::write(
@@ -985,7 +985,6 @@ mod tests {
                 turn_sess("s", 0, "embedded"),
                 turn_sess("s", 1, "still awaiting embedding"),
             ],
-            &chunk::Tier::ALL,
             true,
         );
         let reader = RecordBatchIterator::new(

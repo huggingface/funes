@@ -219,7 +219,7 @@ pub fn verify_installed(root: &Path, id: &str) -> Result<Verification> {
     let Some(record) = installed(root, id) else {
         return Ok(Verification::Unrecorded);
     };
-    owned_by_me(root, &record_path(root, id), 0o022)?;
+    owned_by_me(root, &record_path(root, id))?;
     let dir = root.join(id);
     let changed: Vec<String> = record
         .files
@@ -295,7 +295,7 @@ pub fn binding(root: &Path, id: &str) -> Result<Option<String>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(anyhow::Error::new(e).context(format!("reading {}", path.display()))),
     };
-    owned_by_me(root, &path, 0o022)?;
+    owned_by_me(root, &path)?;
     let memory = text.trim();
     Ok((!memory.is_empty()).then(|| memory.to_string()))
 }
@@ -313,19 +313,15 @@ pub fn bind(root: &Path, id: &str, memory: Option<&str>) -> Result<()> {
 /// Memories, each with the ids of the integrations bound to it.
 pub type Bound = Vec<(String, Vec<String>)>;
 
-/// Each memory an older funes bound the installed integrations to, with the ids bound to it, and
-/// the ids installed with neither an install record nor such a binding.
-pub fn bindings(root: &Path) -> Result<(Bound, Vec<String>)> {
+/// Each memory an older funes bound the installed integrations to, with the ids bound to it.
+pub fn bindings(root: &Path) -> Result<Bound> {
     let mut bound: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let mut unrecorded = Vec::new();
     for id in registered_ids(root) {
-        match binding(root, &id)? {
-            Some(memory) => bound.entry(memory).or_default().push(id),
-            None if installed(root, &id).is_none() => unrecorded.push(id),
-            None => {}
+        if let Some(memory) = binding(root, &id)? {
+            bound.entry(memory).or_default().push(id);
         }
     }
-    Ok((bound.into_iter().collect(), unrecorded))
+    Ok(bound.into_iter().collect())
 }
 
 /// The registry root, `~/.funes/agents` — fixed, not under `$FUNES_HOME`: an agent records the
@@ -383,7 +379,7 @@ pub fn open(root: &Path, id: &str) -> Result<Integration> {
 
     let setup = dir.join(SETUP);
     require_executable(&setup)?;
-    owned_by_me(root, &setup, 0o022)?;
+    owned_by_me(root, &setup)?;
 
     Ok(Integration { dir, manifest })
 }
@@ -442,10 +438,9 @@ fn read_manifest(path: &Path, id: &str) -> Result<Manifest> {
 
 /// Refuse a `path` that someone other than the user running funes could have written, checking
 /// every directory from `top` down as well as the file itself: funes is about to execute what it
-/// finds there. `others` is the mode bits that give it away: group and world write for the
-/// registry. Below `top`, a link is refused rather than followed: what it points at has parents of
-/// its own that this walk would never see.
-fn owned_by_me(top: &Path, path: &Path, others: u32) -> Result<()> {
+/// finds there. Group or world write gives it away. Below `top`, a link is refused rather than
+/// followed: what it points at has parents of its own that this walk would never see.
+fn owned_by_me(top: &Path, path: &Path) -> Result<()> {
     // SAFETY: `geteuid` reads a process attribute and cannot fail.
     let me = unsafe { libc::geteuid() };
     let mut path = path.to_path_buf();
@@ -462,7 +457,7 @@ fn owned_by_me(top: &Path, path: &Path, others: u32) -> Result<()> {
                 path.display()
             );
         }
-        if meta.permissions().mode() & others != 0 {
+        if meta.permissions().mode() & 0o022 != 0 {
             bail!(
                 "{} is writable by other users — funes will not run it; `chmod go-w` it or reinstall",
                 path.display()
@@ -1158,11 +1153,10 @@ mod tests {
                 & 0o777,
             0o644
         );
-        assert!(owned_by_me(&dst, &dst.join("setup"), 0o022).is_ok());
+        assert!(owned_by_me(&dst, &dst.join("setup")).is_ok());
     }
 
-    /// Ownership is judged against the user running funes, file by file up to the top, and by the
-    /// bits that matter there: group write is fine for a checkout, not for the registry.
+    /// Ownership is judged against the user running funes, file by file up to the top.
     #[test]
     fn ownership_is_the_running_users_up_to_the_top() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1171,15 +1165,11 @@ mod tests {
         let file = top.join("a/setup");
         std::fs::write(&file, "").unwrap();
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o775)).unwrap();
-        assert!(
-            owned_by_me(&top, &file, 0o002).is_ok(),
-            "group write passes when world write alone is asked about"
-        );
-        let err = owned_by_me(&top, &file, 0o022).unwrap_err().to_string();
+        let err = owned_by_me(&top, &file).unwrap_err().to_string();
         assert!(err.contains("writable by other users"), "{err}");
         std::fs::set_permissions(top.join("a"), std::fs::Permissions::from_mode(0o777)).unwrap();
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let err = owned_by_me(&top, &file, 0o002).unwrap_err().to_string();
+        let err = owned_by_me(&top, &file).unwrap_err().to_string();
         assert!(err.contains("a is writable"), "a directory on the way counts: {err}");
     }
 
@@ -1316,32 +1306,21 @@ mod tests {
         assert!(!root.join("pi.memory").exists());
     }
 
-    /// Integrations bound to one memory are listed under it; a recorded install with no binding is
-    /// local-only and listed nowhere; an install funes has no record of is named as unrecorded.
+    /// Integrations bound to one memory are listed under it; one with no binding is listed nowhere.
     #[test]
-    fn bindings_group_the_bound_and_name_the_unrecorded() {
+    fn bindings_group_the_bound_under_their_memory() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("agents");
-        for id in ["claude", "codex", "hermes", "pi"] {
+        for id in ["claude", "codex", "pi"] {
             integration(&root, id, &manifest(id, CONTRACT_VERSION), "true");
         }
         bind(&root, "claude", Some("acme/kb")).unwrap();
         bind(&root, "pi", Some("acme/kb")).unwrap();
-        let rec = Installed::new(
-            &open(&root, "hermes").unwrap().manifest,
-            Origin::Directory {
-                path: tmp.path().join("src"),
-            },
-            Files::new(),
-        );
-        record(&root, &rec).unwrap();
 
-        let (bound, unrecorded) = bindings(&root).unwrap();
         assert_eq!(
-            bound,
+            bindings(&root).unwrap(),
             vec![("acme/kb".to_string(), vec!["claude".to_string(), "pi".to_string()])]
         );
-        assert_eq!(unrecorded, vec!["codex".to_string()]);
     }
 
     /// A package without its executable would leave the installed one running outside the
