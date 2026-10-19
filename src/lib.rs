@@ -8,7 +8,7 @@
 //! One directory per layer, each with one job:
 //!
 //! - [`traces`] — where turns come from: turns files, the spools integrations write them into,
-//!   Hub parquet, and the `Turn`/`Block` model they all produce.
+//!   and the `Turn`/`Block` model they produce.
 //! - [`chunk`], [`scan`], [`home`] — what the layers share: chunk text and its ids, secret
 //!   findings, and where funes's home keeps each thing.
 //! - [`inference`] — embedding and reranking behind traits, so a backend swaps at build time.

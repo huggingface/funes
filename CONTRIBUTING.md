@@ -77,7 +77,7 @@ fine; CI runs them with the repository secret.
 
   | Layer | Job |
   |---|---|
-  | `traces/` | where turns come from: turns files, the spools integrations write them into, Hub parquet, and the `Turn`/`Block` model they produce |
+  | `traces/` | where turns come from: turns files, the spools integrations write them into, and the `Turn`/`Block` model they produce |
   | `chunk.rs`, `scan.rs`, `home.rs` | what the layers share: chunk text and ids, secret findings, where funes's home keeps each thing |
   | `inference/` | embedding and reranking behind traits (backend chosen at build time) |
   | `hub.rs` | **transport**: the Hub's client, credentials, and dataset-repo identity and lifecycle. Knows nothing about memories — `memory`, `traces` and `commands` all call it |

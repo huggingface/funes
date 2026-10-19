@@ -4,12 +4,10 @@
 //! A session becomes a sequence of [`Turn`]s, each carrying typed [`Block`]s. Everything downstream
 //! — chunk → embed → store → recall — operates on that shape, so the model is source-agnostic and
 //! lives here, at the root of the readers that fill it. An agent's own transcripts are converted
-//! into [`funes_jsonl`] by its integration, outside funes, so the readers here take that and Hub
-//! parquet.
+//! into [`funes_jsonl`] by its integration, outside funes, so that is the one format read here.
 
 pub mod funes_jsonl;
 pub mod jsonl;
-pub mod parquet;
 pub mod repo;
 pub mod source;
 pub mod spool;

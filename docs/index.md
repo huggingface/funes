@@ -2,10 +2,10 @@
 
 `funes index` builds or updates your local memory from what the integrations convert and from the
 turns files you point it at. [`funes add`](add.md) runs it for you on every turn; run it by hand to
-catch a spool up, to finish the embeddings a budgeted run left, or to fold in a turns file, a
-directory of them, a `.parquet` export, or a Hub trace repo. To index an agent's history from a
-machine that never ran the automation, convert it first —
-[add.md](add.md#converting-by-hand) says how.
+catch a spool up, to finish the embeddings a budgeted run left, or to fold in a turns file or a
+directory of them. To index an agent's history from a machine that never ran the automation, convert
+it first — [add.md](add.md#converting-by-hand) says how. A Hugging Face agent-traces dataset converts
+the same way, with [`hf-traces`](https://github.com/huggingface/funes-integrations#hugging-face-agent-traces-datasets).
 
 ```bash
 funes index      # a budgeted pass over every spool, into one memory
@@ -22,19 +22,16 @@ spool with `--harness <id>`:
 funes index --harness codex        # only Codex's sessions
 ```
 
-Point it at a **path** to index one place in full — a `.funes.jsonl` turns file (or a directory of
-them), or a single `.parquet` trace export — or at a **Hub trace repo** to index its auto-converted
-parquet:
+Point it at a **path** to index one place in full — a `.funes.jsonl` turns file, or a directory of
+them:
 
 ```bash
-funes index ./turns                        # a directory of turns files, or a .parquet
+funes index ./turns                        # a directory of turns files
 funes index thread.funes.jsonl             # turns from a source funes has no parser for
-funes index <org>/<repo>                   # a Hub trace dataset (or a full hf://… URI)
 ```
 
-An existing local path always wins over reading the same string as a repo ref. An **automated
-(non-terminal) run must name a target** — a path or `--harness <id>`; funes refuses to sweep every
-spool unattended (a Claude session-end shouldn't pull in Codex or pi sessions).
+An **automated (non-terminal) run must name a target** — a path or `--harness <id>`; funes refuses
+to sweep every spool unattended (a Claude session-end shouldn't pull in Codex or pi sessions).
 
 funes reads no agent's own transcripts: each integration converts its sessions into its spool, and a
 path holding transcripts that are not turns files is refused with a pointer at the format
@@ -44,44 +41,6 @@ To rebuild a memory from an agent's history, re-run [`funes add <agent>`](add.md
 
 Inline `data:` URI payloads are elided to `data:image/png;base64,[elided]` before a block is
 scanned or stored: a pasted screenshot is megabytes of base64 with nothing recallable in it.
-
-### Parquet trace format
-
-Parquet import targets the Hugging Face agent-traces layout: **one row per session**, with these two
-required columns:
-
-| Column | Arrow type | Meaning |
-| --- | --- | --- |
-| `session_id` | `Utf8` or `LargeUtf8` | Stable identity for the session. |
-| `messages` | `List<Utf8>` or `List<LargeUtf8>` | JSON-encoded, OpenAI-style chat messages in chronological order. |
-
-Each non-null `messages` element is a JSON object. funes reads these fields:
-
-| Field | Mapping |
-| --- | --- |
-| `role` | Turn role. |
-| `content` | A `text` block when it is a non-empty string. |
-| `reasoning_content` | A `thinking` block when it is a non-empty string. |
-| `tool_calls[].function.name` | Tool name on a `tool_use` block. |
-| `tool_calls[].function.arguments` | Tool input, kept as a string or serialized from its JSON value. |
-
-The importer does not currently derive `tool_result` blocks from Parquet messages. Other message
-fields are ignored. Invalid JSON elements are skipped; a row is skipped when none of its messages
-produces an indexable block.
-
-Optional string columns add provenance:
-
-| Column | Meaning |
-| --- | --- |
-| `sent_at` | Timestamp applied to the imported turns. |
-| `harness` | Agent/harness facet; it may differ per row. |
-| `file_path` | Original source path shown in provenance. |
-| `metadata` | JSON object whose `cwd` becomes the workdir facet. |
-
-When optional provenance is absent, funes falls back to the Parquet filename where possible. Turn
-UUIDs are synthesized as `<session_id>-<sequence>` and sequence counts only retained messages. This
-is the compatibility contract behind “another agent can join through a Parquet trace export”; an
-arbitrary Parquet table is not accepted merely because it has a `.parquet` suffix.
 
 ### funes JSONL (turns files)
 
@@ -155,7 +114,7 @@ words. A memory keeps the model it was created with.
 | --- | --- |
 | `--harness <id>` | Index one integration's spool, `~/.funes/spool/<id>`. Refused with a PATH, whose turns name their own harness. |
 | `--check` | Validate PATH without indexing it: turns, chunks, rejected files, duplicate ids; writes nothing, exits non-zero if a unit was rejected. |
-| `--limit <N>` | Index only the most recent N sessions per source. Omit to index all. A Hub repo ignores it and indexes every shard. |
+| `--limit <N>` | Index only the most recent N sessions per source. Omit to index all. |
 | `--no-thinking` | Exclude thinking blocks. |
 | `--yes` | Don't ask: a budgeted (no-path) run finishes all remaining work; an explicit path skips the first-index size confirmation. |
 | `--multilingual` | Create the local memory with `intfloat/multilingual-e5-small`, for sessions not in English. Refused when the local memory exists with the English model. |

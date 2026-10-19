@@ -11,7 +11,6 @@
 use super::compact;
 use crate::chunk::{self, Tier};
 use crate::home;
-use crate::hub;
 use crate::inference::{self, embed_batched, Embedder};
 use crate::memory::dataset::{self, build_batch, model};
 use crate::memory::lock;
@@ -62,9 +61,9 @@ pub struct IndexArgs {
     pub multilingual: bool,
 }
 
-/// `funes index`: validate a path, or index a path, a Hub trace repo, one integration's spool, or
-/// every spool. A spool refresh (no path: the per-turn hook, or a terminal's "keep me fresh") is
-/// budgeted and rows-first; an explicit path or Hub repo is indexed in full.
+/// `funes index`: validate a path, or index a path, one integration's spool, or every spool. A
+/// spool refresh (no path: the per-turn hook, or a terminal's "keep me fresh") is budgeted and
+/// rows-first; an explicit path is indexed in full.
 pub async fn run(args: IndexArgs) -> Result<()> {
     let IndexArgs {
         path,
@@ -92,19 +91,7 @@ pub async fn run(args: IndexArgs) -> Result<()> {
     }
     let budgeted = path.is_none();
     let roots: Vec<PathBuf> = match (path, harness) {
-        // An existing local path wins over reading the same string as a repo ref.
         (Some(p), _) if PathBuf::from(&p).exists() => vec![PathBuf::from(p)],
-        (Some(p), _) if p.starts_with("hf://") || hub::is_remote_shorthand(&p) => {
-            // A Hub trace dataset: resolve to `hf://datasets/<owner>/<name>` and index its
-            // auto-converted parquet.
-            let Memory::Remote { uri } = Memory::parse(&p) else {
-                return Err(anyhow!("expected a Hub repo, got {p:?}"));
-            };
-            if multilingual {
-                ensure_local_memory(model::MULTILINGUAL).await?;
-            }
-            return run_index_remote(&uri, no_thinking).await;
-        }
         (Some(p), _) => return Err(anyhow!("no such path: {p}")),
         (None, Some(id)) => match spool::select(&id) {
             Ok(dir) => vec![dir],
@@ -976,16 +963,6 @@ pub async fn run_index_roots(
         .map(|path| source::open(path, max_sessions))
         .collect::<Result<Vec<_>>>()?;
     index_sources(sources, no_thinking, yes).await
-}
-
-/// Index a Hub trace dataset (`funes index <org/repo>`): resolve its `refs/convert/parquet` shards,
-/// download them, and index — through the same pipeline as the local sources. `uri` is the
-/// `hf://datasets/<owner>/<name>` form (the CLI resolves a shorthand to it).
-pub async fn run_index_remote(uri: &str, no_thinking: bool) -> Result<()> {
-    let (owner, name, _prefix) = hub::parse_hf(uri)?;
-    let src = source::open_remote(&owner, &name, None).await?;
-    // A Hub import is an explicit, deliberate command — skip the first-index confirmation.
-    index_sources(vec![src], no_thinking, true).await
 }
 
 /// The wall-clock budget a budgeted run gives itself: it stops at the first unit-batch or

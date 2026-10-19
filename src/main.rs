@@ -2,8 +2,8 @@
 //!
 //! The CLI: its definitions, and the dispatch that parses a command line, calls one command and
 //! prints what comes back. `recall` reads the index (hybrid search, reranked for a deep pool);
-//! `index` builds/updates it from the integrations' spools, a turns file, a parquet file or a Hub
-//! trace repo. funes's home is `$FUNES_HOME` or `~/.funes`.
+//! `index` builds/updates it from the integrations' spools or a turns file. funes's home is
+//! `$FUNES_HOME` or `~/.funes`.
 
 use funes::agents;
 use funes::commands::target::Target;
@@ -89,10 +89,9 @@ enum Cmd {
     },
     /// Build or update your local memory from session transcripts, then compact it.
     Index {
-        /// A `.funes.jsonl` turns file (or a directory of them), a `.parquet` file, or a Hub
-        /// trace repo `<org>/<repo>`. Omit — in a terminal — to index every integration's spool
-        /// (~/.funes/spool/<id>); `--harness <id>` alone targets one. An automated (non-terminal)
-        /// run must name a target.
+        /// A `.funes.jsonl` turns file, or a directory of them. Omit — in a terminal — to index
+        /// every integration's spool (~/.funes/spool/<id>); `--harness <id>` alone targets one. An
+        /// automated (non-terminal) run must name a target.
         path: Option<String>,
         /// Index only this integration's spool, ~/.funes/spool/<id>. Refused with a PATH, whose
         /// turns name their own harness.
