@@ -358,6 +358,7 @@ async fn run() -> Result<()> {
                     block_type,
                     role,
                     harness,
+                    repo: None,
                     since,
                     until,
                 },

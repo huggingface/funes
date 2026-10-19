@@ -203,12 +203,26 @@ impl DayRange<'_> {
     }
 }
 
-/// `block_type = '…' AND role = '…' AND harness IN ('…') AND ts >= '…'` over whichever filters
-/// are set, else None.
+/// A repo as the one `owner/name` identity it names. A row's `repo` holds nothing else, so any
+/// other value would match no turn, and read as a repo that has none.
+fn parse_repo(s: &str) -> Result<&str> {
+    match s.split_once('/') {
+        Some((owner, name))
+            if !owner.is_empty() && !name.is_empty() && !name.contains('/') && !s.contains(char::is_whitespace) =>
+        {
+            Ok(s)
+        }
+        _ => Err(anyhow!("{s:?} is not a repo: expected owner/name")),
+    }
+}
+
+/// `block_type = '…' AND role = '…' AND harness IN ('…') AND <repo is one of the row's> AND
+/// ts >= '…'` over whichever filters are set, else None.
 fn build_where(
     block_type: Option<&str>,
     role: Option<&str>,
     harness: &[String],
+    repo: Option<&str>,
     days: &DayRange,
 ) -> Result<Option<String>> {
     let mut clauses = Vec::new();
@@ -222,6 +236,11 @@ fn build_where(
         [] => {}
         [h] => clauses.push(dataset::eq("harness", h)),
         many => clauses.push(dataset::in_list("harness", many.iter().map(String::as_str))),
+    }
+    // A row's `repo` names every remote of its checkout, so a fork's turns match its upstream too.
+    // A checkout that did not resolve stored no repo, so its turns match none.
+    if let Some(r) = repo {
+        clauses.push(dataset::has_word("repo", parse_repo(r)?));
     }
     clauses.extend(days.clauses()?);
     Ok(if clauses.is_empty() {
@@ -439,6 +458,8 @@ pub struct RecallFilter {
     pub role: Option<String>,
     /// Keep turns of this harness, as the turns carry it (`claude` also names `claude_code`).
     pub harness: Option<String>,
+    /// Keep turns whose stored repo names this `owner/name`.
+    pub repo: Option<String>,
     /// Keep turns on or after this `YYYY-MM-DD`.
     pub since: Option<String>,
     /// Keep turns on or before this `YYYY-MM-DD`.
@@ -460,7 +481,8 @@ pub struct Search {
     query: String,
     qv: OnceCell<(EmbeddingModel, Vec<f32>)>,
     candidates: usize,
-    harness_filtered: bool,
+    /// The columns `where_clause` reads that a migration added, which an older memory lacks.
+    migrated: Vec<&'static str>,
     where_clause: Option<String>,
 }
 
@@ -494,14 +516,22 @@ impl Search {
     /// Search for `query`, up to `candidates` rows per memory that `filter` keeps.
     pub fn new(query: String, candidates: usize, filter: RecallFilter) -> Result<Self> {
         let harness = filter.harness.clone().map(harness_spellings).unwrap_or_default();
+        let mut migrated = Vec::new();
+        if filter.harness.is_some() {
+            migrated.push("harness");
+        }
+        if filter.repo.is_some() {
+            migrated.push("repo");
+        }
         Ok(Self {
             where_clause: build_where(
                 filter.block_type.as_deref(),
                 filter.role.as_deref(),
                 &harness,
+                filter.repo.as_deref(),
                 &filter.days(),
             )?,
-            harness_filtered: !harness.is_empty(),
+            migrated,
             query,
             qv: OnceCell::new(),
             candidates,
@@ -513,12 +543,10 @@ impl Search {
     pub async fn candidates(&self, memory: &Memory, progress: &(dyn Fn(&str) + Sync)) -> Result<Candidates> {
         progress(&format!("searching {}…", memory.label()));
         let read = open_read(memory).await?;
-        // A `--harness` filter needs the column; on an un-migrated memory it would fail deep inside
-        // Lance with an opaque schema error, so refuse with a clear message instead.
-        if self.harness_filtered && !dataset::has_column(&read.ds, "harness") {
-            return Err(anyhow!(
-                "this memory predates the harness facet — reindex it, or drop --harness"
-            ));
+        // A filter on a migrated column needs the column. On an un-migrated memory it would fail
+        // deep inside Lance with an opaque schema error, so refuse with a clear message instead.
+        if let Some(column) = self.migrated.iter().find(|c| !dataset::has_column(&read.ds, c)) {
+            bail!("this memory predates the {column} facet — reindex it, or drop --{column}");
         }
         let model = dataset::embedding_model(&read.ds)?;
         let (embedded_by, qv) = self
@@ -1783,7 +1811,7 @@ mod tests {
     fn build_where_combines_set_filters() {
         let one = |h: &str| vec![h.to_string()];
         let any = DayRange::default();
-        let w = |bt: Option<&str>, r: Option<&str>, h: &[String], d: &DayRange| build_where(bt, r, h, d).unwrap();
+        let w = |bt: Option<&str>, r: Option<&str>, h: &[String], d: &DayRange| build_where(bt, r, h, None, d).unwrap();
         assert_eq!(w(None, None, &[], &any), None);
         assert_eq!(w(Some("text"), None, &[], &any).as_deref(), Some("block_type = 'text'"));
         assert_eq!(w(None, Some("user"), &[], &any).as_deref(), Some("role = 'user'"));
@@ -1814,13 +1842,25 @@ mod tests {
             until: Some("2026-12-31"),
         };
         assert_eq!(w(None, None, &[], &year_end).as_deref(), Some("ts < '2027-01-01'"));
+        // A repo is one word of the space-joined column.
+        assert_eq!(
+            build_where(Some("text"), None, &[], Some("acme/widget"), &week).unwrap().as_deref(),
+            Some("block_type = 'text' AND concat(' ', repo, ' ') LIKE '% acme/widget %' AND ts >= '2026-09-14' AND ts < '2026-09-21'")
+        );
         // values are escaped against filter-string injection; a bound that is not a date is refused.
         assert_eq!(w(None, None, &one("a'b"), &any).as_deref(), Some("harness = 'a''b'"));
         assert_eq!(w(None, Some("a'b"), &[], &any).as_deref(), Some("role = 'a''b'"));
+        assert_eq!(
+            build_where(None, None, &[], Some("o'k/a_b%c\\d"), &any)
+                .unwrap()
+                .as_deref(),
+            Some("concat(' ', repo, ' ') LIKE '% o''k/a\\_b\\%c\\\\d %'")
+        );
         let err = build_where(
             None,
             None,
             &[],
+            None,
             &DayRange {
                 since: Some("x'y"),
                 until: None,
@@ -1833,8 +1873,97 @@ mod tests {
             since: Some("2026-9-14"),
             until: None,
         };
-        assert!(build_where(None, None, &[], &unpadded).is_err());
+        assert!(build_where(None, None, &[], None, &unpadded).is_err());
         assert!(unpadded.check().is_err());
+        // And a repo that is not one `owner/name`, which no row's identities could hold.
+        for repo in [
+            "",
+            "funes",
+            "/funes",
+            "acme/",
+            "github.com/acme/widget",
+            "acme/widget upstream/widget",
+        ] {
+            let err = build_where(None, None, &[], Some(repo), &any).unwrap_err();
+            assert!(err.to_string().contains("expected owner/name"), "{repo:?}: {err}");
+        }
+    }
+
+    /// A memory of one turn per `(session, repo)`, all saying the same thing, with its text index.
+    async fn memory_of_repos(repos: &[(&str, &str)], dir: &Path) -> Dataset {
+        let turns: Vec<Turn> = repos
+            .iter()
+            .map(|(session, _)| text_turn(session, 0, "user", "A narwhal parses transcripts."))
+            .collect();
+        let mut chunks = chunk::chunks_from_turns(&turns, true);
+        for c in &mut chunks {
+            let (_, repo) = repos.iter().find(|(session, _)| *session == c.session_id).unwrap();
+            c.repo = repo.to_string();
+        }
+        let vectors = vec![vec![0.0f32; dataset::DIM as usize]; chunks.len()];
+        let batch = dataset::build_batch(dataset::model::ENGLISH, &chunks, Some(&vectors)).unwrap();
+        let reader = RecordBatchIterator::new(vec![Ok(batch)], dataset::schema(dataset::model::ENGLISH));
+        let mut ds = Dataset::write(reader, dir.to_str().unwrap(), None).await.unwrap();
+        dataset::build_indexes(&mut ds, |_| {}).await.unwrap();
+        ds
+    }
+
+    #[tokio::test]
+    async fn a_repo_keeps_the_turns_whose_checkout_names_it_among_its_remotes() {
+        let dir = tempfile::tempdir().unwrap();
+        let ds = memory_of_repos(
+            &[
+                ("fork", "acme/widget upstream/widget"),
+                ("look-alike", "acme/widgets"),
+                ("other", "acme/gadget"),
+                ("unresolved", ""),
+            ],
+            dir.path(),
+        )
+        .await;
+        let qv = vec![1.0; dataset::DIM as usize];
+        for (repo, want) in [
+            ("acme/widget", &["fork"][..]),
+            ("upstream/widget", &["fork"]),
+            ("acme/widgets", &["look-alike"]),
+            ("acme/gadget", &["other"]),
+            // A `_` or `%` matches only itself.
+            ("acme/widge_", &[]),
+            ("acme/%", &[]),
+        ] {
+            let filter = build_where(None, None, &[], Some(repo), &DayRange::default()).unwrap();
+            // Both legs prefilter, so each must keep exactly the repo's turns on its own.
+            let by_vector = vector_candidates(&ds, &qv, 10, filter.as_deref()).await.unwrap();
+            let by_text = fts_candidates(&ds, "narwhal", 10, filter.as_deref()).await.unwrap();
+            for (leg, hits) in [("vector", by_vector), ("text", by_text)] {
+                let mut sessions: Vec<String> = hits.into_iter().map(|(_, h)| h.session_id).collect();
+                sessions.sort();
+                assert_eq!(sessions, want, "{leg} search for {repo}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_repo_on_a_memory_without_the_column_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::parse(&dir.path().to_string_lossy());
+        let mut ds = memory_of_repos(
+            &[("session", "acme/widget")],
+            Path::new(&dataset::table_uri(memory.label())),
+        )
+        .await;
+        ds.drop_columns(&["repo"]).await.unwrap();
+        let search = Search::new(
+            "narwhal".into(),
+            DEFAULT_CANDIDATES,
+            RecallFilter {
+                repo: Some("acme/widget".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let err = search.candidates(&memory, &|_| ()).await.err().expect("a refusal");
+        assert!(err.to_string().contains("predates the repo facet"), "{err}");
     }
 
     #[test]

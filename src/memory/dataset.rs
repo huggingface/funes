@@ -284,6 +284,18 @@ pub fn in_list<'a>(column: &str, values: impl IntoIterator<Item = &'a str>) -> S
     format!("{column} IN ({})", list.join(", "))
 }
 
+/// The filter clause keeping rows whose `column`, words joined by single spaces, holds `word` as
+/// one of them. `word` must be non-empty and spaceless. A `%`, `_` or `\` in it matches only
+/// itself (`\` is the escape of Lance's `LIKE`).
+pub fn has_word(column: &str, word: &str) -> String {
+    debug_assert!(
+        !word.is_empty() && !word.contains(char::is_whitespace),
+        "a word is non-empty and spaceless"
+    );
+    let literal = word.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+    format!("concat(' ', {column}, ' ') LIKE {}", quoted(&format!("% {literal} %")))
+}
+
 // ---- columns ----------------------------------------------------------------------------------
 //
 // A column a batch lacks reads as all-null: a memory from before a column existed reads like one

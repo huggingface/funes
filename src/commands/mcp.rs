@@ -208,6 +208,7 @@ impl Funes {
                         block_type,
                         role,
                         harness,
+                        repo: None,
                         since,
                         until,
                     },
