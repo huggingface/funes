@@ -58,6 +58,7 @@ otherwise (see `--candidates` below).
 | `--type` | — | restrict to `text \| thinking \| tool_use \| tool_result` |
 | `--role` | — | restrict to one role, as the turns carry it (an agent's turns say `user \| assistant \| tool \| system`) |
 | `--harness` | — | restrict to one harness facet, as the turns carry it (`claude` also matches the older `claude_code`) |
+| `--repo` | — | restrict to turns whose checkout resolved to this `owner/name` |
 | `--since` / `--until` | — | restrict to turns on or after / on or before a `YYYY-MM-DD` |
 | `--memory` | the bound memory, else local | the memory to read, as it stands (see below) |
 
@@ -67,7 +68,10 @@ cheap way to reach deeper. A pool four times the hits or more is a request to lo
 read less: recall then reranks the pool with the cross-encoder before the cut, which costs seconds
 per call and grows with the pool. Under that line the hits are the first `k` of the fused order,
 and raising `candidates` alone changes little. Ranking weighs relevance, not age: for the latest
-word on a topic, pass `since`. Tool output is a `tool_result` block whatever the turn's role, and
+word on a topic, pass `since`. A memory spans every repo its sessions ran in, so a question in
+general words can return passages from another project: `--repo` keeps to one. A checkout names
+all its remotes, so a fork's turns match its upstream too, and a turn whose checkout did not
+resolve matches no repo. Tool output is a `tool_result` block whatever the turn's role, and
 in Claude's sessions it arrives on `user` turns, so the user's own words are `--role user --type text`.
 
 ## Reading turns with `get`

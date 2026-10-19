@@ -52,6 +52,9 @@ enum Cmd {
         /// `claude_code`).
         #[arg(long)]
         harness: Option<String>,
+        /// Restrict to turns whose checkout resolved to this repo (`owner/name`).
+        #[arg(long, value_name = "OWNER/NAME")]
+        repo: Option<String>,
         /// Restrict to turns on or after this date (`YYYY-MM-DD`).
         #[arg(long, value_name = "DATE")]
         since: Option<String>,
@@ -341,6 +344,7 @@ async fn run() -> Result<()> {
             block_type,
             role,
             harness,
+            repo,
             since,
             until,
             memory,
@@ -358,7 +362,7 @@ async fn run() -> Result<()> {
                     block_type,
                     role,
                     harness,
-                    repo: None,
+                    repo,
                     since,
                     until,
                 },

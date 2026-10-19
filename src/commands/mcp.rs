@@ -36,6 +36,8 @@ pub struct RecallRequest {
         description = "Restrict to a harness facet, as the turns carry it (`claude` also matches the older `claude_code`)"
     )]
     pub harness: Option<String>,
+    #[schemars(description = "Restrict to turns whose checkout resolved to this repo, as `owner/name`")]
+    pub repo: Option<String>,
     #[schemars(description = "Restrict to turns on or after this date, `YYYY-MM-DD`")]
     pub since: Option<String>,
     #[schemars(description = "Restrict to turns on or before this date, `YYYY-MM-DD`")]
@@ -191,6 +193,7 @@ impl Funes {
             block_type,
             role,
             harness,
+            repo,
             since,
             until,
             memory,
@@ -208,7 +211,7 @@ impl Funes {
                         block_type,
                         role,
                         harness,
-                        repo: None,
+                        repo,
                         since,
                         until,
                     },
