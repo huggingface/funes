@@ -56,7 +56,7 @@ objc2 = { version = "0.6", optional = true, features = ["exception"] }  # except
 objc2-foundation = { version = "0.3", optional = true }
 objc2-metal = { version = "0.3", optional = true }
 objc2-metal-performance-shaders = { version = "0.3", optional = true }
-objc2-metal-performance-shaders-graph = { version = "0.3", optional = true }  # the GPU embedder's encoder graph
+objc2-metal-performance-shaders-graph = { version = "0.3", optional = true }  # the GPU encoders' graphs
 half = { version = "2", optional = true }  # fp16 weights for the GPU
 
 [features]
@@ -64,8 +64,8 @@ default = ["blas", "metal"]
 # BLAS inference backend (src/inference/blas.rs), the default: macOS wires it to Accelerate (see build.rs),
 # Linux to faer + a polynomial exp.
 blas = ["dep:tokenizers", "dep:safetensors", "dep:faer", "dep:multiversion"]
-# The embedder on the GPU (src/inference/metal.rs), macOS only — a no-op elsewhere. It reuses the BLAS
-# backend's loaders, and its CPU forward for small calls.
+# The embedder and the reranker on the GPU (src/inference/metal.rs), macOS only — a no-op elsewhere.
+# They reuse the BLAS backend's loaders, and its CPU forwards for small calls.
 metal = [
     "blas",
     "dep:objc2",

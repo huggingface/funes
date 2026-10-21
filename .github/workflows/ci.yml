@@ -86,17 +86,19 @@ jobs:
           curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sudo sh -s -- -b /usr/local/bin v3.95.5
           trufflehog --version
 
-      # The two embedding models' weights, for the metal backend's test that it agrees with the
-      # CPU forward. Cached on main only, like the integration job's.
+      # The weights the unit tests read: the reranker's, for the CPU forward's test against
+      # transformers (and on macOS the GPU's), and on macOS the two embedding models' too, for the
+      # metal backend's test that it agrees with the CPU forward. One key per OS, since each holds
+      # different models. Cached on main only, like the integration job's.
       - name: Restore model weights
-        if: runner.os == 'macOS'
         id: models
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cache/huggingface/hub/models--BAAI--bge-small-en-v1.5
             ~/.cache/huggingface/hub/models--intfloat--multilingual-e5-small
-          key: hf-models-metal-v1
+            ~/.cache/huggingface/hub/models--Alibaba-NLP--gte-reranker-modernbert-base
+          key: hf-models-unit-${{ runner.os }}-v1
 
       # Unit tests only here — hermetic, no network but the weights above. The integration test
       # that runs the real embedder lives in its own job below. --nocapture: the agreement test
@@ -105,13 +107,14 @@ jobs:
         run: cargo test --lib --profile ci -- --nocapture
 
       - name: Save model weights
-        if: ${{ runner.os == 'macOS' && !cancelled() && github.ref == 'refs/heads/main' && steps.models.outputs.cache-hit != 'true' }}
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' && steps.models.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cache/huggingface/hub/models--BAAI--bge-small-en-v1.5
             ~/.cache/huggingface/hub/models--intfloat--multilingual-e5-small
-          key: hf-models-metal-v1
+            ~/.cache/huggingface/hub/models--Alibaba-NLP--gte-reranker-modernbert-base
+          key: hf-models-unit-${{ runner.os }}-v1
 
   # install.sh ships to Linux and macOS and is plain POSIX sh, so it gets a runner of
   # each: the test fakes the platform detection, but not the BSD vs GNU utilities
@@ -180,7 +183,7 @@ jobs:
           curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sudo sh -s -- -b /usr/local/bin v3.95.5
           trufflehog --version
 
-      # Embedder/reranker weights for the default (blas) backend (~1.2 GB of safetensors; funes
+      # Embedder/reranker weights for the default (blas) backend (~0.7 GB of safetensors; funes
       # downloads them into the HF cache on first use). Cache on main only — PRs restore main's
       # copy, so there's no duplicate per-PR copy eating the 10 GB cache budget. The files are the
       # same on both OSes, so one key serves both legs.
@@ -190,8 +193,8 @@ jobs:
         with:
           path: |
             ~/.cache/huggingface/hub/models--BAAI--bge-small-en-v1.5
-            ~/.cache/huggingface/hub/models--BAAI--bge-reranker-base
-          key: hf-models-blas-v1
+            ~/.cache/huggingface/hub/models--Alibaba-NLP--gte-reranker-modernbert-base
+          key: hf-models-blas-v2
 
       # The whole suite, named by nothing: this job has the model cache and the Hub secret, which
       # is everything any test needs, so a test added later is covered without touching this file.
@@ -208,8 +211,8 @@ jobs:
         with:
           path: |
             ~/.cache/huggingface/hub/models--BAAI--bge-small-en-v1.5
-            ~/.cache/huggingface/hub/models--BAAI--bge-reranker-base
-          key: hf-models-blas-v1
+            ~/.cache/huggingface/hub/models--Alibaba-NLP--gte-reranker-modernbert-base
+          key: hf-models-blas-v2
 
   # The ONNX backend is an opt-in feature. Its lint runs on every PR (in lint-test above);
   # the build + real-model integration test here run only on merges to main, so pull requests

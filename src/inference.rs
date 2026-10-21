@@ -3,8 +3,10 @@
 //! stack, so an alternative backend slots in behind the same interface. The backend is chosen at
 //! build time in one place — the `Default*` aliases below: default build → BLAS (a from-scratch
 //! forward on Accelerate/faer); `--no-default-features --features onnx` → fastembed/ort. On macOS
-//! the default build also carries `metal`, the same encoder on the GPU, which [`embedder`] hands
-//! the bulk calls to (see [`metal::Hybrid`]).
+//! the default build also carries `metal`, the same encoders on the GPU, which [`embedder`] and
+//! [`reranker`] hand their bulk calls to (see [`metal::Hybrid`] and [`metal::HybridReranker`]).
+//! The ONNX backend still reranks with bge-reranker-base, the BLAS one with
+//! gte-reranker-modernbert-base.
 
 #[cfg(feature = "blas")]
 pub mod blas;
@@ -19,7 +21,7 @@ use anyhow::{Context, Result};
 #[cfg(all(feature = "onnx", not(feature = "blas")))]
 use self::{OnnxEmbedder as DefaultEmbedder, OnnxReranker as DefaultReranker};
 #[cfg(feature = "blas")]
-use blas::{BlasEmbedder as DefaultEmbedder, BlasReranker as DefaultReranker};
+use blas::{BlasEmbedder as DefaultEmbedder, GteReranker as DefaultReranker};
 #[cfg(not(any(feature = "blas", feature = "onnx")))]
 compile_error!("funes needs an inference backend: feature `blas` (default) or `onnx`");
 
@@ -117,6 +119,9 @@ pub fn embedder(model: EmbeddingModel) -> Result<Box<dyn Embedder>> {
 
 /// Build the reranker for the compiled-in backend. See [`embedder`].
 pub fn reranker() -> Result<Box<dyn Reranker>> {
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    return Ok(Box::new(metal::HybridReranker::new()?));
+    #[allow(unreachable_code)]
     Ok(Box::new(DefaultReranker::new()?))
 }
 
