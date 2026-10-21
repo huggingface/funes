@@ -1,8 +1,10 @@
-//! A from-scratch forward for funes' two models — a BLAS-backed alternative to the ONNX backend
-//! (see `inference`). Every matmul goes through a small platform **seam** (`sgemm`/`vexp`): macOS
-//! wires it to Accelerate (cblas_sgemm on AMX + vForce vvexpf), Linux to faer's pure-Rust GEMM
-//! plus a runtime-dispatched polynomial exp. Everything else — the encoder, tokenization, the
-//! trait impls — is shared, cross-platform source. Gated behind the `blas` feature.
+//! A from-scratch forward for funes' models — a BLAS-backed alternative to the ONNX backend
+//! (see `inference`): the BERT encoder of the embedders and of bge-reranker-base here, and the
+//! ModernBERT encoder of gte-reranker-modernbert-base in [`modernbert`]. Every matmul goes through
+//! a small platform **seam** (`sgemm`/`vexp`): macOS wires it to Accelerate (cblas_sgemm on AMX +
+//! vForce vvexpf), Linux to faer's pure-Rust GEMM plus a runtime-dispatched polynomial exp.
+//! Everything else — the encoders, tokenization, the trait impls — is shared, cross-platform
+//! source. Gated behind the `blas` feature.
 
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
@@ -14,6 +16,9 @@ use tokenizers::utils::padding::pad_encodings;
 use tokenizers::{Encoding, PaddingParams, Tokenizer, TruncationParams};
 
 use super::{Embedder, EmbeddingModel, Reranker};
+
+pub(super) mod modernbert;
+pub use modernbert::GteReranker;
 
 // ---------------------------------------------------------------------------------------------
 // Platform seam: the ONLY OS-specific code. A platform backend implements just these two
@@ -333,11 +338,16 @@ fn par_add(dst: &mut [f32], src: &[f32]) {
     });
 }
 
-/// y[m,out] = x[m,in] · W[out,in]ᵀ + b[out]. The caller owns y (m·out): buffers are reused
-/// across layers — a fresh allocation per call makes the allocator release and re-fault
-/// hundreds of MB per layer on platforms that return large frees to the OS.
-fn linear(x: &[f32], m: usize, in_: usize, w: &[f32], b: &[f32], out: usize, y: &mut [f32]) {
+/// y[m,out] = x[m,in] · W[out,in]ᵀ. The caller owns y (m·out): buffers are reused across layers —
+/// a fresh allocation per call makes the allocator release and re-fault hundreds of MB per layer on
+/// platforms that return large frees to the OS.
+fn matmul(x: &[f32], m: usize, in_: usize, w: &[f32], out: usize, y: &mut [f32]) {
     seam::sgemm(NO_T, T, m, out, in_, 1.0, x, in_, w, in_, y);
+}
+
+/// y[m,out] = x[m,in] · W[out,in]ᵀ + b[out], into a caller-owned y like [`matmul`].
+fn linear(x: &[f32], m: usize, in_: usize, w: &[f32], b: &[f32], out: usize, y: &mut [f32]) {
+    matmul(x, m, in_, w, out, y);
     par_rows(y, out, |row| {
         for (c, bc) in row.iter_mut().zip(b) {
             *c += bc;
