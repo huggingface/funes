@@ -13,12 +13,17 @@ use objc2_metal_performance_shaders::MPSDataType;
 use objc2_metal_performance_shaders_graph::MPSGraphTensor;
 use tokenizers::Tokenizer;
 
-use super::{f16_bytes, pad_group, shape, transposed, Gpu, Graphs, Inputs, EPS, GROUP, MASKED};
+use super::{f16_bytes, pad_group, shape, transposed, Gpu, Graphs, Inputs, EPS, MASKED};
 use crate::inference::blas::modernbert::{
     encode_pairs, global, head, keys, GteReranker, Rope, FFN, H, HD, HEAD, HEADS, LAYERS, REPO,
 };
 use crate::inference::blas::{hf_snapshot, load_tokenizer, load_weights};
 use crate::inference::Reranker;
+
+/// Pairs per forward. The GPU's time grows with the positions a forward pads to, and length-sorted
+/// groups of 8 pad real chunks by about 1.2×, against 2× in the embedder's groups of 64: on an M2,
+/// 1.1 s against 1.7 s for 32 pairs, and 3.4 s against 5.6 s for 100.
+const GROUP: usize = 8;
 
 /// gte-reranker-modernbert-base on the GPU: its encoder and mean pool as a graph, then [`head`].
 pub struct MetalReranker {
