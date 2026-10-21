@@ -239,7 +239,9 @@ fn modernbert(x: Inputs<'_>, b: usize, l: usize) -> Result<Retained<MPSGraphTens
     }
 }
 
-/// Calls of at least this many pairs bring the GPU up; once it is up, every call runs there.
+/// Calls of at least this many pairs bring the GPU up; once it is up, every call runs there. In a
+/// fresh process on an M2, bringing the GPU up and reranking 8 pairs of real chunk lengths takes
+/// 0.88 s against 1.04 s on the CPU forward, and 4 pairs 0.89 s against 0.65 s.
 const GPU_MIN_PAIRS: usize = 8;
 
 /// The CPU forward for small calls and the GPU for the rest, each brought up on its first call. A
