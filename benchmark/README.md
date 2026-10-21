@@ -3,7 +3,7 @@
 Three runnable examples, each `cargo run --release --example <name>`:
 
 - **`bench_recall`** — `recall()` latency, local vs remote, cold vs warm.
-- **`bench_backends`** — latency and output agreement between the BLAS and ONNX inference backends.
+- **`bench_backends`** — latency and output agreement between the inference backends.
 - **`score_recall`** — `funes recall` scored against a labeled set of questions.
 
 ## `bench_recall` — recall latency
@@ -99,18 +99,22 @@ cargo run --release --features onnx --example bench_backends
 cargo run --release --features onnx --example bench_backends -- intfloat/multilingual-e5-small
 ```
 
-It runs six fixed workloads: 16 short documents to expose per-call overhead; 30 documents near
+It runs seven fixed workloads: 16 short documents to expose per-call overhead; 30 documents near
 the 512-token truncation limit to approximate recall's rerank worst case; a ragged batch of 2 capped
-documents among 14 short ones; 32 documents whose token lengths are the quantiles of real
-chunks; and 256-document mixed and real batches, the production batch size, which show how
-a backend scales and what it spends on padding. For each backend it reports
-embedding and reranking latency plus agreement with the first backend:
+documents among 14 short ones; 32 and 100 documents whose token lengths are the quantiles of real
+chunks, the second recall's pool at `--candidates 100`; and 256-document mixed and real batches, the
+production batch size, which show how a backend scales and what it spends on padding.
 
-- `embed cos↔ref` is the minimum cosine similarity between corresponding embedding vectors.
-- `rerank Δ↔ref` is the maximum absolute difference between corresponding reranker scores.
+Rerankers are compared within a model: bge-reranker-base on ONNX and BLAS, and
+gte-reranker-modernbert-base on BLAS and, on macOS, Metal. Each reranker's startup comes first: how
+long it took to load, then its first call on the 32 real documents, which a one-shot `funes recall`
+pays in full. Then each workload's latency, and agreement with the first backend of the same model:
 
-ONNX is the reference when that feature is present. The one argument names the embedding model,
-`BAAI/bge-small-en-v1.5` when omitted. Edit the fixed query or workloads when investigating a
+- `cos↔ref` is the minimum cosine similarity between corresponding embedding vectors.
+- `Δ↔ref` is the maximum absolute difference between corresponding reranker scores.
+
+ONNX is the reference when that feature is present, and BLAS is gte's. The one argument names the
+embedding model, `BAAI/bge-small-en-v1.5` when omitted. Edit the fixed query or workloads when investigating a
 particular regression. Building with only one backend still prints its timing, along with a note
 that there is nothing to compare.
 
