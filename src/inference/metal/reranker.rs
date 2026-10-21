@@ -20,9 +20,8 @@ use crate::inference::blas::modernbert::{
 use crate::inference::blas::{hf_snapshot, load_tokenizer, load_weights};
 use crate::inference::Reranker;
 
-/// Pairs per forward. The GPU's time grows with the positions a forward pads to, and length-sorted
-/// groups of 8 pad real chunks by about 1.2×, against 2× in the embedder's groups of 64: on an M2,
-/// 1.1 s against 1.7 s for 32 pairs, and 3.4 s against 5.6 s for 100.
+/// Pairs per forward. The GPU's time grows with the positions a forward pads to: length-sorted
+/// groups of 8 pad real chunk lengths by about 1.2×, the embedder's groups of 64 by 2×.
 const GROUP: usize = 8;
 
 /// gte-reranker-modernbert-base on the GPU: its encoder and mean pool as a graph, then [`head`].
@@ -239,9 +238,9 @@ fn modernbert(x: Inputs<'_>, b: usize, l: usize) -> Result<Retained<MPSGraphTens
     }
 }
 
-/// Calls of at least this many pairs bring the GPU up; once it is up, every call runs there. In a
-/// fresh process on an M2, bringing the GPU up and reranking 8 pairs of real chunk lengths takes
-/// 0.88 s against 1.04 s on the CPU forward, and 4 pairs 0.89 s against 0.65 s.
+/// Calls of at least this many pairs bring the GPU up. Below it, a fresh process's first call ends
+/// sooner on the CPU forward, since the GPU first uploads its weights and compiles its graphs. Once
+/// it is up, every call runs there.
 const GPU_MIN_PAIRS: usize = 8;
 
 /// The CPU forward for small calls and the GPU for the rest, each brought up on its first call. A
