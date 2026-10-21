@@ -4,7 +4,7 @@ Three runnable examples, each `cargo run --release --example <name>`:
 
 - **`bench_recall`** — `recall()` latency, local vs remote, cold vs warm.
 - **`bench_backends`** — latency and output agreement between the BLAS and ONNX inference backends.
-- **`score_recall`** — a default `funes recall` scored against a labeled set of questions.
+- **`score_recall`** — `funes recall` scored against a labeled set of questions.
 
 ## `bench_recall` — recall latency
 
@@ -119,6 +119,7 @@ that there is nothing to compare.
 `score_recall.rs` asks each question of a labeled set with `funes recall`'s defaults and prints the
 receipt: the funes version, the memory's revision and the file's hash, then hit@1, hit@5, found@8,
 the mean reciprocal rank and the median latency, overall and by kind, then each question's rank.
+`--candidates` asks from a deeper pool, which recall reranks from four times the hits.
 A question is one JSON line with an `id`, the `question`, `gold` (the spans its answer is in, each a
 `session_id` with optional `from` and `to` turns) and an optional `kind`. Its rank is the position of
 its first hit in a gold span. The labeled sets and their receipts live in the

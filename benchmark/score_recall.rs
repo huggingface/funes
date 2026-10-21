@@ -4,6 +4,9 @@
 //! cargo run --release --example score_recall -- questions.jsonl --memory huggingface/funes-memory
 //! ```
 //!
+//! `--candidates` asks from a deeper pool instead. From four times the hits, recall reranks the pool
+//! before the cut, so this scores the reranker.
+//!
 //! A question is one JSON object a line: an `id`, the `question` to ask, `gold`, the spans its answer
 //! is in (a `session_id` with optional `from` and `to` turns, the whole session when both are absent),
 //! and an optional `kind` the receipt breaks the scores down by. Other fields are ignored. A
@@ -16,7 +19,7 @@
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
-use funes::commands::recall::{recall_hits, Hit, RecallFilter, DEFAULT_CANDIDATES, DEFAULT_K};
+use funes::commands::recall::{recall_hits, reranks, Hit, RecallFilter, DEFAULT_CANDIDATES, DEFAULT_K};
 use funes::hub::parse_hf;
 use funes::memory::{Memory, MemoryState};
 use hf_hub::HFClient;
@@ -34,6 +37,9 @@ struct Args {
     /// Memory to ask: `<org>/<repo>`, an `hf://…` URI, a local path, or `local`.
     #[arg(long, default_value = "huggingface/funes-memory")]
     memory: String,
+    /// Size of the fused pool the hits are cut from.
+    #[arg(long, default_value_t = DEFAULT_CANDIDATES)]
+    candidates: usize,
 }
 
 #[derive(Deserialize)]
@@ -132,7 +138,7 @@ async fn main() -> Result<()> {
             memory.clone(),
             q.question.clone(),
             DEFAULT_K,
-            DEFAULT_CANDIDATES,
+            args.candidates,
             0,
             RecallFilter::default(),
             &|_| (),
@@ -158,8 +164,14 @@ async fn main() -> Result<()> {
         args.questions.display()
     );
     println!(
-        "{} questions, {DEFAULT_K} hits a question, p50 {} ms",
+        "{} questions, {DEFAULT_K} hits a question from a pool of {}{}, p50 {} ms",
         questions.len(),
+        args.candidates,
+        if reranks(DEFAULT_K, args.candidates) {
+            " reranked"
+        } else {
+            ""
+        },
         ms[ms.len() / 2]
     );
     println!();
