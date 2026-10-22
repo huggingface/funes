@@ -1,7 +1,6 @@
 //! End-to-end: build a real index from a tiny transcript in a temp dir, then exercise
-//! the read surface (recall / get / status). No mocking — this runs the real
-//! BGE embedder + reranker (downloaded to the fastembed cache on first run) against a
-//! real Lance memory under a temp `$FUNES_HOME`.
+//! the read surface (recall / get / status). No mocking: this runs the real embedder and
+//! reranker (downloaded on first run) against a real Lance memory under a temp `$FUNES_HOME`.
 
 mod support;
 

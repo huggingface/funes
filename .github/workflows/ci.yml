@@ -244,21 +244,25 @@ jobs:
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
-      # ONNX model files (fastembed's own cache, distinct from the safetensors the blas
-      # backend uses). This job only runs on main, so save directly on miss.
-      - name: Restore fastembed models
-        id: fastembed
+      # ONNX model files: the embedder in fastembed's own cache, and the reranker's ONNX export in
+      # the HF cache, where funes downloads it. This job only runs on main, so save directly on miss.
+      - name: Restore ONNX models
+        id: onnx
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: .fastembed_cache
-          key: fastembed-models-v1
+          path: |
+            .fastembed_cache
+            ~/.cache/huggingface/hub/models--Alibaba-NLP--gte-reranker-modernbert-base
+          key: onnx-models-v1
 
       - name: Integration test (onnx backend)
         run: cargo test --profile ci --no-default-features --features onnx --test index_recall -- --nocapture
 
-      - name: Save fastembed models
-        if: ${{ !cancelled() && steps.fastembed.outputs.cache-hit != 'true' }}
+      - name: Save ONNX models
+        if: ${{ !cancelled() && steps.onnx.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: .fastembed_cache
-          key: fastembed-models-v1
+          path: |
+            .fastembed_cache
+            ~/.cache/huggingface/hub/models--Alibaba-NLP--gte-reranker-modernbert-base
+          key: onnx-models-v1

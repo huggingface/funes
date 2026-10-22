@@ -105,15 +105,15 @@ documents among 14 short ones; 32 and 100 documents whose token lengths are the 
 chunks, the second recall's pool at `--candidates 100`; and 256-document mixed and real batches, the
 production batch size, which show how a backend scales and what it spends on padding.
 
-Rerankers are compared within a model: bge-reranker-base on ONNX and BLAS, and
-gte-reranker-modernbert-base on BLAS and, on macOS, Metal. Each reranker's startup comes first: how
+Rerankers are compared within a model: gte-reranker-modernbert-base on ONNX, BLAS and, on macOS,
+Metal, and bge-reranker-base on BLAS as the latency baseline. Each reranker's startup comes first: how
 long it took to load, then its first call on the 32 real documents, which a one-shot `funes recall`
 pays in full. Then each workload's latency, and agreement with the first backend of the same model:
 
 - `cos↔ref` is the minimum cosine similarity between corresponding embedding vectors.
 - `Δ↔ref` is the maximum absolute difference between corresponding reranker scores.
 
-ONNX is the reference when that feature is present, and BLAS is gte's. The one argument names the
+ONNX is the reference when that feature is present, BLAS otherwise. The one argument names the
 embedding model, `BAAI/bge-small-en-v1.5` when omitted. Edit the fixed query or workloads when investigating a
 particular regression. Building with only one backend still prints its timing, along with a note
 that there is nothing to compare.

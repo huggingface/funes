@@ -382,59 +382,10 @@ pub(super) fn l2_normalize(v: &mut [f32]) {
 // Model loading + tokenization (cross-platform)
 // ---------------------------------------------------------------------------------------------
 
-/// Resolve a snapshot dir for `repo` (e.g. "BAAI/bge-small-en-v1.5") in the standard HF cache,
-/// downloading the two files the forward needs on first use (like the ONNX backend does).
+/// A snapshot dir for `repo` in the standard HF cache, holding the two files [`load_weights`] and
+/// [`load_tokenizer`] read, downloaded on first use.
 pub(super) fn hf_snapshot(repo: &str) -> Result<PathBuf> {
-    if let Some(dir) = local_snapshot(repo) {
-        return Ok(dir);
-    }
-    eprintln!("downloading {repo} (first use)…");
-    // A dedicated thread: the blocking hf-hub client drives its own runtime with block_on,
-    // which would panic if called from a thread already inside a tokio runtime (the MCP server).
-    let owned = repo.to_string();
-    let dir = std::thread::spawn(move || -> Result<PathBuf> {
-        let (owner, name) = owned
-            .split_once('/')
-            .ok_or_else(|| anyhow!("model repo {owned} is not owner/name"))?;
-        let client = hf_hub::HFClientSync::new().map_err(|e| anyhow!("hf-hub client: {e}"))?;
-        let r = client.model(owner, name);
-        r.download_file()
-            .filename("tokenizer.json")
-            .send()
-            .with_context(|| format!("downloading {owned}/tokenizer.json"))?;
-        let weights = r
-            .download_file()
-            .filename("model.safetensors")
-            .send()
-            .with_context(|| format!("downloading {owned}/model.safetensors"))?;
-        Ok(weights
-            .parent()
-            .ok_or_else(|| anyhow!("downloaded file has no parent dir"))?
-            .to_path_buf())
-    })
-    .join()
-    .map_err(|_| anyhow!("model download thread panicked"))??;
-    Ok(dir)
-}
-
-/// A cached snapshot of `repo` holding both files the forward needs, if any. With several
-/// snapshots cached the pick is arbitrary — fine here: any complete copy of these frozen model
-/// repos is interchangeable.
-fn local_snapshot(repo: &str) -> Option<PathBuf> {
-    let base = std::env::var("HF_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache/huggingface"));
-    let snaps = base
-        .join("hub")
-        .join(format!("models--{}", repo.replace('/', "--")))
-        .join("snapshots");
-    for e in std::fs::read_dir(&snaps).ok()?.flatten() {
-        let p = e.path();
-        if p.join("model.safetensors").exists() && p.join("tokenizer.json").exists() {
-            return Some(p);
-        }
-    }
-    None
+    super::snapshot(repo, &["tokenizer.json", "model.safetensors"])
 }
 
 /// The f32 tensors of `dir/model.safetensors`, one tensor at a time. Reading the file whole would

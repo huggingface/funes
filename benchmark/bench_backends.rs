@@ -3,10 +3,10 @@
 //! compares whatever backends are compiled in, with ONNX (fastembed) as the reference when present:
 //!   cargo run --release --features onnx --example bench_backends [-- <embedding model id>]
 //!
-//! Rerankers are compared within a model: bge-reranker-base on ONNX (the reference) and BLAS,
-//! gte-reranker-modernbert-base on BLAS (its reference) and, on macOS, Metal. Each reranker's
-//! startup comes first: loading it, then its first call, which a one-shot `funes recall` pays in
-//! full (the GPU compiles a graph per batch shape on first use).
+//! Rerankers are compared within a model: gte-reranker-modernbert-base on ONNX (the reference),
+//! BLAS and, on macOS, Metal, and bge-reranker-base on BLAS as the latency baseline. Each
+//! reranker's startup comes first: loading it, then its first call, which a one-shot `funes recall`
+//! pays in full (the GPU compiles a graph per batch shape on first use).
 //!
 //! Six workloads, because they stress different things: a batch of short docs is dominated by
 //! per-call overheads (tokenization, thread spawns), while 30 docs at the 512-token truncation
@@ -147,20 +147,20 @@ fn rerankers() -> Result<Vec<Ranker>> {
     }
     let mut v = Vec::new();
     #[cfg(feature = "onnx")]
-    {
-        v.push(load("bge", "onnx", || {
-            Ok(Box::new(funes::inference::OnnxReranker::new()?))
-        })?);
-    }
+    v.push(load("gte", "onnx", || {
+        Ok(Box::new(funes::inference::OnnxReranker::new()?))
+    })?);
     #[cfg(feature = "blas")]
-    {
-        use funes::inference::blas::{BlasReranker, GteReranker};
-        v.push(load("bge", "blas", || Ok(Box::new(BlasReranker::new()?)))?);
-        v.push(load("gte", "blas", || Ok(Box::new(GteReranker::new()?)))?);
-    }
+    v.push(load("gte", "blas", || {
+        Ok(Box::new(funes::inference::blas::GteReranker::new()?))
+    })?);
     #[cfg(all(feature = "metal", target_os = "macos"))]
     v.push(load("gte", "metal", || {
         Ok(Box::new(funes::inference::metal::MetalReranker::new()?))
+    })?);
+    #[cfg(feature = "blas")]
+    v.push(load("bge", "blas", || {
+        Ok(Box::new(funes::inference::blas::BlasReranker::new()?))
     })?);
     Ok(v)
 }
