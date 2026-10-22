@@ -189,7 +189,7 @@ fn attend(qkv: &[f32], mask: &[i64], n: usize, l: usize, rope: &Rope, window: bo
     });
 }
 
-/// Forward-pass buffers, owned by the model and reused across calls (see `super::Scratch`).
+/// Forward-pass buffers, owned by the model and reused across calls (see `super::bert::Scratch`).
 #[derive(Default)]
 struct Scratch {
     /// The residual stream, and its normalized copy for the block reading it.
