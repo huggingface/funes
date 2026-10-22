@@ -1,6 +1,6 @@
 //! The embedder on the GPU: the BERT encoder of [`crate::inference::blas::bert`], built as an
 //! MPSGraph and run in fp16. Indexing is embedding-bound, and the GPU runs it faster than the CPU
-//! forward (about 50x on an M5 Max, 4x on an M2), agreeing with it to a cosine of 0.99999.
+//! forward, agreeing with it to a cosine of 0.99999.
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -20,8 +20,8 @@ const HEADS: usize = 12;
 const HD: usize = H / HEADS;
 const FFN: usize = 1536;
 const LAYERS: usize = 12;
-/// Sequences per forward. Measured on real chunk lengths on an M5 Max: 32 leaves the GPU idle
-/// between forwards, 128 brings the padding back.
+/// Sequences per forward. On real chunk lengths, fewer leave the GPU idle between forwards, and
+/// more bring the padding back.
 const GROUP: usize = 64;
 
 /// BERT encoder → pooling → L2-normalize, on the GPU. Both embedding models share the shape.
@@ -233,7 +233,7 @@ impl Embedder for MetalEmbedder {
 /// Seconds of work a GPU call should carry: a caller reports progress and checks its budget
 /// between calls, and the rate that sizes the call is measured, so this holds on any GPU.
 const GPU_CALL_SECS: f64 = 2.0;
-/// Texts per GPU call at most: past this an M5 Max gains nothing.
+/// Texts per GPU call at most: larger calls embed no faster per text.
 const GPU_BATCH: usize = 2048;
 
 /// Calls of at least this many texts bring the GPU up. Below it the CPU forward finishes before the
