@@ -1,9 +1,9 @@
 //! gte-reranker-modernbert-base on the CPU: a ModernBERT cross-encoder, mean-pooled into a small
-//! classifier head. Unlike the BERT encoder of [`super`], its blocks normalize before attention and
-//! before the feed-forward, carry no biases, rotate q and k by position (RoPE) instead of adding a
-//! position embedding, and attend over the whole pair only on every third layer: the others see the
-//! keys within [`HALF_WINDOW`] positions. It shares the seam, the loaders and the length-grouped
-//! batching of [`super`].
+//! classifier head. Unlike the BERT encoder of [`super::bert`], its blocks normalize before
+//! attention and before the feed-forward, carry no biases, rotate q and k by position (RoPE)
+//! instead of adding a position embedding, and attend over the whole pair only on every third
+//! layer: the others see the keys within [`HALF_WINDOW`] positions. It shares the seam, the loaders
+//! and the length-grouped batching of [`super`].
 
 use std::collections::HashMap;
 use std::ops::Range;

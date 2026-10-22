@@ -102,7 +102,7 @@ cargo run --release --features onnx --example bench_backends -- intfloat/multili
 It runs seven fixed workloads: 16 short documents to expose per-call overhead; 30 documents near
 the 512-token truncation limit to approximate recall's rerank worst case; a ragged batch of 2 capped
 documents among 14 short ones; 32 and 100 documents whose token lengths are the quantiles of real
-chunks, the second recall's pool at `--candidates 100`; and 256-document mixed and real batches, the
+chunks (100 is recall's pool at `--candidates 100`); and 256-document mixed and real batches, the
 production batch size, which show how a backend scales and what it spends on padding.
 
 Rerankers are compared within a model: gte-reranker-modernbert-base on ONNX, BLAS and, on macOS,

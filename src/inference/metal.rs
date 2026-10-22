@@ -278,8 +278,9 @@ fn raised(e: Option<Retained<Exception>>) -> anyhow::Error {
 }
 
 /// The sequences of `group`, length-sorted, laid out for one forward as (b, l, ids, mask), ids and
-/// mask [b·l]. A short group is padded with empty rows to a power of two, so a run compiles at most
-/// four batch sizes per length, and every row to the group's longest rounded up to [`ROUND`].
+/// mask [b·l]. A short group is padded with empty rows to a power of two, at least [`MIN_GROUP`], so
+/// a run compiles a graph per power of two rather than per group size, and every row to the group's
+/// longest rounded up to [`ROUND`].
 fn pad_group(encs: &[Encoding], group: &[usize]) -> (usize, usize, Vec<i32>, Vec<f32>) {
     let longest = group.iter().map(|&i| encs[i].get_ids().len()).max().unwrap_or(1);
     let l = (longest.div_ceil(ROUND).max(1) * ROUND).min(MAX_LEN);

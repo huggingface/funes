@@ -21,8 +21,8 @@ pub use bert::{BlasEmbedder, BlasReranker};
 pub use modernbert::GteReranker;
 
 // ---------------------------------------------------------------------------------------------
-// Platform seam: the ONLY OS-specific code. A platform backend implements just these two
-// functions (plus any library link in build.rs) and inherits the entire encoder below.
+// Platform seam: the ONLY OS-specific code. A platform backend implements just these functions
+// (plus any library link in build.rs) and inherits both encoders, in bert.rs and modernbert.rs.
 // ---------------------------------------------------------------------------------------------
 #[cfg(target_os = "macos")]
 mod seam {
@@ -389,9 +389,8 @@ pub(super) fn hf_snapshot(repo: &str) -> Result<PathBuf> {
 }
 
 /// The f32 tensors of `dir/model.safetensors`, one tensor at a time. Reading the file whole would
-/// hold its bytes and the f32 copies of them side by side — 2.2 GB for the reranker's 1.1 GB of
-/// weights, on a run that keeps 1.2 GB — so only the header is buffered and each tensor is
-/// converted through a small window.
+/// hold its bytes and the f32 copies of them side by side, twice the memory the weights keep, so
+/// only the header is buffered and each tensor is converted through a small window.
 pub(super) fn load_weights(dir: &Path) -> Result<HashMap<String, Vec<f32>>> {
     /// Bytes read per conversion. A multiple of 4, so no f32 straddles two reads.
     const WINDOW: usize = 1 << 20;

@@ -8,7 +8,7 @@
 //! reranker's startup comes first: loading it, then its first call, which a one-shot `funes recall`
 //! pays in full (the GPU compiles a graph per batch shape on first use).
 //!
-//! Six workloads, because they stress different things: a batch of short docs is dominated by
+//! Seven workloads, because they stress different things: a batch of short docs is dominated by
 //! per-call overheads (tokenization, thread spawns), while 30 docs at the 512-token truncation
 //! cap — recall's rerank worst case — is dominated by GEMM throughput and memory behavior. The
 //! ragged batch is real indexing's shape — batch-longest padding masks most attention columns,

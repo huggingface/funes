@@ -55,8 +55,8 @@ Inference has two backends behind the `Embedder`/`Reranker` traits (`src/inferen
 default `blas` (src/inference/blas.rs, hand-written forwards on Accelerate/faer) and the opt-in `onnx`
 (fastembed/ort). On macOS the default build also carries `metal` (src/inference/metal.rs): the same
 encoders as MPSGraphs in fp16, which the embedder hands calls of 32+ texts to and the reranker calls
-of 8+ pairs, falling back to `blas` where no GPU starts. Each of the two keeps one module per encoder
-architecture: `bert.rs` (the embedders, and bge-reranker-base on the CPU) and `modernbert.rs`
+of 8+ pairs, falling back to `blas` where no GPU starts. `blas` and `metal` each keep one module per
+encoder architecture: `bert.rs` (the embedders, and bge-reranker-base on the CPU) and `modernbert.rs`
 (gte-reranker-modernbert-base, the reranker). `onnx` runs the same reranker, from the ONNX export in
 gte's Hub repo. CI lints and unit-tests the default build on Linux and on macOS 15, each with the
 other's seam compiled out, and `onnx` on Linux: so also run

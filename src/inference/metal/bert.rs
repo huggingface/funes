@@ -32,7 +32,7 @@ pub struct MetalEmbedder {
 }
 
 impl MetalEmbedder {
-    /// Fails where there is no usable [`device`], or the model's weights cannot be loaded.
+    /// Fails where there is no usable GPU, or the model's weights cannot be loaded.
     pub fn new(model: EmbeddingModel) -> Result<Self> {
         let mut graphs = Graphs::new()?;
         let dir = hf_snapshot(model.id())?;

@@ -55,7 +55,7 @@ const EMBED: Cfg = Cfg {
 
 /// Forward-pass buffers, owned by the model and reused across calls, growing to the high-water
 /// mark. Freeing them between forwards hands the pages back to the OS, and the next call pays a
-/// page fault per 4 KiB rewritten — hundreds of MB per forward (see linear()).
+/// page fault per 4 KiB rewritten — hundreds of MB per forward (see matmul()).
 #[derive(Default)]
 struct Scratch {
     hid: Vec<f32>,
