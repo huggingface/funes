@@ -167,15 +167,11 @@ fn snapshot(repo: &str, files: &[&str]) -> Result<PathBuf> {
     .map_err(|_| anyhow!("model download thread panicked"))?
 }
 
-/// A cached snapshot of `repo` holding each of `files`, if any. With several snapshots cached the
-/// pick is arbitrary, which is fine here: any complete copy of these frozen model repos is
-/// interchangeable.
+/// A cached snapshot of `repo` holding each of `files`, if any, in the cache hf-hub downloads into.
+/// With several snapshots cached the pick is arbitrary, which is fine here: any complete copy of
+/// these frozen model repos is interchangeable.
 fn local_snapshot(repo: &str, files: &[&str]) -> Option<PathBuf> {
-    let base = std::env::var("HF_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache/huggingface"));
-    let snaps = base
-        .join("hub")
+    let snaps = hf_hub::resolve_cache_dir()
         .join(format!("models--{}", repo.replace('/', "--")))
         .join("snapshots");
     for e in std::fs::read_dir(&snaps).ok()?.flatten() {
