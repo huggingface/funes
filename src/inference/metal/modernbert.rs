@@ -1,7 +1,7 @@
-//! The reranker on the GPU: the encoder of [`crate::inference::blas::modernbert`] as an MPSGraph.
-//! Matmuls and attention run in fp16. The residual stream and its norms stay in fp32: a pre-norm
-//! stream grows over the 22 layers, and fp16 would round away what each block adds to it. The graph
-//! ends at mean pooling, and the classifier head runs on the CPU, in fp32.
+//! gte-reranker-modernbert-base on the GPU: the encoder of [`crate::inference::blas::modernbert`]
+//! as an MPSGraph. Matmuls and attention run in fp16. The residual stream and its norms stay in
+//! fp32: a pre-norm stream grows over the 22 layers, and fp16 would round away what each block adds
+//! to it. The graph ends at mean pooling, and the classifier head runs on the CPU, in fp32.
 
 use std::collections::HashMap;
 use std::f64::consts::FRAC_1_SQRT_2;

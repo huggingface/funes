@@ -1,5 +1,5 @@
 //! The encoders on the GPU, built as MPSGraphs and run on Metal: the embedder (the BERT encoder of
-//! [`super::blas`], in fp16) and the reranker (see [`reranker`]). Indexing is embedding-bound, and
+//! [`super::blas`], in fp16) and the reranker (see [`modernbert`]). Indexing is embedding-bound, and
 //! the GPU runs it faster than the CPU forward (about 50x on an M5 Max, 4x on an M2), agreeing with
 //! it to a cosine of 0.99999. macOS only; [`super::embedder`] and [`super::reranker`] fall back to
 //! the CPU forward wherever the GPU cannot start.
@@ -9,7 +9,7 @@
 //! compiles a handful of buckets, not one per length. The weights are fed to every bucket from the
 //! same GPU buffers rather than baked into each graph as constants, so the buckets share one copy.
 
-mod reranker;
+mod modernbert;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -31,7 +31,7 @@ use objc2_metal_performance_shaders_graph::{
 };
 use tokenizers::{Encoding, Tokenizer};
 
-pub use self::reranker::{HybridReranker, MetalReranker};
+pub use self::modernbert::{HybridReranker, MetalReranker};
 use super::blas::{hf_snapshot, l2_normalize, load_tokenizer, load_weights};
 use super::{DefaultEmbedder, Embedder, EmbeddingModel, EMBED_BATCH};
 
