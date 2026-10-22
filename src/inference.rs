@@ -28,6 +28,10 @@ compile_error!("funes needs an inference backend: feature `blas` (default) or `o
 /// How many texts one `embed` call takes.
 const EMBED_BATCH: usize = 256;
 
+/// The most tokens an encoder reads: a longer text, or query and passage pair, is cut to it. The
+/// BERT models' learned positions stop there.
+const MAX_LEN: usize = 512;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum EmbeddingModel {
     BgeSmallEn,
@@ -200,7 +204,7 @@ impl OnnxEmbedder {
         };
         Ok(Self {
             model,
-            inner: TextEmbedding::try_new(InitOptions::new(fastembed_model))?,
+            inner: TextEmbedding::try_new(InitOptions::new(fastembed_model).with_max_length(MAX_LEN))?,
         })
     }
 }
@@ -246,8 +250,7 @@ impl OnnxReranker {
             tokenizer_config_file: read("tokenizer_config.json")?,
         };
         let model = UserDefinedRerankingModel::new(dir.join("onnx/model.onnx"), tokenizer);
-        // The 512-token cap the BLAS forward cuts pairs at.
-        let options = RerankInitOptionsUserDefined::new().with_max_length(512);
+        let options = RerankInitOptionsUserDefined::new().with_max_length(MAX_LEN);
         Ok(Self(TextRerank::try_new_from_user_defined(model, options)?))
     }
 }

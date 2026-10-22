@@ -15,7 +15,7 @@ use super::{
     by_length, ceil_div, gelu, hf_snapshot, load_tokenizer, load_weights, matmul, mean_pool, nthreads, par_add,
     par_rows, seam, seq_workers, softmax_rows, EPS, NO_T, PAR_MIN, RERANK_GROUP, T,
 };
-use crate::inference::Reranker;
+use crate::inference::{Reranker, MAX_LEN};
 
 pub(in crate::inference) const REPO: &str = "Alibaba-NLP/gte-reranker-modernbert-base";
 pub(in crate::inference) const H: usize = 768;
@@ -24,8 +24,6 @@ pub(in crate::inference) const HD: usize = H / HEADS;
 /// The feed-forward's width: `mlp.Wi` projects to twice this, a GELU half and a gate half.
 pub(in crate::inference) const FFN: usize = 1152;
 pub(in crate::inference) const LAYERS: usize = 22;
-/// The longest pair [`load_tokenizer`] lets through, so the positions RoPE needs.
-pub(in crate::inference) const MAX_LEN: usize = 512;
 /// How far a window layer's token sees on each side: transformers' `local_attention // 2`.
 pub(in crate::inference) const HALF_WINDOW: usize = 64;
 const GLOBAL_THETA: f32 = 160_000.0;

@@ -471,7 +471,7 @@ pub(super) fn load_weights(dir: &Path) -> Result<HashMap<String, Vec<f32>>> {
 pub(super) fn load_tokenizer(dir: &Path) -> Result<Tokenizer> {
     let mut tok = Tokenizer::from_file(dir.join("tokenizer.json")).map_err(|e| anyhow!("load tokenizer: {e}"))?;
     tok.with_truncation(Some(TruncationParams {
-        max_length: 512,
+        max_length: super::MAX_LEN,
         ..Default::default()
     }))
     .map_err(|e| anyhow!("set truncation: {e}"))?;

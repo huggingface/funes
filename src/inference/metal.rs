@@ -31,17 +31,18 @@ use objc2_metal_performance_shaders_graph::{
 };
 use tokenizers::Encoding;
 
+use super::MAX_LEN;
+
 pub use self::bert::{Hybrid, MetalEmbedder};
 pub use self::modernbert::{HybridReranker, MetalReranker};
 
-const MAX_LEN: usize = 512;
 /// The CPU forward's layer-norm epsilon, so both backends normalize alike. (The models' configs say
 /// 1e-12, which fp16 cannot hold.)
 const EPS: f32 = 1e-5;
 /// The smallest batch a forward pads a short group to.
 const MIN_GROUP: usize = 8;
 /// Padded lengths are rounded up to a multiple of this, which bounds the buckets a run compiles at
-/// 512/ROUND per group size. 16 compiles twice the buckets for no gain; 64 pads too much.
+/// [`MAX_LEN`]/ROUND per group size. 16 compiles twice the buckets for no gain; 64 pads too much.
 const ROUND: usize = 32;
 /// What a padded column adds to its attention scores: far enough below any real score that its
 /// softmax weight is zero, and inside fp16's range.
