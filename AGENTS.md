@@ -52,10 +52,13 @@ a new function belongs follows from that; the layers and the placement test are 
 [CONTRIBUTING.md](CONTRIBUTING.md#style), also as the crate doc in `src/lib.rs`.
 
 Inference has two backends behind the `Embedder`/`Reranker` traits (`src/inference.rs`): the
-default `blas` (src/inference/blas.rs, hand-written forward on Accelerate/faer) and the opt-in `onnx`
+default `blas` (src/inference/blas.rs, hand-written forwards on Accelerate/faer) and the opt-in `onnx`
 (fastembed/ort). On macOS the default build also carries `metal` (src/inference/metal.rs): the same
-encoder as an MPSGraph in fp16, which the embedder hands calls of 32+ texts to, falling back to `blas`
-where no GPU starts. CI lints and unit-tests the default build on Linux and on macOS 15, each
-with the other's seam compiled out, and `onnx` on Linux: so also run
+encoders as MPSGraphs in fp16, which the embedder hands calls of 32+ texts to and the reranker calls
+of 8+ pairs, falling back to `blas` where no GPU starts. Each of the two keeps one module per encoder
+architecture: `bert.rs` (the embedders, and bge-reranker-base on the CPU) and `modernbert.rs`
+(gte-reranker-modernbert-base, the reranker). `onnx` still reranks with bge-reranker-base. CI lints
+and unit-tests the default build on Linux and on macOS 15, each with the other's seam compiled out,
+and `onnx` on Linux: so also run
 `cargo clippy --all-targets --no-default-features --features onnx` before calling work done;
 `cargo run --release --features onnx --example bench_backends` A/Bs them (latency + agreement).
