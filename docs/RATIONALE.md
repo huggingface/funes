@@ -155,9 +155,13 @@ This isn't a guess about search — it was measured. A run of recall-quality enh
 abstention thresholds, MMR diversity, near-duplicate collapse, semantic expansion, deeper
 candidate pools, and a per-chunk *kind* facet, some at query time and
 some computed at index time — was A/B'd against a labeled retrieval anchor; none moved
-recall. The shipped cross-encoder does not move it either: on a later benchmark it scored no
-better than the fused order, at seconds per recall. So recall returns the fused order and
-leaves the judging to the reader, reranking only a pool several times the hits.
+recall. The cross-encoder is the exception. On the 244 labeled questions of
+[`dacorvo/funes-recall-benchmark`](https://huggingface.co/datasets/dacorvo/funes-recall-benchmark),
+the fused order puts the answer in the default 8 hits from 30 candidates for 128 of them.
+bge-reranker-base, the first cross-encoder funes shipped, lifts that to 140 (p = 0.046), and
+gte-reranker-modernbert-base, which replaced it, to 158 (p < 0.0001). A rerank still costs seconds
+per call, so recall returns the fused order and leaves the judging to the reader, reranking only a
+pool several times the hits.
 
 ## Where this leaves funes
 
