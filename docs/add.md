@@ -120,7 +120,8 @@ funes add claude --from ~/dev/funes-integrations/claude
 ```
 
 funes vouches only for what it published, so it asks you to confirm at the terminal before running
-those files — once, until they change. Off a terminal it refuses rather than assumes. To have a
+those files — once, until they change. Off a terminal it refuses rather than assumes, unless you pass
+`--trust`: the unattended yes to that question, for files you have checked. To have a
 checkout consulted on every run instead, point `$FUNES_INTEGRATIONS` at it
 ([configuration.md](configuration.md#environment-reference)).
 
@@ -226,7 +227,9 @@ sessions are never mixed into a memory this host only reads.
 
 `funes add` runs the one-time bootstrap the hooks can't do unattended:
 
-1. **Asks** before your first index. Declining aborts the add; nothing is installed. At a terminal,
+1. **Asks** before your first index. Declining aborts the add; nothing is installed. `--yes`
+   answers yes up front, for a scripted add; off a terminal with neither, nobody declined, so the
+   add fails rather than exit having wired nothing up. At a terminal,
    with no memory yet, it also asks whether your sessions are English or multilingual, which picks
    the memory's [embedding model](index.md#sessions-not-in-english). The default is multilingual
    when your locale (`LC_ALL`, `LC_MESSAGES`, then `LANG`) is in another language than English
@@ -282,7 +285,9 @@ funes vouches for files it published — a release the catalog names, whose dige
 them without asking. Anything else — what `--from` names, a `$FUNES_INTEGRATIONS` directory, files
 it has no record of installing — is confirmed at the terminal before `setup` runs, naming the
 package by publisher and version and where it came from; off a terminal, funes refuses rather than
-assumes. A refused refresh leaves the installed copy as it was. An archive's checksum proves it arrived intact, not who published it, so an archive
+assumes, unless `--trust` gives the answer up front — it names the package and its source all the
+same, so a log still says what ran. `--yes` never stands in for it: agreeing to index is not
+agreeing to run code funes can't vouch for. A refused refresh leaves the installed copy as it was. An archive's checksum proves it arrived intact, not who published it, so an archive
 `--from` names is confirmed like a directory.
 
 What `funes add` installed is recorded beside the directory, in `~/.funes/agents/<id>.json`: the

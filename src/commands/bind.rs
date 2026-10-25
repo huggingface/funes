@@ -123,7 +123,7 @@ pub(crate) async fn bind_host(resolved: Option<Resolved>, except: Option<&str>) 
 
 /// Run `id`'s installed setup on `memory`.
 async fn follow(root: &Path, id: &str, memory: Option<&str>) -> Result<()> {
-    let integration = prepare_agent(id, registry::speaks_another_contract(root, id), None)
+    let integration = prepare_agent(id, registry::speaks_another_contract(root, id), None, false)
         .await?
         .install(root)?;
     setup_add(&integration, memory)

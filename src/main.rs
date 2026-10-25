@@ -252,6 +252,16 @@ enum Cmd {
         /// `SHA256SUMS` beside it.
         #[arg(long, value_name = "DIR|URL")]
         from: Option<String>,
+        /// Answer yes to the add's own question — indexing the agent's existing sessions on a
+        /// first add — so it runs unattended. It does not confirm an integration funes can't vouch
+        /// for; that takes `--trust`.
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Confirm an integration funes can't vouch for — one from `--from`, or an installed copy
+        /// changed since funes installed it — without a terminal, as answering yes to "Trust it?"
+        /// does. Its setup runs as you; pass this only for files you have checked.
+        #[arg(long)]
+        trust: bool,
     },
     /// Remove funes from a coding agent.
     ///
@@ -488,7 +498,21 @@ async fn run() -> Result<()> {
         Cmd::Update { force } => update::run(force).await,
         Cmd::Mcp { memory } => mcp::run(memory).await,
         Cmd::Bind { memory } => bind::run(&memory).await,
-        Cmd::Add { agent, memory, from } => add::run(&agent, memory.memory.as_deref(), from.as_deref()).await,
+        Cmd::Add {
+            agent,
+            memory,
+            from,
+            yes,
+            trust,
+        } => {
+            add::run(
+                &agent,
+                memory.memory.as_deref(),
+                from.as_deref(),
+                add::Unattended { yes, trust },
+            )
+            .await
+        }
         Cmd::Remove { agent } => add::remove(&agent).await,
     }
 }

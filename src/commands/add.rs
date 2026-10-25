@@ -16,17 +16,28 @@ use anyhow::{bail, Context, Result};
 use std::io::IsTerminal;
 use std::path::Path;
 
+/// The answers an unattended `funes add` gives up front, for the two questions it would otherwise
+/// put to a terminal. They are separate because they grant different things: `yes` agrees to the
+/// add's own work, `trust` runs code funes can't vouch for.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Unattended {
+    /// Index the agent's existing sessions on a first add without asking.
+    pub yes: bool,
+    /// Run an integration funes can't vouch for without asking.
+    pub trust: bool,
+}
+
 /// Resolve `id`'s integration and the memory, and run its `setup add`. A refresh is installed only
 /// as `setup add` is about to run, so a run that stops short of it — trust declined, a memory that
 /// does not resolve, a first index declined — leaves the registry as it was: the agent's hooks run
 /// what is installed there.
-pub async fn run(id: &str, memory: Option<&str>, from: Option<&str>) -> Result<()> {
+pub async fn run(id: &str, memory: Option<&str>, from: Option<&str>, unattended: Unattended) -> Result<()> {
     if !spool::is_id(id) {
         bail!("{id:?} is not an integration id (lowercase [a-z0-9_-])");
     }
     let root = registry::default_root()?;
     let refresh = !root.join(id).is_dir() || from.is_some() || registry::refreshes_on_every_run(&root, id);
-    let prepared = prepare_agent(id, refresh, from).await?;
+    let prepared = prepare_agent(id, refresh, from, unattended.trust).await?;
     // Naming a memory binds the host to it, as `funes bind` does. Naming none, the agent takes
     // the host's.
     let (resolved, binds) = match memory {
@@ -41,7 +52,7 @@ pub async fn run(id: &str, memory: Option<&str>, from: Option<&str>) -> Result<(
         // host's memory; left, a later bare add would bind the host to it again.
         registry::bind(registry_root, id, None)
     };
-    bootstrap_add(id, resolved, binds, install).await
+    bootstrap_add(id, resolved, binds, install, unattended.yes).await
 }
 
 /// Run `id`'s `setup remove`, then delete its files. Nothing installed is the state `remove`
@@ -57,7 +68,7 @@ pub async fn remove(id: &str) -> Result<()> {
         registry::discard(&root, id)?;
         return spool::forget_missing(id);
     }
-    let integration = prepare_agent(id, registry::speaks_another_contract(&root, id), None)
+    let integration = prepare_agent(id, registry::speaks_another_contract(&root, id), None, false)
         .await?
         .install(&root)?;
     integration.remove()?;
@@ -95,8 +106,8 @@ impl Prepared {
 /// staged, so the script funes executes is the one it just wrote — unless the source holds the
 /// release already installed; a source that can't be reached leaves the installed copy to run,
 /// unless `from` named it. Without, the installed copy runs as installed. Says what it refreshed
-/// the files with, when it did.
-pub(crate) async fn prepare_agent(id: &str, refresh: bool, from: Option<&str>) -> Result<Prepared> {
+/// the files with, when it did. `trust` confirms files funes can't vouch for without asking.
+pub(crate) async fn prepare_agent(id: &str, refresh: bool, from: Option<&str>, trust: bool) -> Result<Prepared> {
     let root = registry::default_root()?;
     let installed = root.join(id).is_dir();
     let staged = if refresh {
@@ -128,12 +139,12 @@ pub(crate) async fn prepare_agent(id: &str, refresh: bool, from: Option<&str>) -
     let Some(provisioned) = staged else {
         let provenance = installed_provenance(&root, id)?;
         let integration = registry::open(&root, id)?;
-        confirm_trust(&integration.dir, &integration.manifest, &provenance)?;
+        confirm_trust(&integration.dir, &integration.manifest, &provenance, trust)?;
         return Ok(Prepared::Installed(integration));
     };
     // Files confirmed once, from the same source, unchanged since: confirmed still.
     if !registry::is_recorded(&root, id, &provisioned.origin, &provisioned.files) {
-        confirm_trust(&root.join(id), &provisioned.manifest, &provisioned.provenance)?;
+        confirm_trust(&root.join(id), &provisioned.manifest, &provisioned.provenance, trust)?;
     }
     Ok(Prepared::Staged(provisioned))
 }
@@ -170,11 +181,13 @@ fn unknown_agent(root: &Path, id: &str, e: anyhow::Error) -> anyhow::Error {
 
 /// Confirm before funes executes the integration `manifest` declares from `dir`, when it does not
 /// vouch for it, saying what it is — the package by publisher and version — and where it came
-/// from. The default is no.
+/// from. The default is no. `trusted` is the answer given up front (`funes add --trust`): the same
+/// line is printed, saying it was trusted, so a log still records what ran and from where.
 pub(crate) fn confirm_trust(
     dir: &Path,
     manifest: &registry::Manifest,
     provenance: &registry::Provenance,
+    trusted: bool,
 ) -> Result<()> {
     let registry::Provenance::Unvouched(origin) = provenance else {
         return Ok(());
@@ -186,10 +199,17 @@ pub(crate) fn confirm_trust(
         registry::publisher(&manifest.repo),
         manifest.repo
     );
+    if trusted {
+        eprintln!(
+            "funes: running {}/setup — {package}, from {origin}, trusted by --trust.",
+            dir.display()
+        );
+        return Ok(());
+    }
     if !std::io::stdin().is_terminal() {
         bail!(
             "the {id} integration at {} — {package} — comes from {origin}, which funes can't vouch \
-             for — run this in a terminal to confirm it",
+             for — run this in a terminal to confirm it, or pass --trust if you have checked it",
             dir.display()
         );
     }
@@ -279,13 +299,21 @@ async fn offer_hub_memory() -> Result<Option<Resolved>> {
 /// registers hooks + MCP).
 ///
 /// 1. on a first add (no rows in the local memory yet), ask — the first index is about a minute of
-///    work, and declining aborts the add before anything is installed, so nothing is wired up;
+///    work, and declining aborts the add before anything is installed, so nothing is wired up.
+///    `yes` is the answer given up front. Off a terminal with no answer, nobody declined: that is
+///    an error, so a script never takes an add that wired nothing up for one that worked;
 /// 2. bind the host when the memory was named or offered, every other agent following — once the
 ///    add is going ahead, so a declined one leaves the host as it was;
 /// 3. `install` — writes the spool, bakes the memory in;
 /// 4. build the first index from that spool, so recall and the push have content;
 /// 5. first push if a memory is bound — clears the overlap guard so the push hook works thereafter.
-async fn bootstrap_add<F, Fut>(agent: &str, resolved: Option<Resolved>, binds: bool, install: F) -> Result<()>
+async fn bootstrap_add<F, Fut>(
+    agent: &str,
+    resolved: Option<Resolved>,
+    binds: bool,
+    install: F,
+    yes: bool,
+) -> Result<()>
 where
     F: FnOnce(Option<String>) -> Fut,
     Fut: std::future::Future<Output = Result<()>>,
@@ -307,12 +335,20 @@ where
         }
     }
     let first_add = !matches!(Memory::local().state().await?, MemoryState::Ready(_));
-    if first_add
+    if first_add && yes {
+        eprintln!("funes: indexing your existing {agent} sessions, if any, so recall works (about a minute).");
+    } else if first_add
         && !confirm(
             &format!("funes will index your existing {agent} sessions, if any, so recall works (about a minute). Proceed? [Y/n] "),
             true,
         )
     {
+        if !std::io::stdin().is_terminal() {
+            bail!(
+                "funes add {agent} indexes your existing {agent} sessions first and asks before it does, \
+                 but there was no one to answer — run it at a terminal, or pass --yes"
+            );
+        }
         eprintln!("funes: skipped — nothing was wired up. Run `funes add {agent}` again when you're ready.");
         return Ok(());
     }

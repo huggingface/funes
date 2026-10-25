@@ -436,6 +436,69 @@ fn an_integration_installs_from_a_directory_named_on_the_command_line() {
     assert!(!log.exists(), "setup did not run");
 }
 
+/// `--trust` is the unattended yes to the trust confirmation: off a terminal, a directory funes
+/// can't vouch for installs with it — named in the output all the same, so a log records what ran
+/// and from where — and is refused without it. `--yes` does not stand in for it.
+#[test]
+fn trust_confirms_an_unvouched_integration_off_a_terminal() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let funes_home = tmp.path().join("funes");
+    let log = tmp.path().join("setup.log");
+    fs::create_dir_all(&home).unwrap();
+    let elsewhere = bundle(&tmp.path().join("elsewhere/clyde"), "clyde", 1, "trusted");
+    let from = elsewhere.to_str().unwrap();
+
+    // Agreeing to the first index is not agreeing to run unvouched code.
+    let out = funes(&home, &funes_home, &log, &["add", "clyde", "--from", from, "--yes"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("or pass --trust"), "{}", stderr(&out));
+    assert!(!log.exists(), "setup did not run");
+
+    let out = funes(
+        &home,
+        &funes_home,
+        &log,
+        &["add", "clyde", "--from", from, "--yes", "--trust"],
+    );
+    support::assert_success(&out);
+    assert!(
+        stderr(&out).contains(&format!(
+            "clyde 1.0.0 by example (example/clyde), from {from}, trusted by --trust."
+        )),
+        "{}",
+        stderr(&out)
+    );
+    assert!(fs::read_to_string(&log).unwrap().starts_with("trusted\nadd\n"));
+}
+
+/// Off a terminal, the first-index question has no one to answer it. That is not a decline: the
+/// add fails, rather than exit 0 having wired nothing up, and names `--yes`, which answers it.
+#[test]
+fn an_unanswered_first_add_fails_and_yes_answers_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let funes_home = tmp.path().join("funes");
+    let log = tmp.path().join("setup.log");
+    install(&home, "clyde", 1);
+
+    // A drop-in is unrecorded, so trust is asked first; --trust answers that, and only that.
+    let out = funes(&home, &funes_home, &log, &["add", "clyde", "--trust"]);
+    assert!(!out.status.success(), "an add that wired nothing up must not succeed");
+    assert!(stderr(&out).contains("or pass --yes"), "{}", stderr(&out));
+    assert!(!log.exists(), "setup did not run");
+
+    let out = funes(&home, &funes_home, &log, &["add", "clyde", "--trust", "--yes"]);
+    support::assert_success(&out);
+    assert!(
+        stderr(&out).contains("funes: indexing your existing clyde sessions"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!stderr(&out).contains("Proceed?"), "--yes asks nothing");
+    assert!(fs::read_to_string(&log).unwrap().starts_with("add\n"));
+}
+
 /// A directory named relative to where the command ran is recorded absolute: the record says
 /// where the files came from whatever directory funes ran in.
 #[test]
