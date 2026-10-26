@@ -16,7 +16,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use lance::Dataset;
 use std::cmp::Reverse;
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use tokio::sync::{Mutex, OnceCell};
 
@@ -436,7 +436,7 @@ pub async fn recall_with_progress(
 ) -> Result<String> {
     let search = Search::new(query, candidates, filter)?;
     let pools = target.into().candidates(&search, progress).await?;
-    let languages = pools.first().and_then(|pool| rephrase_languages(&pool.ds));
+    let languages = rephrase_languages(pools.iter().map(|pool| &pool.ds));
     let (note, hits) = search.rank(pools, k, neighbors, progress).await?;
     Ok(crate::ui::render::recall_reply(&note, &hits, languages.as_deref()))
 }
@@ -1508,13 +1508,19 @@ fn languages_line(ds: &Dataset, rows: usize) -> String {
     format!("languages: {}{coverage}\n", shares_list(&shares))
 }
 
-/// The languages to suggest for a rephrase, `None` for English alone: an agent writes it anyway.
-fn rephrase_languages(ds: &Dataset) -> Option<String> {
-    let shares = language_shares(&dataset::languages(ds)?);
-    match shares.as_slice() {
-        [] => None,
-        [(code, _)] if code == "eng" => None,
-        _ => Some(shares_list(&shares)),
+/// Languages detected across the searched memories, `None` for English alone.
+fn rephrase_languages<'a>(memories: impl IntoIterator<Item = &'a Dataset>) -> Option<String> {
+    let languages: BTreeSet<_> = memories
+        .into_iter()
+        .filter_map(dataset::languages)
+        // A language whose share rounds to 0% is too rare to retry in.
+        .flat_map(|languages| language_shares(&languages))
+        .map(|(code, _)| code)
+        .collect();
+    match languages.len() {
+        0 => None,
+        1 if languages.contains("eng") => None,
+        _ => Some(languages.into_iter().collect::<Vec<_>>().join(", ")),
     }
 }
 
@@ -1816,22 +1822,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_miss_names_a_memorys_languages_unless_english_alone() {
+    async fn a_miss_names_the_searched_languages_unless_english_alone() {
         let dir = tempfile::tempdir().unwrap();
         let turns = [text_turn("session", 0, "user", "A narwhal parses transcripts.")];
         let mut ds = memory_of(&turns, dir.path()).await;
-        assert_eq!(rephrase_languages(&ds), None);
+        assert_eq!(rephrase_languages([&ds]), None);
         for (counts, named) in [
             (BTreeMap::from([("eng".to_string(), 9)]), None),
+            (BTreeMap::from([("eng".to_string(), 999), ("ita".to_string(), 1)]), None),
             (
                 BTreeMap::from([("eng".to_string(), 3), ("por".to_string(), 1)]),
-                Some("eng 75%, por 25%"),
+                Some("eng, por"),
             ),
         ] {
+            let previous = ds.clone();
             dataset::stamp_languages(&mut ds, &dataset::Languages { rows: 1, counts })
                 .await
                 .unwrap();
-            assert_eq!(rephrase_languages(&ds).as_deref(), named);
+            assert_eq!(rephrase_languages([&ds]).as_deref(), named);
+            assert_eq!(rephrase_languages([&previous, &ds, &ds]).as_deref(), named);
         }
     }
 

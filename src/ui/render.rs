@@ -46,10 +46,10 @@ pub fn recall_agent(note: &str, hits: &[(Hit, f64)]) -> String {
     out
 }
 
-/// `rephrase`, naming the memory's `languages` when there are some to name.
+/// `rephrase`, naming the searched memories' `languages` when there are some to name.
 fn rephrase_in(rephrase: &str, languages: Option<&str>) -> String {
     match languages {
-        Some(languages) => format!("{rephrase} or in one of the memory's languages ({languages})"),
+        Some(languages) => format!("{rephrase} or in a language detected in the searched memories ({languages})"),
         None => rephrase.to_string(),
     }
 }
@@ -367,10 +367,10 @@ mod tests {
             )
         );
         assert_eq!(
-            recall_reply("", &[(h(), 0.5781)], Some("eng 78%, por 22%")),
+            recall_reply("", &[(h(), 0.5781)], Some("eng, por")),
             format!(
-                "{}if these miss: rephrase in the words the hits use or in one of the memory's languages \
-                 (eng 78%, por 22%), then raise --k; a get line only reads around its own hit\n",
+                "{}if these miss: rephrase in the words the hits use or in a language detected in the searched memories \
+                 (eng, por), then raise --k; a get line only reads around its own hit\n",
                 recall_agent("", &[(h(), 0.5781)])
             )
         );
@@ -379,8 +379,8 @@ mod tests {
             "remote down\nno results\nrephrase in other words"
         );
         assert_eq!(
-            recall_reply("", &[], Some("eng 40%, por 60%")),
-            "no results\nrephrase in other words or in one of the memory's languages (eng 40%, por 60%)"
+            recall_reply("", &[], Some("eng, por")),
+            "no results\nrephrase in other words or in a language detected in the searched memories (eng, por)"
         );
     }
 

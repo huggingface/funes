@@ -40,14 +40,14 @@ Each hit carries its provenance and a ready-to-run drill-down line:
 ```
 
 After the last hit, one line says what to try when the hits miss: rephrase in the words the hits
-use, or in one of the memory's languages when it holds more than English, then raise `--k`. A
-`→ get` line reads the turns around its own hit, so it helps once a hit answers, not to look for
-an answer the hits missed.
+use, or in a language detected in the searched memories when they hold more than English, then
+raise `--k`. A `→ get` line reads the turns around its own hit, so it helps once a hit answers,
+not to look for an answer the hits missed.
 
 The `→ get` line carries exactly the arguments `get` wants, `--memory` included when the call
 named one, as it named it, so the drill-down reads what the search read; a call naming none gets
 a bare line, and following it reads the same way. `no results` prints when nothing matched,
-followed by the advice to rephrase, in one of the memory's languages too when it holds more than
+followed by the advice to rephrase in the searched memories' languages when they hold more than
 English. The exact shape is stable — a contract, not a presentation; don't parse it loosely.
 The score is the cross-encoder's probability when the pool was reranked, the fused rank score
 otherwise (see `--candidates` below).
