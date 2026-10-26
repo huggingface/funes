@@ -1,7 +1,7 @@
 //! Render blocks to text and split into chunks.
 //! All indexing is by Unicode code point (char), not bytes.
 
-use crate::traces::Turn;
+use crate::traces::{self, Turn};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::borrow::Cow;
@@ -309,6 +309,27 @@ pub fn chunks_from_turns(turns: &[Turn], include_thinking: bool) -> Vec<Chunk> {
     out
 }
 
+/// The language of a chunk's prose, as an ISO 639-3 code.
+pub fn language(role: &str, block_type: &str, split_idx: i64, text: &str) -> Option<&'static str> {
+    if block_type != "text" || split_idx != 0 || !matches!(role, "user" | "assistant") {
+        return None;
+    }
+    if role == "user" && traces::is_scaffolding(text) {
+        return None;
+    }
+    whatlang::detect(&prose(text))
+        .filter(|info| info.is_reliable())
+        .map(|info| info.lang().code())
+}
+
+fn prose(text: &str) -> String {
+    text.split("```")
+        .step_by(2)
+        .flat_map(|outside| outside.split('`').step_by(2))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -500,5 +521,38 @@ mod tests {
         assert_eq!(Tier::of_block("tool_result"), Tier::ToolResult);
         assert_eq!(Tier::of_block("mystery"), Tier::Text); // unknown folds into L1, never dropped
         assert!(Tier::Text < Tier::ToolUse && Tier::ToolUse < Tier::ToolResult);
+    }
+
+    const PORTUGUESE: &str = "Precisamos decidir se o atalho apaga o caractere à frente do cursor no campo de texto.";
+
+    #[test]
+    fn language_reads_the_prose_of_user_and_assistant_text() {
+        assert_eq!(language("user", "text", 0, PORTUGUESE), Some("por"));
+        let chinese = "部署失败以后，我们决定先回滚到上一个版本，再排查配置问题。";
+        assert_eq!(language("assistant", "text", 0, chinese), Some("cmn"));
+        let english = "We decided to roll back the deploy first, then look into the configuration drift.\n\
+                       ```sh\ngit revert HEAD\n```";
+        assert_eq!(language("assistant", "text", 0, english), Some("eng"));
+    }
+
+    #[test]
+    fn language_skips_what_is_not_prose() {
+        for (role, block_type, split_idx) in [
+            ("assistant", "thinking", 0),
+            ("assistant", "tool_use", 0),
+            ("user", "tool_result", 0),
+            ("system", "text", 0),
+            ("user", "text", 1),
+        ] {
+            assert_eq!(
+                language(role, block_type, split_idx, PORTUGUESE),
+                None,
+                "{role} {block_type} {split_idx}"
+            );
+        }
+        let reminder = format!("<system-reminder>{PORTUGUESE}</system-reminder>");
+        assert_eq!(language("user", "text", 0, &reminder), None);
+        assert_eq!(language("assistant", "text", 0, "```rust\nfn main() {}\n```"), None);
+        assert_eq!(language("user", "text", 0, "ok"), None);
     }
 }

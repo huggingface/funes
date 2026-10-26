@@ -33,6 +33,7 @@ serde = { version = "1", features = ["derive"] }               # MCP request str
 serde_json = { version = "1", features = ["preserve_order"] }  # parse JSONL; preserve tool_use key order
 sha1 = "0.10"                    # chunk id = sha1(...)[:16]
 sha2 = "0.10"                    # verify release binaries before the installer/updater executes them
+whatlang = "0.18"                # the language of a text block
 hex = "0.4"
 uuid = { version = "1", features = ["v4"] }  # the anonymous install id in the User-Agent
 walkdir = "2"                    # recursive *.jsonl walk

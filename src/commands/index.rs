@@ -492,6 +492,8 @@ struct Indexer {
     n_skipped: u64,
     n_chunks: u64,
     n_embedded: u64,
+    /// The language counts of the chunks written this run.
+    languages: dataset::Languages,
     /// Units (by index) whose read failed this run — reported once. Signed units also keep their
     /// refusal in state until their content or this build changes.
     rejected: HashSet<usize>,
@@ -606,6 +608,7 @@ impl Indexer {
             n_skipped: 0,
             n_chunks: 0,
             n_embedded: 0,
+            languages: dataset::Languages::new(),
             rejected: HashSet::new(),
         })
     }
@@ -787,6 +790,10 @@ impl Indexer {
             return Ok(0);
         }
         let batch = build_batch(self.embedder.model(), chunks, None)?;
+        dataset::add_languages(
+            &mut self.languages,
+            &dataset::count_languages(std::slice::from_ref(&batch)),
+        );
         match &mut self.ds {
             Some(d) => dataset::append(d, batch).await?,
             None => self.ds = Some(dataset::create(&self.uri, batch).await?),
@@ -819,6 +826,9 @@ impl Indexer {
     /// Consumes the indexer, releasing the memory lock.
     async fn finalize(mut self) -> Result<()> {
         if let Some(d) = &mut self.ds {
+            if self.n_chunks > 0 {
+                record_languages(d, &self.languages).await?;
+            }
             // Retry incomplete FTS coverage, and compact a fragmented memory, even when no rows or
             // vectors were written.
             if self.n_chunks > 0
@@ -846,6 +856,19 @@ impl Indexer {
         }
         Ok(())
     }
+}
+
+/// Update the memory's language counts with a run's.
+async fn record_languages(ds: &mut Dataset, run: &dataset::Languages) -> Result<()> {
+    let counts = match dataset::languages(ds)? {
+        Some(_) if run.is_empty() => return Ok(()),
+        Some(mut counts) => {
+            dataset::add_languages(&mut counts, run);
+            counts
+        }
+        None => dataset::scan_languages(ds).await?,
+    };
+    dataset::stamp_languages(ds, &counts).await
 }
 
 /// The run summary line. An interactive rerun that added nothing — and left nothing owed or

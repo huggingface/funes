@@ -575,6 +575,59 @@ pub(crate) fn stamped_model(schema: &Schema) -> Result<EmbeddingModel> {
     }
 }
 
+/// A memory's text counted per language, by ISO 639-3 code.
+pub type Languages = BTreeMap<String, u64>;
+
+const LANGUAGES: &str = "languages";
+
+/// The language counts `ds` records.
+pub fn languages(ds: &Dataset) -> Result<Option<Languages>> {
+    Schema::from(ds.schema())
+        .metadata()
+        .get(LANGUAGES)
+        .map(|counts| serde_json::from_str(counts).context("reading the memory's language counts"))
+        .transpose()
+}
+
+/// Record `counts` as the memory's language counts.
+pub async fn stamp_languages(ds: &mut Dataset, counts: &Languages) -> Result<()> {
+    let counts = serde_json::to_string(counts)?;
+    ds.update_schema_metadata([(LANGUAGES, counts.as_str())])
+        .await
+        .context("recording the memory's language counts")?;
+    Ok(())
+}
+
+/// Add `more` to `counts`.
+pub fn add_languages(counts: &mut Languages, more: &Languages) {
+    for (code, n) in more {
+        *counts.entry(code.clone()).or_default() += n;
+    }
+}
+
+/// The language counts of `batches`' rows.
+pub fn count_languages(batches: &[RecordBatch]) -> Languages {
+    let mut counts = Languages::new();
+    for batch in batches {
+        let (role, block_type, text) = (strs(batch, "role"), strs(batch, "block_type"), strs(batch, "text"));
+        let split_idx = ints(batch, "split_idx");
+        for i in 0..batch.num_rows() {
+            if let Some(code) = chunk::language(role.get(i), block_type.get(i), split_idx.get(i), text.get(i)) {
+                *counts.entry(code.to_string()).or_default() += 1;
+            }
+        }
+    }
+    counts
+}
+
+/// The language counts of every row of `ds`.
+pub async fn scan_languages(ds: &Dataset) -> Result<Languages> {
+    // The only rows `chunk::language` reads, so no other row's text is fetched.
+    let filter = "role IN ('user', 'assistant') AND block_type = 'text' AND split_idx = 0";
+    let batches = scan_rows(ds, &["role", "block_type", "split_idx", "text"], Some(filter), None).await?;
+    Ok(count_languages(&batches))
+}
+
 /// The default analyzer splits text only on spaces and punctuation, so a Chinese clause is one token.
 fn fts_params(model: EmbeddingModel) -> InvertedIndexParams {
     match model {
@@ -1370,6 +1423,48 @@ mod tests {
         let ds = create_empty(&table_uri(dir.path()), e5).await.unwrap();
         assert_eq!(ds.count_rows(None).await.unwrap(), 0);
         assert_eq!(embedding_model(&ds).unwrap(), e5);
+    }
+
+    #[tokio::test]
+    async fn language_counts_survive_appends_and_vector_fills() {
+        let dir = tempfile::tempdir().unwrap();
+        let chunks = chunk::chunks_from_turns(&turns(0, 2), true);
+        let first = build_batch(model::ENGLISH, &chunks[..1], None).unwrap();
+        let mut ds = create(&table_uri(dir.path()), first).await.unwrap();
+        assert_eq!(languages(&ds).unwrap(), None);
+        let counts = Languages::from([("eng".to_string(), 3), ("por".to_string(), 1)]);
+        stamp_languages(&mut ds, &counts).await.unwrap();
+        append(&mut ds, build_batch(model::ENGLISH, &chunks[1..], None).unwrap())
+            .await
+            .unwrap();
+        let ds = fill_vectors(&ds, &[chunks[0].id.as_str()], &vectors(1)).await.unwrap();
+        assert_eq!(languages(&ds).unwrap(), Some(counts));
+    }
+
+    #[tokio::test]
+    async fn scanning_languages_agrees_with_counting_every_row() {
+        let block = |block_type: &str, text: &str| Block {
+            block_type: block_type.into(),
+            text: text.into(),
+            tool_name: None,
+            tool_use_id: None,
+        };
+        let english = "We decided to roll back the deploy first, then look into the configuration drift. ";
+        let mut mixed = turns(0, 3);
+        mixed[0].role = "user".into();
+        mixed[0].blocks = vec![block(
+            "text",
+            "Precisamos decidir se o atalho apaga o caractere à frente do cursor no campo de texto.",
+        )];
+        mixed[1].blocks = vec![block("thinking", english), block("text", &english.repeat(30))];
+        mixed[2].blocks = vec![block("tool_use", r#"{"command": "git revert HEAD"}"#)];
+        let dir = tempfile::tempdir().unwrap();
+        let batch = build_batch(model::ENGLISH, &chunk::chunks_from_turns(&mixed, true), None).unwrap();
+        let ds = create(&table_uri(dir.path()), batch).await.unwrap();
+        let counts = Languages::from([("eng".to_string(), 1), ("por".to_string(), 1)]);
+        let every_row = scan_rows(&ds, &[], None, None).await.unwrap();
+        assert_eq!(count_languages(&every_row), counts);
+        assert_eq!(scan_languages(&ds).await.unwrap(), counts);
     }
 
     async fn turn_uuids(mut scan: lance::dataset::scanner::Scanner) -> Vec<String> {
