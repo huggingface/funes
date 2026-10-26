@@ -113,6 +113,13 @@ path = "scripts/backfill_remote_repo.rs"
 name = "migrate_schema"
 path = "scripts/migrate_schema.rs"
 
+# One-off backfill of the language counts of a memory indexed before funes counted them (local: a
+# commit; remote: a guarded commit). Delete it, and `memory::remote::count_languages`, once every
+# memory records its languages.
+[[example]]
+name = "backfill_languages"
+path = "scripts/backfill_languages.rs"
+
 [profile.release]
 opt-level = 3
 

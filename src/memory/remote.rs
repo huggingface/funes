@@ -565,6 +565,27 @@ pub async fn add_column(
     Ok(info.commit_oid.unwrap_or_else(|| "?".to_string()))
 }
 
+/// Count the remote dataset's languages over all of its rows and record them in one head-guarded
+/// commit, returning the counts and the new oid. A moved head is an error: a single guarded
+/// attempt, not retried.
+pub async fn count_languages(
+    repo: &HFRepository<RepoTypeDataset>,
+    dataset_uri: &str,
+    storage_options: HashMap<String, String>,
+    rev: &str,
+    message: String,
+) -> Result<(dataset::Languages, String)> {
+    let parent = head_oid(repo, rev).await?;
+    let (mut ds, wrapper) = open_pinned(dataset_uri, &storage_options, &parent).await?;
+    let languages = dataset::scan_languages(&ds).await?;
+    dataset::stamp_languages(&mut ds, &languages).await?;
+    let (ops, _dir) = write_ops(&captured_files(&wrapper))?;
+    let info = send_commit(repo, ops, Some(parent), rev, message)
+        .await
+        .map_err(|e| anyhow::Error::new(e).context("language count commit failed"))?;
+    Ok((languages, info.commit_oid.unwrap_or_else(|| "?".to_string())))
+}
+
 /// Open the remote dataset with a [`CaptureStore`] installed, returning the wrapped dataset and the
 /// wrapper that holds the shared capture map.
 async fn open_capturing(
