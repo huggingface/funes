@@ -33,6 +33,7 @@ use lance_index::vector::pq::PQBuildParams;
 use lance_index::{IndexParams, IndexType};
 use lance_io::object_store::{ObjectStoreParams, WrappingObjectStore};
 use lance_linalg::distance::MetricType;
+use serde::{Deserialize, Serialize};
 
 /// The rows a scan hands out and a write takes back, as a command holds them.
 pub use arrow_array::RecordBatch;
@@ -575,8 +576,22 @@ pub(crate) fn stamped_model(schema: &Schema) -> Result<EmbeddingModel> {
     }
 }
 
-/// A memory's text counted per language, by ISO 639-3 code.
-pub type Languages = BTreeMap<String, u64>;
+/// A memory's text counted per language.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Languages {
+    /// How many of the memory's rows the counts cover.
+    pub rows: u64,
+    /// Text blocks per ISO 639-3 code.
+    pub counts: BTreeMap<String, u64>,
+}
+
+impl Languages {
+    /// Count `batch`'s rows in.
+    pub fn add(&mut self, batch: &RecordBatch) {
+        self.rows += batch.num_rows() as u64;
+        count_blocks(&mut self.counts, batch);
+    }
+}
 
 const LANGUAGES: &str = "languages";
 
@@ -598,34 +613,28 @@ pub async fn stamp_languages(ds: &mut Dataset, counts: &Languages) -> Result<()>
     Ok(())
 }
 
-/// Add `more` to `counts`.
-pub fn add_languages(counts: &mut Languages, more: &Languages) {
-    for (code, n) in more {
-        *counts.entry(code.clone()).or_default() += n;
-    }
-}
-
-/// The language counts of `batches`' rows.
-pub fn count_languages(batches: &[RecordBatch]) -> Languages {
-    let mut counts = Languages::new();
-    for batch in batches {
-        let (role, block_type, text) = (strs(batch, "role"), strs(batch, "block_type"), strs(batch, "text"));
-        let split_idx = ints(batch, "split_idx");
-        for i in 0..batch.num_rows() {
-            if let Some(code) = chunk::language(role.get(i), block_type.get(i), split_idx.get(i), text.get(i)) {
-                *counts.entry(code.to_string()).or_default() += 1;
-            }
+fn count_blocks(counts: &mut BTreeMap<String, u64>, batch: &RecordBatch) {
+    let (role, block_type, text) = (strs(batch, "role"), strs(batch, "block_type"), strs(batch, "text"));
+    let split_idx = ints(batch, "split_idx");
+    for i in 0..batch.num_rows() {
+        if let Some(code) = chunk::language(role.get(i), block_type.get(i), split_idx.get(i), text.get(i)) {
+            *counts.entry(code.to_string()).or_default() += 1;
         }
     }
-    counts
 }
 
 /// The language counts of every row of `ds`.
 pub async fn scan_languages(ds: &Dataset) -> Result<Languages> {
     // The only rows `chunk::language` reads, so no other row's text is fetched.
     let filter = "role IN ('user', 'assistant') AND block_type = 'text' AND split_idx = 0";
-    let batches = scan_rows(ds, &["role", "block_type", "split_idx", "text"], Some(filter), None).await?;
-    Ok(count_languages(&batches))
+    let mut counts = BTreeMap::new();
+    for batch in scan_rows(ds, &["role", "block_type", "split_idx", "text"], Some(filter), None).await? {
+        count_blocks(&mut counts, &batch);
+    }
+    Ok(Languages {
+        rows: count_rows(ds, None).await? as u64,
+        counts,
+    })
 }
 
 /// The default analyzer splits text only on spaces and punctuation, so a Chinese clause is one token.
@@ -1432,7 +1441,10 @@ mod tests {
         let first = build_batch(model::ENGLISH, &chunks[..1], None).unwrap();
         let mut ds = create(&table_uri(dir.path()), first).await.unwrap();
         assert_eq!(languages(&ds).unwrap(), None);
-        let counts = Languages::from([("eng".to_string(), 3), ("por".to_string(), 1)]);
+        let counts = Languages {
+            rows: 1,
+            counts: BTreeMap::from([("eng".to_string(), 3), ("por".to_string(), 1)]),
+        };
         stamp_languages(&mut ds, &counts).await.unwrap();
         append(&mut ds, build_batch(model::ENGLISH, &chunks[1..], None).unwrap())
             .await
@@ -1461,10 +1473,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let batch = build_batch(model::ENGLISH, &chunk::chunks_from_turns(&mixed, true), None).unwrap();
         let ds = create(&table_uri(dir.path()), batch).await.unwrap();
-        let counts = Languages::from([("eng".to_string(), 1), ("por".to_string(), 1)]);
-        let every_row = scan_rows(&ds, &[], None, None).await.unwrap();
-        assert_eq!(count_languages(&every_row), counts);
-        assert_eq!(scan_languages(&ds).await.unwrap(), counts);
+        let mut counted = Languages::default();
+        for batch in &scan_rows(&ds, &[], None, None).await.unwrap() {
+            counted.add(batch);
+        }
+        let counts = BTreeMap::from([("eng".to_string(), 1), ("por".to_string(), 1)]);
+        assert_eq!(counted.counts, counts);
+        assert_eq!(scan_languages(&ds).await.unwrap(), counted);
     }
 
     async fn turn_uuids(mut scan: lance::dataset::scanner::Scanner) -> Vec<String> {

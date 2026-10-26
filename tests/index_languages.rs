@@ -4,6 +4,7 @@ use funes::commands::index;
 use funes::home;
 use funes::inference::EmbeddingModel;
 use funes::memory::dataset::{self, Languages};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 const PORTUGUESE: &str = "Precisamos decidir se o atalho apaga o caractere à frente do cursor no campo de texto.";
@@ -36,8 +37,11 @@ async fn recorded() -> Option<Languages> {
     dataset::languages(&ds).unwrap()
 }
 
-fn counted(eng: u64, por: u64) -> Option<Languages> {
-    Some(Languages::from([("eng".to_string(), eng), ("por".to_string(), por)]))
+fn counted(rows: u64, eng: u64, por: u64) -> Option<Languages> {
+    Some(Languages {
+        rows,
+        counts: BTreeMap::from([("eng".to_string(), eng), ("por".to_string(), por)]),
+    })
 }
 
 #[tokio::test]
@@ -50,14 +54,14 @@ async fn indexing_keeps_the_memory_language_counts() {
 
     session(&turns, "a", &[("user", PORTUGUESE), ("assistant", ENGLISH)]);
     index::run_index(&turns, false, None).await.unwrap();
-    assert_eq!(recorded().await, counted(1, 1));
+    assert_eq!(recorded().await, counted(2, 1, 1));
 
     // A later run adds its own.
     session(&turns, "b", &[("user", PORTUGUESE)]);
     index::run_index(&turns, false, None).await.unwrap();
-    assert_eq!(recorded().await, counted(1, 2));
+    assert_eq!(recorded().await, counted(3, 1, 2));
 
-    // A memory rewritten whole records none, and its next run counts every row.
+    // A rewritten memory records none, and its next run counts every row, even with nothing to index.
     let uri = dataset::table_uri(home::memory_dir());
     let ds = dataset::open(&uri, Default::default()).await.unwrap();
     let rows = dataset::scan_rows(&ds, &[], None, None).await.unwrap();
@@ -65,7 +69,6 @@ async fn indexing_keeps_the_memory_language_counts() {
         .await
         .unwrap();
     assert_eq!(recorded().await, None);
-    session(&turns, "c", &[("assistant", ENGLISH)]);
     index::run_index(&turns, false, None).await.unwrap();
-    assert_eq!(recorded().await, counted(2, 2));
+    assert_eq!(recorded().await, counted(3, 1, 2));
 }
