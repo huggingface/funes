@@ -14,6 +14,7 @@ use crate::traces;
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, NaiveDate, Utc};
 use lance::Dataset;
+use std::cmp::Reverse;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
@@ -1460,6 +1461,26 @@ fn index_coverage_line() -> Option<String> {
     })
 }
 
+/// The languages a memory records, each with its share, highest first.
+fn languages_line(ds: &Dataset) -> String {
+    let Some(languages) = dataset::languages(ds) else {
+        return String::new();
+    };
+    let total: u64 = languages.counts.values().sum();
+    let mut shares: Vec<(&str, u64)> = languages
+        .counts
+        .iter()
+        .map(|(code, n)| (code.as_str(), (n * 100 + total / 2) / total))
+        .filter(|&(_, share)| share > 0)
+        .collect();
+    if shares.is_empty() {
+        return String::new();
+    }
+    shares.sort_by_key(|&(_, share)| Reverse(share));
+    let shares: Vec<String> = shares.iter().map(|(code, share)| format!("{code} {share}%")).collect();
+    format!("languages: {}\n", shares.join(", "))
+}
+
 /// Local index progress and its last write time. A version with no recorded timestamp is omitted.
 async fn index_lines(ds: &Dataset, now: DateTime<Utc>) -> Result<String> {
     let mut out = String::new();
@@ -1539,7 +1560,7 @@ pub async fn status(target: impl Into<Target>) -> Result<String> {
         ReadOutcome::Ready(ds) => {
             let now = Utc::now();
             let rows = dataset::count_rows(&ds, None).await?;
-            let mut out = format!("memory: {}\nchunks: {rows}\n", memory.label());
+            let mut out = format!("memory: {}\nchunks: {rows}\n{}", memory.label(), languages_line(&ds));
             match &memory {
                 Memory::Local { .. } => out.push_str(&index_lines(&ds, now).await?),
                 Memory::Remote { uri } => {
@@ -1605,6 +1626,7 @@ pub async fn host_status(bound: Option<&str>, note: Option<&str>) -> Result<Stri
         }
     };
     let _ = writeln!(out, "chunks: {}", dataset::count_rows(&ds, None).await?);
+    out.push_str(&languages_line(&ds));
     if let Memory::Remote { uri } = &memory {
         out.push_str(&remote_lines(&ds, Utc::now()).await);
         if let Some(local) = Memory::local().dataset().await? {
@@ -1700,6 +1722,30 @@ mod tests {
         let out = status(memory).await.unwrap();
         assert!(out.starts_with(&prefix), "{out}");
         assert!(!out.contains("awaiting embedding"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn status_lists_a_memorys_languages_highest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::parse(&dir.path().to_string_lossy());
+        let turns = [text_turn("session", 0, "user", "A narwhal parses transcripts.")];
+        let batch =
+            dataset::build_batch(dataset::model::ENGLISH, &chunk::chunks_from_turns(&turns, true), None).unwrap();
+        let reader = RecordBatchIterator::new([Ok(batch)], dataset::schema(dataset::model::ENGLISH));
+        let mut ds = Dataset::write(reader, &dataset::table_uri(memory.label()), None)
+            .await
+            .unwrap();
+        let counts = BTreeMap::from([
+            ("eng".to_string(), 296),
+            ("lat".to_string(), 1),
+            ("por".to_string(), 100),
+        ]);
+        dataset::stamp_languages(&mut ds, &dataset::Languages { rows: 1, counts })
+            .await
+            .unwrap();
+        let prefix = format!("memory: {}\nchunks: 1\nlanguages: eng 75%, por 25%\n", memory.label());
+        let out = status(memory).await.unwrap();
+        assert!(out.starts_with(&prefix), "{out}");
     }
 
     fn text_turn(session: &str, seq: i64, role: &str, text: &str) -> Turn {

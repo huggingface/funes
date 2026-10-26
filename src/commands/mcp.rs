@@ -14,7 +14,9 @@ use rmcp::{schemars, tool, tool_handler, tool_router, ServerHandler, ServiceExt}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct RecallRequest {
-    #[schemars(description = "Natural-language description of what to recall from past sessions")]
+    #[schemars(
+        description = "Natural-language description of what to recall from past sessions. A query matches best in the language they are written in, which `status` reports."
+    )]
     pub query: String,
     #[schemars(
         description = "Hits returned (default 8). Each is a verbatim passage of a few hundred tokens, so `k` is what a call costs to read."
@@ -341,7 +343,7 @@ impl Funes {
     }
 
     #[tool(
-        description = "Health and size of a memory: indexed chunks, local chunks awaiting embedding, source sessions awaiting indexing, and for a remote this host pushes to what it has yet to push. Call it when a read comes back empty or thinner than expected — it says whether the memory is the problem rather than the call."
+        description = "Health and size of a memory: indexed chunks, the languages its sessions are written in, local chunks awaiting embedding, source sessions awaiting indexing, and for a remote this host pushes to what it has yet to push. Call it when a read comes back empty or thinner than expected — it says whether the memory is the problem rather than the call."
     )]
     async fn status(&self, Parameters(StatusRequest { memory }): Parameters<StatusRequest>) -> String {
         // No update check here: it needs the network, and the "update available" notice belongs

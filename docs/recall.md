@@ -14,6 +14,9 @@ expansion, with a cross-encoder rerank of the pool before the cut when the pool 
 the hits asked for. What comes back is the **actual passage from the actual turn**, not a summary
 written about it.
 
+A query matches best in the language of the sessions it looks for. `funes status` lists the
+languages a memory's sessions are written in.
+
 Passages are searchable by their words as soon as their text is indexed, even while embeddings
 are pending. If text search fails, recall reports an error.
 
