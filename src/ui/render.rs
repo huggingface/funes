@@ -46,21 +46,29 @@ pub fn recall_agent(note: &str, hits: &[(Hit, f64)]) -> String {
     out
 }
 
+/// `rephrase`, naming the memory's `languages` when there are some to name.
+fn rephrase_in(rephrase: &str, languages: Option<&str>) -> String {
+    match languages {
+        Some(languages) => format!("{rephrase} or in one of the memory's languages ({languages})"),
+        None => rephrase.to_string(),
+    }
+}
+
 /// What a `recall` reply closes with: the follow-ups that find a missed answer for the fewest tokens.
 fn recall_miss(languages: Option<&str>) -> String {
-    let rephrase = match languages {
-        Some(languages) => {
-            format!("rephrase in the words the hits use or in one of the memory's languages ({languages})")
-        }
-        None => "rephrase in the words the hits use".to_string(),
-    };
-    format!("if these miss: {rephrase}, then raise --k; a get line only reads around its own hit")
+    format!(
+        "if these miss: {}, then raise --k; a get line only reads around its own hit",
+        rephrase_in("rephrase in the words the hits use", languages)
+    )
 }
 
 /// A `recall` reply: the agent format closed by [`recall_miss`], or `no results` and a hint. Byte-stable.
 pub fn recall_reply(note: &str, hits: &[(Hit, f64)], languages: Option<&str>) -> String {
     if hits.is_empty() {
-        return format!("{note}no results\nrephrase in other words");
+        return format!(
+            "{note}no results\n{}",
+            rephrase_in("rephrase in other words", languages)
+        );
     }
     format!("{}{}\n", recall_agent(note, hits), recall_miss(languages))
 }
@@ -369,6 +377,10 @@ mod tests {
         assert_eq!(
             recall_reply("remote down\n", &[], None),
             "remote down\nno results\nrephrase in other words"
+        );
+        assert_eq!(
+            recall_reply("", &[], Some("eng 40%, por 60%")),
+            "no results\nrephrase in other words or in one of the memory's languages (eng 40%, por 60%)"
         );
     }
 

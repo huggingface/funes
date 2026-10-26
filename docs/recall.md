@@ -47,8 +47,8 @@ an answer the hits missed.
 The `→ get` line carries exactly the arguments `get` wants, `--memory` included when the call
 named one, as it named it, so the drill-down reads what the search read; a call naming none gets
 a bare line, and following it reads the same way. `no results` prints when nothing matched,
-followed by the advice to rephrase. The exact shape is
-stable — a contract, not a presentation; don't parse it loosely.
+followed by the advice to rephrase, in one of the memory's languages too when it holds more than
+English. The exact shape is stable — a contract, not a presentation; don't parse it loosely.
 The score is the cross-encoder's probability when the pool was reranked, the fused rank score
 otherwise (see `--candidates` below).
 

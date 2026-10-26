@@ -135,7 +135,8 @@ before the binding is told what its agents were bound to, and what binds it.
 `funes status` tells you whether recall is reading your own memory yet, and whether a newer funes
 release is out. Its local-index sections distinguish chunks awaiting embedding from source
 sessions not yet indexed. Run `funes index` to continue either. Each memory also lists the
-languages its sessions are written in, with each one's share.
+languages its sessions are written in, with each one's share, and how many chunks the counts cover
+when they miss some.
 
 For the bound memory, one `local push` line says either that this host is up to date or how many
 local sessions are pending. This comes from a per-remote receipt kept on this host, so sessions

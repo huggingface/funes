@@ -1472,16 +1472,13 @@ fn index_coverage_line() -> Option<String> {
     })
 }
 
-/// The languages a memory records, each with its share, highest first.
-fn language_shares(ds: &Dataset) -> Vec<(String, u64)> {
-    let Some(languages) = dataset::languages(ds) else {
-        return Vec::new();
-    };
+/// Each language `languages` counts, with its share, highest first.
+fn language_shares(languages: &dataset::Languages) -> Vec<(String, u64)> {
     let total: u64 = languages.counts.values().sum();
     let mut shares: Vec<(String, u64)> = languages
         .counts
-        .into_iter()
-        .map(|(code, n)| (code, (n * 100 + total / 2) / total))
+        .iter()
+        .map(|(code, n)| (code.clone(), (n * 100 + total / 2) / total))
         .filter(|&(_, share)| share > 0)
         .collect();
     shares.sort_by_key(|&(_, share)| Reverse(share));
@@ -1494,18 +1491,26 @@ fn shares_list(shares: &[(String, u64)]) -> String {
     shares.join(", ")
 }
 
-/// A memory's `languages:` status line, empty when it records none.
-fn languages_line(ds: &Dataset) -> String {
-    let shares = language_shares(ds);
+/// The `languages:` status line of a memory holding `rows` chunks, empty when it records none.
+fn languages_line(ds: &Dataset, rows: usize) -> String {
+    let Some(languages) = dataset::languages(ds) else {
+        return String::new();
+    };
+    let shares = language_shares(&languages);
     if shares.is_empty() {
         return String::new();
     }
-    format!("languages: {}\n", shares_list(&shares))
+    let coverage = if languages.rows == rows as u64 {
+        String::new()
+    } else {
+        format!(" (counted over {} of {rows} chunks)", languages.rows)
+    };
+    format!("languages: {}{coverage}\n", shares_list(&shares))
 }
 
 /// The languages to suggest for a rephrase, `None` for English alone: an agent writes it anyway.
 fn rephrase_languages(ds: &Dataset) -> Option<String> {
-    let shares = language_shares(ds);
+    let shares = language_shares(&dataset::languages(ds)?);
     match shares.as_slice() {
         [] => None,
         [(code, _)] if code == "eng" => None,
@@ -1592,7 +1597,11 @@ pub async fn status(target: impl Into<Target>) -> Result<String> {
         ReadOutcome::Ready(ds) => {
             let now = Utc::now();
             let rows = dataset::count_rows(&ds, None).await?;
-            let mut out = format!("memory: {}\nchunks: {rows}\n{}", memory.label(), languages_line(&ds));
+            let mut out = format!(
+                "memory: {}\nchunks: {rows}\n{}",
+                memory.label(),
+                languages_line(&ds, rows)
+            );
             match &memory {
                 Memory::Local { .. } => out.push_str(&index_lines(&ds, now).await?),
                 Memory::Remote { uri } => {
@@ -1657,8 +1666,9 @@ pub async fn host_status(bound: Option<&str>, note: Option<&str>) -> Result<Stri
             return Ok(out);
         }
     };
-    let _ = writeln!(out, "chunks: {}", dataset::count_rows(&ds, None).await?);
-    out.push_str(&languages_line(&ds));
+    let rows = dataset::count_rows(&ds, None).await?;
+    let _ = writeln!(out, "chunks: {rows}");
+    out.push_str(&languages_line(&ds, rows));
     if let Memory::Remote { uri } = &memory {
         out.push_str(&remote_lines(&ds, Utc::now()).await);
         if let Some(local) = Memory::local().dataset().await? {
@@ -1778,6 +1788,31 @@ mod tests {
         let prefix = format!("memory: {}\nchunks: 1\nlanguages: eng 75%, por 25%\n", memory.label());
         let out = status(memory).await.unwrap();
         assert!(out.starts_with(&prefix), "{out}");
+    }
+
+    #[tokio::test]
+    async fn status_says_when_language_counts_miss_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::parse(&dir.path().to_string_lossy());
+        let turns = [
+            text_turn("session", 0, "user", "A narwhal parses transcripts."),
+            text_turn("session", 1, "assistant", "Each line becomes a typed turn."),
+        ];
+        let batch =
+            dataset::build_batch(dataset::model::ENGLISH, &chunk::chunks_from_turns(&turns, true), None).unwrap();
+        let reader = RecordBatchIterator::new([Ok(batch)], dataset::schema(dataset::model::ENGLISH));
+        let mut ds = Dataset::write(reader, &dataset::table_uri(memory.label()), None)
+            .await
+            .unwrap();
+        let counts = BTreeMap::from([("eng".to_string(), 1)]);
+        dataset::stamp_languages(&mut ds, &dataset::Languages { rows: 1, counts })
+            .await
+            .unwrap();
+        let out = status(memory).await.unwrap();
+        assert!(
+            out.contains("\nlanguages: eng 100% (counted over 1 of 2 chunks)\n"),
+            "{out}"
+        );
     }
 
     #[tokio::test]
