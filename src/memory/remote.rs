@@ -90,7 +90,7 @@ pub(crate) enum Compacted {
 
 /// Append `batches` to the remote Lance dataset at `dataset_uri` (an `hf://…/<table>.lance` URI)
 /// and land them in one `create_commit` on branch `rev`, guarded by the current head. The append
-/// writes only data — a new fragment, manifest, and transaction — and leaves the new rows
+/// writes only data and the language counts, and leaves the new rows
 /// unindexed (refresh the index separately with [`compact`]). `extra_files` (repo path → bytes,
 /// e.g. the dataset card) ride the same guarded commit; cloned per attempt, so a conflict retry
 /// re-attaches them. Returns [`Appended::Committed`] with the new commit oid, the resulting
@@ -112,10 +112,21 @@ pub(crate) async fn append(
     let (mut ds, wrapper) = open_capturing(dataset_uri, storage_options).await?;
     same_model(&ds, &schema)?;
 
+    // Counts that miss rows stay as they are: recounting them would read the whole remote.
+    let rows = dataset::count_rows(&ds, None).await? as u64;
+    let mut languages = dataset::languages(&ds)?.filter(|languages| languages.rows == rows);
+    if let Some(languages) = &mut languages {
+        for batch in &batches {
+            languages.add(batch);
+        }
+    }
     let reader = RecordBatchIterator::new(batches.into_iter().map(Ok), schema);
     ds.append(reader, None)
         .await
         .context("appending to the remote dataset")?;
+    if let Some(languages) = &languages {
+        dataset::stamp_languages(&mut ds, languages).await?;
+    }
 
     // Snapshot the captured writes before reading index stats: `index_statistics` can write a stats
     // migration through the same wrapper, and that must not leak into the data commit.
@@ -174,10 +185,15 @@ pub(crate) async fn first_publish(
     };
     std::fs::create_dir_all(&db_dir)?;
     let table_uri = dataset::table_uri(&db_dir);
+    let mut languages = dataset::Languages::default();
+    for batch in &batches {
+        languages.add(batch);
+    }
     let reader = RecordBatchIterator::new(batches.into_iter().map(Ok), schema);
     let mut ds = Dataset::write(reader, &table_uri, Some(WriteParams::default()))
         .await
         .context("building the dataset for first publish")?;
+    dataset::stamp_languages(&mut ds, &languages).await?;
     dataset::build_indexes(&mut ds, on_event).await?;
 
     let mut ops = Vec::new();
@@ -431,7 +447,7 @@ async fn replay_onto(mut ds: Dataset, read: u64, txns: &[Transaction]) -> Result
         };
         if !matches!(
             landed.map(|txn| txn.operation),
-            Some(Operation::Append { .. } | Operation::ReserveFragments { .. })
+            Some(Operation::Append { .. } | Operation::UpdateConfig { .. } | Operation::ReserveFragments { .. })
         ) {
             return Ok(None);
         }
@@ -1075,6 +1091,31 @@ mod tests {
             1,
             "the pushed row is still found"
         );
+    }
+
+    #[tokio::test]
+    async fn a_compaction_replays_onto_a_push_that_counted_its_languages() {
+        let (store, ds, read) = hub_and_snapshot("languages").await;
+        let reserve = Operation::ReserveFragments {
+            num_fragments: dataset::fragments_to_compact(&ds).await.unwrap() as u32,
+        };
+        let mut hub = CommitBuilder::new(Arc::new(ds))
+            .execute(Transaction::new(read, reserve, None))
+            .await
+            .unwrap();
+        hub.append(text_rows("pushed"), None).await.unwrap();
+        let counts = dataset::Languages {
+            rows: 5,
+            counts: BTreeMap::from([("eng".to_string(), 5)]),
+        };
+        dataset::stamp_languages(&mut hub, &counts).await.unwrap();
+
+        let txns = compact_snapshot("languages", &store, read).await;
+        let head = replay_onto(hub, read, &txns)
+            .await
+            .unwrap()
+            .expect("only a push landed");
+        assert_eq!(dataset::languages(&head).unwrap(), Some(counts));
     }
 
     #[tokio::test]

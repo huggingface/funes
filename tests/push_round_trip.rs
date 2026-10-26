@@ -229,6 +229,10 @@ async fn push_round_trip_create_append_recall() {
         Ok(t) => t.schema().metadata.get("embedding_model").cloned(),
         Err(_) => None,
     };
+    let remote_languages = match Memory::parse(&uri).open().await {
+        Ok(ds) => funes::memory::dataset::languages(&ds).unwrap(),
+        Err(_) => None,
+    };
 
     // Cleanup before asserting, so a failed assertion can't leave the scratch path behind.
     let _ = repo
@@ -354,6 +358,11 @@ async fn push_round_trip_create_append_recall() {
         remote_model.as_deref(),
         Some(funes::memory::dataset::model::ENGLISH.id()),
         "the model id should travel with the memory via push"
+    );
+    assert_eq!(
+        remote_languages.map(|languages| languages.rows),
+        Some(remote_rows as u64),
+        "every push, the compaction and the race should leave the language counts covering every row"
     );
     assert_eq!(
         readme_before, readme_after,
