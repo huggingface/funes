@@ -421,13 +421,24 @@ pub async fn recall(
     neighbors: i64,
     filter: RecallFilter,
 ) -> Result<String> {
-    let (note, hits) = recall_hits(target, query, k, candidates, neighbors, filter, &|_| ()).await?;
-    Ok(rendered(&note, &hits))
+    recall_with_progress(target, query, k, candidates, neighbors, filter, &|_| ()).await
 }
 
-/// Recall results in the agent format, or the note and `no results` when nothing matched.
-pub fn rendered(note: &str, hits: &[(Hit, f64)]) -> String {
-    crate::ui::render::recall_reply(note, hits)
+/// [`recall`], reporting each stage to `progress`.
+pub async fn recall_with_progress(
+    target: impl Into<Target>,
+    query: String,
+    k: usize,
+    candidates: usize,
+    neighbors: i64,
+    filter: RecallFilter,
+    progress: &(dyn Fn(&str) + Sync),
+) -> Result<String> {
+    let search = Search::new(query, candidates, filter)?;
+    let pools = target.into().candidates(&search, progress).await?;
+    let languages = pools.first().and_then(|pool| rephrase_languages(&pool.ds));
+    let (note, hits) = search.rank(pools, k, neighbors, progress).await?;
+    Ok(crate::ui::render::recall_reply(&note, &hits, languages.as_deref()))
 }
 
 /// Run the recall pipeline over what `target` reads: hybrid retrieval, pooled with this host's
@@ -1462,23 +1473,44 @@ fn index_coverage_line() -> Option<String> {
 }
 
 /// The languages a memory records, each with its share, highest first.
-fn languages_line(ds: &Dataset) -> String {
+fn language_shares(ds: &Dataset) -> Vec<(String, u64)> {
     let Some(languages) = dataset::languages(ds) else {
-        return String::new();
+        return Vec::new();
     };
     let total: u64 = languages.counts.values().sum();
-    let mut shares: Vec<(&str, u64)> = languages
+    let mut shares: Vec<(String, u64)> = languages
         .counts
-        .iter()
-        .map(|(code, n)| (code.as_str(), (n * 100 + total / 2) / total))
+        .into_iter()
+        .map(|(code, n)| (code, (n * 100 + total / 2) / total))
         .filter(|&(_, share)| share > 0)
         .collect();
+    shares.sort_by_key(|&(_, share)| Reverse(share));
+    shares
+}
+
+/// `shares` as `eng 75%, por 25%`.
+fn shares_list(shares: &[(String, u64)]) -> String {
+    let shares: Vec<String> = shares.iter().map(|(code, share)| format!("{code} {share}%")).collect();
+    shares.join(", ")
+}
+
+/// A memory's `languages:` status line, empty when it records none.
+fn languages_line(ds: &Dataset) -> String {
+    let shares = language_shares(ds);
     if shares.is_empty() {
         return String::new();
     }
-    shares.sort_by_key(|&(_, share)| Reverse(share));
-    let shares: Vec<String> = shares.iter().map(|(code, share)| format!("{code} {share}%")).collect();
-    format!("languages: {}\n", shares.join(", "))
+    format!("languages: {}\n", shares_list(&shares))
+}
+
+/// The languages to suggest for a rephrase, `None` for English alone: an agent writes it anyway.
+fn rephrase_languages(ds: &Dataset) -> Option<String> {
+    let shares = language_shares(ds);
+    match shares.as_slice() {
+        [] => None,
+        [(code, _)] if code == "eng" => None,
+        _ => Some(shares_list(&shares)),
+    }
 }
 
 /// Local index progress and its last write time. A version with no recorded timestamp is omitted.
@@ -1746,6 +1778,26 @@ mod tests {
         let prefix = format!("memory: {}\nchunks: 1\nlanguages: eng 75%, por 25%\n", memory.label());
         let out = status(memory).await.unwrap();
         assert!(out.starts_with(&prefix), "{out}");
+    }
+
+    #[tokio::test]
+    async fn a_miss_names_a_memorys_languages_unless_english_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let turns = [text_turn("session", 0, "user", "A narwhal parses transcripts.")];
+        let mut ds = memory_of(&turns, dir.path()).await;
+        assert_eq!(rephrase_languages(&ds), None);
+        for (counts, named) in [
+            (BTreeMap::from([("eng".to_string(), 9)]), None),
+            (
+                BTreeMap::from([("eng".to_string(), 3), ("por".to_string(), 1)]),
+                Some("eng 75%, por 25%"),
+            ),
+        ] {
+            dataset::stamp_languages(&mut ds, &dataset::Languages { rows: 1, counts })
+                .await
+                .unwrap();
+            assert_eq!(rephrase_languages(&ds).as_deref(), named);
+        }
     }
 
     fn text_turn(session: &str, seq: i64, role: &str, text: &str) -> Turn {
