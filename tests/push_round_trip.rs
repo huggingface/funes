@@ -230,7 +230,7 @@ async fn push_round_trip_create_append_recall() {
         Err(_) => None,
     };
     let remote_languages = match Memory::parse(&uri).open().await {
-        Ok(ds) => funes::memory::dataset::languages(&ds).unwrap(),
+        Ok(ds) => funes::memory::dataset::languages(&ds),
         Err(_) => None,
     };
 

@@ -554,10 +554,7 @@ impl Indexer {
             None => HashSet::new(),
         };
         let first_index = existing.is_empty();
-        let languages = match &ds {
-            Some(d) => dataset::languages(d)?,
-            None => None,
-        };
+        let languages = ds.as_ref().and_then(dataset::languages);
 
         // Incremental state: path -> {change stamp, level/refusal}; an unreadable or old-schema file →
         // empty. A first index (memory missing or empty) owes everything, whatever an old state.json
@@ -866,7 +863,7 @@ async fn record_languages(ds: &mut Dataset, kept: Option<&dataset::Languages>) -
         Some(kept) if kept.rows == rows => kept.clone(),
         _ => dataset::scan_languages(ds).await?,
     };
-    if dataset::languages(ds)?.as_ref() != Some(&counted) {
+    if dataset::languages(ds).as_ref() != Some(&counted) {
         dataset::stamp_languages(ds, &counted).await?;
     }
     Ok(())
@@ -1369,7 +1366,7 @@ mod tests {
             counts: BTreeMap::from([("eng".to_string(), 9)]),
         };
         record_languages(&mut ds, Some(&stale)).await.unwrap();
-        let recorded = dataset::languages(&ds).unwrap().unwrap();
+        let recorded = dataset::languages(&ds).unwrap();
         assert_eq!(recorded.rows, 3);
         assert_eq!(recorded, dataset::scan_languages(&ds).await.unwrap());
     }

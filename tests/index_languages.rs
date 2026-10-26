@@ -34,7 +34,7 @@ async fn recorded() -> Option<Languages> {
     let ds = dataset::open(&dataset::table_uri(home::memory_dir()), Default::default())
         .await
         .unwrap();
-    dataset::languages(&ds).unwrap()
+    dataset::languages(&ds)
 }
 
 fn counted(rows: u64, eng: u64, por: u64) -> Option<Languages> {
@@ -69,6 +69,14 @@ async fn indexing_keeps_the_memory_language_counts() {
         .await
         .unwrap();
     assert_eq!(recorded().await, None);
+    index::run_index(&turns, false, None).await.unwrap();
+    assert_eq!(recorded().await, counted(3, 1, 2));
+
+    // Counts in a shape it cannot read are counted again.
+    let mut ds = dataset::open(&uri, Default::default()).await.unwrap();
+    ds.update_schema_metadata([("languages", r#"{"eng":1}"#)])
+        .await
+        .unwrap();
     index::run_index(&turns, false, None).await.unwrap();
     assert_eq!(recorded().await, counted(3, 1, 2));
 }

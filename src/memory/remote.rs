@@ -114,7 +114,7 @@ pub(crate) async fn append(
 
     // Counts that miss rows stay as they are: recounting them would read the whole remote.
     let rows = dataset::count_rows(&ds, None).await? as u64;
-    let mut languages = dataset::languages(&ds)?.filter(|languages| languages.rows == rows);
+    let mut languages = dataset::languages(&ds).filter(|languages| languages.rows == rows);
     if let Some(languages) = &mut languages {
         for batch in &batches {
             languages.add(batch);
@@ -1115,7 +1115,7 @@ mod tests {
             .await
             .unwrap()
             .expect("only a push landed");
-        assert_eq!(dataset::languages(&head).unwrap(), Some(counts));
+        assert_eq!(dataset::languages(&head), Some(counts));
     }
 
     #[tokio::test]

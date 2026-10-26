@@ -595,13 +595,12 @@ impl Languages {
 
 const LANGUAGES: &str = "languages";
 
-/// The language counts `ds` records.
-pub fn languages(ds: &Dataset) -> Result<Option<Languages>> {
+/// The language counts `ds` records, `None` for counts in a shape it cannot read.
+pub fn languages(ds: &Dataset) -> Option<Languages> {
     Schema::from(ds.schema())
         .metadata()
         .get(LANGUAGES)
-        .map(|counts| serde_json::from_str(counts).context("reading the memory's language counts"))
-        .transpose()
+        .and_then(|counts| serde_json::from_str(counts).ok())
 }
 
 /// Record `counts` as the memory's language counts.
@@ -1440,7 +1439,7 @@ mod tests {
         let chunks = chunk::chunks_from_turns(&turns(0, 2), true);
         let first = build_batch(model::ENGLISH, &chunks[..1], None).unwrap();
         let mut ds = create(&table_uri(dir.path()), first).await.unwrap();
-        assert_eq!(languages(&ds).unwrap(), None);
+        assert_eq!(languages(&ds), None);
         let counts = Languages {
             rows: 1,
             counts: BTreeMap::from([("eng".to_string(), 3), ("por".to_string(), 1)]),
@@ -1450,7 +1449,17 @@ mod tests {
             .await
             .unwrap();
         let ds = fill_vectors(&ds, &[chunks[0].id.as_str()], &vectors(1)).await.unwrap();
-        assert_eq!(languages(&ds).unwrap(), Some(counts));
+        assert_eq!(languages(&ds), Some(counts));
+    }
+
+    #[tokio::test]
+    async fn language_counts_it_cannot_read_are_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let chunks = chunk::chunks_from_turns(&turns(0, 1), true);
+        let batch = build_batch(model::ENGLISH, &chunks, None).unwrap();
+        let mut ds = create(&table_uri(dir.path()), batch).await.unwrap();
+        ds.update_schema_metadata([(LANGUAGES, r#"{"eng":1}"#)]).await.unwrap();
+        assert_eq!(languages(&ds), None);
     }
 
     #[tokio::test]
