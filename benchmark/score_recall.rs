@@ -4,8 +4,8 @@
 //! cargo run --release --example score_recall -- questions.jsonl --memory huggingface/funes-memory
 //! ```
 //!
-//! `--candidates` asks from a deeper pool instead. From four times the hits, recall reranks the pool
-//! before the cut, so this scores the reranker.
+//! `--candidates` asks from a deeper pool instead. A pool larger than the hits is reranked before the
+//! cut, so `--candidates 8` scores the fused order alone.
 //!
 //! A question is one JSON object a line: an `id`, the `question` to ask, `gold`, the spans its answer
 //! is in (a `session_id` with optional `from` and `to` turns, the whole session when both are absent),

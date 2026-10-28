@@ -10,9 +10,9 @@ funes recall "why did we switch off the streaming parser"
 ```
 
 Retrieval is one pipeline: hybrid search (vector + BM25, fused by reciprocal rank) → neighbor
-expansion, with a cross-encoder rerank of the pool before the cut when the pool is several times
-the hits asked for. What comes back is the **actual passage from the actual turn**, not a summary
-written about it.
+expansion, with a cross-encoder rerank of the pool before the cut when the pool holds more rows
+than the hits asked for. What comes back is the **actual passage from the actual turn**, not a
+summary written about it.
 
 A query matches best in the language of the sessions it looks for. `funes status` lists the
 languages a memory's sessions are written in.
@@ -57,7 +57,7 @@ otherwise (see `--candidates` below).
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `-k` | 8 | hits returned, each a passage to read |
-| `--candidates` | 30 | fused pool the hits are cut from, reranked by the cross-encoder before the cut at four times `-k` or more |
+| `--candidates` | 30 | fused pool the hits are cut from, reranked by the cross-encoder before the cut when it holds more than `-k` rows |
 | `--neighbors` | 1 | adjacent chunks (by seq) attached per hit; 0 disables |
 | `--type` | — | restrict to `text \| thinking \| tool_use \| tool_result` |
 | `--role` | — | restrict to one role, as the turns carry it (an agent's turns say `user \| assistant \| tool \| system`) |
@@ -67,11 +67,10 @@ otherwise (see `--candidates` below).
 | `--memory` | the bound memory, else local | the memory to read, as it stands (see below) |
 
 The MCP `recall` tool takes the same parameters and defaults. Each hit is a passage to read, so
-`k` is what a call costs in tokens and `candidates` is how far it looks. Reading more hits is the
-cheap way to reach deeper. A pool four times the hits or more is a request to look that deep and
-read less: recall then reranks the pool with the cross-encoder before the cut, which costs seconds
-per call and grows with the pool. Under that line the hits are the first `k` of the fused order,
-and raising `candidates` alone changes little. Ranking weighs relevance, not age: for the latest
+`k` is what a call costs in tokens and `candidates` is how far it looks. A pool larger than the
+hits is reranked with the cross-encoder before the cut, about a second a call that grows with the
+pool, so `candidates` can grow while `k` stays small. A pool of `k` rows or fewer is read whole,
+in the fused order. Ranking weighs relevance, not age: for the latest
 word on a topic, pass `since`. A memory spans every repo its sessions ran in, so a question in
 general words can return passages from another project: `--repo` keeps to one. A checkout names
 all its remotes, so a fork's turns match its upstream too, and a turn whose checkout did not

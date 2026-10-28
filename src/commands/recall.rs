@@ -1,6 +1,6 @@
 //! The read surface: `recall`, `get`, `status` over the existing index.
 //! Recall pipeline: hybrid (vector + BM25, fused by reciprocal rank) → neighbor expansion, with a
-//! cross-encoder rerank of the pool before the cut when it is several times the hits ([`reranks`]).
+//! cross-encoder rerank of the pool before the cut when it holds more rows than the hits ([`reranks`]).
 //! `recall`/`get` return results rendered in the agent format;
 //! `recall_hits`/`get_turns` return the structured results for other renderings (see `render`).
 
@@ -401,14 +401,13 @@ pub const DEFAULT_K: usize = 8;
 pub const DEFAULT_CANDIDATES: usize = 30;
 pub const DEFAULT_NEIGHBORS: i64 = 1;
 
-/// How many times the hits a pool must be before a recall reranks it. Reranking a pool near `k`
-/// only reorders what the caller reads anyway, for seconds. A pool several times `k` is a request
-/// to look that deep and read less, which is what a rerank is for. The defaults sit under the line.
-pub const RERANK_RATIO: usize = 4;
-
-/// Whether a recall of `k` hits from a pool of `candidates` reranks the pool.
-pub fn reranks(k: usize, candidates: usize) -> bool {
-    candidates >= RERANK_RATIO * k
+/// Whether a recall of `k` hits from a pool of `pool` rows reranks it: whenever the pool holds more
+/// than the hits, so the cut has something to choose. On the labeled sets, reranking the default
+/// pool finds a third more answers in the same 8 hits and puts the answer first twice as often
+/// (funes-recall-benchmark, 2026-10-28), for about a second a call on a GPU and three on a CPU. A
+/// pool of `k` rows or fewer is read whole, in the fused order, and loads no reranker.
+pub fn reranks(k: usize, pool: usize) -> bool {
+    pool > k
 }
 
 /// Run the recall pipeline over what `target` reads and return the results rendered in the agent
@@ -442,7 +441,7 @@ pub async fn recall_with_progress(
 }
 
 /// Run the recall pipeline over what `target` reads: hybrid retrieval, pooled with this host's
-/// unpushed turns for the bound memory → rank, reranked when the pool is several times `k` →
+/// unpushed turns for the bound memory → rank, reranked when the pool holds more rows than `k` →
 /// neighbor expansion.
 /// Returns the degradation note (empty when the memory opened normally) and the scored hits, best
 /// first — rendering is the caller's choice. `progress` hears a short label as each slow phase
@@ -587,9 +586,9 @@ impl Search {
     }
 
     /// Rank the pooled candidates, a row several memories hold counted once: the best `candidates`
-    /// by fused score, reranked by the cross-encoder when the pool is several times `k`
-    /// ([`reranks`]) or the search asked for it, cut to `k`, with `neighbors` attached from the
-    /// memory each hit came from. Returns the pools' degradation notes and the hits, best first.
+    /// by fused score, reranked by the cross-encoder when the pool holds more rows than `k`
+    /// ([`reranks`]), cut to `k`, with `neighbors` attached from the memory each hit came from.
+    /// Returns the pools' degradation notes and the hits, best first.
     pub async fn rank(
         &self,
         pools: Vec<Candidates>,
@@ -617,7 +616,7 @@ impl Search {
             return Ok((note, Vec::new()));
         }
 
-        let mut scored: Vec<(usize, f64)> = if reranks(k, self.candidates) {
+        let mut scored: Vec<(usize, f64)> = if reranks(k, hits.len()) {
             let docs: Vec<&str> = hits.iter().map(|(_, h)| h.text.as_str()).collect();
             progress(&format!("reranking {} candidates…", docs.len()));
             let scores = models()
@@ -1890,18 +1889,11 @@ mod tests {
     }
 
     #[test]
-    fn a_pool_several_times_the_hits_is_reranked() {
-        assert_eq!(
-            RERANK_RATIO, 4,
-            "the CLI help, the MCP schema and docs/recall.md say four"
-        );
-        assert!(
-            !reranks(DEFAULT_K, DEFAULT_CANDIDATES),
-            "the defaults sit under the line"
-        );
-        assert!(!reranks(8, 31));
-        assert!(reranks(8, 32));
-        assert!(reranks(5, 30));
+    fn a_pool_larger_than_the_hits_is_reranked() {
+        assert!(reranks(DEFAULT_K, DEFAULT_CANDIDATES), "the defaults rerank");
+        assert!(reranks(8, 9));
+        assert!(!reranks(8, 8), "a pool of the hits is read whole");
+        assert!(!reranks(8, 3), "a pool short of the hits too");
         assert!(!reranks(30, 30));
     }
 

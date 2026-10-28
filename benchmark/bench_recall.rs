@@ -45,7 +45,7 @@ struct Args {
     /// Results to return (recall `k`).
     #[arg(long, default_value_t = 8)]
     k: usize,
-    /// Fused pool the hits are cut from, reranked at four times --k or more.
+    /// Fused pool the hits are cut from, reranked when larger than --k.
     #[arg(long, default_value_t = 30)]
     candidates: usize,
     /// Neighbor chunks attached per hit.

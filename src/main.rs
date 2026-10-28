@@ -25,7 +25,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Recall passages from past sessions (hybrid → neighbors, reranked when --candidates is several times -k).
+    /// Recall passages from past sessions (hybrid → reranked when the pool exceeds -k → neighbors).
     Recall {
         /// What to recall (free text).
         #[arg(required = true, num_args = 1..)]
@@ -33,9 +33,9 @@ enum Cmd {
         /// How many results to show. Each is a passage to read.
         #[arg(short, long, default_value_t = recall::DEFAULT_K)]
         k: usize,
-        /// Size of the fused pool the hits are cut from. At four times -k or more, the pool is
-        /// reranked by the cross-encoder before the cut (seconds per call). Under that, the hits
-        /// are the first -k of the fused order.
+        /// Size of the fused pool the hits are cut from. Larger than -k, the pool is reranked by
+        /// the cross-encoder before the cut (about a second, growing with the pool). A pool of -k
+        /// rows or fewer is read whole, in the fused order.
         #[arg(long, default_value_t = recall::DEFAULT_CANDIDATES)]
         candidates: usize,
         /// Adjacent chunks (within this seq window) to attach to each hit. 0 disables.

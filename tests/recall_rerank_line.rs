@@ -1,5 +1,6 @@
 //! The line between a pool reranked and a pool cut as fused, over a real index under a temp
-//! `$FUNES_HOME`: the defaults sit under it, fewer hits from the same pool sit over it.
+//! `$FUNES_HOME`: a memory with no more rows than the hits is read whole, fewer hits than rows are
+//! reranked.
 
 mod support;
 
@@ -7,7 +8,7 @@ use funes::commands::recall;
 use funes::memory::Memory;
 
 #[tokio::test]
-async fn a_pool_near_the_hits_is_not_reranked() {
+async fn a_pool_within_the_hits_is_not_reranked() {
     let db_dir = tempfile::tempdir().unwrap();
     let source = tempfile::tempdir().unwrap();
     std::env::set_var("FUNES_HOME", db_dir.path());
@@ -18,7 +19,7 @@ async fn a_pool_near_the_hits_is_not_reranked() {
     let quiet = |_: &str| ();
     let query = "parse transcripts into turns";
 
-    // The defaults: 8 hits from a pool of 30, under the line.
+    // The defaults, 8 hits from a pool of 30, on a memory of a few rows: nothing to choose.
     let (_, hits) = recall::recall_hits(
         Memory::local(),
         query.into(),
@@ -30,17 +31,17 @@ async fn a_pool_near_the_hits_is_not_reranked() {
     )
     .await
     .unwrap();
-    assert!(!hits.is_empty());
+    assert!(hits.len() > 1 && hits.len() <= recall::DEFAULT_K, "{} rows", hits.len());
     for (hit, score) in &hits {
-        assert_eq!(*score, hit.fused as f64, "the defaults keep the fused order");
+        assert_eq!(*score, hit.fused as f64, "a pool within the hits keeps the fused order");
     }
 
-    // Fewer hits from the same pool: four times the hits, reranked.
-    let (_, hits) = recall::recall_hits(Memory::local(), query.into(), 5, 30, 0, Default::default(), &quiet)
+    // Fewer hits than the memory holds: the pool is reranked.
+    let (_, hits) = recall::recall_hits(Memory::local(), query.into(), 1, 30, 0, Default::default(), &quiet)
         .await
         .unwrap();
     assert!(
         hits.iter().any(|(hit, score)| *score != hit.fused as f64),
-        "a pool several times the hits is reranked"
+        "a pool larger than the hits is reranked"
     );
 }

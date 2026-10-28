@@ -1,7 +1,7 @@
 //! funes — recall over your past AI agent sessions.
 //!
 //! Pipeline: parse transcripts → chunk → embed → store (lance), then read via
-//! `recall` (hybrid → neighbors, reranked when the pool is several times the hits), `get`, `status`.
+//! `recall` (hybrid → reranked when the pool exceeds the hits → neighbors), `get`, `status`.
 //! The binary (`main.rs`) is the CLI's definitions and dispatch, nothing else; integration
 //! tests drive the commands directly.
 //!

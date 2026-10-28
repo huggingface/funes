@@ -23,8 +23,8 @@ Every timed call runs the recall pipeline:
 embed query → vector ANN + BM25 FTS (fused by RRF) → [cross-encoder rerank] → neighbors → format
 ```
 
-The rerank runs when `--candidates` is at least four times `--k`, which the defaults (8 of 30) are
-not: a default timed call has no rerank, `--candidates 32` or more times one.
+The rerank runs whenever the pool holds more rows than `--k`, so a default timed call (8 of 30)
+reranks 30 pairs. `--candidates 8` times a call without one.
 
 The CPU stages (query embed, and the rerank when it runs) are identical whatever the memory, so the
 local↔remote gap is entirely the I/O path: opening the dataset, the ANN/FTS scans, and the neighbor
@@ -125,7 +125,8 @@ that there is nothing to compare.
 `score_recall.rs` asks each question of a labeled set with `funes recall`'s defaults and prints the
 receipt: the funes version, the memory's revision and the file's hash, then hit@1, hit@5, found@8,
 the mean reciprocal rank and the median latency, overall and by kind, then each question's rank.
-`--candidates` asks from a deeper pool, which recall reranks from four times the hits.
+`--candidates` asks from a deeper pool. `--candidates 8` scores the fused order alone, since a pool
+of the hits is not reranked.
 A question is one JSON line with an `id`, the `question`, `gold` (the spans its answer is in, each a
 `session_id` with optional `from` and `to` turns) and an optional `kind`. Its rank is the position of
 its first hit in a gold span. The labeled sets and their receipts live in the
