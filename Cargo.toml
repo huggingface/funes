@@ -96,6 +96,10 @@ path = "benchmark/bench_backends.rs"
 name = "score_recall"
 path = "benchmark/score_recall.rs"
 
+[[example]]
+name = "sweep_rerank"
+path = "benchmark/sweep_rerank.rs"
+
 # One-off backfill of the `repo` column (local: add_columns; remote: add_columns via a guarded
 # commit). Delete both, and `memory::remote::add_column`, once every store carries `repo`.
 [[example]]
