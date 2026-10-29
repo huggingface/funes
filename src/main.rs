@@ -34,7 +34,7 @@ enum Cmd {
         #[arg(short, long, default_value_t = recall::DEFAULT_K)]
         k: usize,
         /// Size of the fused pool the hits are cut from. Larger than -k, the pool is reranked by
-        /// the cross-encoder before the cut (about a second, growing with the pool). A pool of -k
+        /// the cross-encoder before the cut (seconds per call, growing with the pool). A pool of -k
         /// rows or fewer is read whole, in the fused order.
         #[arg(long, default_value_t = recall::DEFAULT_CANDIDATES)]
         candidates: usize,

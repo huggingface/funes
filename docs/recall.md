@@ -68,8 +68,8 @@ otherwise (see `--candidates` below).
 
 The MCP `recall` tool takes the same parameters and defaults. Each hit is a passage to read, so
 `k` is what a call costs in tokens and `candidates` is how far it looks. A pool larger than the
-hits is reranked with the cross-encoder before the cut, about a second a call that grows with the
-pool, so `candidates` can grow while `k` stays small. A pool of `k` rows or fewer is read whole,
+hits is reranked with the cross-encoder before the cut, which costs seconds per call and grows with
+the pool, so `candidates` can grow while `k` stays small. A pool of `k` rows or fewer is read whole,
 in the fused order. Ranking weighs relevance, not age: for the latest
 word on a topic, pass `since`. A memory spans every repo its sessions ran in, so a question in
 general words can return passages from another project: `--repo` keeps to one. A checkout names
