@@ -255,7 +255,7 @@ enum Cmd {
         /// Answer yes to the add's own question — indexing the agent's existing sessions on a
         /// first add — so it runs unattended. It does not confirm an integration funes can't vouch
         /// for; that takes `--trust`.
-        #[arg(long, short = 'y')]
+        #[arg(short, long)]
         yes: bool,
         /// Confirm an integration funes can't vouch for — one from `--from`, or an installed copy
         /// changed since funes installed it — without a terminal, as answering yes to "Trust it?"

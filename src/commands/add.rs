@@ -19,7 +19,7 @@ use std::path::Path;
 /// The answers an unattended `funes add` gives up front, for the two questions it would otherwise
 /// put to a terminal. They are separate because they grant different things: `yes` agrees to the
 /// add's own work, `trust` runs code funes can't vouch for.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct Unattended {
     /// Index the agent's existing sessions on a first add without asking.
     pub yes: bool,
