@@ -1,4 +1,5 @@
-//! Sweep the pool sizes a recall could rerank, for a labeled set of questions:
+//! How much a rerank helps at each pool size, on a set of `dacorvo/funes-recall-benchmark`'s
+//! questions:
 //!
 //! ```text
 //! cargo run --release --example sweep_rerank -- questions.jsonl --memory mem/funes-memory --out sweep.jsonl
@@ -8,11 +9,12 @@
 //! fused order of the pool, which funes reads whole for N hits, never reranked) and scores every
 //! candidate with funes's own reranker, as `funes recall --candidates N` would before its cut.
 //! One JSON line per question and pool: the candidates in fused order, each with its fused score and
-//! its reranker score, and how long the retrieval and the rerank took. A scorer cuts and reorders
-//! them any way it likes. By default a question's union of pools is scored in one reranker call and
-//! a chunk's score looked up by its id; `--per-pool` scores each pool as its own call, as funes does,
-//! which is what to time, and `--cpu` then also times the CPU reranker. The output is appended to,
-//! and a (question, pool) already in it is skipped, so an interrupted run resumes.
+//! its reranker score, and how long the retrieval and the rerank took. The dataset's scorers compare
+//! the fused order with the reranked order at any cut. By default a question's union of pools is
+//! scored in one reranker call and a chunk's score looked up by its id. `--per-pool` scores each pool
+//! as its own call, as funes does, which is what to time, and `--cpu` then also times the CPU
+//! reranker. The output is appended to, and a (question, pool) already in it is skipped, so an
+//! interrupted run resumes.
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
@@ -26,7 +28,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 #[derive(Parser)]
-#[command(about = "Dump the fused pool and its reranker scores at several pool sizes, per question")]
+#[command(about = "How much a rerank helps at each pool size: the fused pool and its reranker scores, per question")]
 struct Args {
     /// Questions file, one JSON object a line with an `id` and a `question`.
     questions: PathBuf,

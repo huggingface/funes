@@ -5,8 +5,8 @@ Four runnable examples, each `cargo run --release --example <name>`:
 - **`bench_recall`** — `recall()` latency, local vs remote, cold vs warm.
 - **`bench_backends`** — latency and output agreement between the inference backends.
 - **`score_recall`** — `funes recall` scored against a labeled set of questions.
-- **`sweep_rerank`** — the fused order and the reranker's scores of each pool size, per question, for
-  a scorer to compare the two orders.
+- **`sweep_rerank`** — how much reranking helps at each pool size, on a `dacorvo/funes-recall-benchmark`
+  set.
 
 ## `bench_recall` — recall latency
 
@@ -142,10 +142,13 @@ an earlier recall, `→ get` lines included, and nothing in the text tells a quo
 A run stops on a degraded read (the Hub unreachable, recall answering from the local memory), since
 those hits were drawn from another memory.
 
-## `sweep_rerank` — the fused order against the reranked order, per pool size
+## `sweep_rerank` — how much reranking helps, per pool size
 
-`sweep_rerank.rs` dumps what a scorer needs to compare the fused order with the reranked order at
-any pool size and any `k`, for a labeled set of questions:
+`sweep_rerank.rs` measures how much a rerank helps for different pool sizes, on a set of the
+[`dacorvo/funes-recall-benchmark`](https://huggingface.co/datasets/dacorvo/funes-recall-benchmark)
+dataset's questions: for every question it dumps the fused order of each pool and the reranker's
+score of each candidate, and the dataset's scorers compare the fused order with the reranked order
+at any cut.
 
 ```sh
 cargo run --release --example sweep_rerank -- questions.jsonl --memory mem/funes-memory --out sweep.jsonl
@@ -159,6 +162,4 @@ rerank times. By default a question's union of pools is scored in one reranker c
 score looked up by its id, which the GPU makes exact (a pair scores the same whatever batch holds
 it). `--per-pool` scores each pool as its own call, as recall does, which is what to time, and
 `--cpu` then also times the CPU reranker. The output is appended to, and a (question, pool) already
-in it is skipped, so an interrupted run resumes. The scorers and the receipts live in the
-[`dacorvo/funes-recall-benchmark`](https://huggingface.co/datasets/dacorvo/funes-recall-benchmark)
-dataset.
+in it is skipped, so an interrupted run resumes. The scorers and the receipts live in the dataset.
