@@ -159,7 +159,7 @@ asks `recall_hits` for N hits from N candidates, the fused order of the pool rec
 scores every candidate with funes's own reranker. One JSON line per question and pool: the
 candidates in fused order, each with its fused score and its reranker score, and the retrieval and
 rerank times. By default a question's union of pools is scored in one reranker call and a chunk's
-score looked up by its id, which the GPU makes exact (a pair scores the same whatever batch holds
-it). `--per-pool` scores each pool as its own call, as recall does, which is what to time, and
-`--cpu` then also times the CPU reranker. The output is appended to, and a (question, pool) already
+score looked up by its id (on the GPU, a pair scored the same in every batch that held it, on the
+120 pairs checked). `--per-pool` scores each pool as its own call, as recall does, twice, timing
+the second so no GPU graph is built inside the timing, and `--cpu` also times the CPU reranker. The output is appended to, and a (question, pool) already
 in it is skipped, so an interrupted run resumes. The scorers and the receipts live in the dataset.

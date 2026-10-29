@@ -12,9 +12,9 @@
 //! its reranker score, and how long the retrieval and the rerank took. The dataset's scorers compare
 //! the fused order with the reranked order at any cut. By default a question's union of pools is
 //! scored in one reranker call and a chunk's score looked up by its id. `--per-pool` scores each pool
-//! as its own call, as funes does, which is what to time, and `--cpu` then also times the CPU
-//! reranker. The output is appended to, and a (question, pool) already in it is skipped, so an
-//! interrupted run resumes.
+//! as its own call, as funes does, twice, timing the second so no GPU graph is built inside the
+//! timing, and `--cpu` also times the CPU reranker. The output is appended to, and a (question, pool)
+//! already in it is skipped, so an interrupted run resumes.
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
@@ -23,7 +23,7 @@ use funes::inference::{self, Reranker};
 use funes::memory::Memory;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -42,10 +42,11 @@ struct Args {
     #[arg(long)]
     out: PathBuf,
     /// Score each pool as its own reranker call, as funes would, instead of each question's union of
-    /// pools once. Slower, and what the latencies of a pool are measured on.
+    /// pools once. Slower, and what the latencies of a pool are measured on: each call runs twice
+    /// and the second is timed, so no GPU graph is built inside the timing.
     #[arg(long)]
     per_pool: bool,
-    /// Also time the CPU reranker on every pool (with --per-pool).
+    /// Also time the CPU reranker on every pool.
     #[arg(long)]
     cpu: bool,
     /// Stop after this many questions.
@@ -115,12 +116,22 @@ async fn main() -> Result<()> {
 
     let mut done: HashSet<(String, usize)> = HashSet::new();
     if args.out.exists() {
-        for line in BufReader::new(std::fs::File::open(&args.out)?).lines() {
-            let line = line?;
+        let text = std::fs::read_to_string(&args.out)?;
+        // A row is written whole and ends with a newline, so a run killed mid-write leaves a partial
+        // last line: drop it, and the row is scored again.
+        let complete = text.rfind('\n').map_or(0, |i| i + 1);
+        if complete < text.len() {
+            eprintln!("{}: dropping an incomplete last row", args.out.display());
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&args.out)?
+                .set_len(complete as u64)?;
+        }
+        for line in text[..complete].lines() {
             if line.trim().is_empty() {
                 continue;
             }
-            let d: Done = serde_json::from_str(&line).with_context(|| format!("parsing {}", args.out.display()))?;
+            let d: Done = serde_json::from_str(line).with_context(|| format!("parsing {}", args.out.display()))?;
             done.insert((d.id, d.pool));
         }
     }
@@ -135,7 +146,7 @@ async fn main() -> Result<()> {
         eprintln!("CPU reranker built in {} ms", t.elapsed().as_millis());
     }
 
-    // Warm up: the embedder, the dataset and the GPU graph, so no row's timing carries them.
+    // Warm up: the embedder, the dataset and the reranker's weights, so no row's timing carries them.
     if let Some(q) = questions.first() {
         let t = Instant::now();
         let (_, hits) = recall_hits(
@@ -209,6 +220,9 @@ async fn main() -> Result<()> {
         for (pool, retrieve_ms, hits) in &pools {
             let docs: Vec<&str> = hits.iter().map(|(h, _)| h.text.as_str()).collect();
             let (scores, rerank_ms) = if args.per_pool {
+                // The first call at a new padded length builds its GPU graph, so the timed call is
+                // the second.
+                reranker.rerank(&q.question, &docs)?;
                 let t = Instant::now();
                 let scores = reranker.rerank(&q.question, &docs)?;
                 (scores, t.elapsed().as_millis())
