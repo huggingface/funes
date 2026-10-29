@@ -437,8 +437,8 @@ fn an_integration_installs_from_a_directory_named_on_the_command_line() {
 }
 
 /// `--trust` is the unattended yes to the trust confirmation: off a terminal, a directory funes
-/// can't vouch for installs with it — named in the output all the same, so a log records what ran
-/// and from where — and is refused without it. `--yes` does not stand in for it.
+/// can't vouch for installs with it — named in the output all the same, so a log records what was
+/// trusted and from where — and is refused without it. `--yes` does not stand in for it.
 #[test]
 fn trust_confirms_an_unvouched_integration_off_a_terminal() {
     let tmp = tempfile::tempdir().unwrap();
@@ -464,7 +464,7 @@ fn trust_confirms_an_unvouched_integration_off_a_terminal() {
     support::assert_success(&out);
     assert!(
         stderr(&out).contains(&format!(
-            "clyde 1.0.0 by example (example/clyde), from {from}, trusted by --trust."
+            "clyde 1.0.0 by example (example/clyde), from {from} — trusted by --trust."
         )),
         "{}",
         stderr(&out)

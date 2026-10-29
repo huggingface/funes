@@ -189,8 +189,8 @@ fn unknown_agent(root: &Path, id: &str, e: anyhow::Error) -> anyhow::Error {
 /// vouch for it, saying what it is — the package by publisher and version — and where it came
 /// from. The default is no. `trust` is the answer `--trust` gave up front, and `None` from a command
 /// that has no such flag, so the refusal off a terminal suggests the flag only where it is taken.
-/// With the flag, the same line is printed, saying it was trusted, so a log still records what ran
-/// and from where.
+/// With the flag, the same line names the files and the flag that trusted them, so a log says what
+/// was trusted and from where. Trusted, not run: the command can still stop before setup.
 pub(crate) fn confirm_trust(
     dir: &Path,
     manifest: &registry::Manifest,
@@ -209,7 +209,7 @@ pub(crate) fn confirm_trust(
     );
     if trust == Some(true) {
         eprintln!(
-            "funes: running {}/setup — {package}, from {origin}, trusted by --trust.",
+            "funes: {}/setup — {package}, from {origin} — trusted by --trust.",
             dir.display()
         );
         return Ok(());

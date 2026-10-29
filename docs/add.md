@@ -286,7 +286,7 @@ them without asking. Anything else — what `--from` names, a `$FUNES_INTEGRATIO
 it has no record of installing — is confirmed at the terminal before `setup` runs, naming the
 package by publisher and version and where it came from; off a terminal, funes refuses rather than
 assumes, unless `--trust` gives the answer up front — it names the package and its source all the
-same, so a log still says what ran. `--yes` never stands in for it: agreeing to index is not
+same, so a log still says what was trusted. `--yes` never stands in for it: agreeing to index is not
 agreeing to run code funes can't vouch for. A refused refresh leaves the installed copy as it was. An archive's checksum proves it arrived intact, not who published it, so an archive
 `--from` names is confirmed like a directory.
 
