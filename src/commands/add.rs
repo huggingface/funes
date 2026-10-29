@@ -312,8 +312,9 @@ async fn offer_hub_memory() -> Result<Option<Resolved>> {
 ///
 /// 1. on a first add (no rows in the local memory yet), ask — the first index is about a minute of
 ///    work, and declining aborts the add before anything is installed, so nothing is wired up.
-///    `yes` is the answer given up front. Off a terminal with no answer, nobody declined: that is
-///    an error, so a script never takes an add that wired nothing up for one that worked;
+///    `yes` is the answer given up front. Off a terminal there is no one to ask, so a first add
+///    without it is an error naming the flag: a script never takes an add that wired nothing up
+///    for one that worked;
 /// 2. bind the host when the memory was named or offered, every other agent following — once the
 ///    add is going ahead, so a declined one leaves the host as it was;
 /// 3. `install` — writes the spool, bakes the memory in;
@@ -347,22 +348,21 @@ where
         }
     }
     let first_add = !matches!(Memory::local().state().await?, MemoryState::Ready(_));
-    if first_add && yes {
-        eprintln!("funes: indexing your existing {agent} sessions, if any, so recall works (about a minute).");
-    } else if first_add
-        && !confirm(
-            &format!("funes will index your existing {agent} sessions, if any, so recall works (about a minute). Proceed? [Y/n] "),
-            true,
-        )
-    {
-        if !std::io::stdin().is_terminal() {
+    if first_add {
+        if yes {
+            eprintln!("funes: indexing your existing {agent} sessions, if any, so recall works (about a minute).");
+        } else if !std::io::stdin().is_terminal() {
             bail!(
                 "funes add {agent} indexes your existing {agent} sessions first and asks before it does, \
                  but there was no one to answer — run it at a terminal, or pass --yes"
             );
+        } else if !confirm(
+            &format!("funes will index your existing {agent} sessions, if any, so recall works (about a minute). Proceed? [Y/n] "),
+            true,
+        ) {
+            eprintln!("funes: skipped — nothing was wired up. Run `funes add {agent}` again when you're ready.");
+            return Ok(());
         }
-        eprintln!("funes: skipped — nothing was wired up. Run `funes add {agent}` again when you're ready.");
-        return Ok(());
     }
     if local.is_none() {
         let model = match bound {
