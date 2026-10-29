@@ -20,6 +20,8 @@ async fn a_pool_within_the_hits_is_not_reranked() {
     let query = "parse transcripts into turns";
 
     // The defaults, 8 hits from a pool of 30, on a memory of a few rows: nothing to choose.
+    let rows = support::stored_rows().await;
+    assert!(rows > 1 && rows <= recall::DEFAULT_K, "the fixture holds {rows} rows");
     let (_, hits) = recall::recall_hits(
         Memory::local(),
         query.into(),
@@ -31,7 +33,7 @@ async fn a_pool_within_the_hits_is_not_reranked() {
     )
     .await
     .unwrap();
-    assert!(hits.len() > 1 && hits.len() <= recall::DEFAULT_K, "{} rows", hits.len());
+    assert_eq!(hits.len(), rows, "the memory is read whole");
     for (hit, score) in &hits {
         assert_eq!(*score, hit.fused as f64, "a pool within the hits keeps the fused order");
     }
