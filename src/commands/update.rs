@@ -212,7 +212,7 @@ async fn agent(root: &Path, id: &str) -> Result<String> {
         return Ok(format!("The {id} integration is up to date."));
     };
     if !recorded {
-        confirm_trust(&root.join(id), &provisioned.manifest, &provisioned.provenance, false)?;
+        confirm_trust(&root.join(id), &provisioned.manifest, &provisioned.provenance, None)?;
     }
     // Bound as the host is; on a host without the binding, as an older funes bound the agent.
     let bound = memory::binding()?.or(registry::binding(root, id)?);

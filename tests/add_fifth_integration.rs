@@ -1314,6 +1314,7 @@ fn a_refused_integration_update_leaves_it_as_installed_and_the_others_to_theirs(
     let err = stderr(&out);
     assert!(err.contains("the clyde integration could not be updated"), "{err}");
     assert!(err.contains("run this in a terminal"), "{err}");
+    assert!(!err.contains("--trust"), "update takes no --trust: {err}");
     assert!(!log.exists(), "setup did not run");
     let manifest = fs::read_to_string(home.join(".funes/agents/clyde/manifest.json")).unwrap();
     assert!(manifest.contains(r#""version":"1.0.0""#), "{manifest}");

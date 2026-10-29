@@ -37,7 +37,7 @@ pub async fn run(id: &str, memory: Option<&str>, from: Option<&str>, unattended:
     }
     let root = registry::default_root()?;
     let refresh = !root.join(id).is_dir() || from.is_some() || registry::refreshes_on_every_run(&root, id);
-    let prepared = prepare_agent(id, refresh, from, unattended.trust).await?;
+    let prepared = prepare_agent(id, refresh, from, Some(unattended.trust)).await?;
     // Naming a memory binds the host to it, as `funes bind` does. Naming none, the agent takes
     // the host's.
     let (resolved, binds) = match memory {
@@ -68,7 +68,7 @@ pub async fn remove(id: &str) -> Result<()> {
         registry::discard(&root, id)?;
         return spool::forget_missing(id);
     }
-    let integration = prepare_agent(id, registry::speaks_another_contract(&root, id), None, false)
+    let integration = prepare_agent(id, registry::speaks_another_contract(&root, id), None, None)
         .await?
         .install(&root)?;
     integration.remove()?;
@@ -106,8 +106,14 @@ impl Prepared {
 /// staged, so the script funes executes is the one it just wrote — unless the source holds the
 /// release already installed; a source that can't be reached leaves the installed copy to run,
 /// unless `from` named it. Without, the installed copy runs as installed. Says what it refreshed
-/// the files with, when it did. `trust` confirms files funes can't vouch for without asking.
-pub(crate) async fn prepare_agent(id: &str, refresh: bool, from: Option<&str>, trust: bool) -> Result<Prepared> {
+/// the files with, when it did. `trust` is `--trust`'s answer for files funes can't vouch for, `None`
+/// from a command that has no such flag.
+pub(crate) async fn prepare_agent(
+    id: &str,
+    refresh: bool,
+    from: Option<&str>,
+    trust: Option<bool>,
+) -> Result<Prepared> {
     let root = registry::default_root()?;
     let installed = root.join(id).is_dir();
     let staged = if refresh {
@@ -181,13 +187,15 @@ fn unknown_agent(root: &Path, id: &str, e: anyhow::Error) -> anyhow::Error {
 
 /// Confirm before funes executes the integration `manifest` declares from `dir`, when it does not
 /// vouch for it, saying what it is — the package by publisher and version — and where it came
-/// from. The default is no. `trusted` is the answer given up front (`funes add --trust`): the same
-/// line is printed, saying it was trusted, so a log still records what ran and from where.
+/// from. The default is no. `trust` is the answer `--trust` gave up front, and `None` from a command
+/// that has no such flag, so the refusal off a terminal suggests the flag only where it is taken.
+/// With the flag, the same line is printed, saying it was trusted, so a log still records what ran
+/// and from where.
 pub(crate) fn confirm_trust(
     dir: &Path,
     manifest: &registry::Manifest,
     provenance: &registry::Provenance,
-    trusted: bool,
+    trust: Option<bool>,
 ) -> Result<()> {
     let registry::Provenance::Unvouched(origin) = provenance else {
         return Ok(());
@@ -199,7 +207,7 @@ pub(crate) fn confirm_trust(
         registry::publisher(&manifest.repo),
         manifest.repo
     );
-    if trusted {
+    if trust == Some(true) {
         eprintln!(
             "funes: running {}/setup — {package}, from {origin}, trusted by --trust.",
             dir.display()
@@ -207,9 +215,13 @@ pub(crate) fn confirm_trust(
         return Ok(());
     }
     if !std::io::stdin().is_terminal() {
+        let hint = match trust {
+            Some(_) => ", or pass --trust if you have checked it",
+            None => "",
+        };
         bail!(
             "the {id} integration at {} — {package} — comes from {origin}, which funes can't vouch \
-             for — run this in a terminal to confirm it, or pass --trust if you have checked it",
+             for — run this in a terminal to confirm it{hint}",
             dir.display()
         );
     }
