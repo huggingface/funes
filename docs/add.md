@@ -228,7 +228,7 @@ sessions are never mixed into a memory this host only reads.
 `funes add` runs the one-time bootstrap the hooks can't do unattended:
 
 1. **Asks** before your first index. Declining aborts the add; nothing is installed. `--yes`
-   answers yes up front, for a scripted add; off a terminal with neither, nobody declined, so the
+   answers yes up front, for a scripted add; off a terminal without it, nobody declined, so the
    add fails rather than exit having wired nothing up. At a terminal,
    with no memory yet, it also asks whether your sessions are English or multilingual, which picks
    the memory's [embedding model](index.md#sessions-not-in-english). The default is multilingual
