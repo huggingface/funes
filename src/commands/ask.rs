@@ -18,7 +18,8 @@ use super::target::Target;
 use crate::ui::banner::{accent, band_width, Banner};
 use crate::ui::render;
 
-// Recall's CLI defaults; ask exposes no tuning of its own.
+// Recall's CLI defaults, so the pool is reranked as a default recall's is. ask exposes no tuning
+// of its own.
 const K: usize = 8;
 const CANDIDATES: usize = 30;
 const NEIGHBORS: i64 = 1;

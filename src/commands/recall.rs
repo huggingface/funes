@@ -403,9 +403,11 @@ pub const DEFAULT_NEIGHBORS: i64 = 1;
 
 /// Whether a recall of `k` hits from a pool of `pool` rows reranks it: whenever the pool holds more
 /// than the hits, so the cut has something to choose. On the labeled sets, reranking the default
-/// pool finds a third more answers in the same 8 hits and puts the answer first twice as often
-/// (funes-recall-benchmark, 2026-10-28), at an extra latency of typically seconds, growing with the
-/// pool. A pool of `k` rows or fewer is read whole, in the fused order, and loads no reranker.
+/// pool finds a third more answers in the same 8 hits and puts the answer first twice as often, and
+/// the gain holds from the smallest pools: 10 rows for 8 hits find 12 more answers on funes-memory
+/// and lose none (funes-recall-benchmark, 2026-10-28). So the line sits right above `k`, at an extra
+/// latency of typically seconds, growing with the pool. A pool of `k` rows or fewer is read whole,
+/// in the fused order, and loads no reranker.
 pub fn reranks(k: usize, pool: usize) -> bool {
     pool > k
 }

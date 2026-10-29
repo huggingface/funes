@@ -34,8 +34,9 @@ parse. Quote the question (or put `--` before it) when it contains flag-like wor
 | `<question>` | the question to answer (free text) |
 | `--memory <label>` | the memory to ground in, as it stands — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`; omitted, the bound memory, else local |
 
-`ask` reuses recall's defaults (`-k 8`, 30 candidates, 1 neighbor) and exposes no
-tuning of its own; drop to `funes recall` when you want to adjust retrieval.
+`ask` reuses recall's defaults (`-k 8`, 30 candidates, 1 neighbor), so its pool is reranked like
+any default recall's, at seconds of latency, and exposes no tuning of its own; drop to
+`funes recall` when you want to adjust retrieval.
 
 ## Data sent to the agent
 

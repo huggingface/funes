@@ -39,6 +39,7 @@ that will drift.
 - **`ask` grounds in one turn.** funes recalls in-process, embeds the passages in the prompt, and
   runs the agent with no tools and its MCP servers silenced. An A/B against agent-driven recall
   showed the agentic loop pays only on a first-retrieval miss, at several times the latency and cost.
+  The recall is a default one, so its pool is reranked like any pool larger than the hits.
 - **A memory's state comes from the domain.** Ask `Memory::state()`; never infer it from an error
   shape.
 
