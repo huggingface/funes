@@ -114,6 +114,14 @@ maintain theirs in their own repositories. The
 [community directory](https://github.com/huggingface/funes-integrations/blob/main/COMMUNITY.md)
 makes those projects discoverable while leaving releases and support with their publishers.
 
+The boundary also brings code funes did not write onto your machine: an integration's `setup` runs
+as you, and adding one grants it your session history and hooks that keep running after it. funes
+vouches only for what it published. Anything else runs after a person has confirmed it, and no flag
+answers in their place, because consent to run someone else's code on your sessions is not a step
+to script away. Signed, verifiable integration artifacts would let funes vouch for more. Until then,
+the person at the terminal is the certification. What funes vouches for, and how a confirmation is
+kept, is in [add.md](add.md#what-funes-vouches-for).
+
 For the steps to build, test, publish, and list one, see
 [Writing an integration](../CONTRIBUTING.md#writing-an-integration).
 

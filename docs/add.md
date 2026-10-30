@@ -282,8 +282,9 @@ funes vouches for files it published — a release the catalog names, whose dige
 them without asking. Anything else — what `--from` names, a `$FUNES_INTEGRATIONS` directory, files
 it has no record of installing — is confirmed at the terminal before `setup` runs, naming the
 package by publisher and version and where it came from; off a terminal, funes refuses rather than
-assumes. A refused refresh leaves the installed copy as it was. An archive's checksum proves it arrived intact, not who published it, so an archive
-`--from` names is confirmed like a directory.
+assumes, and no flag answers for you. A refused refresh leaves the installed copy as it was. An
+archive's checksum proves it arrived intact, not who published it, so an archive `--from` names is
+confirmed like a directory.
 
 What `funes add` installed is recorded beside the directory, in `~/.funes/agents/<id>.json`: the
 package as its manifest declared it — publisher, id, version, contract — where the files came from
