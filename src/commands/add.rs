@@ -344,9 +344,8 @@ where
     if first_add {
         seed_local_index(agent).await;
     }
-    // A memory at a local path is read where it is: push only publishes to the Hub.
     if let Some(Resolved { memory, created }) = resolved {
-        if matches!(Memory::parse(&memory), Memory::Remote { .. }) {
+        if bind::owes_first_push(&memory, created) {
             // The integration is in place by now; only the push is owed, and it takes a terminal.
             bind::first_push(&memory, created).await.with_context(|| {
                 format!(

@@ -1,7 +1,7 @@
 //! `funes bind <memory>`: the memory this host reads and publishes to, every installed agent
 //! following. Also what `add` and `update` do with the binding: resolve a memory the user named,
 //! bind the host, bring a host from before the binding forward, and the first push to a memory on
-//! the Hub.
+//! the Hub that holds nothing from this host yet.
 
 use super::add::{prepare_agent, setup_add};
 use super::index;
@@ -10,7 +10,7 @@ use crate::agents::registry;
 use crate::hub;
 use crate::inference::EmbeddingModel;
 use crate::memory::dataset;
-use crate::memory::{self, Memory, MemoryState, Reachability};
+use crate::memory::{self, receipt, Memory, MemoryState, Reachability};
 use crate::traces::spool;
 use crate::ui::prompt::confirm;
 use anyhow::{bail, Context, Result};
@@ -18,9 +18,9 @@ use std::collections::BTreeMap;
 use std::io::IsTerminal;
 use std::path::Path;
 
-/// A resolved memory binding: the memory spec, and whether funes just created the repo this run — the
-/// signal the first push uses to skip the wrong-memory guard (an empty repo funes made for the user
-/// is plainly not "the wrong memory").
+/// A resolved memory binding: the memory spec, and whether funes just created the repo this run. A
+/// repo funes just made is owed its first push, with no wrong-memory guard to clear: an empty repo
+/// made for the user is plainly not "the wrong memory".
 #[derive(Clone)]
 pub(crate) struct Resolved {
     pub(crate) memory: String,
@@ -40,14 +40,14 @@ pub(crate) async fn resolve_named(spec: &str) -> Result<Option<Resolved>> {
 }
 
 /// `funes bind`: bind this host to `spec`, `local` to unbind, every installed agent following, then
-/// the first push when this host has a local memory and the memory is on the Hub.
+/// the first push when this host has a local memory and owes the memory one.
 pub async fn run(spec: &str) -> Result<()> {
     let resolved = resolve_named(spec).await?;
     bind_host(resolved.clone(), None).await?;
     let Some(Resolved { memory, created }) = resolved else {
         return Ok(());
     };
-    if matches!(Memory::parse(&memory), Memory::Remote { .. }) && index::local_memory_model().await?.is_some() {
+    if owes_first_push(&memory, created) && index::local_memory_model().await?.is_some() {
         first_push(&memory, created).await.with_context(|| {
             format!(
                 "this host is bound to {memory}, but the first push there did not go through — run \
@@ -273,10 +273,20 @@ pub(crate) async fn bound_model(memory: &str, takes: bool) -> Result<Option<Embe
     .with_context(|| format!("can't read {memory}"))
 }
 
-/// The one-time first publish `add` and `bind` perform when a memory is bound (the push hook
-/// can't, off a terminal — the overlap guard fails closed there). The guard prompts before
-/// publishing to a memory that holds none of this host's chunks — unless funes just `created` the
-/// memory this run, which is plainly the user's own empty repo, so the push proceeds without
+/// Whether this host owes `remote` a first push: it is on the Hub, and funes just `created` it or
+/// it holds nothing from this host yet. The push hook can't do that one off a terminal, where the
+/// wrong-memory guard fails closed. A memory that held this host's chunks before takes the next
+/// push, which the guard lets through. A memory at a local path is read where it is.
+pub(crate) fn owes_first_push(remote: &str, created: bool) -> bool {
+    match Memory::parse(remote) {
+        Memory::Remote { uri } => created || !receipt::held_before(&uri),
+        Memory::Local { .. } => false,
+    }
+}
+
+/// The first publish to a memory this host owes one, at a terminal. The wrong-memory guard prompts
+/// before publishing to a memory that holds none of this host's chunks, unless funes just `created`
+/// the memory this run, which is plainly the user's own empty repo, so the push proceeds without
 /// re-asking. Errors that aren't fatal to the install (a read-only token, held-back secrets) are
 /// reported without failing the command.
 pub(crate) async fn first_push(remote: &str, created: bool) -> Result<()> {
