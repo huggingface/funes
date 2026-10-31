@@ -30,7 +30,8 @@ It also performs the one-time bootstrap steps, so nothing is left to run by hand
   see [the setup steps](add.md#what-a-run-does).
 - **Does the first push** to a freshly-bound memory. The push hook can't: a first publish to a memory
   your local memory shares no chunks with is refused off a terminal (the wrong-memory guard, below),
-  so it must be interactive — `funes add` handles it.
+  so it must be interactive — `funes add` handles it. A memory this host has published to before
+  needs none: the hook's next push goes through.
 
 Run `funes bind <org>/<repo>` any time to change the memory, every installed agent following, and
 re-run `funes add <agent>` to refresh one setup — it's idempotent, and it brings an install an older
