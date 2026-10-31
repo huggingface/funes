@@ -84,7 +84,9 @@ funes bind local                           # back to the local memory, every age
 - The first push to a freshly-bound memory is `bind`'s, or `add`'s, to do, at a terminal: the
   hooks refuse it off one (the wrong-memory guard, in [automation.md](automation.md)). On a new
   host, binding it or re-running `funes add` once clears the guard for that machine, as soon as it
-  has an index of its own to push. A memory at a local path is not pushed to.
+  has an index of its own to push. A memory this host has published to before is left as it is:
+  what is pending goes up with the next push, the hooks' or yours. A memory at a local path is not
+  pushed to.
 
 ## Getting the newest integration
 
@@ -242,8 +244,9 @@ sessions are never mixed into a memory this host only reads.
    to recall; [unfinished work continues on later turns](index.md#progress-and-resuming).
 5. **Does the first push** to a freshly-bound memory — the publish the hook refuses to do off a
    terminal (the wrong-memory guard; see [automation.md](automation.md)). With nothing indexed yet,
-   it still gives a memory with no dataset your local memory's model. A memory at a local path is
-   not pushed to.
+   it still gives a memory with no dataset your local memory's model. A memory this host has
+   published to before is left to the hooks' next push, which the guard lets through. A memory at
+   a local path is not pushed to.
 
 ### The spool
 

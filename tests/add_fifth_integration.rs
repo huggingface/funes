@@ -599,6 +599,43 @@ fn a_failed_first_push_still_records_the_install() {
     assert!(!record.exists());
 }
 
+/// A memory that held this host's chunks before is owed no first push: the hooks' next push goes
+/// through the wrong-memory guard, so `bind` leaves what is pending to it. The receipt tells the
+/// two apart: one holding a chunk id makes a known host, one an aborted prompt left empty does not.
+#[test]
+fn bind_leaves_a_memory_this_host_published_to_before_to_the_next_push() {
+    for (receipt, known) in [("chunk-1\n", true), ("", false)] {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let funes_home = tmp.path().join("funes");
+        let log = tmp.path().join("setup.log");
+        fs::create_dir_all(&home).unwrap();
+        support::assert_success(&funes_at_a_terminal(
+            &home,
+            &funes_home,
+            &log,
+            &["index", "--multilingual"],
+        ));
+        let path = funes_home.join("pushed/hf___datasets_acme_memory");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, receipt).unwrap();
+
+        // Offline, the binding goes through on the local memory's model, and a push can only fail.
+        let out = funes_offline_at_a_terminal(&home, &funes_home, &log, &["bind", "acme/memory"]);
+        let transcript = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(out.status.success(), known, "{transcript}");
+        assert_eq!(
+            transcript.contains("the first push there did not go through"),
+            !known,
+            "{transcript}"
+        );
+        assert_eq!(
+            fs::read_to_string(funes_home.join("bound")).unwrap().trim(),
+            "acme/memory"
+        );
+    }
+}
+
 /// Installed, an integration runs as installed: nothing is fetched to rebind or remove it, and a
 /// copy confirmed once runs unasked until one of its files changes — or its files are named again.
 #[test]
