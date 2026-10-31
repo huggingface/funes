@@ -128,8 +128,6 @@ pub(crate) async fn append(
         dataset::stamp_languages(&mut ds, languages).await?;
     }
 
-    // Snapshot the captured writes before reading index stats: `index_statistics` can write a stats
-    // migration through the same wrapper, and that must not leak into the data commit.
     let mut files = captured_files(&wrapper);
     let unindexed = dataset::max_unindexed_rows(&ds).await;
     let text_indexed = dataset::sub_index_counts(&ds).await?.contains_key(dataset::FTS_INDEX);

@@ -39,8 +39,8 @@ use std::io::IsTerminal;
 
 /// Compact the remote once this many appended rows are sitting unindexed (answered by a
 /// brute-force scan until folded in). Bounds per-query cost, not push count, and is stateless —
-/// [`remote::append`] reads it straight from Lance's index stats. Nonzero so tiny per-push
-/// deltas don't pile up between compactions.
+/// [`remote::append`] reads it off the manifest. Nonzero so tiny per-push deltas don't pile up
+/// between compactions.
 const COMPACT_THRESHOLD: u64 = 500;
 
 /// This host's session-level push coverage for one remote. A session is fully pushed only when
