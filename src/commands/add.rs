@@ -345,7 +345,7 @@ where
         seed_local_index(agent).await;
     }
     if let Some(Resolved { memory, created }) = resolved {
-        if bind::owes_first_push(&memory, created) {
+        if bind::owes_first_push(&memory, created).await? {
             // The integration is in place by now; only the push is owed, and it takes a terminal.
             bind::first_push(&memory, created).await.with_context(|| {
                 format!(
