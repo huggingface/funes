@@ -85,8 +85,10 @@ funes bind local                           # back to the local memory, every age
   hooks refuse it off one (the wrong-memory guard, in [automation.md](automation.md)). On a new
   host, binding it or re-running `funes add` once clears the guard for that machine, as soon as it
   has an index of its own to push. A memory this host has published to before is left as it is:
-  what is pending goes up with the next push, the hooks' or yours. A memory at a local path is not
-  pushed to.
+  what is pending goes up with the next push, the hooks' or yours. One emptied since is pushed to
+  as a first publish again. One whose content was replaced since holds nothing of this host's, so
+  the hooks refuse it off a terminal as the wrong memory, and `funes push <memory>` at a terminal
+  settles it. A memory at a local path is not pushed to.
 
 ## Getting the newest integration
 

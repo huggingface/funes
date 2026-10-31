@@ -47,7 +47,7 @@ pub async fn run(spec: &str) -> Result<()> {
     let Some(Resolved { memory, created }) = resolved else {
         return Ok(());
     };
-    if owes_first_push(&memory, created) && index::local_memory_model().await?.is_some() {
+    if owes_first_push(&memory, created).await? && index::local_memory_model().await?.is_some() {
         first_push(&memory, created).await.with_context(|| {
             format!(
                 "this host is bound to {memory}, but the first push there did not go through — run \
@@ -273,15 +273,21 @@ pub(crate) async fn bound_model(memory: &str, takes: bool) -> Result<Option<Embe
     .with_context(|| format!("can't read {memory}"))
 }
 
-/// Whether this host owes `remote` a first push: it is on the Hub, and funes just `created` it or
-/// it holds nothing from this host yet. The push hook can't do that one off a terminal, where the
-/// wrong-memory guard fails closed. A memory that held this host's chunks before takes the next
-/// push, which the guard lets through. A memory at a local path is read where it is.
-pub(crate) fn owes_first_push(remote: &str, created: bool) -> bool {
-    match Memory::parse(remote) {
-        Memory::Remote { uri } => created || !receipt::held_before(&uri),
-        Memory::Local { .. } => false,
+/// Whether this host owes `remote` a first push: it is on the Hub, and funes just `created` it, it
+/// holds nothing from this host yet, or it holds no dataset, as a repo emptied since this host last
+/// published there. The push hook can't do that one off a terminal, where the wrong-memory guard
+/// fails closed. A memory that held this host's chunks before, and holds a dataset, takes the next
+/// push: the guard lets it through, or refuses it off a terminal with what to do when the two have
+/// nothing in common. A memory at a local path is read where it is.
+pub async fn owes_first_push(remote: &str, created: bool) -> Result<bool> {
+    let target = Memory::parse(remote);
+    let Memory::Remote { uri } = &target else {
+        return Ok(false);
+    };
+    if created || !receipt::held_before(uri) {
+        return Ok(true);
     }
+    Ok(matches!(target.state().await?, MemoryState::Empty))
 }
 
 /// The first publish to a memory this host owes one, at a terminal. The wrong-memory guard prompts
