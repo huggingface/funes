@@ -180,29 +180,33 @@ pub fn has_token() -> bool {
     hf_token().is_some()
 }
 
-/// HF token from the standard env var, else the `huggingface_hub` cached token file.
+/// The Hub token, by hf-hub's rules, so funes and the client it builds agree on whether there is
+/// one: the token env vars, else the file `HF_TOKEN_PATH` names, else `token` under the Hugging
+/// Face home, where `hf auth login` writes it. None once `HF_HUB_DISABLE_IMPLICIT_TOKEN` is set,
+/// which makes hf-hub ignore them all too.
 pub fn hf_token() -> Option<String> {
-    let token_file = std::env::var("HOME")
-        .ok()
-        .map(|h| PathBuf::from(h).join(".cache/huggingface/token"));
-    token_from(|k| std::env::var(k).ok(), token_file.as_deref())
+    token_from(|k| std::env::var(k).ok(), &hf_hub::hf_home())
 }
 
-/// Pure core of [`hf_token`]: env vars (in precedence order) win over the token file; blank
-/// values are ignored and surrounding whitespace trimmed. Split out so it's testable without
-/// mutating process env.
-fn token_from(env: impl Fn(&str) -> Option<String>, token_file: Option<&Path>) -> Option<String> {
+/// Pure core of [`hf_token`], over `env` and the Hugging Face home: blank values are ignored and
+/// surrounding whitespace trimmed. Split out so it's testable without mutating process env.
+fn token_from(env: impl Fn(&str) -> Option<String>, hf_home: &Path) -> Option<String> {
+    let set = |var: &str| env(var).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    if set("HF_HUB_DISABLE_IMPLICIT_TOKEN").is_some() {
+        return None;
+    }
     for var in ["HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN"] {
-        if let Some(t) = env(var) {
-            let t = t.trim();
-            if !t.is_empty() {
-                return Some(t.to_string());
-            }
+        if let Some(token) = set(var) {
+            return Some(token);
         }
     }
-    let cached = std::fs::read_to_string(token_file?).ok()?;
-    let t = cached.trim();
-    (!t.is_empty()).then(|| t.to_string())
+    set("HF_TOKEN_PATH")
+        .map(PathBuf::from)
+        .into_iter()
+        .chain([hf_home.join("token")])
+        .filter_map(|file| std::fs::read_to_string(file).ok())
+        .map(|cached| cached.trim().to_string())
+        .find(|token| !token.is_empty())
 }
 
 /// The public bucket (`huggingface/funes`) holding the released binaries, the agent integrations,
@@ -460,23 +464,48 @@ mod tests {
     #[test]
     fn token_env_beats_file_and_trims() {
         let env: HashMap<&str, &str> = [("HF_TOKEN", "  hf_envtok \n")].into_iter().collect();
-        let file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(file.path(), "hf_filetok").unwrap();
-        let got = token_from(|k| env.get(k).map(|s| s.to_string()), Some(file.path()));
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("token"), "hf_filetok").unwrap();
+        let got = token_from(|k| env.get(k).map(|s| s.to_string()), home.path());
         assert_eq!(got.as_deref(), Some("hf_envtok")); // env wins, trimmed
     }
 
     #[test]
-    fn token_falls_back_to_file() {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(file.path(), "  hf_filetok\n").unwrap();
-        let got = token_from(|_| None, Some(file.path()));
+    fn token_falls_back_to_the_file_under_the_hf_home() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("token"), "  hf_filetok\n").unwrap();
+        let got = token_from(|_| None, home.path());
         assert_eq!(got.as_deref(), Some("hf_filetok"));
+    }
+
+    #[test]
+    fn token_path_names_the_file_and_an_unreadable_one_falls_through() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("token"), "hf_hometok").unwrap();
+        let named = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(named.path(), "hf_pathtok\n").unwrap();
+        let path = named.path().to_string_lossy().into_owned();
+        let env = |k: &str| (k == "HF_TOKEN_PATH").then(|| path.clone());
+        assert_eq!(token_from(env, home.path()).as_deref(), Some("hf_pathtok"));
+        let missing = home.path().join("absent").to_string_lossy().into_owned();
+        let env = |k: &str| (k == "HF_TOKEN_PATH").then(|| missing.clone());
+        assert_eq!(token_from(env, home.path()).as_deref(), Some("hf_hometok"));
     }
 
     #[test]
     fn token_blank_env_is_skipped_none_when_no_file() {
         let env: HashMap<&str, &str> = [("HF_TOKEN", "   ")].into_iter().collect();
-        assert_eq!(token_from(|k| env.get(k).map(|s| s.to_string()), None), None);
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(token_from(|k| env.get(k).map(|s| s.to_string()), home.path()), None);
+    }
+
+    #[test]
+    fn disabling_implicit_tokens_ignores_env_and_file_alike() {
+        let env: HashMap<&str, &str> = [("HF_TOKEN", "hf_envtok"), ("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")]
+            .into_iter()
+            .collect();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("token"), "hf_filetok").unwrap();
+        assert_eq!(token_from(|k| env.get(k).map(|s| s.to_string()), home.path()), None);
     }
 }

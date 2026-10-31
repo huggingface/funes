@@ -55,12 +55,16 @@ beside the installed scripts as `funes-sync.log`.
 ## Authentication
 
 Private-memory reads and all Hub writes need a Hugging Face token. funes uses the first non-empty
-token in this order:
+token in this order, which is hf-hub's with two older variable names kept, so funes and the Hub
+client it builds agree on whether there is one:
 
 1. `HF_TOKEN`
 2. `HUGGING_FACE_HUB_TOKEN`
 3. `HUGGINGFACE_TOKEN`
-4. `~/.cache/huggingface/token`, written by `hf auth login`
+4. the file `HF_TOKEN_PATH` names
+5. `$HF_HOME/token`, written by `hf auth login` (`HF_HOME` defaults to `~/.cache/huggingface`)
+
+`HF_HUB_DISABLE_IMPLICIT_TOKEN`, set to anything, makes funes use none of them, as it does hf-hub.
 
 A token used only for recall needs read access; `push` needs write
 access to the target dataset repository. Public-memory recall needs no token.
@@ -87,7 +91,9 @@ file-grained cache design and cold-versus-warm behavior.
 | `FUNES_INTEGRATIONS` | Directory `funes add` installs an agent integration from, instead of the published one. funes can't vouch for those files, so it asks you to confirm before running them — once, until they change. |
 | `FUNES_TRUFFLEHOG` | Explicit TruffleHog binary for secret scanning. Index-time redaction is best-effort; push and scrub scanning fail closed. |
 | `HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN`, `HUGGINGFACE_TOKEN` | Hugging Face authentication, in the precedence shown above. |
-| `HF_HOME` | Hugging Face home, including the default backend's model cache. |
+| `HF_TOKEN_PATH` | The token file, when it is not `$HF_HOME/token`. |
+| `HF_HUB_DISABLE_IMPLICIT_TOKEN` | Set to anything: no token is used, from the variables or a file. |
+| `HF_HOME` | Hugging Face home: the token file, and the default backend's model cache. |
 | `HF_HUB_CACHE` | Hugging Face Hub file-cache location, including cached remote-memory files. |
 | `HF_HUB_USER_AGENT_ORIGIN` | Origin hf-hub appends to the User-Agent of every Hub request. funes adds `funes/<version>` and `install/<id>` to it, keeping an origin already set, and the agent integrations add `agent/<harness>`. |
 | `DO_NOT_TRACK`, `FUNES_NO_TELEMETRY` | Either set keeps the install id out of the User-Agent. |

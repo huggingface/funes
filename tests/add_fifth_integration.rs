@@ -254,9 +254,8 @@ fn run_with(
         .env("FUNES_HOME", funes_home)
         .env("FUNES_TEST_SETUP_LOG", log)
         .env("HF_HOME", support::hf_home())
-        .env_remove("HF_TOKEN")
-        .env_remove("HUGGING_FACE_HUB_TOKEN")
-        .env_remove("HUGGINGFACE_TOKEN")
+        // The Hub is anonymous here: neither funes nor hf-hub may pick up a token of the developer's.
+        .env("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
         .env_remove("FUNES_BIN")
         .env("LANG", "en_US.UTF-8")
         .env_remove("LC_ALL")
