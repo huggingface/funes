@@ -243,19 +243,23 @@ pub fn schema_of(ds: &Dataset) -> Arc<Schema> {
     Arc::new(Schema::from(ds.schema()))
 }
 
-/// The most rows any index leaves unindexed, from the index stats; 0 when they cannot be read.
+/// The most rows any index leaves unindexed, or 0 when the manifest can't be read.
 pub async fn max_unindexed_rows(ds: &Dataset) -> u64 {
     let Ok(indices) = ds.load_indices().await else {
         return 0;
     };
+    let names: HashSet<&str> = indices.iter().map(|idx| idx.name.as_str()).collect();
     let mut max = 0u64;
-    for idx in indices.iter() {
-        if let Ok(json) = ds.index_statistics(&idx.name).await {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) {
-                if let Some(n) = v.get("num_unindexed_rows").and_then(|x| x.as_u64()) {
-                    max = max.max(n);
-                }
-            }
+    for name in names {
+        let Ok(fragments) = ds.unindexed_fragments(name).await else {
+            continue;
+        };
+        if let Some(rows) = fragments
+            .iter()
+            .map(|fragment| fragment.num_rows())
+            .sum::<Option<usize>>()
+        {
+            max = max.max(rows as u64);
         }
     }
     max
@@ -1326,6 +1330,35 @@ mod tests {
 
     fn fragment_ids(ds: &Dataset) -> Vec<usize> {
         ds.get_fragments().iter().map(|f| f.id()).collect()
+    }
+
+    #[tokio::test]
+    async fn max_unindexed_rows_counts_the_live_rows_the_indexes_miss() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ds = indexed_then_appended(dir.path()).await;
+        assert_eq!(max_unindexed_rows(&ds).await, 3);
+
+        // A deleted row is never searched, so it is not owed an index.
+        ds.append(reader(embedded(&turns(TRAINABLE + 3, 2))), None)
+            .await
+            .unwrap();
+        assert_eq!(max_unindexed_rows(&ds).await, 5);
+        ds.delete(&eq("turn_uuid", &format!("turn{}", TRAINABLE + 3)))
+            .await
+            .unwrap();
+        assert_eq!(ds.get_fragments().len(), 6, "the fragment keeps its other row");
+        assert_eq!(max_unindexed_rows(&ds).await, 4);
+        for name in [VECTOR_INDEX, FTS_INDEX] {
+            let stats: serde_json::Value = serde_json::from_str(&ds.index_statistics(name).await.unwrap()).unwrap();
+            assert_eq!(
+                stats["num_unindexed_rows"].as_u64(),
+                Some(4),
+                "lance's own count for {name}"
+            );
+        }
+
+        build_indexes(&mut ds, |_| {}).await.unwrap();
+        assert_eq!(max_unindexed_rows(&ds).await, 0);
     }
 
     #[tokio::test]
