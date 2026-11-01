@@ -55,14 +55,13 @@ beside the installed scripts as `funes-sync.log`.
 ## Authentication
 
 Private-memory reads and all Hub writes need a Hugging Face token. funes uses the first non-empty
-token in this order, which is hf-hub's with two older variable names kept, so funes and the Hub
-client it builds agree on whether there is one:
+token in this order:
 
 1. `HF_TOKEN`
 2. `HUGGING_FACE_HUB_TOKEN`
 3. `HUGGINGFACE_TOKEN`
-4. the file `HF_TOKEN_PATH` names
-5. `$HF_HOME/token`, written by `hf auth login` (`HF_HOME` defaults to `~/.cache/huggingface`)
+4. the token file, written by `hf auth login`: `$HF_TOKEN_PATH` if set, else `$HF_HOME/token`
+   (`HF_HOME` defaults to `~/.cache/huggingface`)
 
 `HF_HUB_DISABLE_IMPLICIT_TOKEN`, set to anything, makes funes use none of them, as it does hf-hub.
 
