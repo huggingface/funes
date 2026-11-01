@@ -36,7 +36,11 @@ async fn host_status_shows_the_bound_memory_or_the_older_bindings() {
         .unwrap_or_else(|| panic!("the bound memory is listed: {out}"));
     assert!(block.starts_with("\nchunks: "), "{out}");
     assert!(
-        !block.contains("last write"),
+        block.contains("\nlast write: "),
+        "a bound memory is read as it stands: {out}"
+    );
+    assert!(
+        !block.contains("push coverage"),
         "a memory at a local path is not a remote anything pushes to: {out}"
     );
 

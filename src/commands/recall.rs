@@ -1525,17 +1525,16 @@ fn rephrase_languages<'a>(memories: impl IntoIterator<Item = &'a Dataset>) -> Op
     }
 }
 
-/// Index progress and its last write time. The source sessions still owed rows are the host
-/// index's alone: another memory at a local path has rows and embedding progress of its own, and
-/// no coverage snapshot here. A version with no recorded timestamp is omitted.
-async fn index_lines(ds: &Dataset, now: DateTime<Utc>, host_index: bool) -> Result<String> {
+/// The local memory's progress and its last write time. A version with no recorded timestamp is
+/// omitted.
+async fn local_memory_lines(ds: &Dataset, now: DateTime<Utc>) -> Result<String> {
     let mut out = String::new();
     if let Some(n) = session_count(ds).await {
         let _ = writeln!(out, "sessions: {n}");
     }
     out.push_str(&pending_embeddings_line(ds).await?);
-    if host_index {
-        out.push_str(&index_coverage_line().unwrap_or_default());
+    if let Some(line) = index_coverage_line() {
+        out.push_str(&line);
     }
     if let Some(t) = dataset::last_write(ds) {
         let _ = writeln!(out, "last indexed: {}", stamp(t, now));
@@ -1543,11 +1542,10 @@ async fn index_lines(ds: &Dataset, now: DateTime<Utc>, host_index: bool) -> Resu
     Ok(out)
 }
 
-/// A remote memory's published state: when it was last written to and its unindexed backlog.
-async fn remote_lines(ds: &Dataset, now: DateTime<Utc>) -> String {
+/// Any other memory, a remote or one at a local path, as it stands: its last write time and its
+/// unindexed backlog.
+async fn other_memory_lines(ds: &Dataset, now: DateTime<Utc>) -> String {
     let mut out = String::new();
-    // Every write to a remote memory is a push or a compaction, so the head version's timestamp is
-    // when it was last written to.
     if let Some(t) = dataset::last_write(ds) {
         let _ = writeln!(out, "last write: {}", stamp(t, now));
     }
@@ -1596,7 +1594,8 @@ async fn push_coverage_lines(local: &Dataset, memory: &Memory, uri: &str) -> Str
     out
 }
 
-/// The status of what `target` reads. A remote reports this host's push coverage only as the bound
+/// The status of what `target` reads: the local memory's progress, and any other memory, a remote
+/// or one at a path, as it stands. A remote reports this host's push coverage only as the bound
 /// memory: coverage is a question only for a memory this host pushes to.
 pub async fn status(target: impl Into<Target>) -> Result<String> {
     let target = target.into();
@@ -1611,23 +1610,24 @@ pub async fn status(target: impl Into<Target>) -> Result<String> {
                 memory.label(),
                 languages_line(&ds, rows)
             );
-            match &memory {
-                Memory::Local { .. } => out.push_str(&index_lines(&ds, now, memory.is_default_local()).await?),
-                Memory::Remote { uri } => {
-                    out.push_str(&remote_lines(&ds, now).await);
-                    // The local index is what pushes here — show it alongside, so one status
-                    // answers both "what's published" and "what's indexed on this machine".
-                    if let Some(local) = Memory::local().dataset().await? {
-                        let local_rows = dataset::count_rows(&local, None).await?;
-                        let _ = writeln!(
-                            out,
-                            "\nlocal index: {}\nchunks: {local_rows}",
-                            Memory::local().label()
-                        );
-                        out.push_str(&index_lines(&local, now, true).await?);
-                        if bound {
-                            out.push_str(&push_coverage_lines(&local, &memory, uri).await);
-                        }
+            if memory.is_default_local() {
+                out.push_str(&local_memory_lines(&ds, now).await?);
+            } else {
+                out.push_str(&other_memory_lines(&ds, now).await);
+            }
+            if let Memory::Remote { uri } = &memory {
+                // The local index is what pushes here — show it alongside, so one status
+                // answers both "what's published" and "what's indexed on this machine".
+                if let Some(local) = Memory::local().dataset().await? {
+                    let local_rows = dataset::count_rows(&local, None).await?;
+                    let _ = writeln!(
+                        out,
+                        "\nlocal index: {}\nchunks: {local_rows}",
+                        Memory::local().label()
+                    );
+                    out.push_str(&local_memory_lines(&local, now).await?);
+                    if bound {
+                        out.push_str(&push_coverage_lines(&local, &memory, uri).await);
                     }
                 }
             }
@@ -1650,9 +1650,9 @@ pub async fn status(target: impl Into<Target>) -> Result<String> {
     }
 }
 
-/// This host's status: the local memory, then the memory it is bound to with its push coverage.
-/// `note` is what a host without the binding is told about the memories an older funes bound its
-/// agents to.
+/// This host's status: the local memory, then the memory it is bound to as it stands, with this
+/// host's push coverage for a remote. `note` is what a host without the binding is told about the
+/// memories an older funes bound its agents to.
 pub async fn host_status(bound: Option<&str>, note: Option<&str>) -> Result<String> {
     let mut out = status(Memory::local()).await?;
     if let Some(note) = note {
@@ -1678,8 +1678,8 @@ pub async fn host_status(bound: Option<&str>, note: Option<&str>) -> Result<Stri
     let rows = dataset::count_rows(&ds, None).await?;
     let _ = writeln!(out, "chunks: {rows}");
     out.push_str(&languages_line(&ds, rows));
+    out.push_str(&other_memory_lines(&ds, Utc::now()).await);
     if let Memory::Remote { uri } = &memory {
-        out.push_str(&remote_lines(&ds, Utc::now()).await);
         if let Some(local) = Memory::local().dataset().await? {
             out.push_str(&push_coverage_lines(&local, &memory, uri).await);
         }
@@ -1745,9 +1745,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn status_counts_pending_embeddings_until_they_are_filled() {
+    async fn local_memory_lines_count_pending_embeddings_until_they_are_filled() {
         let dir = tempfile::tempdir().unwrap();
-        let memory = Memory::parse(&dir.path().to_string_lossy());
         let turns = [
             text_turn("session", 0, "user", "A narwhal parses transcripts."),
             text_turn("session", 1, "assistant", "Each line becomes a typed turn."),
@@ -1755,23 +1754,23 @@ mod tests {
         let chunks = chunk::chunks_from_turns(&turns, true);
         let batch = dataset::build_batch(dataset::model::ENGLISH, &chunks, None).unwrap();
         let reader = RecordBatchIterator::new([Ok(batch)], dataset::schema(dataset::model::ENGLISH));
-        let mut ds = Dataset::write(reader, &dataset::table_uri(memory.label()), None)
+        let mut ds = Dataset::write(reader, &dataset::table_uri(dir.path()), None)
             .await
             .unwrap();
-        let prefix = format!("memory: {}\nchunks: 2\nsessions: 1\n", memory.label());
+        let now = Utc::now();
 
         for (chunk, line) in chunks
             .iter()
             .zip(["2 chunks awaiting embedding\n", "1 chunk awaiting embedding\n"])
         {
-            let out = status(memory.clone()).await.unwrap();
-            assert!(out.starts_with(&format!("{prefix}{line}")), "{out}");
+            let out = local_memory_lines(&ds, now).await.unwrap();
+            assert!(out.starts_with(&format!("sessions: 1\n{line}")), "{out}");
             ds = dataset::fill_vectors(&ds, &[chunk.id.as_str()], &[vec![0.0; dataset::DIM as usize]])
                 .await
                 .unwrap();
         }
-        let out = status(memory).await.unwrap();
-        assert!(out.starts_with(&prefix), "{out}");
+        let out = local_memory_lines(&ds, now).await.unwrap();
+        assert!(out.starts_with("sessions: 1\n"), "{out}");
         assert!(!out.contains("awaiting embedding"), "{out}");
     }
 

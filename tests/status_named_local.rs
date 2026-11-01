@@ -1,5 +1,6 @@
-//! `status` of a memory named by its local path: its own rows and embedding progress, and never
-//! the source sessions this host's index still owes rows, which are the host's memory's alone.
+//! `status` of a memory named by its local path reads it as it stands, like a remote: its last
+//! write and unindexed backlog. The local memory's progress (its sessions, embedding backlog and
+//! the source sessions still owed rows) is its own.
 
 use funes::commands::recall::status;
 use funes::home;
@@ -17,7 +18,7 @@ async fn index_into(home: &Path, source: &Path) -> String {
 }
 
 #[tokio::test]
-async fn a_memory_at_a_local_path_does_not_report_the_hosts_pending_sources() {
+async fn a_memory_at_a_local_path_is_read_as_it_stands_not_as_the_hosts_index() {
     // A memory indexed under one home, then named by its path from another.
     let other_home = tempfile::tempdir().unwrap();
     let other_source = tempfile::tempdir().unwrap();
@@ -34,13 +35,17 @@ async fn a_memory_at_a_local_path_does_not_report_the_hosts_pending_sources() {
     .unwrap();
 
     let own = status(Memory::local()).await.unwrap();
+    assert!(own.contains("\nsessions: 1\n"), "{own}");
     assert!(own.contains("pending indexing: 1 source session"), "{own}");
+    assert!(own.contains("\nlast indexed: "), "{own}");
 
     let named = status(Memory::parse(&at_path)).await.unwrap();
     assert!(named.starts_with(&format!("memory: {at_path}\nchunks: ")), "{named}");
-    assert!(named.contains("\nsessions: 1\n"), "{named}");
-    assert!(
-        !named.contains("pending indexing"),
-        "the owed sources are the host index's, not this memory's: {named}"
-    );
+    assert!(named.contains("\nlast write: "), "{named}");
+    for host_line in ["sessions:", "pending indexing", "last indexed"] {
+        assert!(
+            !named.contains(host_line),
+            "{host_line} describes the local memory, not this one: {named}"
+        );
+    }
 }
