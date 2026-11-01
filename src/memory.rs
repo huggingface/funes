@@ -105,10 +105,8 @@ impl Memory {
             Memory::Remote { uri } => {
                 let (owner, name, _) = parse_hf(uri)?;
                 let token = hf_token();
-                let mut opts = HashMap::new();
-                if let Some(t) = &token {
-                    opts.insert("hf_token".to_string(), t.clone());
-                }
+                // Always set: with the key absent Lance resolves `HF_TOKEN` itself, disable variable or not.
+                let mut opts = HashMap::from([("hf_token".to_string(), token.clone().unwrap_or_default())]);
                 let table = dataset::table_uri(uri);
                 // Pin reads to the head commit and install the read wrapper. The pin is re-resolved
                 // on every open, so a new push is picked up by the next command. If the head can't
