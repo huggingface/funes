@@ -599,9 +599,8 @@ fn a_failed_first_push_still_records_the_install() {
     assert!(!record.exists());
 }
 
-/// A memory that held this host's chunks before is owed no first push: the hooks' next push goes
-/// through the wrong-memory guard, so `bind` leaves what is pending to it. The receipt tells the
-/// two apart: one holding a chunk id makes a known host, one an aborted prompt left empty does not.
+/// `bind` skips the first push to a memory this host already pushed to. A receipt with a chunk id
+/// marks such a memory. An empty receipt (left by an aborted prompt) does not.
 #[test]
 fn bind_leaves_a_memory_this_host_published_to_before_to_the_next_push() {
     for (receipt, known) in [("chunk-1\n", true), ("", false)] {
@@ -620,7 +619,7 @@ fn bind_leaves_a_memory_this_host_published_to_before_to_the_next_push() {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, receipt).unwrap();
 
-        // Offline, the binding goes through on the local memory's model, and a push can only fail.
+        // Offline, binding succeeds and any push fails, which tells whether one was attempted.
         let out = funes_offline_at_a_terminal(&home, &funes_home, &log, &["bind", "acme/memory"]);
         let transcript = String::from_utf8_lossy(&out.stdout);
         assert_eq!(out.status.success(), known, "{transcript}");
