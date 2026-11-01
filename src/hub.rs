@@ -195,7 +195,7 @@ pub fn hf_token() -> Option<String> {
 /// means no token at all, as it does for hf-hub. Split out so it's testable without mutating
 /// process env.
 fn token_from(env: impl Fn(&str) -> Option<String>, token_file: Option<&Path>) -> Option<String> {
-    if env("HF_HUB_DISABLE_IMPLICIT_TOKEN").is_some_and(|v| !v.trim().is_empty()) {
+    if env("HF_HUB_DISABLE_IMPLICIT_TOKEN").is_some_and(|v| !v.is_empty()) {
         return None;
     }
     for var in ["HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN"] {
@@ -495,6 +495,14 @@ mod tests {
         std::fs::write(file.path(), "hf_filetok").unwrap();
         assert_eq!(
             token_from(|k| env.get(k).map(|s| s.to_string()), Some(file.path())),
+            None
+        );
+        // Set to anything, blank included, as hf-hub reads it.
+        let blank: HashMap<&str, &str> = [("HF_TOKEN", "hf_envtok"), ("HF_HUB_DISABLE_IMPLICIT_TOKEN", " ")]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            token_from(|k| blank.get(k).map(|s| s.to_string()), Some(file.path())),
             None
         );
     }
