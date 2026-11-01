@@ -1,7 +1,6 @@
-//! Gated live test: what `bind` and `add` owe a memory on the Hub. A memory this host never
-//! published to is owed a first push, one holding this host's chunks is not, and one emptied since
-//! is owed one again. Publishes to a unique scratch path on the shared test dataset, then deletes
-//! it. No real data.
+//! Gated live test: a first push is owed before this host ever pushed to the memory, not owed once
+//! the memory holds this host's chunks, and owed again once its dataset is deleted from the Hub.
+//! Publishes to a unique scratch path on the shared test dataset, then deletes it. No real data.
 //!
 //! Skipped unless `HF_FUNES_TEST_TOKEN` is set AND `trufflehog` is on PATH (the push scans its
 //! row). To run:
@@ -58,13 +57,11 @@ async fn a_first_push_is_owed_to_a_memory_new_to_this_host_or_emptied_since() {
     drop(f);
     index::run_index(src.path(), false, None).await.unwrap();
 
-    // Never published there: owed. Published there: not, the hooks' next push goes through.
     let before = owes_first_push(&uri, false).await;
     let pushed = push::run_push(Memory::parse(&uri), false, Confirm::Yes, &[]).await;
     let after = owes_first_push(&uri, false).await;
 
-    // The dataset deleted from under a receipt that still names its chunks: owed again, as the
-    // first publish the hooks would refuse off a terminal.
+    // The receipt outlives the dataset: only the state probe can tell the memory is empty again.
     let emptied = repo
         .delete_folder()
         .path_in_repo(prefix.clone())
