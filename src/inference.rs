@@ -136,35 +136,27 @@ fn snapshot(repo: &str, files: &[&str]) -> Result<PathBuf> {
         return Ok(dir);
     }
     eprintln!("downloading {repo} (first use)…");
-    // A dedicated thread: the blocking hf-hub client drives its own runtime with block_on,
-    // which would panic if called from a thread already inside a tokio runtime (the MCP server).
-    let owned = repo.to_string();
-    let files: Vec<String> = files.iter().map(|f| f.to_string()).collect();
-    std::thread::spawn(move || -> Result<PathBuf> {
-        let (owner, name) = owned
-            .split_once('/')
-            .ok_or_else(|| anyhow!("model repo {owned} is not owner/name"))?;
-        let client = hf_hub::HFClientSync::new().map_err(|e| anyhow!("hf-hub client: {e}"))?;
-        let r = client.model(owner, name);
-        let mut dir = PathBuf::new();
-        for file in &files {
-            let path = r
-                .download_file()
-                .filename(file)
-                .send()
-                .with_context(|| format!("downloading {owned}/{file}"))?;
-            // The snapshot holds the file as deep as its path in the repo goes: onnx/model.onnx
-            // is two levels down.
-            dir = path
-                .ancestors()
-                .nth(Path::new(file).components().count())
-                .ok_or_else(|| anyhow!("{} is not in a snapshot dir", path.display()))?
-                .to_path_buf();
-        }
-        Ok(dir)
-    })
-    .join()
-    .map_err(|_| anyhow!("model download thread panicked"))?
+    let (owner, name) = repo
+        .split_once('/')
+        .ok_or_else(|| anyhow!("model repo {repo} is not owner/name"))?;
+    let client = hf_hub::HFClientSync::new().map_err(|e| anyhow!("hf-hub client: {e}"))?;
+    let r = client.model(owner, name);
+    let mut dir = PathBuf::new();
+    for file in files {
+        let path = r
+            .download_file()
+            .filename(*file)
+            .send()
+            .with_context(|| format!("downloading {repo}/{file}"))?;
+        // The snapshot holds the file as deep as its path in the repo goes: onnx/model.onnx
+        // is two levels down.
+        dir = path
+            .ancestors()
+            .nth(Path::new(file).components().count())
+            .ok_or_else(|| anyhow!("{} is not in a snapshot dir", path.display()))?
+            .to_path_buf();
+    }
+    Ok(dir)
 }
 
 /// A cached snapshot of `repo` holding each of `files`, if any, in the cache hf-hub downloads into.
