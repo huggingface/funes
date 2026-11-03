@@ -26,8 +26,9 @@ use chrono::Utc;
 use futures::stream::{self, BoxStream, StreamExt};
 use object_store::path::Path as OPath;
 use object_store::{
-    Attributes, CopyOptions, GetOptions, GetResult, GetResultPayload, ListResult, MultipartUpload, ObjectMeta,
-    ObjectStore as OSObjectStore, PutMultipartOptions, PutOptions, PutPayload, PutResult, Result as OSResult,
+    Attributes, CopyOptions, Extensions, GetOptions, GetResult, GetResultPayload, ListResult, MultipartUpload,
+    ObjectMeta, ObjectStore as OSObjectStore, PutMultipartOptions, PutOptions, PutPayload, PutResult,
+    Result as OSResult,
 };
 
 /// Supplies a whole local file for an object key: given the object path, return a local filesystem
@@ -138,6 +139,7 @@ fn serve_from_file(path: &Path, location: &OPath, options: &GetOptions) -> Resul
             meta,
             range: 0..0,
             attributes: Attributes::default(),
+            extensions: Extensions::default(),
         });
     }
     let range = match &options.range {
@@ -151,6 +153,7 @@ fn serve_from_file(path: &Path, location: &OPath, options: &GetOptions) -> Resul
         meta,
         range,
         attributes: Attributes::default(),
+        extensions: Extensions::default(),
     })
 }
 

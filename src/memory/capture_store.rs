@@ -29,9 +29,9 @@ use chrono::Utc;
 use futures::stream::{self, BoxStream, StreamExt};
 use object_store::path::Path as OPath;
 use object_store::{
-    Attributes, CopyOptions, Error as OSError, GetOptions, GetRange, GetResult, GetResultPayload, ListResult,
-    MultipartUpload, ObjectMeta, ObjectStore as OSObjectStore, PutMultipartOptions, PutOptions, PutPayload, PutResult,
-    Result as OSResult, UploadPart,
+    Attributes, CopyOptions, Error as OSError, Extensions, GetOptions, GetRange, GetResult, GetResultPayload,
+    ListResult, MultipartUpload, ObjectMeta, ObjectStore as OSObjectStore, PutMultipartOptions, PutOptions, PutPayload,
+    PutResult, Result as OSResult, UploadPart,
 };
 
 /// In-memory capture of object-store changes: path → the bytes written, or `None` for a delete.
@@ -74,6 +74,7 @@ impl OSObjectStore for CaptureStore {
         Ok(PutResult {
             e_tag: None,
             version: None,
+            extensions: Extensions::default(),
         })
     }
 
@@ -107,6 +108,7 @@ impl OSObjectStore for CaptureStore {
                     meta: meta(location.clone(), total),
                     range,
                     attributes: Attributes::default(),
+                    extensions: Extensions::default(),
                 })
             }
             None => self.inner.get_opts(location, options).await,
@@ -204,6 +206,7 @@ impl MultipartUpload for CaptureMultipart {
         Ok(PutResult {
             e_tag: None,
             version: None,
+            extensions: Extensions::default(),
         })
     }
 
