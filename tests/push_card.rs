@@ -104,7 +104,7 @@ async fn card_created_refreshed_and_a_hand_card_respected() {
     // Cleanup before asserting, so a failed assertion can't leave the scratch repo behind.
     let _ = client
         .delete_repository()
-        .repo_id(format!("{OWNER}/{name}"))
+        .repo_id(&format!("{OWNER}/{name}"))
         .repo_type(RepoTypeDataset)
         .send()
         .await;

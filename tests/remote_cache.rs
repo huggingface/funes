@@ -103,7 +103,7 @@ async fn warm_recall_is_served_from_cache_without_downloading() {
     // Cleanup before asserting, so a failed assertion can't leave the scratch repo behind.
     let _ = client
         .delete_repository()
-        .repo_id(format!("{OWNER}/{name}"))
+        .repo_id(&format!("{OWNER}/{name}"))
         .repo_type(RepoTypeDataset)
         .send()
         .await;
