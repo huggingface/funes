@@ -696,8 +696,8 @@ const VECTOR: IndexSpec = IndexSpec {
     label: "vector index",
 };
 
-/// Refresh `index` if `existing` lists it, else build it whole with `params`. A refresh that fails
-/// also builds it whole, so the rows it left out don't stay unindexed.
+/// Refresh `index` if `existing` lists it, else build it whole with `params`. A refresh that fails,
+/// or leaves rows out, also builds it whole, so those rows don't stay unindexed.
 async fn refresh_or_build(
     ds: &mut Dataset,
     index: &IndexSpec,
@@ -706,7 +706,11 @@ async fn refresh_or_build(
     on_event: impl Fn(IndexBuildEvent),
 ) -> Result<()> {
     if let Some(&subs) = existing.get(index.name) {
-        if optimize_index(ds, index.name, subs, &on_event).await.is_ok() {
+        // When lance cannot open one of the index's segments, it skips the refresh and still
+        // returns Ok, so only an index that now covers every fragment was refreshed.
+        if optimize_index(ds, index.name, subs, &on_event).await.is_ok()
+            && ds.unindexed_fragments(index.name).await.is_ok_and(|f| f.is_empty())
+        {
             return Ok(());
         }
     }
@@ -1654,6 +1658,9 @@ mod tests {
             std::fs::write(file.unwrap().path(), b"corrupt").unwrap();
         }
 
+        // A fresh handle, as the next `funes index` opens: the delta is read from disk, not from
+        // the cache of the handle that built it.
+        let mut ds = open(&uri, HashMap::new()).await.unwrap();
         ds.append(reader(embedded(&turns(TRAINABLE + MERGE_DELTAS, 1))), None)
             .await
             .unwrap();
