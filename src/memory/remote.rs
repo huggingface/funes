@@ -54,6 +54,7 @@ use lance::dataset::transaction::{Operation, Transaction};
 use lance::dataset::{ColumnAlteration, CommitBuilder, Dataset, NewColumnTransform, WriteParams};
 use lance::Error as LanceError;
 use lance_io::object_store::WrappingObjectStore;
+use object_store::list::PaginatedListStore;
 use object_store::ObjectStore as OSObjectStore;
 
 use super::capture_store::{CaptureStore, Captured};
@@ -861,6 +862,16 @@ impl WrappingObjectStore for CaptureWrapper {
     fn wrap(&self, _prefix: &str, original: Arc<dyn OSObjectStore>) -> Arc<dyn OSObjectStore> {
         Arc::new(CaptureStore::new(original, self.captured.clone()))
     }
+
+    /// A pushed-down listing would walk past the capture: it would miss the files written here and
+    /// still list the ones deleted here.
+    fn wrap_paginated(
+        &self,
+        _prefix: &str,
+        _original: Arc<dyn PaginatedListStore>,
+    ) -> Option<Arc<dyn PaginatedListStore>> {
+        None
+    }
 }
 
 /// Fetches a repo file whole at the pinned revision, returning its path in hf-hub's local cache.
@@ -920,6 +931,15 @@ impl FetchWrapper {
 impl WrappingObjectStore for FetchWrapper {
     fn wrap(&self, _prefix: &str, original: Arc<dyn OSObjectStore>) -> Arc<dyn OSObjectStore> {
         Arc::new(FetchStore::new(original, self.fetcher.clone()))
+    }
+
+    /// [`FetchStore`] serves reads alone and passes listings through, so the pushdown can stay.
+    fn wrap_paginated(
+        &self,
+        _prefix: &str,
+        original: Arc<dyn PaginatedListStore>,
+    ) -> Option<Arc<dyn PaginatedListStore>> {
+        Some(original)
     }
 }
 
