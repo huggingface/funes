@@ -2576,7 +2576,7 @@ dependencies = [
  "futures",
  "half",
  "hex",
- "hf-hub 1.0.0-rc.1",
+ "hf-hub 1.0.0",
  "lance",
  "lance-index",
  "lance-io",
@@ -3085,18 +3085,20 @@ dependencies = [
 
 [[package]]
 name = "hf-hub"
-version = "1.0.0-rc.1"
+version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f89305dc8fe34e165eaf0eb12b6e294e12381d9df9a431bcc52a5809bab4319"
+checksum = "e7ccb6bcc85dec15413ef5949879f9a5497ca4568ed702547eb83fac23376e5c"
 dependencies = [
  "base64 0.22.1",
  "bon",
  "bytes",
  "futures",
+ "getrandom 0.2.17",
  "globset",
  "hf-xet",
  "hyper",
  "pathdiff",
+ "percent-encoding",
  "reqwest 0.13.4",
  "serde",
  "serde_json",
@@ -3107,6 +3109,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "url",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]

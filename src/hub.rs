@@ -162,7 +162,7 @@ pub async fn whoami() -> Result<String> {
 pub async fn create_dataset_repo(owner: &str, name: &str) -> Result<()> {
     authed_client()?
         .create_repository()
-        .repo_id(format!("{owner}/{name}"))
+        .repo_id(&format!("{owner}/{name}"))
         .repo_type(RepoTypeDataset)
         // Agent memory is the user's own data — create private; going public is a deliberate act
         // on the Hub. `exist_ok` means an already-created repo keeps whatever visibility it has.
