@@ -159,16 +159,18 @@ note that the *retrieval* machinery (hybrid vector + lexical search, fused, opti
 common to mature memory systems; funes does not differentiate on search. The difference is
 entirely *upstream*: deterministic no-LLM ingest, immutable passages, and provenance.
 
-This isn't a guess about search — it was measured. A run of recall-quality enhancements —
-abstention thresholds, MMR diversity, near-duplicate collapse, semantic expansion, deeper
-candidate pools, and a per-chunk *kind* facet, some at query time and
-some computed at index time — was A/B'd against a labeled retrieval anchor; none moved
-recall. The cross-encoder is the exception. On the 244 labeled questions of
+We evaluate every change to the search on the labeled questions of
 [`dacorvo/funes-recall-benchmark`](https://huggingface.co/datasets/dacorvo/funes-recall-benchmark),
-the fused order puts the answer in the default 8 hits from 30 candidates for 95 of them,
-bge-reranker-base for 104 (p = 0.0023) and gte-reranker-modernbert-base, the reranker funes runs,
-for 128 (p < 0.0001), first for 62 against 31. So recall reranks any pool larger than the hits, at
-an extra latency of typically seconds.
+and keep only those that improve recall:
+
+- A cross-encoder reranks any pool larger than the hits.
+- The search is hybrid: the vector half finds answers full-text search misses.
+- The vector search refines the index's shortlist on the stored vectors.
+
+> **Tested and abandoned:** abstention thresholds, MMR diversity, near-duplicate collapse, semantic
+> expansion, deeper candidate pools and a per-chunk *kind* facet did not move recall. Rebuilding
+> the vector index (larger codes, RaBitQ, scalar quantization, more partitions, retraining) did no
+> better than refining its shortlist.
 
 ## Where this leaves funes
 
