@@ -130,6 +130,10 @@ pub async fn scan_rows_with_ids(ds: &Dataset, columns: &[&str], filter: Option<&
     collect(scan).await
 }
 
+/// The vector index's PQ codes shortlist this many times the rows asked for, and the stored vectors
+/// rank the shortlist: the codes alone misorder close neighbours.
+const REFINE_FACTOR: u32 = 10;
+
 /// The `limit` rows nearest to `query` by vector distance, nearest first, each with its row id.
 /// `filter` is applied before the search, not to its result: a selective filter would otherwise
 /// drop most of a globally-nearest pool and return far fewer than `limit` rows when matches exist.
@@ -143,6 +147,7 @@ pub async fn nearest(
     let query = Float32Array::from(query.to_vec());
     let mut scan = ds.scan();
     scan.nearest("vector", &query, limit)?;
+    scan.refine(REFINE_FACTOR);
     if let Some(f) = filter {
         scan.prefilter(true);
         scan.filter(f)?;
@@ -1157,6 +1162,30 @@ mod tests {
         assert_eq!(ds.count_rows(Some("vector IS NOT NULL".into())).await.unwrap(), 256);
         assert_eq!(ds.count_rows(Some("vector IS NULL".into())).await.unwrap(), 2);
         assert_eq!(sub_index_counts(&ds).await.unwrap()[VECTOR_INDEX], 1);
+    }
+
+    #[tokio::test]
+    async fn nearest_measures_distances_on_the_stored_vectors() {
+        let dir = tempfile::tempdir().unwrap();
+        let uri = table_uri(dir.path());
+        // Far more rows than a PQ codebook's 256 centroids, so the codes can't hold the vectors exactly.
+        let n = 2000;
+        let mut ds = Dataset::write(reader(embedded(&turns(0, n))), &uri, None)
+            .await
+            .unwrap();
+        build_indexes(&mut ds, |_| {}).await.unwrap();
+        assert_eq!(sub_index_counts(&ds).await.unwrap()[VECTOR_INDEX], 1);
+
+        let batches = nearest(&ds, &vectors(n)[7], 10, None, &["turn_uuid", "_distance"])
+            .await
+            .unwrap();
+        let distance = batches[0]
+            .column_by_name("_distance")
+            .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
+            .unwrap()
+            .value(0);
+        assert_eq!(strs(&batches[0], "turn_uuid").get(0), "turn7");
+        assert_eq!(distance, 0.0, "measured on the PQ codes instead of the stored vector");
     }
 
     #[tokio::test]
