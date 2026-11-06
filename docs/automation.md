@@ -75,7 +75,9 @@ validates a producer's output without writing anything, so run it before wiring 
   Reads take no lock. `funes push` takes one of its own, per remote memory — it only reads the local
   memory, so it never blocks an index — and a publish that finds another in flight steps aside; the
   next session start sweeps it. Nothing is serialized across machines: two hosts publishing to one
-  memory still race on the Hub.
+  memory compete for its head on the Hub, and the one that loses retries. The one case that can
+  leave rows out is a first publish to an empty memory, which has no head to check against. Setting
+  up one host before the others avoids it.
 - **Secrets held back.** funes redacts credentials at index time; on push, a separate always-on gate
   withholds any chunk that still contains one — the clean rows publish, and the push exits non-zero
   (code `2`) only if that leaves nothing to publish. Run `funes scrub`, then the next push includes it.
