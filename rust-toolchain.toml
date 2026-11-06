@@ -1,0 +1,6 @@
+# A fixed release rather than `stable`, so every checkout and every CI job builds with the same
+# compiler and lints. Move it to each new stable release: the Rust project supports only the latest.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

@@ -31,7 +31,8 @@ Two more places to look before proposing:
 
 You need:
 
-- **Rust** (stable; CI builds with 1.95.0)
+- **Rust** (the release [rust-toolchain.toml](rust-toolchain.toml) pins, which rustup installs on
+  the first `cargo` call)
 - **`protoc`** — `lance`'s build scripts compile protobuf at build time:
 
   ```bash

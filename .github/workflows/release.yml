@@ -13,6 +13,7 @@ on:
       - "tests/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "rust-toolchain.toml"
       - "scripts/install.sh"
       - ".github/workflows/release.yml"
   workflow_dispatch:
@@ -147,9 +148,17 @@ jobs:
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
-        with:
-          targets: ${{ matrix.target }}
+      # The bare container has no rustup, unlike the hosted runners.
+      - name: Install rustup
+        run: |
+          set -o pipefail
+          curl --proto '=https' --tlsv1.2 --retry 10 --retry-connrefused --location --silent --show-error --fail https://sh.rustup.rs | sh -s -- --default-toolchain none -y
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Install Rust from rust-toolchain.toml
+        run: |
+          rustup toolchain install --no-self-update
+          rustup target add ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
@@ -238,9 +247,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
-        with:
-          targets: aarch64-apple-darwin
+      - name: Install Rust from rust-toolchain.toml
+        run: |
+          rustup toolchain install --no-self-update
+          rustup target add aarch64-apple-darwin
 
       - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
