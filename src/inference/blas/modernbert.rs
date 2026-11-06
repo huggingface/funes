@@ -88,7 +88,7 @@ impl Rope {
     /// Rotate one head's rows in place: `x` is [l × HD], the row at position t by t's angles.
     fn rotate(&self, x: &mut [f32]) {
         let half = HD / 2;
-        for (t, row) in x.chunks_exact_mut(HD).enumerate() {
+        for (t, row) in x.as_chunks_mut::<HD>().0.iter_mut().enumerate() {
             let (cos, sin) = (&self.cos[t * half..][..half], &self.sin[t * half..][..half]);
             let (a, b) = row.split_at_mut(half);
             for (((x0, x1), c), s) in a.iter_mut().zip(b.iter_mut()).zip(cos).zip(sin) {
@@ -233,7 +233,7 @@ fn encode(
         buf.resize(len, 0.0);
     }
     let emb = g("model.embeddings.tok_embeddings.weight");
-    for (row, &id) in s.hid.chunks_exact_mut(H).zip(ids) {
+    for (row, &id) in s.hid.as_chunks_mut::<H>().0.iter_mut().zip(ids) {
         row.copy_from_slice(&emb[id as usize * H..][..H]);
     }
     norm(&mut s.hid, g("model.embeddings.norm.weight"));
@@ -276,7 +276,9 @@ pub(in crate::inference) fn head(w: &HashMap<String, Vec<f32>>, pooled: &[f32], 
     matmul(pooled, n, H, dense, H, &mut d);
     gelu(&mut d);
     norm(&mut d, gamma);
-    d.chunks_exact(H)
+    d.as_chunks::<H>()
+        .0
+        .iter()
         .map(|row| row.iter().zip(cw).map(|(a, b)| a * b).sum::<f32>() + cb[0])
         .collect()
 }
