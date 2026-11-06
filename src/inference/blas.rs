@@ -192,8 +192,7 @@ mod seam {
     #[multiversion::multiversion(targets("x86_64+avx512f+avx512bw+avx512dq", "x86_64+avx2+fma"))]
     pub fn vmax(x: &[f32]) -> f32 {
         let mut acc = [f32::MIN; LANES];
-        let chunks = x.chunks_exact(LANES);
-        let rem = chunks.remainder();
+        let (chunks, rem) = x.as_chunks::<LANES>();
         for c in chunks {
             for (a, v) in acc.iter_mut().zip(c) {
                 *a = a.max(*v);
@@ -207,8 +206,7 @@ mod seam {
     #[multiversion::multiversion(targets("x86_64+avx512f+avx512bw+avx512dq", "x86_64+avx2+fma"))]
     pub fn vsum(x: &[f32]) -> f32 {
         let mut acc = [0f32; LANES];
-        let chunks = x.chunks_exact(LANES);
-        let rem = chunks.remainder();
+        let (chunks, rem) = x.as_chunks::<LANES>();
         for c in chunks {
             for (a, v) in acc.iter_mut().zip(c) {
                 *a += *v;
@@ -455,11 +453,7 @@ pub(super) fn load_weights(dir: &Path) -> Result<HashMap<String, Vec<f32>>> {
             let take = left.min(WINDOW);
             file.read_exact(&mut window[..take])
                 .with_context(|| format!("reading {name} from {}", path.display()))?;
-            vals.extend(
-                window[..take]
-                    .chunks_exact(4)
-                    .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])),
-            );
+            vals.extend(window[..take].as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)));
             left -= take;
         }
         at = end;
