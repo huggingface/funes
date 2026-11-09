@@ -38,7 +38,7 @@ Re-emit the file, or upgrade funes, and it is read again.
 | `format` | integer | no | format version; `1` when absent. A version funes does not know is rejected. |
 | `session_id` | string | yes | the conversation this turn belongs to. **One session is one thread** — a transcript, an issue, a PR. An id input; may not contain `:`. |
 | `turn_uuid` | string | yes | the turn's identity: unique within its session, **stable across re-emits**. An id input; may not contain `:`. |
-| `seq` | integer | yes | the turn's position in its session: a **dense counter from 0**, in the order the producer emits turns, never reassigned. Positional neighbours (`seq ± window`) and `get` read by it. |
+| `seq` | integer | yes | the turn's position in its session: a **dense counter from 0**, in the order the producer emits turns, never reassigned. `get` reads by it. |
 | `ts` | string | yes | when the turn happened, RFC 3339 **in UTC, `Z` suffix** — `2026-09-18T09:41:07Z`. Printed on every hit and turn; a session's earliest dates it for `sessions --since/--until`. |
 | `role` | string | yes | who speaks. One dimension per producer, no default bucket. Agents: `user` / `assistant` / `tool` / `system`. A tracker might use `member` / `contributor` / `bot`. |
 | `harness` | string | yes | the producer's id: lowercase letters, digits, `-` (preferred) or `_` — `opencode`, `cline`, `github`. A stored facet; `recall --harness` filters on it. |
@@ -96,9 +96,9 @@ follows from that.
 4. **`seq` is a dense counter in emission order.** 0, 1, 2… with no gaps, assigned once and never
    reassigned: a delta file continues where the previous one stopped, and a turn discovered late takes
    the next number, not the one its `ts` would suggest. Position is order of appearance; `ts` carries
-   time. `get` reads ranges of `seq` and neighbours are `seq ± window`, so a sparse or shifting counter
+   time. `get` reads ranges of `seq`, so a sparse or shifting counter
    breaks both.
-5. **One session is one thread.** `get`, neighbours, `sketch` and `sessions` all assume it. A whole
+5. **One session is one thread.** `get`, `sketch` and `sessions` all assume it. A whole
    issue tracker is thousands of sessions, not one.
 
 ## Validation

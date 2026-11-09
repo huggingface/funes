@@ -154,7 +154,6 @@ async fn main() -> Result<()> {
             q.question.clone(),
             32,
             32,
-            0,
             RecallFilter::default(),
             &|_| (),
         )
@@ -188,7 +187,6 @@ async fn main() -> Result<()> {
                 q.question.clone(),
                 pool,
                 pool,
-                0,
                 RecallFilter::default(),
                 &|_| (),
             )

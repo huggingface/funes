@@ -39,8 +39,8 @@ async fn recall_tolerates_a_memory_without_the_harness_column() {
         "parse transcripts into turns".into(),
         5,
         30,
-        1,
         Default::default(),
+        false,
     )
     .await
     .expect("recall over a memory without the harness column");
@@ -56,11 +56,11 @@ async fn recall_tolerates_a_memory_without_the_harness_column() {
         "parse transcripts into turns".into(),
         5,
         30,
-        1,
         funes::commands::recall::RecallFilter {
             harness: Some("pi".into()),
             ..Default::default()
         },
+        false,
     )
     .await
     .expect_err("--harness on a column-less memory should error");

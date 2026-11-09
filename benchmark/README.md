@@ -20,15 +20,14 @@ dataset over `hf://` — both legs run identical data, so the gap is the I/O pat
 Every timed call runs the recall pipeline:
 
 ```
-embed query → vector ANN + BM25 FTS (fused by RRF) → [cross-encoder rerank] → neighbors → format
+embed query → vector ANN + BM25 FTS (fused by RRF) → [cross-encoder rerank] → format
 ```
 
 The rerank runs whenever the pool holds more rows than `--k`, so a default timed call (8 of 30)
 reranks 30 pairs. `--candidates 8` times a call without one.
 
 The CPU stages (query embed, and the rerank when it runs) are identical whatever the memory, so the
-local↔remote gap is entirely the I/O path: opening the dataset, the ANN/FTS scans, and the neighbor
-fetch. The embed + rerank models are loaded once in a warm-up call that is **excluded** from all
+local↔remote gap is entirely the I/O path: opening the dataset and the ANN/FTS scans. The embed + rerank models are loaded once in a warm-up call that is **excluded** from all
 timings.
 
 For each memory the harness reports a single **cold** call followed by the min / median / max of
@@ -63,7 +62,6 @@ both legs run identical data, so the gap is the I/O path, not the corpus.
 | `--cold` | off | give the remote leg a throwaway `HF_HUB_CACHE` temp dir so its cold call is a true download (your real cache is left untouched) |
 | `--k <N>` | `8` | results returned |
 | `--candidates <N>` | `30` | fused candidates reranked |
-| `--neighbors <N>` | `1` | adjacent chunks attached per hit |
 
 > `--cold` only relocates the hf-hub file **cache** (via `HF_HUB_CACHE`) to a temp dir for the run —
 > it does not touch your real `~/.cache/huggingface/hub`, your HF token, or `HF_HOME`. The local-leg

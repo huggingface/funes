@@ -16,8 +16,8 @@ async fn recall_without_an_index_guides_to_funes_add() {
         "how do I connect funes to claude code".into(),
         5,
         30,
-        1,
         Default::default(),
+        false,
     )
     .await
     .expect_err("recall with no index should error, not return canned content")

@@ -29,8 +29,8 @@ async fn index_then_read_surface() {
         "parse transcripts into turns".into(),
         5,
         30,
-        1,
         Default::default(),
+        false,
     )
     .await
     .unwrap();
@@ -50,11 +50,11 @@ async fn index_then_read_surface() {
         "cargo test".into(),
         5,
         30,
-        0,
         funes::commands::recall::RecallFilter {
             block_type: Some("tool_use".into()),
             ..Default::default()
         },
+        false,
     )
     .await
     .unwrap();
@@ -283,8 +283,8 @@ async fn index_then_read_surface() {
         "parse transcripts into turns".into(),
         5,
         30,
-        1,
         Default::default(),
+        false,
     )
     .await
     .unwrap();

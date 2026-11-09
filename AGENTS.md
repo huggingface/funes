@@ -42,6 +42,9 @@ that will drift.
   The recall is a default one, so its pool is reranked like any pool larger than the hits.
 - **A memory's state comes from the domain.** Ask `Memory::state()`; never infer it from an error
   shape.
+- **An MCP request refuses a parameter its schema does not list.** The request types carry
+  `deny_unknown_fields`, so a retired or misspelled parameter fails the call with the field named.
+  An agent reading the schema never sends one, and a silent ignore would hide the bug.
 
 ## Working on the repo
 

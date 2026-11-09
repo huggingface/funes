@@ -1,6 +1,6 @@
 //! The read surface: `recall`, `get`, `status` over the existing index.
-//! Recall pipeline: hybrid (vector + BM25, fused by reciprocal rank) → neighbor expansion, with a
-//! cross-encoder rerank of the pool before the cut when it holds more rows than the hits ([`reranks`]).
+//! Recall pipeline: hybrid (vector + BM25, fused by reciprocal rank), with a cross-encoder rerank of
+//! the pool before the cut when it holds more rows than the hits ([`reranks`]).
 //! `recall`/`get` return results rendered in the agent format;
 //! `recall_hits`/`get_turns` return the structured results for other renderings (see `render`).
 
@@ -33,19 +33,8 @@ const HIT_COLS: &[&str] = &[
     "harness",
 ];
 
-/// Scanned row for neighbor expansion: (session_id, seq, turn_uuid, block_idx, split_idx, role, block_type, text).
-type NeighborRow = (String, i64, String, i64, i64, String, String, String);
-
 /// Scanned row for `get`: (seq, turn_uuid, ts, role, block_idx, split_idx, text).
 type TurnRow = (i64, String, String, String, i64, i64, String);
-
-/// One adjacent chunk pulled in to give a hit some surrounding context.
-pub struct Neighbor {
-    pub seq: i64,
-    pub role: String,
-    pub block_type: String,
-    pub text: String,
-}
 
 /// One candidate row carried from retrieval through rerank to display.
 pub struct Hit {
@@ -58,7 +47,6 @@ pub struct Hit {
     pub ts: String,
     pub block_type: String,
     pub harness: String,
-    pub neighbors: Vec<Neighbor>,
     /// The `--memory` the hit's drill-down repeats, as the call named it; empty for a call naming
     /// none.
     pub memory: String,
@@ -399,7 +387,6 @@ async fn models() -> &'static Mutex<Models> {
 /// A recall's defaults, owned here so the CLI and the MCP server search the same way.
 pub const DEFAULT_K: usize = 8;
 pub const DEFAULT_CANDIDATES: usize = 30;
-pub const DEFAULT_NEIGHBORS: i64 = 1;
 
 /// Whether a recall of `k` hits from a pool of `pool` rows reranks it: whenever the pool holds more
 /// than the hits, so the cut has something to choose. On the labeled sets, reranking the default
@@ -413,16 +400,16 @@ pub fn reranks(k: usize, pool: usize) -> bool {
 }
 
 /// Run the recall pipeline over what `target` reads and return the results rendered in the agent
-/// format.
+/// format: each hit's passage, or one row per hit with `oneline`.
 pub async fn recall(
     target: impl Into<Target>,
     query: String,
     k: usize,
     candidates: usize,
-    neighbors: i64,
     filter: RecallFilter,
+    oneline: bool,
 ) -> Result<String> {
-    recall_with_progress(target, query, k, candidates, neighbors, filter, &|_| ()).await
+    recall_with_progress(target, query, k, candidates, filter, oneline, &|_| ()).await
 }
 
 /// [`recall`], reporting each stage to `progress`.
@@ -431,20 +418,23 @@ pub async fn recall_with_progress(
     query: String,
     k: usize,
     candidates: usize,
-    neighbors: i64,
     filter: RecallFilter,
+    oneline: bool,
     progress: &(dyn Fn(&str) + Sync),
 ) -> Result<String> {
     let search = Search::new(query, candidates, filter)?;
     let pools = target.into().candidates(&search, progress).await?;
     let languages = rephrase_languages(pools.iter().map(|pool| &pool.ds));
-    let (note, hits) = search.rank(pools, k, neighbors, progress).await?;
-    Ok(crate::ui::render::recall_reply(&note, &hits, languages.as_deref()))
+    let (note, hits) = search.rank(pools, k, progress).await?;
+    Ok(if oneline {
+        crate::ui::render::recall_oneline_reply(&note, &hits, languages.as_deref())
+    } else {
+        crate::ui::render::recall_reply(&note, &hits, languages.as_deref())
+    })
 }
 
 /// Run the recall pipeline over what `target` reads: hybrid retrieval, pooled with this host's
-/// unpushed turns for the bound memory → rank, reranked when the pool holds more rows than `k` →
-/// neighbor expansion.
+/// unpushed turns for the bound memory → rank, reranked when the pool holds more rows than `k`.
 /// Returns the degradation note (empty when the memory opened normally) and the scored hits, best
 /// first — rendering is the caller's choice. `progress` hears a short label as each slow phase
 /// starts (model load, search, rerank); pass a no-op to run silently.
@@ -453,13 +443,12 @@ pub async fn recall_hits(
     query: String,
     k: usize,
     candidates: usize,
-    neighbors: i64,
     filter: RecallFilter,
     progress: &(dyn Fn(&str) + Sync),
 ) -> Result<(String, Vec<(Hit, f64)>)> {
     let search = Search::new(query, candidates, filter)?;
     let pools = target.into().candidates(&search, progress).await?;
-    search.rank(pools, k, neighbors, progress).await
+    search.rank(pools, k, progress).await
 }
 
 /// What narrows a search.
@@ -589,37 +578,29 @@ impl Search {
 
     /// Rank the pooled candidates, a row several memories hold counted once: the best `candidates`
     /// by fused score, reranked by the cross-encoder when the pool holds more rows than `k`
-    /// ([`reranks`]), cut to `k`, with `neighbors` attached from the memory each hit came from.
+    /// ([`reranks`]), cut to `k`.
     /// Returns the pools' degradation notes and the hits, best first.
     pub async fn rank(
         &self,
         pools: Vec<Candidates>,
         k: usize,
-        neighbors: i64,
         progress: &(dyn Fn(&str) + Sync),
     ) -> Result<(String, Vec<(Hit, f64)>)> {
         let note: String = pools.iter().map(|p| p.note.as_str()).collect();
         let mut seen = HashSet::new();
-        let mut hits: Vec<(usize, Hit)> = Vec::new();
-        let mut sources = Vec::with_capacity(pools.len());
-        for (i, pool) in pools.into_iter().enumerate() {
-            hits.extend(
-                pool.hits
-                    .into_iter()
-                    .filter(|h| seen.insert(h.id.clone()))
-                    .map(|h| (i, h)),
-            );
-            sources.push(pool.ds);
+        let mut hits: Vec<Hit> = Vec::new();
+        for pool in pools {
+            hits.extend(pool.hits.into_iter().filter(|h| seen.insert(h.id.clone())));
         }
         // Stable, so equal scores keep their memory's order and the earlier pool's rows.
-        hits.sort_by(|(_, a), (_, b)| b.fused.partial_cmp(&a.fused).unwrap_or(std::cmp::Ordering::Equal));
+        hits.sort_by(|a, b| b.fused.partial_cmp(&a.fused).unwrap_or(std::cmp::Ordering::Equal));
         hits.truncate(self.candidates);
         if hits.is_empty() {
             return Ok((note, Vec::new()));
         }
 
         let mut scored: Vec<(usize, f64)> = if reranks(k, hits.len()) {
-            let docs: Vec<&str> = hits.iter().map(|(_, h)| h.text.as_str()).collect();
+            let docs: Vec<&str> = hits.iter().map(|h| h.text.as_str()).collect();
             progress(&format!("reranking {} candidates…", docs.len()));
             let scores = models()
                 .await
@@ -633,29 +614,19 @@ impl Search {
                 .map(|(i, &s)| (i, 1.0 / (1.0 + (-(s as f64)).exp())))
                 .collect()
         } else {
-            hits.iter().enumerate().map(|(i, (_, h))| (i, h.fused as f64)).collect()
+            hits.iter().enumerate().map(|(i, h)| (i, h.fused as f64)).collect()
         };
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(k);
 
-        // Keep only the top-k hits, in scored order, carrying their score and source along.
-        let mut top: Vec<(usize, Hit, f64)> = Vec::with_capacity(scored.len());
-        let mut taken: Vec<Option<(usize, Hit)>> = hits.into_iter().map(Some).collect();
-        for (idx, score) in &scored {
-            if let Some((source, h)) = taken[*idx].take() {
-                top.push((source, h, *score));
-            }
-        }
+        // Keep only the top-k hits, in scored order, each carrying its score.
+        let mut taken: Vec<Option<Hit>> = hits.into_iter().map(Some).collect();
+        let top = scored
+            .iter()
+            .filter_map(|(idx, score)| taken[*idx].take().map(|h| (h, *score)))
+            .collect();
 
-        if neighbors > 0 {
-            progress("expanding neighbors…");
-            for (i, ds) in sources.iter().enumerate() {
-                let mut refs: Vec<&mut Hit> = top.iter_mut().filter(|t| t.0 == i).map(|t| &mut t.1).collect();
-                attach_neighbors(ds, &mut refs, neighbors).await?;
-            }
-        }
-
-        Ok((note, top.into_iter().map(|(_, h, score)| (h, score)).collect()))
+        Ok((note, top))
     }
 }
 
@@ -721,7 +692,6 @@ fn hits_of(batches: &[RecordBatch]) -> Result<Vec<(u64, Hit)>> {
                     ts: ts.get(i).to_string(),
                     block_type: bt.get(i).to_string(),
                     harness: harness.get(i).to_string(),
-                    neighbors: Vec::new(),
                     memory: String::new(),
                     fused: 0.0,
                 },
@@ -755,84 +725,6 @@ fn rrf_fuse(vector: Vec<(u64, Hit)>, fts: Vec<(u64, Hit)>, limit: usize) -> Vec<
         .into_iter()
         .filter_map(|(id, fused)| rows.remove(&id).map(|h| Hit { fused, ..h }))
         .collect()
-}
-
-/// For each hit, pull chunks in the same session within `window` of its seq (excluding the
-/// hit's own turn) as surrounding context. One combined scan covers every hit.
-async fn attach_neighbors(ds: &Dataset, hits: &mut [&mut Hit], window: i64) -> Result<()> {
-    if hits.is_empty() {
-        return Ok(());
-    }
-    let pred = hits
-        .iter()
-        .map(|h| {
-            format!(
-                "({} AND seq >= {} AND seq <= {})",
-                dataset::eq("session_id", &h.session_id),
-                h.seq - window,
-                h.seq + window
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" OR ");
-
-    let cols = [
-        "session_id",
-        "turn_uuid",
-        "seq",
-        "role",
-        "block_type",
-        "text",
-        "block_idx",
-        "split_idx",
-    ];
-    let batches = dataset::scan_rows(ds, &cols, Some(pred.as_str()), None).await?;
-
-    let mut rows: Vec<NeighborRow> = Vec::new();
-    for batch in &batches {
-        let (sess, turn, role, bt, text) = (
-            dataset::strs(batch, "session_id"),
-            dataset::strs(batch, "turn_uuid"),
-            dataset::strs(batch, "role"),
-            dataset::strs(batch, "block_type"),
-            dataset::strs(batch, "text"),
-        );
-        let (seq, bi, si) = (
-            dataset::ints(batch, "seq"),
-            dataset::ints(batch, "block_idx"),
-            dataset::ints(batch, "split_idx"),
-        );
-        for i in 0..batch.num_rows() {
-            rows.push((
-                sess.get(i).to_string(),
-                seq.get(i),
-                turn.get(i).to_string(),
-                bi.get(i),
-                si.get(i),
-                role.get(i).to_string(),
-                bt.get(i).to_string(),
-                text.get(i).to_string(),
-            ));
-        }
-    }
-
-    for h in hits.iter_mut() {
-        let mut ns: Vec<&NeighborRow> = rows
-            .iter()
-            .filter(|r| r.0 == h.session_id && r.2 != h.turn_uuid && (r.1 - h.seq).abs() <= window)
-            .collect();
-        ns.sort_by_key(|r| (r.1, r.3, r.4));
-        h.neighbors = ns
-            .into_iter()
-            .map(|r| Neighbor {
-                seq: r.1,
-                role: r.5.clone(),
-                block_type: r.6.clone(),
-                text: r.7.clone(),
-            })
-            .collect();
-    }
-    Ok(())
 }
 
 /// Which turns of a session to read, as a `seq` range: `seq` is the session's own dense counter over
@@ -1915,7 +1807,6 @@ mod tests {
             ts: String::new(),
             block_type: String::new(),
             harness: String::new(),
-            neighbors: Vec::new(),
             memory: String::new(),
             fused: 0.0,
         };

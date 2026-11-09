@@ -22,7 +22,6 @@ use crate::ui::render;
 // of its own.
 const K: usize = 8;
 const CANDIDATES: usize = 30;
-const NEIGHBORS: i64 = 1;
 
 /// The prompt must precede the flags, which would otherwise swallow it; the empty strict MCP
 /// config keeps any registered servers out of a session that must answer from the passages
@@ -114,7 +113,6 @@ pub async fn grounding(target: impl Into<Target>, question: &str, progress: &(dy
         question.to_string(),
         K,
         CANDIDATES,
-        NEIGHBORS,
         RecallFilter::default(),
         progress,
     )

@@ -75,8 +75,8 @@ async fn seed_finishes_a_small_history_and_a_rerun_is_a_noop() {
         "parse transcripts".into(),
         5,
         30,
-        0,
         Default::default(),
+        false,
     )
     .await
     .unwrap();

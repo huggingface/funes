@@ -12,7 +12,10 @@ use rmcp::model::{Implementation, ServerCapabilities, ServerConfig};
 use rmcp::transport::stdio;
 use rmcp::{schemars, tool, tool_handler, tool_router, ServerHandler, ServiceExt};
 
+// A request refuses a parameter its schema does not list: an agent reading the schema never sends
+// one, so an unknown field is the caller's bug, failed with the field named rather than ignored.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RecallRequest {
     #[schemars(
         description = "Natural-language description of what to recall from past sessions. A query matches best in the language they are written in, which `status` reports."
@@ -22,8 +25,10 @@ pub struct RecallRequest {
         description = "Hits returned (default 8). Each is a verbatim passage of a few hundred tokens, so `k` is what a call costs to read."
     )]
     pub k: Option<usize>,
-    #[schemars(description = "Adjacent chunks attached to each hit for context; 0 returns the hits alone.")]
-    pub neighbors: Option<i64>,
+    #[schemars(
+        description = "One row per hit, no passage: the provenance, the `→ get` target and the hit's opening words. For choosing what to read before a `get`, at a fraction of the tokens."
+    )]
+    pub oneline: Option<bool>,
     #[schemars(
         description = "Size of the fused pool the hits are cut from (default 30): how far the search looks. Larger than `k`, the pool is reranked by the cross-encoder before the cut, which costs seconds and grows with the pool, so `k` can stay small while the search looks deep. A pool of `k` rows or fewer is read whole, in the fused order."
     )]
@@ -51,6 +56,7 @@ pub struct RecallRequest {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GetRequest {
     #[schemars(description = "Session id from a recall hit's `→ get` line")]
     pub session_id: String,
@@ -69,6 +75,7 @@ pub struct GetRequest {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SessionsRequest {
     #[schemars(description = "Keep only sessions whose checkout resolved to this repo, as `owner/name`")]
     pub repo: Option<String>,
@@ -91,6 +98,7 @@ pub struct SessionsRequest {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ScanRequest {
     #[schemars(
         description = "The literal string to find. Not regex — a pattern that silently matched nothing would read as a clean result."
@@ -115,6 +123,7 @@ pub struct ScanRequest {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SketchRequest {
     #[schemars(description = "Session to digest — the id from a `sessions` row or a hit's `→ get` line")]
     pub session_id: String,
@@ -139,6 +148,7 @@ pub struct SketchRequest {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct StatusRequest {
     #[schemars(
         description = "Memory to inspect — `<org>/<repo>`, an `hf://…` URI, a local path, or `local`. Omitted, the server's memory."
@@ -183,14 +193,14 @@ impl Funes {
     }
 
     #[tool(
-        description = "Semantic search over the user's past AI agent sessions: describe what you are after, get back the verbatim passages — what was decided, tried, measured or investigated. Call it when they refer to earlier work, or when you are about to re-derive something a session may already have settled. Call it too before claiming that something was never built, was dropped, or was never discussed: the code cannot show that, only the sessions can. Ranked top-k, so it gives you a foothold on a topic, not every session touching it. Ranking weighs relevance, not age: for the latest word on a topic, or one stretch of time, bound it with `since`/`until`. Each hit is a passage you will read: `k` is the token cost, `candidates` the reach, and a pool larger than `k` is reranked, at seconds of latency that grow with the pool, so the reach can grow without the reading."
+        description = "Semantic search over the user's past AI agent sessions: describe what you are after, get back the verbatim passages — what was decided, tried, measured or investigated. Call it when they refer to earlier work, or when you are about to re-derive something a session may already have settled. Call it too before claiming that something was never built, was dropped, or was never discussed: the code cannot show that, only the sessions can. Ranked top-k, so it gives you a foothold on a topic, not every session touching it. Ranking weighs relevance, not age: for the latest word on a topic, or one stretch of time, bound it with `since`/`until`. Each hit is a passage you will read: `k` is the token cost, `candidates` the reach, and a pool larger than `k` is reranked, at seconds of latency that grow with the pool, so the reach can grow without the reading. `oneline` lists the hits without their passages, to choose what to read."
     )]
     async fn recall(
         &self,
         Parameters(RecallRequest {
             query,
             k,
-            neighbors,
+            oneline,
             candidates,
             block_type,
             role,
@@ -208,7 +218,6 @@ impl Funes {
                     query,
                     k.unwrap_or(recall::DEFAULT_K),
                     candidates.unwrap_or(recall::DEFAULT_CANDIDATES),
-                    neighbors.unwrap_or(recall::DEFAULT_NEIGHBORS),
                     recall::RecallFilter {
                         block_type,
                         role,
@@ -217,6 +226,7 @@ impl Funes {
                         since,
                         until,
                     },
+                    oneline.unwrap_or(false),
                 )
                 .await
             }
@@ -380,4 +390,21 @@ pub async fn run(memory: Option<String>) -> Result<()> {
     let service = Funes::new(memory).serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_request_refuses_a_parameter_its_schema_does_not_list() {
+        let err = serde_json::from_value::<RecallRequest>(serde_json::json!({"query": "x", "neighbors": 0}))
+            .expect_err("a retired parameter must fail the call");
+        assert!(err.to_string().contains("unknown field `neighbors`"), "got: {err}");
+        let err = serde_json::from_value::<GetRequest>(serde_json::json!({"session_id": "s", "form": 3}))
+            .expect_err("a misspelled parameter must fail the call");
+        assert!(err.to_string().contains("unknown field `form`"), "got: {err}");
+        serde_json::from_value::<RecallRequest>(serde_json::json!({"query": "x", "oneline": true}))
+            .expect("a listed parameter parses");
+    }
 }

@@ -3,7 +3,7 @@
 //!
 //! The CPU stages of recall (query embed, cross-encoder rerank) are identical whatever the memory;
 //! the local↔remote difference is entirely in the I/O stages (memory open, vector ANN scan, BM25
-//! scan, neighbor scan). To compare them fairly the bench downloads the `--remote` dataset to a
+//! scan). To compare them fairly the bench downloads the `--remote` dataset to a
 //! temp dir and benchmarks that local copy against the same dataset over `hf://`.
 //!
 //! ```text
@@ -48,9 +48,6 @@ struct Args {
     /// Fused pool the hits are cut from, reranked when larger than --k.
     #[arg(long, default_value_t = 30)]
     candidates: usize,
-    /// Neighbor chunks attached per hit.
-    #[arg(long, default_value_t = 1)]
-    neighbors: i64,
 }
 
 /// One timed `recall()` call: elapsed millis and the number of hits in the output.
@@ -61,8 +58,8 @@ async fn time_recall(memory: &Memory, a: &Args) -> Result<(f64, usize)> {
         a.query.clone(),
         a.k,
         a.candidates,
-        a.neighbors,
         Default::default(),
+        false,
     )
     .await?;
     let ms = t.elapsed().as_secs_f64() * 1000.0;
@@ -163,11 +160,11 @@ async fn main() -> Result<()> {
     // Warm up the embed + rerank models once (against the local copy), so the one-time model load
     // (hundreds of ms, identical for every memory) is excluded from all timings below.
     eprintln!("loading models…");
-    let _ = recall(local.clone(), a.query.clone(), 1, 5, 0, Default::default()).await;
+    let _ = recall(local.clone(), a.query.clone(), 1, 5, Default::default(), false).await;
 
     println!(
-        "\ndataset: {}   query: {:?}   k={} candidates={} neighbors={}   warm iters={}\n",
-        a.remote, a.query, a.k, a.candidates, a.neighbors, a.iters
+        "\ndataset: {}   query: {:?}   k={} candidates={}   warm iters={}\n",
+        a.remote, a.query, a.k, a.candidates, a.iters
     );
     println!(
         "{:<8} {:>9} {:>9} {:>9} {:>9} {:>5}",
