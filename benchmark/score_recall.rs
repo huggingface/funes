@@ -7,21 +7,22 @@
 //! `--candidates` asks from a deeper pool instead. A pool larger than the hits is reranked before the
 //! cut, so `--candidates 8` scores the fused order alone.
 //!
-//! A question is one JSON object a line: an `id`, the `question` to ask, `gold`, the spans its answer
-//! is in (a `session_id` with optional `from` and `to` turns, the whole session when both are absent),
-//! and an optional `kind` the receipt breaks the scores down by. Other fields are ignored. A
-//! question's rank is the position of its first hit in a gold span. The receipt names the funes
-//! version, the memory's revision and the file's hash, then reports hit@1, hit@5, found@k (k the hits
-//! a default recall returns), the mean reciprocal rank and the median latency, overall and by kind,
-//! then each question's rank. The hits come from the call `funes recall` makes, not from its printed
-//! text: a hit's text can quote an earlier recall, `→ get` lines included, and nothing in the text
-//! tells a quoted hit from a real one.
+//! A question is one JSON object a line: an `id`, the `question` to ask, `gold`, its answering turns
+//! (each a `session_id` and a `turn`: the answer and each restatement), and an optional `kind` the
+//! receipt breaks the scores down by. A question's rank is the position of its first hit showing an
+//! answering turn, as the hit itself or in its exchange frame. The receipt names the funes version,
+//! the memory's revision and the file's hash, then reports hit@1, hit@5, found@k, the mean reciprocal
+//! rank and the answers that are a hit's own turn, overall and by kind, with the median reply size
+//! and latency, then each question's rank and the turns its reply showed, so it can be rescored. The
+//! hits come from the call `funes recall` makes, not from its printed text, which can quote an
+//! earlier recall, `→ get` lines included.
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use funes::commands::recall::{recall_hits, reranks, Hit, RecallFilter, DEFAULT_CANDIDATES, DEFAULT_K};
 use funes::hub::parse_hf;
 use funes::memory::{Memory, MemoryState};
+use funes::ui::render::recall_reply;
 use hf_hub::HFClient;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -32,7 +33,7 @@ use std::time::Instant;
 #[derive(Parser)]
 #[command(about = "Score a default funes recall against a labeled set of questions")]
 struct Args {
-    /// Questions file, one JSON object a line with an `id`, a `question` and its `gold` spans.
+    /// Questions file, one JSON object a line with an `id`, a `question` and its `gold` turns.
     questions: PathBuf,
     /// Memory to ask: `<org>/<repo>`, an `hf://…` URI, a local path, or `local`.
     #[arg(long, default_value = "huggingface/funes-memory")]
@@ -47,23 +48,32 @@ struct Question {
     id: String,
     question: String,
     kind: Option<String>,
-    gold: Vec<Span>,
+    gold: Vec<Answer>,
 }
 
-/// Where a question's answer is: a session, or a range of its turns.
+/// A turn that answers the question, the answer or a restatement.
 #[derive(Deserialize)]
-struct Span {
+struct Answer {
     session_id: String,
-    from: Option<i64>,
-    to: Option<i64>,
+    turn: i64,
 }
 
-impl Span {
-    fn holds(&self, hit: &Hit) -> bool {
-        hit.session_id == self.session_id
-            && self.from.is_none_or(|from| from <= hit.seq)
-            && self.to.is_none_or(|to| hit.seq <= to)
+impl Answer {
+    /// Whether the hit's own turn is this one.
+    fn is_hit(&self, hit: &Hit) -> bool {
+        hit.session_id == self.session_id && hit.seq == self.turn
     }
+
+    /// Whether the hit shows this turn, as itself or in its frame.
+    fn shown_by(&self, hit: &Hit) -> bool {
+        self.is_hit(hit) || (hit.session_id == self.session_id && hit.exchange.iter().any(|e| e.seq == self.turn))
+    }
+}
+
+/// A question's rank, and whether an answering turn is a hit's own turn.
+struct Score {
+    rank: Option<usize>,
+    as_hit: bool,
 }
 
 /// The memory's revision for the receipt: the Hub commit a remote's reads pin to, or a local
@@ -97,19 +107,31 @@ fn dash(rank: Option<usize>) -> String {
     rank.map_or_else(|| "-".to_string(), |r| (r + 1).to_string())
 }
 
-fn row(label: &str, ranks: &[Option<usize>]) {
-    let within = |n: usize| ranks.iter().filter(|r| r.is_some_and(|r| r < n)).count();
-    let mrr = ranks
+/// The turns a reply showed, one word a hit: its own turn, then its frame's.
+fn shown(hits: &[(Hit, f64)]) -> String {
+    hits.iter()
+        .map(|(h, _)| {
+            let frame: String = h.exchange.iter().map(|e| format!("+{}", e.seq)).collect();
+            format!("{}:{}{frame}", h.session_id, h.seq)
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn row(label: &str, scores: &[&Score]) {
+    let within = |n: usize| scores.iter().filter(|s| s.rank.is_some_and(|r| r < n)).count();
+    let mrr = scores
         .iter()
-        .map(|r| r.map_or(0.0, |r| 1.0 / (r as f64 + 1.0)))
+        .map(|s| s.rank.map_or(0.0, |r| 1.0 / (r as f64 + 1.0)))
         .sum::<f64>()
-        / ranks.len() as f64;
+        / scores.len() as f64;
     println!(
-        "{label:16} {:5} {:5} {:7}  {mrr:.3}   (of {})",
+        "{label:16} {:5} {:5} {:7}  {mrr:.3} {:10}   (of {})",
         within(1),
         within(5),
-        ranks.iter().flatten().count(),
-        ranks.len()
+        scores.iter().filter(|s| s.rank.is_some()).count(),
+        scores.iter().filter(|s| s.as_hit).count(),
+        scores.len()
     );
 }
 
@@ -129,8 +151,10 @@ async fn main() -> Result<()> {
     let memory = Memory::resolve(Some(args.memory));
     let revision = revision(&memory).await?;
 
-    let mut ranks = Vec::with_capacity(questions.len());
+    let mut scores = Vec::with_capacity(questions.len());
+    let mut replies = Vec::with_capacity(questions.len());
     let mut ms = Vec::with_capacity(questions.len());
+    let mut chars = Vec::with_capacity(questions.len());
     for q in &questions {
         let t = Instant::now();
         let (note, hits) = recall_hits(
@@ -142,18 +166,24 @@ async fn main() -> Result<()> {
             &|_| (),
         )
         .await?;
+        let took = t.elapsed().as_millis();
         // A degraded read answers from another memory (the local one when the Hub times out), so
         // its hits would be scored against labels they were never drawn from.
         if !note.is_empty() {
             bail!("{}: {}", q.id, note.trim());
         }
-        let rank = hits.iter().position(|(h, _)| q.gold.iter().any(|s| s.holds(h)));
-        let took = t.elapsed().as_millis();
-        eprintln!("{} rank {} {took} ms", q.id, dash(rank));
-        ranks.push(rank);
+        let score = Score {
+            rank: hits.iter().position(|(h, _)| q.gold.iter().any(|a| a.shown_by(h))),
+            as_hit: hits.iter().any(|(h, _)| q.gold.iter().any(|a| a.is_hit(h))),
+        };
+        eprintln!("{} rank {} {took} ms", q.id, dash(score.rank));
+        chars.push(recall_reply(&note, &hits, None).chars().count());
+        replies.push(shown(&hits));
+        scores.push(score);
         ms.push(took);
     }
     ms.sort_unstable();
+    chars.sort_unstable();
 
     println!(
         "funes {}, memory {} @ {revision}, questions {} sha256 {digest}",
@@ -162,7 +192,7 @@ async fn main() -> Result<()> {
         args.questions.display()
     );
     println!(
-        "{} questions, {DEFAULT_K} hits a question from a pool of {}{}, p50 {} ms",
+        "{} questions, {DEFAULT_K} hits a question from a pool of {}{}, p50 {} ms, reply p50 {} chars",
         questions.len(),
         args.candidates,
         if reranks(DEFAULT_K, args.candidates) {
@@ -170,25 +200,28 @@ async fn main() -> Result<()> {
         } else {
             ""
         },
-        ms[ms.len() / 2]
+        ms[ms.len() / 2],
+        chars[chars.len() / 2]
     );
     println!();
-    println!("{:16} hit@1 hit@5 found@{DEFAULT_K}    MRR", "");
-    row("all", &ranks);
+    println!("{:16} hit@1 hit@5 found@{DEFAULT_K}    MRR    as a hit", "");
+    row("all", &scores.iter().collect::<Vec<_>>());
     let kinds: BTreeSet<&str> = questions.iter().filter_map(|q| q.kind.as_deref()).collect();
     for kind in kinds {
-        let of_kind: Vec<Option<usize>> = questions
+        let of_kind: Vec<&Score> = questions
             .iter()
-            .zip(&ranks)
+            .zip(&scores)
             .filter(|(q, _)| q.kind.as_deref() == Some(kind))
-            .map(|(_, r)| *r)
+            .map(|(_, s)| s)
             .collect();
         row(&format!("  {kind}"), &of_kind);
     }
     println!();
-    println!("rank per question (- = not in the hits):");
-    for (q, rank) in questions.iter().zip(&ranks) {
-        println!("  {}  {}", q.id, dash(*rank));
+    println!(
+        "rank per question (- = not in the reply), then the turns the reply showed, a hit's own turn and its frame's:"
+    );
+    for ((q, score), reply) in questions.iter().zip(&scores).zip(&replies) {
+        println!("  {}  {}  {reply}", q.id, dash(score.rank));
     }
     Ok(())
 }
