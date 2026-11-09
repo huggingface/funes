@@ -122,12 +122,14 @@ that there is nothing to compare.
 
 `score_recall.rs` asks each question of a labeled set with `funes recall`'s defaults and prints the
 receipt: the funes version, the memory's revision and the file's hash, then hit@1, hit@5, found@8,
-the mean reciprocal rank and the median latency, overall and by kind, then each question's rank.
+the mean reciprocal rank and how many answers are a hit's own turn, overall and by kind, with the
+median reply size and latency, then each question's rank and the turns its reply showed.
 `--candidates` asks from a deeper pool. `--candidates 8` scores the fused order alone, since a pool
 of the hits is not reranked.
-A question is one JSON line with an `id`, the `question`, `gold` (the spans its answer is in, each a
-`session_id` with optional `from` and `to` turns) and an optional `kind`. Its rank is the position of
-its first hit in a gold span. The labeled sets and their receipts live in the
+A question is one JSON line with an `id`, the `question`, `gold` (the turns that answer it, each a
+`session_id` and the `turn` within it: the answer and each restatement of it) and an optional `kind`.
+Its rank is the position of its first hit that shows an answering turn, as the hit itself or as a turn
+of the exchange frame attached to it. The labeled sets and their receipts live in the
 [`dacorvo/funes-recall-benchmark`](https://huggingface.co/datasets/dacorvo/funes-recall-benchmark)
 dataset:
 
