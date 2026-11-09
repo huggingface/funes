@@ -45,6 +45,11 @@ that will drift.
 - **An MCP request refuses a parameter its schema does not list.** The request types carry
   `deny_unknown_fields`, so a retired or misspelled parameter fails the call with the field named.
   An agent reading the schema never sends one, and a silent ignore would hide the bug.
+- **A hit comes with its exchange frame.** Recall attaches to each hit the prompt that opened its
+  exchange, the assistant's last text before the next prompt and that next prompt, in full, once per
+  reply. On funes-memory that puts the answer in the reply for 185 of 242 questions against 145 for
+  the passages alone, where the two adjacent chunk snippets it replaced added none. Trim a reply
+  with `--oneline` or `k`, not by dropping the frame.
 
 ## Working on the repo
 

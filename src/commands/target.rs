@@ -136,13 +136,19 @@ impl Target {
         Ok(vec![pool, local])
     }
 
+    /// Whether this host still owes the bound memory rows of `session_id`.
+    pub(crate) async fn owes_session(&self, session_id: &str) -> Result<bool> {
+        match self.overlaid() {
+            Some(uri) => receipt::owes_session(uri, session_id).await,
+            None => Ok(false),
+        }
+    }
+
     /// Where `session_id` is read from: the local memory when the bound memory is still owed rows
     /// of it, since the local memory holds the session whole; else the memory itself.
     pub(crate) async fn holder(self, session_id: &str) -> Result<Memory> {
-        if let Some(uri) = self.overlaid() {
-            if receipt::owes_session(uri, session_id).await? {
-                return Ok(Memory::local());
-            }
+        if self.owes_session(session_id).await? {
+            return Ok(Memory::local());
         }
         Ok(self.memory)
     }
