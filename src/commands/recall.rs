@@ -425,7 +425,7 @@ pub async fn recall_with_progress(
     let search = Search::new(query, candidates, filter)?;
     let pools = target.into().candidates(&search, progress).await?;
     let languages = rephrase_languages(pools.iter().map(|pool| &pool.ds));
-    let (note, hits) = search.rank(pools, k, progress).await?;
+    let Ranked { note, hits } = search.rank(pools, k, progress).await?;
     Ok(if oneline {
         crate::ui::render::recall_oneline_reply(&note, &hits, languages.as_deref())
     } else {
@@ -435,9 +435,24 @@ pub async fn recall_with_progress(
 
 /// Run the recall pipeline over what `target` reads: hybrid retrieval, pooled with this host's
 /// unpushed turns for the bound memory → rank, reranked when the pool holds more rows than `k`.
-/// Returns the degradation note (empty when the memory opened normally) and the scored hits, best
-/// first — rendering is the caller's choice. `progress` hears a short label as each slow phase
-/// starts (model load, search, rerank); pass a no-op to run silently.
+/// Returns the cut as a [`Ranked`], for tooling that studies the pool. [`recall_hits`] is the
+/// recall. `progress` hears a short label as each slow phase starts (model load, search, rerank).
+/// Pass a no-op to run silently.
+pub async fn ranked_hits(
+    target: impl Into<Target>,
+    query: String,
+    k: usize,
+    candidates: usize,
+    filter: RecallFilter,
+    progress: &(dyn Fn(&str) + Sync),
+) -> Result<Ranked> {
+    let search = Search::new(query, candidates, filter)?;
+    let pools = target.into().candidates(&search, progress).await?;
+    search.rank(pools, k, progress).await
+}
+
+/// The hits of a recall over what `target` reads ([`ranked_hits`]): the degradation note (empty when
+/// the memory opened normally) and the scored hits, best first. Rendering is the caller's choice.
 pub async fn recall_hits(
     target: impl Into<Target>,
     query: String,
@@ -446,9 +461,8 @@ pub async fn recall_hits(
     filter: RecallFilter,
     progress: &(dyn Fn(&str) + Sync),
 ) -> Result<(String, Vec<(Hit, f64)>)> {
-    let search = Search::new(query, candidates, filter)?;
-    let pools = target.into().candidates(&search, progress).await?;
-    search.rank(pools, k, progress).await
+    let Ranked { note, hits } = ranked_hits(target, query, k, candidates, filter, progress).await?;
+    Ok((note, hits))
 }
 
 /// What narrows a search.
@@ -578,14 +592,8 @@ impl Search {
 
     /// Rank the pooled candidates, a row several memories hold counted once: the best `candidates`
     /// by fused score, reranked by the cross-encoder when the pool holds more rows than `k`
-    /// ([`reranks`]), cut to `k`.
-    /// Returns the pools' degradation notes and the hits, best first.
-    pub async fn rank(
-        &self,
-        pools: Vec<Candidates>,
-        k: usize,
-        progress: &(dyn Fn(&str) + Sync),
-    ) -> Result<(String, Vec<(Hit, f64)>)> {
+    /// ([`reranks`]), cut to `k`. Returns the pools' degradation notes and the hits, best first.
+    pub async fn rank(&self, pools: Vec<Candidates>, k: usize, progress: &(dyn Fn(&str) + Sync)) -> Result<Ranked> {
         let note: String = pools.iter().map(|p| p.note.as_str()).collect();
         let mut seen = HashSet::new();
         let mut hits: Vec<Hit> = Vec::new();
@@ -596,7 +604,7 @@ impl Search {
         hits.sort_by(|a, b| b.fused.partial_cmp(&a.fused).unwrap_or(std::cmp::Ordering::Equal));
         hits.truncate(self.candidates);
         if hits.is_empty() {
-            return Ok((note, Vec::new()));
+            return Ok(Ranked { note, hits: Vec::new() });
         }
 
         let mut scored: Vec<(usize, f64)> = if reranks(k, hits.len()) {
@@ -621,13 +629,22 @@ impl Search {
 
         // Keep only the top-k hits, in scored order, each carrying its score.
         let mut taken: Vec<Option<Hit>> = hits.into_iter().map(Some).collect();
-        let top = scored
+        let hits = scored
             .iter()
             .filter_map(|(idx, score)| taken[*idx].take().map(|h| (h, *score)))
             .collect();
 
-        Ok((note, top))
+        Ok(Ranked { note, hits })
     }
+}
+
+/// A search's hits after the cut, best first: what a recall returns, and what tooling studying the
+/// pool reads through [`ranked_hits`].
+pub struct Ranked {
+    /// The pools' degradation notes, empty when every memory opened normally.
+    pub note: String,
+    /// The hits, best first, each with its score.
+    pub hits: Vec<(Hit, f64)>,
 }
 
 /// Vector ANN + BM25 candidates fused by reciprocal rank, top `candidates`.

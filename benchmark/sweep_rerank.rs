@@ -18,7 +18,7 @@
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
-use funes::commands::recall::{recall_hits, RecallFilter};
+use funes::commands::recall::{ranked_hits, Ranked, RecallFilter};
 use funes::inference::{self, Reranker};
 use funes::memory::Memory;
 use serde::{Deserialize, Serialize};
@@ -149,7 +149,7 @@ async fn main() -> Result<()> {
     // Warm up: the embedder, the dataset and the reranker's weights, so no row's timing carries them.
     if let Some(q) = questions.first() {
         let t = Instant::now();
-        let (_, hits) = recall_hits(
+        let Ranked { hits, .. } = ranked_hits(
             memory.clone(),
             q.question.clone(),
             32,
@@ -182,7 +182,7 @@ async fn main() -> Result<()> {
                 continue;
             }
             let t = Instant::now();
-            let (note, hits) = recall_hits(
+            let Ranked { note, hits, .. } = ranked_hits(
                 memory.clone(),
                 q.question.clone(),
                 pool,

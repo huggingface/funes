@@ -153,7 +153,7 @@ cargo run --release --example sweep_rerank -- questions.jsonl --memory mem/funes
 ```
 
 For each question and each `--pools` size N (10, 12, 16, 20, 24, 30, 32, 50 and 100 by default) it
-asks `recall_hits` for N hits from N candidates, the fused order of the pool recall would cut, and
+asks `ranked_hits` for N hits from N candidates, the fused order of the pool recall would cut, and
 scores every candidate with funes's own reranker. One JSON line per question and pool: the
 candidates in fused order, each with its fused score and its reranker score, and the retrieval and
 rerank times. By default a question's union of pools is scored in one reranker call and a chunk's
