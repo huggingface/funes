@@ -35,8 +35,15 @@ Each hit carries its provenance and a ready-to-run drill-down line:
 [<ts>] <harness> <workdir>/<session8> <block_type>  score=<s.sss>
   → get <session_id> --from <seq> --to <seq>[ --memory <memory>]
 <the full chunk text>
+  ↳ [<role> text seq<N>]
+<a turn of the hit's exchange, in full>
 ---
 ```
+
+The `↳` turns are the hit's exchange: the user prompt that opened it, the assistant's last text
+before the next prompt and that next prompt, in session order, each attached once per reply even
+when several hits share an exchange. They are where the answer usually is: the hit is the chunk that
+matched the question, the final text is the assistant's word on it, the next prompt the user's.
 
 After the last hit, one line says what to try when the hits miss: rephrase in the words the hits
 use, or in a language detected in the searched memories when they hold more than English, then

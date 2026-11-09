@@ -65,6 +65,11 @@ async fn recall_bound(uri: &str, query: &str) -> String {
     .unwrap()
 }
 
+/// The passage of one hit's block in a recall reply, before the turns framing it.
+fn passage(hit: &str) -> &str {
+    hit.split("\n  ↳ ").next().unwrap_or(hit)
+}
+
 /// Push confirmations, recorded so the test can assert whether — and with what pending-chunk count —
 /// the no-overlap gate consulted the prompt. Safe as process globals: this binary runs one test.
 static PROMPTS: AtomicUsize = AtomicUsize::new(0);
@@ -199,6 +204,16 @@ async fn push_round_trip_create_append_recall() {
         .unwrap();
     let recall_pooled = recall_bound(&uri, "SYNCSMOKE4 not yet pushed").await;
     let recall_exact = support::recall_remote(&uri, "SYNCSMOKE4 not yet pushed").await;
+    let recall_framed = recall::recall(
+        Target::bound(Memory::parse(&uri)),
+        "SYNCSMOKE3 the turn two pushes race".into(),
+        1,
+        30,
+        Default::default(),
+        false,
+    )
+    .await
+    .unwrap();
     // The session it grew is owed, so the bound memory lists and reads it from the local memory,
     // whole; read as it stands, the remote shows its shorter copy.
     let all_sessions = || recall::SessionFilter {
@@ -311,7 +326,7 @@ async fn push_round_trip_create_append_recall() {
     );
     let unpushed_hit = recall_pooled
         .split("---")
-        .find(|hit| hit.contains("SYNCSMOKE4"))
+        .find(|hit| passage(hit).contains("SYNCSMOKE4"))
         .unwrap_or_else(|| panic!("pooling should surface the unpushed turn: {recall_pooled}"));
     assert!(
         !unpushed_hit.contains("--memory"),
@@ -321,10 +336,18 @@ async fn push_round_trip_create_append_recall() {
         recall_exact.contains(&format!("--memory {uri}")),
         "a read naming the memory hints it: {recall_exact}"
     );
+    let pushed_hits: Vec<&str> = recall_pooled
+        .split("---")
+        .filter(|hit| passage(hit).contains("SYNCSMOKE3 the turn"))
+        .collect();
     assert_eq!(
-        recall_pooled.matches("SYNCSMOKE3 the turn").count(),
+        pushed_hits.len(),
         1,
         "a pushed turn should come back once, not once per memory: {recall_pooled}"
+    );
+    assert!(
+        recall_framed.contains("↳ [user text seq3]") && recall_framed.contains("SYNCSMOKE4"),
+        "an owed session's frame reads the local memory: {recall_framed}"
     );
     assert!(
         !recall_exact.contains("SYNCSMOKE4"),

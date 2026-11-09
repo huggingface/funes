@@ -36,6 +36,13 @@ const HIT_COLS: &[&str] = &[
 /// Scanned row for `get`: (seq, turn_uuid, ts, role, block_idx, split_idx, text).
 type TurnRow = (i64, String, String, String, i64, i64, String);
 
+/// One prose turn of the exchange framing a hit, attached in full.
+pub struct ExchangeTurn {
+    pub seq: i64,
+    pub role: String,
+    pub text: String,
+}
+
 /// One candidate row carried from retrieval through rerank to display.
 pub struct Hit {
     pub id: String,
@@ -47,6 +54,9 @@ pub struct Hit {
     pub ts: String,
     pub block_type: String,
     pub harness: String,
+    /// The prose turns framing the hit's exchange, attached in full: the prompt that opened it, its
+    /// final summary and the next prompt.
+    pub exchange: Vec<ExchangeTurn>,
     /// The `--memory` the hit's drill-down repeats, as the call named it; empty for a call naming
     /// none.
     pub memory: String,
@@ -422,10 +432,16 @@ pub async fn recall_with_progress(
     oneline: bool,
     progress: &(dyn Fn(&str) + Sync),
 ) -> Result<String> {
+    let target = target.into();
     let search = Search::new(query, candidates, filter)?;
-    let pools = target.into().candidates(&search, progress).await?;
+    let pools = target.candidates(&search, progress).await?;
     let languages = rephrase_languages(pools.iter().map(|pool| &pool.ds));
-    let Ranked { note, hits } = search.rank(pools, k, progress).await?;
+    let mut ranked = search.rank(pools, k, progress).await?;
+    // A one-line listing shows no frame, so it reads none.
+    if !oneline {
+        ranked.frame(&target, progress).await?;
+    }
+    let Ranked { note, hits, .. } = ranked;
     Ok(if oneline {
         crate::ui::render::recall_oneline_reply(&note, &hits, languages.as_deref())
     } else {
@@ -433,11 +449,8 @@ pub async fn recall_with_progress(
     })
 }
 
-/// Run the recall pipeline over what `target` reads: hybrid retrieval, pooled with this host's
-/// unpushed turns for the bound memory → rank, reranked when the pool holds more rows than `k`.
-/// Returns the cut as a [`Ranked`], for tooling that studies the pool. [`recall_hits`] is the
-/// recall. `progress` hears a short label as each slow phase starts (model load, search, rerank).
-/// Pass a no-op to run silently.
+/// The hits of a recall before their exchange frame, for tooling that studies the pool rather than
+/// the reply. `progress` hears a short label as each slow phase starts.
 pub async fn ranked_hits(
     target: impl Into<Target>,
     query: String,
@@ -446,13 +459,25 @@ pub async fn ranked_hits(
     filter: RecallFilter,
     progress: &(dyn Fn(&str) + Sync),
 ) -> Result<Ranked> {
+    rank_target(&target.into(), query, k, candidates, filter, progress).await
+}
+
+/// [`ranked_hits`] over a resolved target.
+async fn rank_target(
+    target: &Target,
+    query: String,
+    k: usize,
+    candidates: usize,
+    filter: RecallFilter,
+    progress: &(dyn Fn(&str) + Sync),
+) -> Result<Ranked> {
     let search = Search::new(query, candidates, filter)?;
-    let pools = target.into().candidates(&search, progress).await?;
+    let pools = target.candidates(&search, progress).await?;
     search.rank(pools, k, progress).await
 }
 
-/// The hits of a recall over what `target` reads ([`ranked_hits`]): the degradation note (empty when
-/// the memory opened normally) and the scored hits, best first. Rendering is the caller's choice.
+/// The hits of a recall over what `target` reads, each framed by its exchange: the degradation note
+/// (empty when the memory opened normally) and the scored hits, best first.
 pub async fn recall_hits(
     target: impl Into<Target>,
     query: String,
@@ -461,8 +486,10 @@ pub async fn recall_hits(
     filter: RecallFilter,
     progress: &(dyn Fn(&str) + Sync),
 ) -> Result<(String, Vec<(Hit, f64)>)> {
-    let Ranked { note, hits } = ranked_hits(target, query, k, candidates, filter, progress).await?;
-    Ok((note, hits))
+    let target = target.into();
+    let mut ranked = rank_target(&target, query, k, candidates, filter, progress).await?;
+    ranked.frame(&target, progress).await?;
+    Ok((ranked.note, ranked.hits))
 }
 
 /// What narrows a search.
@@ -596,19 +623,31 @@ impl Search {
     pub async fn rank(&self, pools: Vec<Candidates>, k: usize, progress: &(dyn Fn(&str) + Sync)) -> Result<Ranked> {
         let note: String = pools.iter().map(|p| p.note.as_str()).collect();
         let mut seen = HashSet::new();
-        let mut hits: Vec<Hit> = Vec::new();
-        for pool in pools {
-            hits.extend(pool.hits.into_iter().filter(|h| seen.insert(h.id.clone())));
+        let mut hits: Vec<(usize, Hit)> = Vec::new();
+        let mut sources = Vec::with_capacity(pools.len());
+        for (i, pool) in pools.into_iter().enumerate() {
+            hits.extend(
+                pool.hits
+                    .into_iter()
+                    .filter(|h| seen.insert(h.id.clone()))
+                    .map(|h| (i, h)),
+            );
+            sources.push(pool.ds);
         }
         // Stable, so equal scores keep their memory's order and the earlier pool's rows.
-        hits.sort_by(|a, b| b.fused.partial_cmp(&a.fused).unwrap_or(std::cmp::Ordering::Equal));
+        hits.sort_by(|(_, a), (_, b)| b.fused.partial_cmp(&a.fused).unwrap_or(std::cmp::Ordering::Equal));
         hits.truncate(self.candidates);
         if hits.is_empty() {
-            return Ok(Ranked { note, hits: Vec::new() });
+            return Ok(Ranked {
+                note,
+                hits: Vec::new(),
+                origins: Vec::new(),
+                sources,
+            });
         }
 
         let mut scored: Vec<(usize, f64)> = if reranks(k, hits.len()) {
-            let docs: Vec<&str> = hits.iter().map(|h| h.text.as_str()).collect();
+            let docs: Vec<&str> = hits.iter().map(|(_, h)| h.text.as_str()).collect();
             progress(&format!("reranking {} candidates…", docs.len()));
             let scores = models()
                 .await
@@ -622,29 +661,254 @@ impl Search {
                 .map(|(i, &s)| (i, 1.0 / (1.0 + (-(s as f64)).exp())))
                 .collect()
         } else {
-            hits.iter().enumerate().map(|(i, h)| (i, h.fused as f64)).collect()
+            hits.iter().enumerate().map(|(i, (_, h))| (i, h.fused as f64)).collect()
         };
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(k);
 
-        // Keep only the top-k hits, in scored order, each carrying its score.
-        let mut taken: Vec<Option<Hit>> = hits.into_iter().map(Some).collect();
-        let hits = scored
+        // Keep only the top-k hits, in scored order, each with its score and the memory it came from.
+        let mut taken: Vec<Option<(usize, Hit)>> = hits.into_iter().map(Some).collect();
+        let top: Vec<(usize, Hit, f64)> = scored
             .iter()
-            .filter_map(|(idx, score)| taken[*idx].take().map(|h| (h, *score)))
+            .filter_map(|(idx, score)| taken[*idx].take().map(|(source, h)| (source, h, *score)))
             .collect();
 
-        Ok(Ranked { note, hits })
+        let (origins, hits) = top.into_iter().map(|(source, h, score)| (source, (h, score))).unzip();
+        Ok(Ranked {
+            note,
+            hits,
+            origins,
+            sources,
+        })
     }
 }
 
-/// A search's hits after the cut, best first: what a recall returns, and what tooling studying the
-/// pool reads through [`ranked_hits`].
+/// A search's hits after the cut, best first, before their exchange frame ([`Ranked::frame`]).
 pub struct Ranked {
     /// The pools' degradation notes, empty when every memory opened normally.
     pub note: String,
     /// The hits, best first, each with its score.
     pub hits: Vec<(Hit, f64)>,
+    /// For each hit, the index in `sources` of the memory it came from.
+    origins: Vec<usize>,
+    sources: Vec<Dataset>,
+}
+
+impl Ranked {
+    /// Attach to each hit the turns framing its exchange. A session this host still owes the bound
+    /// memory rows of is read from the local memory, which holds it whole, as `get` reads it.
+    pub async fn frame(&mut self, target: &Target, progress: &(dyn Fn(&str) + Sync)) -> Result<()> {
+        progress("attaching exchanges…");
+        let mut attached: HashSet<(String, i64)> =
+            self.hits.iter().map(|(h, _)| (h.session_id.clone(), h.seq)).collect();
+        let sessions: BTreeSet<String> = self.hits.iter().map(|(h, _)| h.session_id.clone()).collect();
+        let mut owed = HashSet::new();
+        for sid in sessions {
+            if target.owes_session(&sid).await? {
+                owed.insert(sid);
+            }
+        }
+        if !owed.is_empty() {
+            let local = Memory::local().open().await?;
+            let mut refs: Vec<&mut Hit> = self
+                .hits
+                .iter_mut()
+                .map(|(h, _)| h)
+                .filter(|h| owed.contains(&h.session_id))
+                .collect();
+            attach_exchange(&local, &mut refs, &mut attached).await?;
+        }
+        for (i, ds) in self.sources.iter().enumerate() {
+            let mut refs: Vec<&mut Hit> = self
+                .hits
+                .iter_mut()
+                .zip(&self.origins)
+                .filter(|((h, _), origin)| **origin == i && !owed.contains(&h.session_id))
+                .map(|((h, _), _)| h)
+                .collect();
+            attach_exchange(ds, &mut refs, &mut attached).await?;
+        }
+        Ok(())
+    }
+}
+
+/// An attached turn under assembly, keyed by (session, seq): its role, and its text blocks' splits,
+/// each keyed by (block_idx, split_idx) with its chunk id and text.
+type ExchangeTexts = HashMap<(String, i64), (String, Vec<((i64, i64), String, String)>)>;
+
+/// Attach to each hit the prose turns framing its exchange, once per reply: `taken` arrives holding
+/// the hits' own turns, which the reply shows already.
+async fn attach_exchange(ds: &Dataset, hits: &mut [&mut Hit], taken: &mut HashSet<(String, i64)>) -> Result<()> {
+    if hits.is_empty() {
+        return Ok(());
+    }
+    // Placing the turns needs no text, so the text is read for the few turns chosen alone.
+    let sessions: BTreeSet<&str> = hits.iter().map(|h| h.session_id.as_str()).collect();
+    let in_sessions = sessions
+        .iter()
+        .map(|s| dataset::eq("session_id", s))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let cols = ["session_id", "seq", "role", "block_type"];
+    let batches = dataset::scan_rows(ds, &cols, Some(in_sessions.as_str()), None).await?;
+    // (session, seq) -> (role, has a text block, has a tool_result block)
+    let mut turns: HashMap<(String, i64), (String, bool, bool)> = HashMap::new();
+    for batch in &batches {
+        let (sess, role, bt) = (
+            dataset::strs(batch, "session_id"),
+            dataset::strs(batch, "role"),
+            dataset::strs(batch, "block_type"),
+        );
+        let seq = dataset::ints(batch, "seq");
+        for i in 0..batch.num_rows() {
+            let e = turns
+                .entry((sess.get(i).to_string(), seq.get(i)))
+                .or_insert_with(|| (role.get(i).to_string(), false, false));
+            match bt.get(i) {
+                "text" => e.1 = true,
+                "tool_result" => e.2 = true,
+                _ => {}
+            }
+        }
+    }
+    // The start of every user text block says whether it is the human's words or scaffolding.
+    let pred = format!(
+        "({in_sessions}) AND {} AND {} AND split_idx = 0",
+        dataset::eq("role", "user"),
+        dataset::eq("block_type", "text")
+    );
+    let cols = ["session_id", "seq", "block_idx", "text"];
+    let batches = dataset::scan_rows(ds, &cols, Some(pred.as_str()), None).await?;
+    let mut scaffolding: HashSet<(String, i64, i64)> = HashSet::new();
+    let mut spoken: HashSet<(String, i64)> = HashSet::new();
+    for batch in &batches {
+        let (sess, text) = (dataset::strs(batch, "session_id"), dataset::strs(batch, "text"));
+        let (seq, bi) = (dataset::ints(batch, "seq"), dataset::ints(batch, "block_idx"));
+        for i in 0..batch.num_rows() {
+            if traces::is_scaffolding(text.get(i)) {
+                scaffolding.insert((sess.get(i).to_string(), seq.get(i), bi.get(i)));
+            } else {
+                spoken.insert((sess.get(i).to_string(), seq.get(i)));
+            }
+        }
+    }
+    let mut prompts: HashMap<&str, Vec<i64>> = HashMap::new();
+    let mut summaries: HashMap<&str, Vec<i64>> = HashMap::new();
+    for ((sid, seq), (role, text, tool_result)) in &turns {
+        if role == "user" && !*tool_result && spoken.contains(&(sid.clone(), *seq)) {
+            prompts.entry(sid.as_str()).or_default().push(*seq);
+        }
+        if role == "assistant" && *text {
+            summaries.entry(sid.as_str()).or_default().push(*seq);
+        }
+    }
+    for v in prompts.values_mut() {
+        v.sort_unstable();
+    }
+    for v in summaries.values_mut() {
+        v.sort_unstable();
+    }
+    let mut wanted: Vec<Vec<(String, i64)>> = Vec::with_capacity(hits.len());
+    let mut completed = HashSet::new();
+    for h in hits.iter() {
+        let ps = prompts.get(h.session_id.as_str()).map_or(&[][..], Vec::as_slice);
+        let ss = summaries.get(h.session_id.as_str()).map_or(&[][..], Vec::as_slice);
+        let p = ps.iter().rev().find(|&&s| s <= h.seq).copied();
+        let n = ps.iter().find(|&&s| s > h.seq).copied();
+        let (lo, hi) = (p.unwrap_or(i64::MIN), n.unwrap_or(i64::MAX));
+        let s = ss.iter().rev().find(|&&s| s >= lo && s < hi).copied();
+        let mut want: Vec<i64> = [p, s, n].into_iter().flatten().collect();
+        want.sort_unstable();
+        want.dedup();
+        let keep = want
+            .into_iter()
+            .filter(|&seq| {
+                let key = (h.session_id.clone(), seq);
+                if seq == h.seq {
+                    completed.insert(key)
+                } else {
+                    taken.insert(key)
+                }
+            })
+            .map(|seq| (h.session_id.clone(), seq))
+            .collect();
+        wanted.push(keep);
+    }
+    let all: Vec<&(String, i64)> = wanted.iter().flatten().collect();
+    if all.is_empty() {
+        return Ok(());
+    }
+    let pred = all
+        .iter()
+        .map(|(sid, seq)| format!("({} AND seq = {seq})", dataset::eq("session_id", sid)))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let cols = [
+        "id",
+        "session_id",
+        "seq",
+        "role",
+        "block_type",
+        "block_idx",
+        "split_idx",
+        "text",
+    ];
+    let batches = dataset::scan_rows(ds, &cols, Some(pred.as_str()), None).await?;
+    let mut texts: ExchangeTexts = HashMap::new();
+    for batch in &batches {
+        let (id, sess, role, bt, text) = (
+            dataset::strs(batch, "id"),
+            dataset::strs(batch, "session_id"),
+            dataset::strs(batch, "role"),
+            dataset::strs(batch, "block_type"),
+            dataset::strs(batch, "text"),
+        );
+        let (seq, bi, si) = (
+            dataset::ints(batch, "seq"),
+            dataset::ints(batch, "block_idx"),
+            dataset::ints(batch, "split_idx"),
+        );
+        for i in 0..batch.num_rows() {
+            if bt.get(i) != "text" {
+                continue;
+            }
+            let e = texts
+                .entry((sess.get(i).to_string(), seq.get(i)))
+                .or_insert_with(|| (role.get(i).to_string(), Vec::new()));
+            e.1.push(((bi.get(i), si.get(i)), id.get(i).to_string(), text.get(i).to_string()));
+        }
+    }
+    for (h, keys) in hits.iter_mut().zip(wanted) {
+        for key in keys {
+            let Some((role, mut splits)) = texts.remove(&key) else {
+                continue;
+            };
+            splits.sort_by_key(|(k, _, _)| *k);
+            // A block of one split that is the hit itself is already shown whole.
+            let mut blocks: Vec<(i64, usize, String, String)> = Vec::new();
+            for ((bi, _), id, piece) in splits {
+                match blocks.last_mut() {
+                    Some((last, n, _, text)) if *last == bi => {
+                        let joined = chunk::stitch(text, &piece);
+                        *text = joined;
+                        *n += 1;
+                    }
+                    _ => blocks.push((bi, 1, id, piece)),
+                }
+            }
+            let text = blocks
+                .into_iter()
+                .filter(|(_, n, id, _)| !(*n == 1 && *id == h.id))
+                .filter(|(bi, _, _, _)| !scaffolding.contains(&(key.0.clone(), key.1, *bi)))
+                .map(|(_, _, _, t)| t)
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            if !text.is_empty() {
+                h.exchange.push(ExchangeTurn { seq: key.1, role, text });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Vector ANN + BM25 candidates fused by reciprocal rank, top `candidates`.
@@ -709,6 +973,7 @@ fn hits_of(batches: &[RecordBatch]) -> Result<Vec<(u64, Hit)>> {
                     ts: ts.get(i).to_string(),
                     block_type: bt.get(i).to_string(),
                     harness: harness.get(i).to_string(),
+                    exchange: Vec::new(),
                     memory: String::new(),
                     fused: 0.0,
                 },
@@ -1824,6 +2089,7 @@ mod tests {
             ts: String::new(),
             block_type: String::new(),
             harness: String::new(),
+            exchange: Vec::new(),
             memory: String::new(),
             fused: 0.0,
         };

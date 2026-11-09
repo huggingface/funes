@@ -17,7 +17,8 @@ fn hint_range(seq: i64) -> String {
 }
 
 /// The agent `recall` format: provenance header with score, a `→ get` line naming the memory the
-/// hit was read from, and the full chunk text per hit. The chunk is never clipped — the ranking scored
+/// hit was read from, the full chunk text, and the turns framing the hit's exchange under `↳` lines.
+/// The chunk is never clipped — the ranking scored
 /// all of it, so a preview could hide exactly the span that made it a hit; the chunker's size
 /// cap bounds the payload instead. Byte-stable — the layout is a published contract.
 pub fn recall_agent(note: &str, hits: &[(Hit, f64)]) -> String {
@@ -37,6 +38,10 @@ pub fn recall_agent(note: &str, hits: &[(Hit, f64)]) -> String {
             memory_hint(Some(&h.memory).filter(|m| !m.is_empty()).map(String::as_str))
         );
         let _ = writeln!(out, "{}", h.text);
+        for e in &h.exchange {
+            let _ = writeln!(out, "  ↳ [{} text seq{}]", e.role, e.seq);
+            let _ = writeln!(out, "{}", e.text);
+        }
         let _ = writeln!(out, "---");
     }
     out
@@ -337,7 +342,7 @@ pub fn dim(s: &str, color: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::recall::ScanHit;
+    use crate::commands::recall::{ExchangeTurn, ScanHit};
     use crate::commands::sketch::{Diagnostics, Evidence};
 
     fn hit(ts: &str, block_type: &str, text: &str) -> Hit {
@@ -351,6 +356,7 @@ mod tests {
             ts: ts.to_string(),
             block_type: block_type.to_string(),
             harness: "claude_code".to_string(),
+            exchange: vec![],
             memory: "hf://datasets/acme/kb".to_string(),
             fused: 0.0,
         }
@@ -376,6 +382,32 @@ mod tests {
         assert!(
             bare.contains("  → get 0123456789abcdef --from 4 --to 10\n"),
             "got: {bare}"
+        );
+    }
+
+    #[test]
+    fn agent_format_frames_a_hit_with_its_exchange() {
+        let mut h = hit("2026-06-19T01:29:59.000Z", "text", "the decision was made");
+        h.exchange.push(ExchangeTurn {
+            seq: 3,
+            role: "user".to_string(),
+            text: "should we keep it?".to_string(),
+        });
+        h.exchange.push(ExchangeTurn {
+            seq: 9,
+            role: "assistant".to_string(),
+            text: "we keep it".to_string(),
+        });
+        assert_eq!(
+            recall_agent("", &[(h, 0.5781)]),
+            "[2026-06-19T01:29:59.000Z] claude_code -home-u-funes/01234567 text  score=0.578\n\
+             \x20 → get 0123456789abcdef --from 4 --to 10 --memory hf://datasets/acme/kb\n\
+             the decision was made\n\
+             \x20 ↳ [user text seq3]\n\
+             should we keep it?\n\
+             \x20 ↳ [assistant text seq9]\n\
+             we keep it\n\
+             ---\n"
         );
     }
 
