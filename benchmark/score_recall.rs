@@ -133,13 +133,11 @@ async fn main() -> Result<()> {
     let mut ms = Vec::with_capacity(questions.len());
     for q in &questions {
         let t = Instant::now();
-        // No neighbors: they are context attached to the hits once ranked.
         let (note, hits) = recall_hits(
             memory.clone(),
             q.question.clone(),
             DEFAULT_K,
             args.candidates,
-            0,
             RecallFilter::default(),
             &|_| (),
         )

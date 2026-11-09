@@ -11,7 +11,7 @@ use funes::memory::{dataset, Memory};
 use lance::Dataset;
 
 #[tokio::test]
-async fn shallow_recall_returns_ranked_passages_and_neighbors() {
+async fn shallow_recall_returns_ranked_passages() {
     let home = tempfile::tempdir().unwrap();
     let memory = home.path().join("memory").to_string_lossy().into_owned();
     let texts = [
@@ -66,7 +66,6 @@ async fn shallow_recall_returns_ranked_passages_and_neighbors() {
         "narwhal".into(),
         5,
         30,
-        1,
         recall::RecallFilter {
             block_type: Some("text".into()),
             harness: Some("codex".into()),
@@ -82,16 +81,16 @@ async fn shallow_recall_returns_ranked_passages_and_neighbors() {
     assert_eq!(hit.turn_uuid, "turn-1");
     assert_eq!(hit.text, texts[1]);
     assert!(score.is_finite() && *score > 0.0 && *score <= 1.0);
-    assert_eq!(
-        hit.neighbors
-            .iter()
-            .map(|neighbor| neighbor.text.as_str())
-            .collect::<Vec<_>>(),
-        [texts[0], texts[2]]
-    );
 
-    let empty = recall::recall(Memory::parse(&memory), "quasar".into(), 5, 30, 1, Default::default())
-        .await
-        .unwrap();
+    let empty = recall::recall(
+        Memory::parse(&memory),
+        "quasar".into(),
+        5,
+        30,
+        Default::default(),
+        false,
+    )
+    .await
+    .unwrap();
     assert_eq!(empty, "no results\nrephrase in other words");
 }

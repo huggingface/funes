@@ -58,8 +58,8 @@ async fn recall_bound(uri: &str, query: &str) -> String {
         query.into(),
         5,
         30,
-        0,
         Default::default(),
+        false,
     )
     .await
     .unwrap()

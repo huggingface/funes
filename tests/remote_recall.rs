@@ -35,14 +35,14 @@ async fn recall_from_remote_fixture() {
 
     // End-to-end: the full recall pipeline (hybrid vector + BM25 → rerank → format) over
     // the remote memory surfaces the marker chunk — exercising both the remote IVF_PQ and inverted-
-    // index reads (lazy, Xet-cached). No neighbors, to keep the assertion tight.
+    // index reads (lazy, Xet-cached).
     let out = funes::commands::recall::recall(
         Memory::parse(FIXTURE_URI),
         MARKER.to_string(),
         5,
         30,
-        0,
         Default::default(),
+        false,
     )
     .await
     .expect("recall over remote fixture");

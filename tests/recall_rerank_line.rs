@@ -27,7 +27,6 @@ async fn a_pool_within_the_hits_is_not_reranked() {
         query.into(),
         recall::DEFAULT_K,
         recall::DEFAULT_CANDIDATES,
-        0,
         Default::default(),
         &quiet,
     )
@@ -39,7 +38,7 @@ async fn a_pool_within_the_hits_is_not_reranked() {
     }
 
     // Fewer hits than the memory holds: the pool is reranked.
-    let (_, hits) = recall::recall_hits(Memory::local(), query.into(), 1, 30, 0, Default::default(), &quiet)
+    let (_, hits) = recall::recall_hits(Memory::local(), query.into(), 1, 30, Default::default(), &quiet)
         .await
         .unwrap();
     assert!(

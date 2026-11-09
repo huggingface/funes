@@ -32,7 +32,7 @@ async fn recall_embeds_the_query_with_the_memorys_model() {
     .await;
 
     // No query token is a chunk token and the pool is too small to rerank: only the vectors decide.
-    let (_, hits) = recall::recall_hits(memory, "怎样让查询变快".into(), 1, 3, 0, Default::default(), &|_| {})
+    let (_, hits) = recall::recall_hits(memory, "怎样让查询变快".into(), 1, 3, Default::default(), &|_| {})
         .await
         .unwrap();
     assert_eq!(hits.len(), 1);

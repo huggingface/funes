@@ -9,9 +9,9 @@ them on its own — but they work the same from a terminal.
 funes recall "why did we switch off the streaming parser"
 ```
 
-Retrieval is one pipeline: hybrid search (vector + BM25, fused by reciprocal rank) → neighbor
-expansion, with a cross-encoder rerank of the pool before the cut when the pool holds more rows
-than the hits asked for. What comes back is the **actual passage from the actual turn**, not a
+Retrieval is one pipeline: hybrid search (vector + BM25, fused by reciprocal rank), with a
+cross-encoder rerank of the pool before the cut when the pool holds more rows than the hits asked
+for. What comes back is the **actual passage from the actual turn**, not a
 summary written about it.
 
 A query matches best in the language of the sessions it looks for. `funes status` lists the
@@ -35,7 +35,6 @@ Each hit carries its provenance and a ready-to-run drill-down line:
 [<ts>] <harness> <workdir>/<session8> <block_type>  score=<s.sss>
   → get <session_id> --from <seq> --to <seq>[ --memory <memory>]
 <the full chunk text>
-  ~ [<role> <block_type> seq<N>] <neighbor chunk, first 160 chars>
 ---
 ```
 
@@ -52,13 +51,22 @@ English. The exact shape is stable — a contract, not a presentation; don't par
 The score is the cross-encoder's probability when the pool was reranked, the fused rank score
 otherwise (see `--candidates` below).
 
+`--oneline` prints one row per hit instead: the header and the `→ get` target joined, then the
+hit's first 120 characters flattened onto the line, and no passage. It is for choosing what to
+read: a listing of eight hits costs a few hundred tokens where each passage costs that much on its
+own. The row is as stable as the agent format.
+
+```
+[<ts>] <harness> <workdir>/<session8> <block_type>  score=<s.sss>  → get <session_id> --from <seq> --to <seq>[ --memory <memory>] · <first 120 chars>
+```
+
 ## `recall` flags
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `-k` | 8 | hits returned, each a passage to read |
 | `--candidates` | 30 | fused pool the hits are cut from, reranked by the cross-encoder before the cut when it holds more than `-k` rows |
-| `--neighbors` | 1 | adjacent chunks (by seq) attached per hit; 0 disables |
+| `--oneline` | off | one row per hit: provenance, `→ get` target and opening words, no passage |
 | `--type` | — | restrict to `text \| thinking \| tool_use \| tool_result` |
 | `--role` | — | restrict to one role, as the turns carry it (an agent's turns say `user \| assistant \| tool \| system`) |
 | `--harness` | — | restrict to one harness facet, as the turns carry it (`claude` also matches the older `claude_code`) |

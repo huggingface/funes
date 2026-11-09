@@ -150,7 +150,7 @@ pub async fn index_fragmented(home: &Path, source: &Path) {
 
 /// A recall of the remote memory at `uri`, or the error it gave as the reply.
 pub async fn recall_remote(uri: &str, query: &str) -> String {
-    recall::recall(Memory::parse(uri), query.into(), 5, 30, 0, Default::default())
+    recall::recall(Memory::parse(uri), query.into(), 5, 30, Default::default(), false)
         .await
         .unwrap_or_else(|e| format!("<recall error: {e}>"))
 }

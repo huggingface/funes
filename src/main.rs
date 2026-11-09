@@ -25,7 +25,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Recall passages from past sessions (hybrid → reranked when the pool exceeds -k → neighbors).
+    /// Recall passages from past sessions (hybrid → reranked when the pool exceeds -k).
     Recall {
         /// What to recall (free text).
         #[arg(required = true, num_args = 1..)]
@@ -38,9 +38,10 @@ enum Cmd {
         /// rows or fewer is read whole, in the fused order.
         #[arg(long, default_value_t = recall::DEFAULT_CANDIDATES)]
         candidates: usize,
-        /// Adjacent chunks (within this seq window) to attach to each hit. 0 disables.
-        #[arg(long, default_value_t = recall::DEFAULT_NEIGHBORS)]
-        neighbors: i64,
+        /// One row per hit, no passage: the provenance, the → get target and the hit's opening
+        /// words. For choosing what to read.
+        #[arg(long)]
+        oneline: bool,
         /// Restrict to a block type: text | thinking | tool_use | tool_result.
         #[arg(long = "type", value_name = "BLOCK_TYPE")]
         block_type: Option<String>,
@@ -340,7 +341,7 @@ async fn run() -> Result<()> {
             query,
             k,
             candidates,
-            neighbors,
+            oneline,
             block_type,
             role,
             harness,
@@ -357,7 +358,6 @@ async fn run() -> Result<()> {
                 query,
                 k,
                 candidates,
-                neighbors,
                 recall::RecallFilter {
                     block_type,
                     role,
@@ -366,6 +366,7 @@ async fn run() -> Result<()> {
                     since,
                     until,
                 },
+                oneline,
                 &|label| spinner.set(label),
             )
             .await?;

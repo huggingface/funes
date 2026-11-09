@@ -8,7 +8,7 @@ use funes::memory::Memory;
 
 /// The distinct days the hits of one recall fall on.
 async fn days(filter: RecallFilter) -> Vec<String> {
-    let (_, hits) = recall::recall_hits(Memory::local(), "static cache build".into(), 50, 50, 0, filter, &|_| ())
+    let (_, hits) = recall::recall_hits(Memory::local(), "static cache build".into(), 50, 50, filter, &|_| ())
         .await
         .unwrap();
     let mut days: Vec<String> = hits.iter().map(|(h, _)| h.ts[..10].to_string()).collect();
