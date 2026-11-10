@@ -170,28 +170,64 @@ pub async fn root_readme(repo: &HFRepository<RepoTypeDataset>) -> Option<String>
 const TEST_ORG: &str = "optimum-internal-testing";
 
 /// A private dataset repo for one live test alone, `funes-test-<tag>-<pid>-<nanos>` under the test
-/// org: its handle and its `owner/name` id. The Hub's commit lock and parent-commit guard are
-/// repo-wide, so tests sharing a repo, each under a prefix of its own, still refuse each other's
-/// commits. `None`, after a skip note, when the token cannot create a repo under the org.
-pub async fn scratch_repo(client: &HFClient, tag: &str) -> Option<(HFRepository<RepoTypeDataset>, String)> {
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-    let name = format!("funes-test-{tag}-{}-{nanos}", std::process::id());
-    if let Err(e) = funes::hub::create_dataset_repo(TEST_ORG, &name).await {
-        eprintln!("skip: cannot create a scratch repo under {TEST_ORG}: {e}");
-        return None;
-    }
-    Some((client.dataset(TEST_ORG, name.as_str()), format!("{TEST_ORG}/{name}")))
+/// org, deleted when dropped, so a test that panics takes its repo with it. The Hub's commit lock
+/// and parent-commit guard are repo-wide, so tests sharing a repo, each under a prefix of its own,
+/// still refuse each other's commits.
+pub struct ScratchRepo {
+    /// `owner/name`.
+    pub id: String,
+    pub repo: HFRepository<RepoTypeDataset>,
+    token: String,
 }
 
-/// Delete the scratch repo `id`. Best effort: a deletion that fails leaves a repo named for its
-/// test behind, not a failed test.
-pub async fn delete_scratch_repo(client: &HFClient, id: &str) {
-    let _ = client
-        .delete_repository()
-        .repo_id(id)
-        .repo_type(RepoTypeDataset)
-        .send()
-        .await;
+impl ScratchRepo {
+    /// Create the repo with `token`. `None`, after a skip note, when the Hub refuses that token the
+    /// right to create one under the org; any other failure is the test's own, and panics.
+    pub async fn create(token: &str, tag: &str) -> Option<Self> {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let name = format!("funes-test-{tag}-{}-{nanos}", std::process::id());
+        let id = format!("{TEST_ORG}/{name}");
+        let client = HFClient::builder().token(token).build().unwrap();
+        match client
+            .create_repository()
+            .repo_id(&id)
+            .repo_type(RepoTypeDataset)
+            .private(true)
+            .send()
+            .await
+        {
+            Ok(_) => Some(Self {
+                id,
+                repo: client.dataset(TEST_ORG, name),
+                token: token.to_string(),
+            }),
+            Err(e @ HFError::Forbidden { .. }) => {
+                eprintln!("skip: the token may not create a scratch repo under {TEST_ORG}: {e}");
+                None
+            }
+            Err(e) => panic!("creating the scratch repo {id}: {e}"),
+        }
+    }
+}
+
+impl Drop for ScratchRepo {
+    /// Best effort: a deletion that fails leaves a repo named for its test behind, not a failed test.
+    fn drop(&mut self) {
+        let (token, id) = (self.token.clone(), self.id.clone());
+        // A drop cannot await, and the test's runtime refuses to be blocked on from inside it, so
+        // the blocking client makes the call on a runtime of its own, on a thread of its own.
+        let _ = std::thread::spawn(move || {
+            let Ok(client) = HFClient::builder().token(token).build_sync() else {
+                return;
+            };
+            let _ = client
+                .delete_repository()
+                .repo_id(&id)
+                .repo_type(RepoTypeDataset)
+                .send();
+        })
+        .join();
+    }
 }
 
 pub fn files_containing(dir: &Path, needle: &str) -> Vec<PathBuf> {

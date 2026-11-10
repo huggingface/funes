@@ -24,7 +24,6 @@ use funes::commands::push::{Confirm, Disjoint};
 use funes::commands::recall;
 use funes::commands::target::Target;
 use funes::memory::Memory;
-use hf_hub::HFClient;
 
 /// The remote's row count and its distinct chunk-id count.
 async fn remote_rows_and_ids(uri: &str) -> (usize, usize) {
@@ -102,14 +101,14 @@ async fn push_round_trip_create_append_recall() {
         return;
     }
     std::env::set_var("HF_TOKEN", &token);
-    let client = HFClient::builder().token(token).build().unwrap();
-    let Some((repo, id)) = support::scratch_repo(&client, "round-trip").await else {
+    let Some(scratch) = support::ScratchRepo::create(&token, "round-trip").await else {
         return;
     };
+    let (repo, id) = (&scratch.repo, &scratch.id);
 
     // The memory lives under a prefix, so no push here may ever touch the repo-root README (the
     // dataset card is root-stores-only). Snapshot it now, compare after every push ran.
-    let readme_before = support::root_readme(&repo).await;
+    let readme_before = support::root_readme(repo).await;
     let prefix = "lancedb";
     let uri = format!("hf://datasets/{id}/{prefix}");
 
@@ -234,7 +233,7 @@ async fn push_round_trip_create_append_recall() {
     let status_bound = recall::status(Target::bound(Memory::parse(&uri))).await.unwrap();
     let status_unbound = recall::status(Memory::parse(&uri)).await.unwrap();
 
-    let readme_after = support::root_readme(&repo).await;
+    let readme_after = support::root_readme(repo).await;
     // The model id must travel with the memory (stamped in the schema metadata, uploaded by push).
     let remote_model = match Memory::parse(&uri).open().await {
         Ok(t) => t.schema().metadata.get("embedding_model").cloned(),
@@ -244,9 +243,6 @@ async fn push_round_trip_create_append_recall() {
         Ok(ds) => funes::memory::dataset::languages(&ds),
         Err(_) => None,
     };
-
-    // Cleanup before asserting, so a failed assertion can't leave the scratch repo behind.
-    support::delete_scratch_repo(&client, &id).await;
 
     // Gate: declining a first publish aborts and leaves the remote empty (nothing was uploaded).
     let declined = match declined {

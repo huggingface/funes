@@ -16,7 +16,6 @@ mod support;
 use funes::commands::push::Confirm;
 use funes::memory::Memory;
 use hf_hub::repository::CommitOperation;
-use hf_hub::HFClient;
 
 #[tokio::test]
 async fn card_created_refreshed_and_a_hand_card_respected() {
@@ -33,12 +32,12 @@ async fn card_created_refreshed_and_a_hand_card_respected() {
         return;
     }
     std::env::set_var("HF_TOKEN", &token);
-    let client = HFClient::builder().token(token).build().unwrap();
 
     // A throwaway ROOT memory.
-    let Some((repo, id)) = support::scratch_repo(&client, "card").await else {
+    let Some(scratch) = support::ScratchRepo::create(&token, "card").await else {
         return;
     };
+    let (repo, id) = (&scratch.repo, &scratch.id);
     let uri = format!("hf://datasets/{id}");
 
     // Synthetic local memory with one turn.
@@ -52,7 +51,7 @@ async fn card_created_refreshed_and_a_hand_card_respected() {
 
     // First publish → the card rides the initial commit.
     let create = funes::commands::push::run_push(Memory::parse(&uri), false, Confirm::Yes, &[]).await;
-    let card_created = support::root_readme(&repo).await;
+    let card_created = support::root_readme(repo).await;
 
     // Grow by one turn → the append must refresh the stats in the same data commit.
     support::write_session(
@@ -64,7 +63,7 @@ async fn card_created_refreshed_and_a_hand_card_respected() {
         .await
         .unwrap();
     let append = funes::commands::push::run_push(Memory::parse(&uri), false, Confirm::Yes, &[]).await;
-    let card_refreshed = support::root_readme(&repo).await;
+    let card_refreshed = support::root_readme(repo).await;
 
     // Hand-write the README: from here on funes must keep its hands off.
     let hand = "# hand-written card\n";
@@ -91,10 +90,7 @@ async fn card_created_refreshed_and_a_hand_card_respected() {
         .await
         .unwrap();
     let append_past_hand = funes::commands::push::run_push(Memory::parse(&uri), false, Confirm::Yes, &[]).await;
-    let card_after_hand = support::root_readme(&repo).await;
-
-    // Cleanup before asserting, so a failed assertion can't leave the scratch repo behind.
-    support::delete_scratch_repo(&client, &id).await;
+    let card_after_hand = support::root_readme(repo).await;
 
     let create = create.expect("create push").report;
     assert!(
