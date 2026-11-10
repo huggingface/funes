@@ -1,25 +1,24 @@
 //! Gated live test: a first push is owed before this host ever pushed to the memory, not owed once
 //! the memory holds this host's chunks, and owed again once its dataset is deleted from the Hub.
-//! Publishes to a unique scratch path on the shared test dataset, then deletes it. No real data.
+//! Publishes to a throwaway repo of its own (created and deleted here). No real data.
 //!
 //! Skipped unless `HF_FUNES_TEST_TOKEN` is set AND `trufflehog` is on PATH (the push scans its
-//! row). To run:
+//! row) — and skipped with a note if the token cannot create a scratch repo under the test org. To
+//! run:
 //!
 //!   export HF_FUNES_TEST_TOKEN=<your HF token>
 //!   RUST_MIN_STACK=16777216 cargo test --test bind_first_push_owed -- --nocapture
 
+mod support;
+
 use std::io::Write;
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use funes::commands::bind::owes_first_push;
 use funes::commands::index;
 use funes::commands::push::{self, Confirm};
 use funes::memory::Memory;
 use hf_hub::HFClient;
-
-const OWNER: &str = "optimum-internal-testing";
-const NAME: &str = "funes-test";
 
 #[tokio::test]
 async fn a_first_push_is_owed_to_a_memory_new_to_this_host_or_emptied_since() {
@@ -40,10 +39,11 @@ async fn a_first_push_is_owed_to_a_memory_new_to_this_host_or_emptied_since() {
         return;
     }
     std::env::set_var("HF_TOKEN", &token);
-    let repo = HFClient::builder().token(token).build().unwrap().dataset(OWNER, NAME);
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-    let prefix = format!("_synctest/{}-{nanos}", std::process::id());
-    let uri = format!("hf://datasets/{OWNER}/{NAME}/{prefix}/lancedb");
+    let client = HFClient::builder().token(token).build().unwrap();
+    let Some((repo, id)) = support::scratch_repo(&client, "first-push").await else {
+        return;
+    };
+    let uri = format!("hf://datasets/{id}/lancedb");
 
     let home = tempfile::tempdir().unwrap();
     std::env::set_var("FUNES_HOME", home.path());
@@ -64,19 +64,14 @@ async fn a_first_push_is_owed_to_a_memory_new_to_this_host_or_emptied_since() {
     // The receipt outlives the dataset: only the state probe can tell the memory is empty again.
     let emptied = repo
         .delete_folder()
-        .path_in_repo(prefix.clone())
+        .path_in_repo("lancedb")
         .commit_message("funes first-push test: empty the memory")
         .send()
         .await;
     let again = owes_first_push(&uri, false).await;
 
-    // Cleanup before asserting, so a failed assertion can't leave the scratch path behind.
-    let _ = repo
-        .delete_folder()
-        .path_in_repo(prefix.clone())
-        .commit_message("cleanup funes first-push test")
-        .send()
-        .await;
+    // Cleanup before asserting, so a failed assertion can't leave the scratch repo behind.
+    support::delete_scratch_repo(&client, &id).await;
 
     assert!(before.unwrap(), "a memory this host never published to");
     assert!(pushed.unwrap().report.contains("pushed 1 chunks"));

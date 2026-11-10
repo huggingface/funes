@@ -14,13 +14,11 @@
 mod support;
 
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use funes::commands::push::Confirm;
 use funes::memory::Memory;
-use hf_hub::{HFClient, RepoTypeDataset};
+use hf_hub::HFClient;
 
-const OWNER: &str = "optimum-internal-testing";
 const MARKER: &str = "CACHESMOKE";
 
 /// (entry count, total bytes) under `dir`, recursively.
@@ -76,14 +74,10 @@ async fn warm_recall_is_served_from_cache_without_downloading() {
         .await
         .unwrap();
 
-    // Unique repo name so concurrent/repeated runs don't collide.
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-    let name = format!("funes-test-cache-{}-{nanos}", std::process::id());
-    if let Err(e) = funes::hub::create_dataset_repo(OWNER, &name).await {
-        eprintln!("skip: cannot create a scratch repo under {OWNER}: {e}");
+    let Some((_, id)) = support::scratch_repo(&client, "cache").await else {
         return;
-    }
-    let uri = format!("hf://datasets/{OWNER}/{name}");
+    };
+    let uri = format!("hf://datasets/{id}");
     let push = funes::commands::push::run_push(Memory::parse(&uri), false, Confirm::Yes, &[]).await;
 
     // Isolate the hf-hub cache to a fresh dir, so "cold" is a genuine first download and "warm"
@@ -101,12 +95,7 @@ async fn warm_recall_is_served_from_cache_without_downloading() {
     let after_warm = cache_footprint(cache.path());
 
     // Cleanup before asserting, so a failed assertion can't leave the scratch repo behind.
-    let _ = client
-        .delete_repository()
-        .repo_id(&format!("{OWNER}/{name}"))
-        .repo_type(RepoTypeDataset)
-        .send()
-        .await;
+    support::delete_scratch_repo(&client, &id).await;
 
     push.expect("publishing the scratch memory");
     assert_eq!(before, (0, 0), "cache must start empty");

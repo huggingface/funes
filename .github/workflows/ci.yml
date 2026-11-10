@@ -200,7 +200,7 @@ jobs:
       # The whole suite, named by nothing: this job has the model cache and the Hub secret, which
       # is everything any test needs, so a test added later is covered without touching this file.
       # The Hub ones skip themselves when the secret is absent (on a fork) and clean up the
-      # scratch paths they create.
+      # scratch repos they create.
       - name: Integration tests
         env:
           HF_FUNES_TEST_TOKEN: ${{ secrets.HF_FUNES_TEST_TOKEN }}

@@ -54,9 +54,11 @@ cargo test --lib               # unit tests — hermetic, no network
 cargo test                     # full suite; first run downloads the embedder/reranker weights
 ```
 
-The tests that talk to the Hugging Face Hub (`remote_recall`, `push_round_trip`) skip
+The tests that talk to the Hugging Face Hub (`remote_recall`, `push_round_trip`, …) skip
 themselves unless `HF_FUNES_TEST_TOKEN` is set — on a fork they simply don't run, and that's
-fine; CI runs them with the repository secret.
+fine; CI runs them with the repository secret. The ones that write each create a private dataset
+repo of their own under `optimum-internal-testing` and delete it after: the Hub's commit lock is
+repo-wide, so two test runs sharing a repo would refuse each other's commits.
 
 ## Style
 

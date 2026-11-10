@@ -1,25 +1,24 @@
 //! Gated live test: a first push from a local memory with no rows gives the remote its embedding
-//! model, and the next push appends onto it. Publishes to a unique scratch path on the shared test
-//! dataset, then deletes it. No real data.
+//! model, and the next push appends onto it. Publishes to a throwaway repo of its own (created and
+//! deleted here). No real data.
 //!
 //! Skipped unless `HF_FUNES_TEST_TOKEN` is set AND `trufflehog` is on PATH (the second push scans
-//! its row). To run:
+//! its row) — and skipped with a note if the token cannot create a scratch repo under the test org.
+//! To run:
 //!
 //!   export HF_FUNES_TEST_TOKEN=<your HF token>
 //!   RUST_MIN_STACK=16777216 cargo test --test push_model_first -- --nocapture
 
+mod support;
+
 use std::io::Write;
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use funes::commands::index;
 use funes::commands::push::{self, Confirm};
 use funes::inference::EmbeddingModel;
 use funes::memory::{dataset, Memory, MemoryState};
 use hf_hub::HFClient;
-
-const OWNER: &str = "optimum-internal-testing";
-const NAME: &str = "funes-test";
 
 fn never_asked(_label: &str, _chunks: usize, _why: push::Disjoint) -> bool {
     panic!("a push of no chunks asks nothing");
@@ -55,10 +54,11 @@ async fn a_first_push_with_no_rows_gives_the_remote_its_model() {
         return;
     }
     std::env::set_var("HF_TOKEN", &token);
-    let repo = HFClient::builder().token(token).build().unwrap().dataset(OWNER, NAME);
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-    let prefix = format!("_synctest/{}-{nanos}", std::process::id());
-    let uri = format!("hf://datasets/{OWNER}/{NAME}/{prefix}/lancedb");
+    let client = HFClient::builder().token(token).build().unwrap();
+    let Some((_, id)) = support::scratch_repo(&client, "model-first").await else {
+        return;
+    };
+    let uri = format!("hf://datasets/{id}/lancedb");
 
     let home = tempfile::tempdir().unwrap();
     std::env::set_var("FUNES_HOME", home.path());
@@ -78,13 +78,8 @@ async fn a_first_push_with_no_rows_gives_the_remote_its_model() {
     let appended = push::run_push(Memory::parse(&uri), false, Confirm::Yes, &[]).await;
     let after_append = remote_model_and_rows(&uri).await;
 
-    // Cleanup before asserting, so a failed assertion can't leave the scratch path behind.
-    let _ = repo
-        .delete_folder()
-        .path_in_repo(prefix.clone())
-        .commit_message("cleanup funes first-push model test")
-        .send()
-        .await;
+    // Cleanup before asserting, so a failed assertion can't leave the scratch repo behind.
+    support::delete_scratch_repo(&client, &id).await;
 
     let report = created.unwrap().report;
     assert!(report.contains(&format!("created with {}", e5.id())), "{report}");
