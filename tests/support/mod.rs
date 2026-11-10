@@ -6,6 +6,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use arrow_array::types::Float32Type;
 use arrow_array::{ArrayRef, FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator, StringArray};
@@ -14,7 +15,7 @@ use funes::commands::recall;
 use funes::home;
 use funes::inference::{self, EmbeddingModel};
 use funes::memory::{dataset, Memory};
-use hf_hub::{HFError, HFRepository, RepoTypeDataset};
+use hf_hub::{HFClient, HFError, HFRepository, RepoTypeDataset};
 use lance::Dataset;
 
 /// The model cache the embedder and reranker read, for a run whose `$HOME` is fake.
@@ -163,6 +164,34 @@ pub async fn root_readme(repo: &HFRepository<RepoTypeDataset>) -> Option<String>
         Err(HFError::EntryNotFound { .. }) => None,
         Err(e) => panic!("querying the repo-root README: {e}"),
     }
+}
+
+/// The Hub org the live tests write under.
+const TEST_ORG: &str = "optimum-internal-testing";
+
+/// A private dataset repo for one live test alone, `funes-test-<tag>-<pid>-<nanos>` under the test
+/// org: its handle and its `owner/name` id. The Hub's commit lock and parent-commit guard are
+/// repo-wide, so tests sharing a repo, each under a prefix of its own, still refuse each other's
+/// commits. `None`, after a skip note, when the token cannot create a repo under the org.
+pub async fn scratch_repo(client: &HFClient, tag: &str) -> Option<(HFRepository<RepoTypeDataset>, String)> {
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let name = format!("funes-test-{tag}-{}-{nanos}", std::process::id());
+    if let Err(e) = funes::hub::create_dataset_repo(TEST_ORG, &name).await {
+        eprintln!("skip: cannot create a scratch repo under {TEST_ORG}: {e}");
+        return None;
+    }
+    Some((client.dataset(TEST_ORG, name.as_str()), format!("{TEST_ORG}/{name}")))
+}
+
+/// Delete the scratch repo `id`. Best effort: a deletion that fails leaves a repo named for its
+/// test behind, not a failed test.
+pub async fn delete_scratch_repo(client: &HFClient, id: &str) {
+    let _ = client
+        .delete_repository()
+        .repo_id(id)
+        .repo_type(RepoTypeDataset)
+        .send()
+        .await;
 }
 
 pub fn files_containing(dir: &Path, needle: &str) -> Vec<PathBuf> {

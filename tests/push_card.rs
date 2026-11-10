@@ -13,14 +13,10 @@
 
 mod support;
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use funes::commands::push::Confirm;
 use funes::memory::Memory;
 use hf_hub::repository::CommitOperation;
-use hf_hub::{HFClient, RepoTypeDataset};
-
-const OWNER: &str = "optimum-internal-testing";
+use hf_hub::HFClient;
 
 #[tokio::test]
 async fn card_created_refreshed_and_a_hand_card_respected() {
@@ -39,15 +35,11 @@ async fn card_created_refreshed_and_a_hand_card_respected() {
     std::env::set_var("HF_TOKEN", &token);
     let client = HFClient::builder().token(token).build().unwrap();
 
-    // A throwaway ROOT memory: unique repo name so concurrent/repeated runs don't collide.
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-    let name = format!("funes-test-card-{}-{nanos}", std::process::id());
-    if let Err(e) = funes::hub::create_dataset_repo(OWNER, &name).await {
-        eprintln!("skip: cannot create a scratch repo under {OWNER}: {e}");
+    // A throwaway ROOT memory.
+    let Some((repo, id)) = support::scratch_repo(&client, "card").await else {
         return;
-    }
-    let repo = client.dataset(OWNER, name.clone());
-    let uri = format!("hf://datasets/{OWNER}/{name}");
+    };
+    let uri = format!("hf://datasets/{id}");
 
     // Synthetic local memory with one turn.
     let db_dir = tempfile::tempdir().unwrap();
@@ -102,12 +94,7 @@ async fn card_created_refreshed_and_a_hand_card_respected() {
     let card_after_hand = support::root_readme(&repo).await;
 
     // Cleanup before asserting, so a failed assertion can't leave the scratch repo behind.
-    let _ = client
-        .delete_repository()
-        .repo_id(&format!("{OWNER}/{name}"))
-        .repo_type(RepoTypeDataset)
-        .send()
-        .await;
+    support::delete_scratch_repo(&client, &id).await;
 
     let create = create.expect("create push").report;
     assert!(
@@ -124,7 +111,7 @@ async fn card_created_refreshed_and_a_hand_card_respected() {
         "the card should count the pushed chunk: {card_created}"
     );
     assert!(
-        card_created.contains(&format!("--memory {OWNER}/{name}")),
+        card_created.contains(&format!("--memory {id}")),
         "the recall example should name this memory: {card_created}"
     );
 

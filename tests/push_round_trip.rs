@@ -1,15 +1,16 @@
-//! Gated live round-trip for `push`. Build a synthetic local memory, publish it to a unique
-//! scratch path on the shared test dataset (create), grow it by a turn and publish again
-//! (append → capture Lance's native append), recall both markers back from the remote, then delete the
-//! scratch path. No real data.
+//! Gated live round-trip for `push`. Build a synthetic local memory, publish it under a prefix of
+//! a throwaway repo of its own (create), grow it by a turn and publish again (append → capture
+//! Lance's native append), recall both markers back from the remote, then delete the repo. No real
+//! data.
 //!
 //! Also covers the no-overlap confirmation gate against the live remote: declining a first publish
 //! (the local index shares nothing with the empty remote) must abort and upload nothing, while an
 //! append to a memory that already shares chunks must not be prompted at all.
 //!
 //! Skipped unless `HF_FUNES_TEST_TOKEN` is set (it provides `HF_TOKEN` for `Memory::open` / the
-//! hf-hub client) AND `trufflehog` is on PATH (push's pre-publish gate is fail-closed). Needs a
-//! bigger thread stack than the default — lance + fastembed recurse deeply — so set
+//! hf-hub client) AND `trufflehog` is on PATH (push's pre-publish gate is fail-closed) — and
+//! skipped with a note if the token cannot create a scratch repo under the test org. Needs a bigger
+//! thread stack than the default — lance + fastembed recurse deeply — so set
 //! `RUST_MIN_STACK` (CI uses the same value). To run:
 //!
 //!   export HF_FUNES_TEST_TOKEN=<your HF token>
@@ -18,16 +19,12 @@
 mod support;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use funes::commands::push::{Confirm, Disjoint};
 use funes::commands::recall;
 use funes::commands::target::Target;
 use funes::memory::Memory;
 use hf_hub::HFClient;
-
-const OWNER: &str = "optimum-internal-testing";
-const NAME: &str = "funes-test";
 
 /// The remote's row count and its distinct chunk-id count.
 async fn remote_rows_and_ids(uri: &str) -> (usize, usize) {
@@ -106,16 +103,15 @@ async fn push_round_trip_create_append_recall() {
     }
     std::env::set_var("HF_TOKEN", &token);
     let client = HFClient::builder().token(token).build().unwrap();
-    let repo = client.dataset(OWNER, NAME);
+    let Some((repo, id)) = support::scratch_repo(&client, "round-trip").await else {
+        return;
+    };
 
     // The memory lives under a prefix, so no push here may ever touch the repo-root README (the
     // dataset card is root-stores-only). Snapshot it now, compare after every push ran.
     let readme_before = support::root_readme(&repo).await;
-
-    // Unique scratch path so concurrent/repeated runs don't collide.
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-    let prefix = format!("_synctest/{}-{nanos}", std::process::id());
-    let uri = format!("hf://datasets/{OWNER}/{NAME}/{prefix}/lancedb");
+    let prefix = "lancedb";
+    let uri = format!("hf://datasets/{id}/{prefix}");
 
     // Synthetic local memory with one marked turn.
     let db_dir = tempfile::tempdir().unwrap();
@@ -134,7 +130,7 @@ async fn push_round_trip_create_append_recall() {
     // so an unreachable remote fails the test loudly instead of masquerading as "nothing uploaded".
     let after_decline = repo
         .get_paths_info()
-        .paths(vec![prefix.clone()])
+        .paths(vec![prefix.to_string()])
         .send()
         .await
         .expect("querying the remote for the declined scratch path");
@@ -249,13 +245,8 @@ async fn push_round_trip_create_append_recall() {
         Err(_) => None,
     };
 
-    // Cleanup before asserting, so a failed assertion can't leave the scratch path behind.
-    let _ = repo
-        .delete_folder()
-        .path_in_repo(prefix.clone())
-        .commit_message("cleanup funes push round-trip test")
-        .send()
-        .await;
+    // Cleanup before asserting, so a failed assertion can't leave the scratch repo behind.
+    support::delete_scratch_repo(&client, &id).await;
 
     // Gate: declining a first publish aborts and leaves the remote empty (nothing was uploaded).
     let declined = match declined {
