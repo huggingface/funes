@@ -17,7 +17,6 @@ use std::path::Path;
 
 use funes::commands::push::Confirm;
 use funes::memory::Memory;
-use hf_hub::HFClient;
 
 const MARKER: &str = "CACHESMOKE";
 
@@ -64,7 +63,6 @@ async fn warm_recall_is_served_from_cache_without_downloading() {
     }
     // funes' Memory::open authenticates via HF_TOKEN.
     std::env::set_var("HF_TOKEN", &token);
-    let client = HFClient::builder().token(token).build().unwrap();
 
     let home = tempfile::tempdir().unwrap();
     let src = tempfile::tempdir().unwrap();
@@ -74,10 +72,10 @@ async fn warm_recall_is_served_from_cache_without_downloading() {
         .await
         .unwrap();
 
-    let Some((_, id)) = support::scratch_repo(&client, "cache").await else {
+    let Some(scratch) = support::ScratchRepo::create(&token, "cache").await else {
         return;
     };
-    let uri = format!("hf://datasets/{id}");
+    let uri = format!("hf://datasets/{}", scratch.id);
     let push = funes::commands::push::run_push(Memory::parse(&uri), false, Confirm::Yes, &[]).await;
 
     // Isolate the hf-hub cache to a fresh dir, so "cold" is a genuine first download and "warm"
@@ -93,9 +91,6 @@ async fn warm_recall_is_served_from_cache_without_downloading() {
     // Warm: same head commit ⇒ every file is already cached ⇒ the cache stays as it was.
     let warm = recall(&uri).await;
     let after_warm = cache_footprint(cache.path());
-
-    // Cleanup before asserting, so a failed assertion can't leave the scratch repo behind.
-    support::delete_scratch_repo(&client, &id).await;
 
     push.expect("publishing the scratch memory");
     assert_eq!(before, (0, 0), "cache must start empty");

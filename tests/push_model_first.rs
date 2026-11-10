@@ -18,7 +18,6 @@ use funes::commands::index;
 use funes::commands::push::{self, Confirm};
 use funes::inference::EmbeddingModel;
 use funes::memory::{dataset, Memory, MemoryState};
-use hf_hub::HFClient;
 
 fn never_asked(_label: &str, _chunks: usize, _why: push::Disjoint) -> bool {
     panic!("a push of no chunks asks nothing");
@@ -54,11 +53,10 @@ async fn a_first_push_with_no_rows_gives_the_remote_its_model() {
         return;
     }
     std::env::set_var("HF_TOKEN", &token);
-    let client = HFClient::builder().token(token).build().unwrap();
-    let Some((_, id)) = support::scratch_repo(&client, "model-first").await else {
+    let Some(scratch) = support::ScratchRepo::create(&token, "model-first").await else {
         return;
     };
-    let uri = format!("hf://datasets/{id}/lancedb");
+    let uri = format!("hf://datasets/{}/lancedb", scratch.id);
 
     let home = tempfile::tempdir().unwrap();
     std::env::set_var("FUNES_HOME", home.path());
@@ -77,9 +75,6 @@ async fn a_first_push_with_no_rows_gives_the_remote_its_model() {
     index::run_index(src.path(), false, None).await.unwrap();
     let appended = push::run_push(Memory::parse(&uri), false, Confirm::Yes, &[]).await;
     let after_append = remote_model_and_rows(&uri).await;
-
-    // Cleanup before asserting, so a failed assertion can't leave the scratch repo behind.
-    support::delete_scratch_repo(&client, &id).await;
 
     let report = created.unwrap().report;
     assert!(report.contains(&format!("created with {}", e5.id())), "{report}");

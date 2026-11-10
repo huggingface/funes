@@ -18,7 +18,6 @@ use funes::commands::bind::owes_first_push;
 use funes::commands::index;
 use funes::commands::push::{self, Confirm};
 use funes::memory::Memory;
-use hf_hub::HFClient;
 
 #[tokio::test]
 async fn a_first_push_is_owed_to_a_memory_new_to_this_host_or_emptied_since() {
@@ -39,11 +38,10 @@ async fn a_first_push_is_owed_to_a_memory_new_to_this_host_or_emptied_since() {
         return;
     }
     std::env::set_var("HF_TOKEN", &token);
-    let client = HFClient::builder().token(token).build().unwrap();
-    let Some((repo, id)) = support::scratch_repo(&client, "first-push").await else {
+    let Some(scratch) = support::ScratchRepo::create(&token, "first-push").await else {
         return;
     };
-    let uri = format!("hf://datasets/{id}/lancedb");
+    let uri = format!("hf://datasets/{}/lancedb", scratch.id);
 
     let home = tempfile::tempdir().unwrap();
     std::env::set_var("FUNES_HOME", home.path());
@@ -62,16 +60,14 @@ async fn a_first_push_is_owed_to_a_memory_new_to_this_host_or_emptied_since() {
     let after = owes_first_push(&uri, false).await;
 
     // The receipt outlives the dataset: only the state probe can tell the memory is empty again.
-    let emptied = repo
+    let emptied = scratch
+        .repo
         .delete_folder()
         .path_in_repo("lancedb")
         .commit_message("funes first-push test: empty the memory")
         .send()
         .await;
     let again = owes_first_push(&uri, false).await;
-
-    // Cleanup before asserting, so a failed assertion can't leave the scratch repo behind.
-    support::delete_scratch_repo(&client, &id).await;
 
     assert!(before.unwrap(), "a memory this host never published to");
     assert!(pushed.unwrap().report.contains("pushed 1 chunks"));

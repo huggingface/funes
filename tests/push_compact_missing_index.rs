@@ -20,7 +20,7 @@ use arrow_array::RecordBatchIterator;
 use funes::commands::push::Confirm;
 use funes::memory::{dataset, Memory};
 use hf_hub::repository::CommitOperation;
-use hf_hub::{HFClient, HFRepository, RepoTypeDataset};
+use hf_hub::{HFRepository, RepoTypeDataset};
 use lance::Dataset;
 
 /// Write a turns file with the given user turns, one a second, and index it.
@@ -81,10 +81,10 @@ async fn push_builds_the_indexes_a_remote_lacks() {
         return;
     }
     std::env::set_var("HF_TOKEN", &token);
-    let client = HFClient::builder().token(token).build().unwrap();
-    let Some((repo, id)) = support::scratch_repo(&client, "missing-index").await else {
+    let Some(scratch) = support::ScratchRepo::create(&token, "missing-index").await else {
         return;
     };
+    let (repo, id) = (&scratch.repo, &scratch.id);
     let forced = format!("hf://datasets/{id}/forced/lancedb");
     let auto = format!("hf://datasets/{id}/auto/lancedb");
 
@@ -92,8 +92,8 @@ async fn push_builds_the_indexes_a_remote_lacks() {
     let src = tempfile::tempdir().unwrap();
     std::env::set_var("FUNES_HOME", home.path());
     index_turns(src.path(), &["NOINDEXSMOKE the remote carries no index yet"]).await;
-    upload_without_indexes(&repo, "forced").await;
-    upload_without_indexes(&repo, "auto").await;
+    upload_without_indexes(repo, "forced").await;
+    upload_without_indexes(repo, "auto").await;
 
     let before = support::recall_remote(&forced, "NOINDEXSMOKE").await;
 
@@ -112,9 +112,6 @@ async fn push_builds_the_indexes_a_remote_lacks() {
     .await;
     let append = funes::commands::push::run_push(Memory::parse(&auto), false, Confirm::Yes, &[]).await;
     let after_auto = support::recall_remote(&auto, "NOINDEXSMOKE").await;
-
-    // Cleanup before asserting, so a failed assertion can't leave the scratch repo behind.
-    support::delete_scratch_repo(&client, &id).await;
 
     assert!(
         before.contains("recall error"),
