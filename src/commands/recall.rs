@@ -521,8 +521,6 @@ pub struct Search {
     /// The columns `where_clauses` read that a migration added, which an older memory lacks.
     migrated: Vec<&'static str>,
     /// The filter of each search a memory runs: one per block type, or the one the filter names.
-    /// On the labeled sets, one search over every type gives tool results close to half of the
-    /// pool, and most answers are prose.
     where_clauses: Vec<String>,
 }
 

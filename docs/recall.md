@@ -11,7 +11,7 @@ funes recall "why did we switch off the streaming parser"
 
 Retrieval is one pipeline. A hybrid search (vector + BM25, fused by reciprocal rank) runs for each
 block type, as deep as the pool, and each type gets an equal share of the pool. The default 30
-candidates hold 7 or 8 rows of each of the four types, the extra rows going to the types whose next
+candidates hold 7 or 8 rows of each of the four types. The extra rows go to the types whose next
 row ranks higher. A type with fewer matches leaves the rest of its share to the others, and `--type`
 gives the whole pool to one type. When the pool holds more rows than the hits asked for, a
 cross-encoder reranks it before the cut. What comes back is the **actual passage from the actual
