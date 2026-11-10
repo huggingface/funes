@@ -166,11 +166,15 @@ and keep only those that improve recall:
 - A cross-encoder reranks any pool larger than the hits.
 - The search is hybrid: the vector half finds answers full-text search misses.
 - The vector search refines the index's shortlist on the stored vectors.
+- Each block type gets an equal share of the pool: searched together, tool results take much of
+  it, and most answers are prose.
 
 > **Tested and abandoned:** abstention thresholds, MMR diversity, near-duplicate collapse, semantic
-> expansion, deeper candidate pools and a per-chunk *kind* facet did not move recall. Rebuilding
-> the vector index (larger codes, RaBitQ, scalar quantization, more partitions, retraining) did no
-> better than refining its shortlist.
+> expansion, deeper candidate pools, a per-chunk *kind* facet and leaving thinking blocks out did
+> not move recall. Rebuilding the vector index (larger codes, RaBitQ, scalar quantization, more
+> partitions, retraining) did no better than refining its shortlist. Shares of the pool fitted to
+> one memory's questions scored within noise of equal shares, and each agent writes a different mix
+> of block types. Splitting the pool evenly between prose and tool traffic lost most of the gain.
 
 ## Where this leaves funes
 

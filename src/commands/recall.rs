@@ -1,6 +1,7 @@
 //! The read surface: `recall`, `get`, `status` over the existing index.
-//! Recall pipeline: hybrid (vector + BM25, fused by reciprocal rank), with a cross-encoder rerank of
-//! the pool before the cut when it holds more rows than the hits ([`reranks`]).
+//! Recall pipeline: a hybrid search (vector + BM25, fused by reciprocal rank) for each block type,
+//! each type an equal share of the pool, and a cross-encoder rerank of the pool before the cut when
+//! it holds more rows than the hits ([`reranks`]).
 //! `recall`/`get` return results rendered in the agent format;
 //! `recall_hits`/`get_turns` return the structured results for other renderings (see `render`).
 
@@ -216,18 +217,15 @@ fn parse_repo(s: &str) -> Result<&str> {
 }
 
 /// `block_type = '…' AND role = '…' AND harness IN ('…') AND <repo is one of the row's> AND
-/// ts >= '…'` over whichever filters are set, else None.
+/// ts >= '…'` over the block type and whichever other filters are set.
 fn build_where(
-    block_type: Option<&str>,
+    block_type: &str,
     role: Option<&str>,
     harness: &[String],
     repo: Option<&str>,
     days: &DayRange,
-) -> Result<Option<String>> {
-    let mut clauses = Vec::new();
-    if let Some(bt) = block_type {
-        clauses.push(dataset::eq("block_type", bt));
-    }
+) -> Result<String> {
+    let mut clauses = vec![dataset::eq("block_type", block_type)];
     if let Some(r) = role {
         clauses.push(dataset::eq("role", r));
     }
@@ -242,11 +240,7 @@ fn build_where(
         clauses.push(dataset::has_word("repo", parse_repo(r)?));
     }
     clauses.extend(days.clauses()?);
-    Ok(if clauses.is_empty() {
-        None
-    } else {
-        Some(clauses.join(" AND "))
-    })
+    Ok(clauses.join(" AND "))
 }
 
 /// The stored `harness` facets a `--harness` value names. `claude` and `claude_code` name each
@@ -524,9 +518,12 @@ pub struct Search {
     query: String,
     qv: OnceCell<(EmbeddingModel, Vec<f32>)>,
     candidates: usize,
-    /// The columns `where_clause` reads that a migration added, which an older memory lacks.
+    /// The columns `where_clauses` read that a migration added, which an older memory lacks.
     migrated: Vec<&'static str>,
-    where_clause: Option<String>,
+    /// The filter of each search a memory runs: one per block type, or the one the filter names.
+    /// On the labeled sets, one search over every type gives tool results close to half of the
+    /// pool, and most answers are prose.
+    where_clauses: Vec<String>,
 }
 
 /// One memory's candidates for a [`Search`], before the rerank.
@@ -566,14 +563,24 @@ impl Search {
         if filter.repo.is_some() {
             migrated.push("repo");
         }
+        let block_types = match filter.block_type.as_deref() {
+            Some(bt) => vec![bt],
+            None => traces::BLOCK_TYPES.to_vec(),
+        };
+        let where_clauses = block_types
+            .into_iter()
+            .map(|bt| {
+                build_where(
+                    bt,
+                    filter.role.as_deref(),
+                    &harness,
+                    filter.repo.as_deref(),
+                    &filter.days(),
+                )
+            })
+            .collect::<Result<_>>()?;
         Ok(Self {
-            where_clause: build_where(
-                filter.block_type.as_deref(),
-                filter.role.as_deref(),
-                &harness,
-                filter.repo.as_deref(),
-                &filter.days(),
-            )?,
+            where_clauses,
             migrated,
             query,
             qv: OnceCell::new(),
@@ -581,8 +588,8 @@ impl Search {
         })
     }
 
-    /// Hybrid retrieval over one memory: a vector ANN scan and a BM25 scan, fused by reciprocal
-    /// rank.
+    /// Hybrid retrieval over one memory, `candidates` rows deep for each block type the search
+    /// covers: a vector ANN scan and a BM25 scan, fused by reciprocal rank.
     pub async fn candidates(&self, memory: &Memory, progress: &(dyn Fn(&str) + Sync)) -> Result<Candidates> {
         progress(&format!("searching {}…", memory.label()));
         let read = open_read(memory).await?;
@@ -609,7 +616,10 @@ impl Search {
             );
         }
         progress(&format!("searching {}…", memory.label()));
-        let hits = hybrid_candidates(&read.ds, qv, &self.query, self.candidates, self.where_clause.as_deref()).await?;
+        let mut hits = Vec::new();
+        for clause in &self.where_clauses {
+            hits.extend(hybrid_candidates(&read.ds, qv, &self.query, self.candidates, Some(clause)).await?);
+        }
         Ok(Candidates {
             ds: read.ds,
             note: read.note.unwrap_or_default(),
@@ -618,8 +628,9 @@ impl Search {
     }
 
     /// Rank the pooled candidates, a row several memories hold counted once: the best `candidates`
-    /// by fused score, reranked by the cross-encoder when the pool holds more rows than `k`
-    /// ([`reranks`]), cut to `k`. Returns the pools' degradation notes and the hits, best first.
+    /// by fused score, an equal share for each block type ([`share_by_type`]), reranked by the
+    /// cross-encoder when the pool holds more rows than `k` ([`reranks`]), cut to `k`. Returns the
+    /// pools' degradation notes and the hits, best first.
     pub async fn rank(&self, pools: Vec<Candidates>, k: usize, progress: &(dyn Fn(&str) + Sync)) -> Result<Ranked> {
         let note: String = pools.iter().map(|p| p.note.as_str()).collect();
         let mut seen = HashSet::new();
@@ -636,7 +647,7 @@ impl Search {
         }
         // Stable, so equal scores keep their memory's order and the earlier pool's rows.
         hits.sort_by(|(_, a), (_, b)| b.fused.partial_cmp(&a.fused).unwrap_or(std::cmp::Ordering::Equal));
-        hits.truncate(self.candidates);
+        let hits = share_by_type(hits, self.candidates);
         if hits.is_empty() {
             return Ok(Ranked {
                 note,
@@ -681,6 +692,23 @@ impl Search {
             sources,
         })
     }
+}
+
+/// The first `limit` of `hits`, best first, in equal shares per block type: every type's best row,
+/// then every type's second, and so on. Rows of one rank keep their order. A type that runs out
+/// leaves its share to the others.
+fn share_by_type(hits: Vec<(usize, Hit)>, limit: usize) -> Vec<(usize, Hit)> {
+    let mut depth: HashMap<String, usize> = HashMap::new();
+    let mut ranked: Vec<(usize, (usize, Hit))> = hits
+        .into_iter()
+        .map(|hit| {
+            let rank = depth.entry(hit.1.block_type.clone()).or_default();
+            *rank += 1;
+            (*rank, hit)
+        })
+        .collect();
+    ranked.sort_by_key(|(rank, _)| *rank);
+    ranked.into_iter().take(limit).map(|(_, hit)| hit).collect()
 }
 
 /// A search's hits after the cut, best first, before their exchange frame ([`Ranked::frame`]).
@@ -2065,6 +2093,68 @@ mod tests {
         assert!(!prompts.contains_key("scaffold"), "{prompts:?}");
     }
 
+    /// A turn of session `s` holding one block of `block_type`.
+    fn block_turn(seq: i64, role: &str, block_type: &str, text: &str) -> Turn {
+        let mut turn = text_turn("s", seq, role, text);
+        turn.blocks[0].block_type = block_type.into();
+        turn
+    }
+
+    /// The block types of the pool a search of `memory` for `query` cuts, sorted. The pool is no
+    /// larger than the hits, so no reranker runs, and the query's vector is set, so no embedder
+    /// loads.
+    async fn pool_types(memory: &Memory, query: &str, candidates: usize, block_type: Option<&str>) -> Vec<String> {
+        let filter = RecallFilter {
+            block_type: block_type.map(String::from),
+            ..Default::default()
+        };
+        let search = Search::new(query.into(), candidates, filter).unwrap();
+        assert!(search
+            .qv
+            .set((dataset::model::ENGLISH, vec![1.0; dataset::DIM as usize]))
+            .is_ok());
+        let pool = search.candidates(memory, &|_| ()).await.unwrap();
+        let ranked = search.rank(vec![pool], candidates, &|_| ()).await.unwrap();
+        let mut types: Vec<String> = ranked.hits.into_iter().map(|(h, _)| h.block_type).collect();
+        types.sort();
+        types
+    }
+
+    #[tokio::test]
+    async fn tool_output_matching_the_query_best_leaves_room_for_the_prose() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::parse(&dir.path().to_string_lossy());
+        let turns = [
+            block_turn(0, "user", "tool_result", "walrus parser walrus parser"),
+            block_turn(1, "user", "tool_result", "walrus parser walrus"),
+            block_turn(2, "user", "tool_result", "walrus parser"),
+            block_turn(3, "assistant", "text", "we dropped the walrus"),
+        ];
+        let chunks = chunk::chunks_from_turns(&turns, true);
+        // No vectors: the text search alone ranks, and it ranks every tool result above the text.
+        let batch = dataset::build_batch(dataset::model::ENGLISH, &chunks, None).unwrap();
+        let reader = RecordBatchIterator::new([Ok(batch)], dataset::schema(dataset::model::ENGLISH));
+        let mut ds = Dataset::write(reader, &dataset::table_uri(memory.label()), None)
+            .await
+            .unwrap();
+        dataset::build_indexes(&mut ds, |_| {}).await.unwrap();
+
+        assert_eq!(
+            pool_types(&memory, "walrus parser", 2, None).await,
+            ["text", "tool_result"]
+        );
+        assert_eq!(
+            pool_types(&memory, "walrus parser", 3, None).await,
+            ["text", "tool_result", "tool_result"],
+            "a type that runs out leaves its share to the others"
+        );
+        assert_eq!(
+            pool_types(&memory, "walrus parser", 2, Some("tool_result")).await,
+            ["tool_result", "tool_result"],
+            "a search of one type fills the pool with it"
+        );
+    }
+
     #[test]
     fn a_pool_larger_than_the_hits_is_reranked() {
         assert!(reranks(DEFAULT_K, DEFAULT_CANDIDATES), "the defaults rerank");
@@ -2111,6 +2201,72 @@ mod tests {
     }
 
     #[test]
+    fn share_by_type_takes_each_types_next_row_in_turn() {
+        // (block type, fused score), best first.
+        let rows = [
+            ("tool_result", 0.05),
+            ("tool_result", 0.04),
+            ("tool_use", 0.03),
+            ("text", 0.02),
+            ("tool_result", 0.015),
+            ("text", 0.01),
+        ];
+        let hits = || -> Vec<(usize, Hit)> {
+            rows.iter()
+                .enumerate()
+                .map(|(i, (block_type, fused))| {
+                    let hit = Hit {
+                        id: i.to_string(),
+                        text: String::new(),
+                        session_id: String::new(),
+                        workdir: String::new(),
+                        turn_uuid: String::new(),
+                        seq: 0,
+                        ts: String::new(),
+                        block_type: block_type.to_string(),
+                        harness: String::new(),
+                        exchange: Vec::new(),
+                        memory: String::new(),
+                        fused: *fused,
+                    };
+                    (0, hit)
+                })
+                .collect()
+        };
+        let ids = |hits: Vec<(usize, Hit)>| hits.into_iter().map(|(_, h)| h.id).collect::<Vec<_>>();
+        assert_eq!(ids(share_by_type(hits(), 6)), ["0", "2", "3", "1", "5", "4"]);
+        assert_eq!(
+            ids(share_by_type(hits(), 4)),
+            ["0", "2", "3", "1"],
+            "the extra row of an uneven share goes to the type whose next row scores higher"
+        );
+    }
+
+    #[test]
+    fn a_search_covers_each_block_type_unless_the_filter_names_one() {
+        let clauses = |block_type: Option<&str>, role: Option<&str>| {
+            let filter = RecallFilter {
+                block_type: block_type.map(String::from),
+                role: role.map(String::from),
+                ..Default::default()
+            };
+            Search::new("q".into(), 30, filter).unwrap().where_clauses
+        };
+        let each = |rest: &str| -> Vec<String> {
+            traces::BLOCK_TYPES
+                .iter()
+                .map(|bt| format!("block_type = '{bt}'{rest}"))
+                .collect()
+        };
+        assert_eq!(clauses(None, None), each(""));
+        assert_eq!(clauses(None, Some("user")), each(" AND role = 'user'"));
+        assert_eq!(
+            clauses(Some("text"), Some("user")),
+            ["block_type = 'text' AND role = 'user'"]
+        );
+    }
+
+    #[test]
     fn harness_spellings_cover_both_names_of_a_known_agent_and_pass_others_through() {
         assert_eq!(harness_spellings("claude".into()), ["claude_code", "claude"]);
         assert_eq!(harness_spellings("claude_code".into()), ["claude_code", "claude"]);
@@ -2122,22 +2278,27 @@ mod tests {
     fn build_where_combines_set_filters() {
         let one = |h: &str| vec![h.to_string()];
         let any = DayRange::default();
-        let w = |bt: Option<&str>, r: Option<&str>, h: &[String], d: &DayRange| build_where(bt, r, h, None, d).unwrap();
-        assert_eq!(w(None, None, &[], &any), None);
-        assert_eq!(w(Some("text"), None, &[], &any).as_deref(), Some("block_type = 'text'"));
-        assert_eq!(w(None, Some("user"), &[], &any).as_deref(), Some("role = 'user'"));
-        assert_eq!(w(None, None, &one("codex"), &any).as_deref(), Some("harness = 'codex'"));
+        let w = |bt: &str, r: Option<&str>, h: &[String], d: &DayRange| build_where(bt, r, h, None, d).unwrap();
+        assert_eq!(w("text", None, &[], &any), "block_type = 'text'");
         assert_eq!(
-            w(Some("tool_use"), None, &one("pi"), &any).as_deref(),
-            Some("block_type = 'tool_use' AND harness = 'pi'")
+            w("text", Some("user"), &[], &any),
+            "block_type = 'text' AND role = 'user'"
         );
         assert_eq!(
-            w(Some("text"), Some("user"), &one("pi"), &any).as_deref(),
-            Some("block_type = 'text' AND role = 'user' AND harness = 'pi'")
+            w("text", None, &one("codex"), &any),
+            "block_type = 'text' AND harness = 'codex'"
         );
         assert_eq!(
-            w(None, None, &harness_spellings("claude".into()), &any).as_deref(),
-            Some("harness IN ('claude_code', 'claude')")
+            w("tool_use", None, &one("pi"), &any),
+            "block_type = 'tool_use' AND harness = 'pi'"
+        );
+        assert_eq!(
+            w("text", Some("user"), &one("pi"), &any),
+            "block_type = 'text' AND role = 'user' AND harness = 'pi'"
+        );
+        assert_eq!(
+            w("text", None, &harness_spellings("claude".into()), &any),
+            "block_type = 'text' AND harness IN ('claude_code', 'claude')"
         );
         // A day range is inclusive: the upper clause is the day after `until`, exclusive.
         let week = DayRange {
@@ -2145,30 +2306,37 @@ mod tests {
             until: Some("2026-09-20"),
         };
         assert_eq!(
-            w(Some("text"), None, &[], &week).as_deref(),
-            Some("block_type = 'text' AND ts >= '2026-09-14' AND ts < '2026-09-21'")
+            w("text", None, &[], &week),
+            "block_type = 'text' AND ts >= '2026-09-14' AND ts < '2026-09-21'"
         );
         let year_end = DayRange {
             since: None,
             until: Some("2026-12-31"),
         };
-        assert_eq!(w(None, None, &[], &year_end).as_deref(), Some("ts < '2027-01-01'"));
+        assert_eq!(
+            w("text", None, &[], &year_end),
+            "block_type = 'text' AND ts < '2027-01-01'"
+        );
         // A repo is one word of the space-joined column.
         assert_eq!(
-            build_where(Some("text"), None, &[], Some("acme/widget"), &week).unwrap().as_deref(),
-            Some("block_type = 'text' AND concat(' ', repo, ' ') LIKE '% acme/widget %' AND ts >= '2026-09-14' AND ts < '2026-09-21'")
+            build_where("text", None, &[], Some("acme/widget"), &week).unwrap(),
+            "block_type = 'text' AND concat(' ', repo, ' ') LIKE '% acme/widget %' AND ts >= '2026-09-14' AND ts < '2026-09-21'"
         );
         // values are escaped against filter-string injection; a bound that is not a date is refused.
-        assert_eq!(w(None, None, &one("a'b"), &any).as_deref(), Some("harness = 'a''b'"));
-        assert_eq!(w(None, Some("a'b"), &[], &any).as_deref(), Some("role = 'a''b'"));
         assert_eq!(
-            build_where(None, None, &[], Some("o'k/a_b%c\\d"), &any)
-                .unwrap()
-                .as_deref(),
-            Some("concat(' ', repo, ' ') LIKE '% o''k/a\\_b\\%c\\\\d %'")
+            w("text", None, &one("a'b"), &any),
+            "block_type = 'text' AND harness = 'a''b'"
+        );
+        assert_eq!(
+            w("text", Some("a'b"), &[], &any),
+            "block_type = 'text' AND role = 'a''b'"
+        );
+        assert_eq!(
+            build_where("text", None, &[], Some("o'k/a_b%c\\d"), &any).unwrap(),
+            "block_type = 'text' AND concat(' ', repo, ' ') LIKE '% o''k/a\\_b\\%c\\\\d %'"
         );
         let err = build_where(
-            None,
+            "text",
             None,
             &[],
             None,
@@ -2184,7 +2352,7 @@ mod tests {
             since: Some("2026-9-14"),
             until: None,
         };
-        assert!(build_where(None, None, &[], None, &unpadded).is_err());
+        assert!(build_where("text", None, &[], None, &unpadded).is_err());
         assert!(unpadded.check().is_err());
         // And a repo that is not one `owner/name`, which no row's identities could hold.
         for repo in [
@@ -2195,7 +2363,7 @@ mod tests {
             "github.com/acme/widget",
             "acme/widget upstream/widget",
         ] {
-            let err = build_where(None, None, &[], Some(repo), &any).unwrap_err();
+            let err = build_where("text", None, &[], Some(repo), &any).unwrap_err();
             assert!(err.to_string().contains("expected owner/name"), "{repo:?}: {err}");
         }
     }
@@ -2242,10 +2410,10 @@ mod tests {
             ("acme/widge_", &[]),
             ("acme/%", &[]),
         ] {
-            let filter = build_where(None, None, &[], Some(repo), &DayRange::default()).unwrap();
+            let filter = build_where("text", None, &[], Some(repo), &DayRange::default()).unwrap();
             // Both legs prefilter, so each must keep exactly the repo's turns on its own.
-            let by_vector = vector_candidates(&ds, &qv, 10, filter.as_deref()).await.unwrap();
-            let by_text = fts_candidates(&ds, "narwhal", 10, filter.as_deref()).await.unwrap();
+            let by_vector = vector_candidates(&ds, &qv, 10, Some(&filter)).await.unwrap();
+            let by_text = fts_candidates(&ds, "narwhal", 10, Some(&filter)).await.unwrap();
             for (leg, hits) in [("vector", by_vector), ("text", by_text)] {
                 let mut sessions: Vec<String> = hits.into_iter().map(|(_, h)| h.session_id).collect();
                 sessions.sort();

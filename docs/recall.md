@@ -9,10 +9,13 @@ them on its own — but they work the same from a terminal.
 funes recall "why did we switch off the streaming parser"
 ```
 
-Retrieval is one pipeline: hybrid search (vector + BM25, fused by reciprocal rank), with a
-cross-encoder rerank of the pool before the cut when the pool holds more rows than the hits asked
-for. What comes back is the **actual passage from the actual turn**, not a
-summary written about it.
+Retrieval is one pipeline. A hybrid search (vector + BM25, fused by reciprocal rank) runs for each
+block type, as deep as the pool, and each type gets an equal share of the pool. The default 30
+candidates hold 7 or 8 rows of each of the four types, the extra rows going to the types whose next
+row ranks higher. A type with fewer matches leaves the rest of its share to the others, and `--type`
+gives the whole pool to one type. When the pool holds more rows than the hits asked for, a
+cross-encoder reranks it before the cut. What comes back is the **actual passage from the actual
+turn**, not a summary written about it.
 
 A query matches best in the language of the sessions it looks for. `funes status` lists the
 languages a memory's sessions are written in.
