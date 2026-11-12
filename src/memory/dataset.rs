@@ -367,6 +367,16 @@ impl Vectors<'_> {
     }
 }
 
+/// The score of each returned search row, in batch order.
+pub(crate) fn search_scores<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a [f32]> {
+    batch
+        .column_by_name(name)
+        .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
+        .filter(|c| c.null_count() == 0)
+        .map(|c| c.values().as_ref())
+        .with_context(|| format!("a search result without valid {name} scores"))
+}
+
 /// The row ids of a batch scanned with them.
 pub struct RowIds<'a>(&'a UInt64Array);
 
