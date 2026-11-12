@@ -84,6 +84,12 @@ onnx = ["dep:fastembed"]
 name = "bench_recall"
 path = "benchmark/bench_recall.rs"
 
+# Time the part of `funes index` that writes rows, without the embedding:
+#   cargo run --release --example bench_index -- --sessions 2000 2>/dev/null
+[[example]]
+name = "bench_index"
+path = "benchmark/bench_index.rs"
+
 # Time the embedder and the reranker on one backend, blas or, in a macOS build, metal:
 #   cargo run --release --example bench_models -- --backend metal
 [[example]]
