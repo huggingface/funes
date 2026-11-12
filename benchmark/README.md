@@ -1,9 +1,11 @@
 # Benchmarks
 
-Four runnable examples, each `cargo run --release --example <name>`:
+Five runnable examples, each `cargo run --release --example <name>`:
 
 - **`bench_recall`** — `recall()` latency, local vs remote, cold vs warm.
-- **`bench_backends`** — latency and output agreement between the inference backends.
+- **`bench_models`** — embedding and reranking time on one inference backend.
+- **`score_models`** — how closely the inference backends reproduce ONNX Runtime's embeddings and
+  reranker scores.
 - **`score_recall`** — `funes recall` scored against a labeled set of questions.
 - **`sweep_rerank`** — how much reranking helps at each pool size, on a `dacorvo/funes-recall-benchmark`
   set.
@@ -89,34 +91,50 @@ that floor moves with the CPU and the inference backend. What the benchmark meas
 - For a private dataset, a token must be available (`HF_TOKEN` or the cached login) — the same one
   recall uses.
 
-## `bench_backends` — inference backend comparison
+## `bench_models` — embedding and reranking time
 
-`bench_backends.rs` compares every compiled `Embedder`/`Reranker` implementation. Build with both
-the default BLAS backend and the optional ONNX reference:
+`bench_models.rs` times funes's embedder and reranker (gte-reranker-modernbert-base) on one
+backend: `--backend blas`, the default, runs the CPU forwards every build carries, and
+`--backend metal` the GPU forwards of a macOS build. `--model` names the embedding model,
+`BAAI/bge-small-en-v1.5` when omitted.
 
 ```sh
-cargo run --release --features onnx --example bench_backends
-cargo run --release --features onnx --example bench_backends -- intfloat/multilingual-e5-small
+cargo run --release --example bench_models -- --backend metal
+cargo run --release --example bench_models -- --model intfloat/multilingual-e5-small
 ```
 
-It runs seven fixed workloads: 16 short documents to expose per-call overhead; 30 documents near
-the 512-token truncation limit to approximate recall's rerank worst case; a ragged batch of 2 capped
-documents among 14 short ones; 32 and 100 documents whose token lengths are the quantiles of real
-chunks (100 is recall's pool at `--candidates 100`); and 256-document mixed and real batches, the
-production batch size, which show how a backend scales and what it spends on padding.
+It times the forwards themselves. funes runs them behind a router that keeps a call on the CPU
+until it holds 32 texts or 8 pairs, and the two backends' startup and first calls are what those
+thresholds weigh. Each model's startup comes first: how long it took to load, then its first call
+on the 32 real documents, which a one-shot process such as `funes recall` pays in full. Then each
+workload's time per call and documents per second, after one warm-up call.
 
-Rerankers are compared within a model: gte-reranker-modernbert-base on ONNX, BLAS and, on macOS,
-Metal, and bge-reranker-base on BLAS as the latency baseline. Each reranker's startup comes first: how
-long it took to load, then its first call on the 32 real documents, which a one-shot `funes recall`
-pays in full. Then each workload's latency, and agreement with the first backend of the same model:
+The seven workloads live in `workloads.rs`, which `score_models` shares:
 
-- `cos↔ref` is the minimum cosine similarity between corresponding embedding vectors.
-- `Δ↔ref` is the maximum absolute difference between corresponding reranker scores.
+- 16 short documents, to expose per-call overhead.
+- 30 documents near the 512-token truncation limit, recall's rerank worst case.
+- A ragged batch of 2 capped documents among 14 short ones.
+- 32 and 100 documents whose token lengths are the quantiles of real chunks. 100 is recall's pool
+  at `--candidates 100`.
+- 256-document mixed and real batches, the production batch size, which show how a backend scales
+  and what it spends on padding.
 
-ONNX is the reference when that feature is present, BLAS otherwise. The one argument names the
-embedding model, `BAAI/bge-small-en-v1.5` when omitted. Edit the fixed query or workloads when investigating a
-particular regression. Building with only one backend still prints its timing, along with a note
-that there is nothing to compare.
+Edit the query or the workloads when investigating a particular regression.
+
+## `score_models` — the backends against ONNX
+
+`score_models.rs` measures how closely funes's backends reproduce ONNX Runtime running each model's
+ONNX export: the CPU forwards (`blas`) and, in a macOS build, the GPU forwards (`metal`), over the
+same seven workloads. ONNX is the reference, so the example needs it compiled in:
+
+```sh
+cargo run --release --features onnx --example score_models
+cargo run --release --features onnx --example score_models -- --model intfloat/multilingual-e5-small
+```
+
+- `cos↔onnx` is the lowest cosine similarity between a document's embedding on the backend and on
+  ONNX.
+- `Δ↔onnx` is the largest absolute difference between their reranker scores.
 
 ## `score_recall` — recall against labeled questions
 

@@ -185,7 +185,7 @@ back to the CPU where no GPU starts. An ONNX Runtime backend is available as an 
 
 ```bash
 cargo build --release --no-default-features --features onnx   # ONNX backend instead
-cargo run --release --features onnx --example bench_backends  # A/B both backends
+cargo run --release --features onnx --example score_models    # score the built-in backend against it
 ```
 
 ## Notes
