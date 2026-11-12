@@ -15,7 +15,7 @@ use crate::traces;
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, NaiveDate, Utc};
 use lance::Dataset;
-use std::cmp::{Ordering, Reverse};
+use std::cmp::Reverse;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
@@ -953,13 +953,13 @@ async fn hybrid_candidates(
 /// Top-`limit` rows by vector distance, each with its row id (the fusion key).
 async fn vector_candidates(ds: &Dataset, qv: &[f32], limit: usize, filter: Option<&str>) -> Result<Vec<(u64, Hit)>> {
     let batches = dataset::nearest(ds, qv, limit, filter, &hit_cols(ds, "_distance")).await?;
-    hits_of(&batches, "_distance", f32::total_cmp)
+    hits_of(&batches, "_distance")
 }
 
 /// Top-`limit` rows by BM25 score, each with its row id. Errors if the memory has no FTS index.
 async fn fts_candidates(ds: &Dataset, query: &str, limit: usize, filter: Option<&str>) -> Result<Vec<(u64, Hit)>> {
     let batches = dataset::full_text(ds, query, limit, filter, &hit_cols(ds, "_score")).await?;
-    hits_of(&batches, "_score", |a, b| b.total_cmp(a))
+    hits_of(&batches, "_score")
 }
 
 /// Project the search score alongside the hit columns. Old memories can omit `harness`.
@@ -973,12 +973,9 @@ fn hit_cols(ds: &Dataset, score_column: &'static str) -> Vec<&'static str> {
         .collect()
 }
 
-/// Order each search's candidates before fusion so tied scores get stable ranks.
-fn hits_of(
-    batches: &[RecordBatch],
-    score_column: &str,
-    compare_scores: impl Fn(&f32, &f32) -> Ordering,
-) -> Result<Vec<(u64, Hit)>> {
+/// The `(row id, Hit)` of every row of `batches`, in their order (the search's rank), equal scores
+/// by row id.
+fn hits_of(batches: &[RecordBatch], score_column: &str) -> Result<Vec<(u64, Hit)>> {
     let mut out = Vec::new();
     for batch in batches {
         let row_ids = dataset::row_ids(batch)?;
@@ -1015,9 +1012,11 @@ fn hits_of(
             ));
         }
     }
-    out.sort_unstable_by(|(a_score, a_id, _), (b_score, b_id, _)| {
-        compare_scores(a_score, b_score).then(a_id.cmp(b_id))
-    });
+    // Equal BM25 scores come back in an order that depends on which of Lance's index segments
+    // finishes first.
+    for tie in out.chunk_by_mut(|(a, ..), (b, ..)| a == b) {
+        tie.sort_unstable_by_key(|(_, id, _)| *id);
+    }
     Ok(out.into_iter().map(|(_, id, hit)| (id, hit)).collect())
 }
 
@@ -2240,12 +2239,7 @@ mod tests {
                     batch(score_column, &[(a, best)]),
                     batch(score_column, &[(b, best), (1, worse)]),
                 ];
-                let compare: fn(&f32, &f32) -> Ordering = if score_column == "_distance" {
-                    f32::total_cmp
-                } else {
-                    |a, b| b.total_cmp(a)
-                };
-                let hits = hits_of(&batches, score_column, compare).unwrap();
+                let hits = hits_of(&batches, score_column).unwrap();
                 let row_ids: Vec<_> = hits.iter().map(|(id, _)| *id).collect();
                 assert_eq!(row_ids, [3, 11, 1], "{score_column}");
                 assert_eq!(rrf_fuse(hits, vec![], 1)[0].id, "3");
