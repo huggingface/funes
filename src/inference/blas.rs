@@ -3,8 +3,8 @@
 //! wires it to Accelerate (cblas_sgemm on AMX + vForce vvexpf), Linux to faer's pure-Rust GEMM
 //! plus a runtime-dispatched polynomial exp. This module holds the seam, the kernels, the model
 //! loaders and the length-grouped batching. The encoders built on them are cross-platform source:
-//! BERT (the embedders and bge-reranker-base) in [`bert`], ModernBERT
-//! (gte-reranker-modernbert-base) in [`modernbert`]. Gated behind the `blas` feature.
+//! BERT (the embedders) in [`bert`], ModernBERT (gte-reranker-modernbert-base) in [`modernbert`].
+//! Gated behind the `blas` feature.
 
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
@@ -17,7 +17,7 @@ use tokenizers::{Encoding, PaddingParams, Tokenizer, TruncationParams};
 
 pub(super) mod bert;
 pub(super) mod modernbert;
-pub use bert::{BlasEmbedder, BlasReranker};
+pub use bert::BlasEmbedder;
 pub use modernbert::GteReranker;
 
 // ---------------------------------------------------------------------------------------------

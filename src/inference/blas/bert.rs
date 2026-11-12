@@ -1,6 +1,6 @@
-//! The BERT encoder on the CPU, for the embedders and bge-reranker-base: post-norm blocks with
-//! biases, and learned positions added to the embeddings. It shares the seam, the kernels, the
-//! loaders and the length-grouped batching of [`super`].
+//! The BERT encoder on the CPU, for the embedders: post-norm blocks with biases, and learned
+//! positions added to the embeddings. It shares the seam, the kernels, the loaders and the
+//! length-grouped batching of [`super`].
 
 use std::collections::HashMap;
 
@@ -9,22 +9,18 @@ use tokenizers::Tokenizer;
 
 use super::{
     by_length, ceil_div, gelu, hf_snapshot, l2_normalize, layernorm, linear, load_tokenizer, load_weights, mean_pool,
-    par_add, seam, seq_workers, softmax_rows, NO_T, RERANK_GROUP, T,
+    par_add, seam, seq_workers, softmax_rows, NO_T, T,
 };
-use crate::inference::{Embedder, EmbeddingModel, Reranker};
+use crate::inference::{Embedder, EmbeddingModel};
 
-const PAD: i64 = 1;
-
-/// A BERT-family encoder config. Reranker is XLM-R (pad-offset positions); embedder is BERT.
+/// The BERT encoder's shape.
 #[derive(Clone, Copy)]
 struct Cfg {
-    prefix: &'static str,
     h: usize,
     heads: usize,
     hd: usize,
     ffn: usize,
     layers: usize,
-    bert_pos: bool,
     /// Sequences per forward. A forward pads every sequence to the longest it holds, so
     /// [`by_length`] runs inputs length-sorted, this many at a time. Measured on real chunk
     /// lengths: fewer shrinks the GEMMs, more brings the padding back. `Scratch` is sized to one
@@ -32,24 +28,12 @@ struct Cfg {
     group: usize,
 }
 
-const RERANK: Cfg = Cfg {
-    prefix: "roberta.",
-    h: 768,
-    heads: 12,
-    hd: 64,
-    ffn: 3072,
-    layers: 12,
-    bert_pos: false,
-    group: RERANK_GROUP,
-};
 const EMBED: Cfg = Cfg {
-    prefix: "",
     h: 384,
     heads: 12,
     hd: 32,
     ffn: 1536,
     layers: 12,
-    bert_pos: true,
     group: 16,
 };
 
@@ -73,9 +57,9 @@ fn encode(w: &HashMap<String, Vec<f32>>, c: Cfg, ids: &[i64], mask: &[i64], n: u
     let g = |k: &str| w.get(k).unwrap_or_else(|| panic!("missing weight {k}")).as_slice();
     let (h, ffn, hd, heads) = (c.h, c.ffn, c.hd, c.heads);
     let m = n * l;
-    let word = g(&format!("{}embeddings.word_embeddings.weight", c.prefix));
-    let pos = g(&format!("{}embeddings.position_embeddings.weight", c.prefix));
-    let typ = g(&format!("{}embeddings.token_type_embeddings.weight", c.prefix));
+    let word = g("embeddings.word_embeddings.weight");
+    let pos = g("embeddings.position_embeddings.weight");
+    let typ = g("embeddings.token_type_embeddings.weight");
     for (buf, len) in [
         (&mut s.hid, m * h),
         (&mut s.q, m * h),
@@ -94,20 +78,11 @@ fn encode(w: &HashMap<String, Vec<f32>>, c: Cfg, ids: &[i64], mask: &[i64], n: u
             scope.spawn(move || {
                 for (si, seq) in grp.chunks_mut(l * h).enumerate() {
                     let sq = gi * seqs_per + si;
-                    let mut run = 0i64;
                     for i in 0..l {
                         let id = ids[sq * l + i];
-                        let posid = if c.bert_pos {
-                            i
-                        } else if id != PAD {
-                            run += 1;
-                            (PAD + run) as usize
-                        } else {
-                            PAD as usize
-                        };
                         let dst = &mut seq[i * h..i * h + h];
                         let we = &word[id as usize * h..id as usize * h + h];
-                        let pe = &pos[posid * h..posid * h + h];
+                        let pe = &pos[i * h..i * h + h];
                         for cc in 0..h {
                             dst[cc] = we[cc] + pe[cc] + typ[cc];
                         }
@@ -119,13 +94,13 @@ fn encode(w: &HashMap<String, Vec<f32>>, c: Cfg, ids: &[i64], mask: &[i64], n: u
     layernorm(
         &mut s.hid,
         h,
-        g(&format!("{}embeddings.LayerNorm.weight", c.prefix)),
-        g(&format!("{}embeddings.LayerNorm.bias", c.prefix)),
+        g("embeddings.LayerNorm.weight"),
+        g("embeddings.LayerNorm.bias"),
     );
 
     let scale = 1.0 / (hd as f32).sqrt();
     for ly in 0..c.layers {
-        let p = format!("{}encoder.layer.{ly}", c.prefix);
+        let p = format!("encoder.layer.{ly}");
         linear(
             &s.hid,
             m,
@@ -286,67 +261,6 @@ impl Embedder for BlasEmbedder {
                     e
                 })
                 .collect()
-        })
-    }
-}
-
-/// bge-reranker-base cross-encoder: XLM-R encoder → CLS → out_proj(tanh(dense(cls))).
-pub struct BlasReranker {
-    w: HashMap<String, Vec<f32>>,
-    tok: Tokenizer,
-    scratch: Scratch,
-}
-
-impl BlasReranker {
-    pub fn new() -> Result<Self> {
-        let dir = hf_snapshot("BAAI/bge-reranker-base")?;
-        Ok(Self {
-            w: load_weights(&dir)?,
-            tok: load_tokenizer(&dir)?,
-            scratch: Scratch::default(),
-        })
-    }
-}
-
-impl Reranker for BlasReranker {
-    fn rerank(&mut self, query: &str, docs: &[&str]) -> Result<Vec<f32>> {
-        let pairs: Vec<(&str, &str)> = docs.iter().map(|d| (query, *d)).collect();
-        let encs = self
-            .tok
-            .encode_batch(pairs, true)
-            .map_err(|e| anyhow!("tokenize: {e}"))?;
-        let (w, scratch) = (&self.w, &mut self.scratch);
-        let h = RERANK.h;
-        by_length(encs, RERANK.group, |ids, mask, n, l| {
-            encode(w, RERANK, ids, mask, n, l, scratch);
-            let mut cls = vec![0f32; n * h];
-            for s in 0..n {
-                cls[s * h..s * h + h].copy_from_slice(&scratch.hid[(s * l) * h..(s * l) * h + h]);
-            }
-            let mut d = vec![0f32; n * h];
-            linear(
-                &cls,
-                n,
-                h,
-                w["classifier.dense.weight"].as_slice(),
-                w["classifier.dense.bias"].as_slice(),
-                h,
-                &mut d,
-            );
-            for v in d.iter_mut() {
-                *v = v.tanh();
-            }
-            let mut scores = vec![0f32; n];
-            linear(
-                &d,
-                n,
-                h,
-                w["classifier.out_proj.weight"].as_slice(),
-                w["classifier.out_proj.bias"].as_slice(),
-                1,
-                &mut scores,
-            );
-            scores
         })
     }
 }
