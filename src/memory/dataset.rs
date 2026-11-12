@@ -27,9 +27,11 @@ use lance::dataset::{
 use lance::index::vector::VectorIndexParams;
 use lance::index::{DatasetIndexExt, DatasetIndexInternalExt};
 use lance_index::optimize::OptimizeOptions;
+use lance_index::scalar::inverted::SCORE_COL;
 use lance_index::scalar::{FullTextSearchQuery, InvertedIndexParams};
 use lance_index::vector::ivf::IvfBuildParams;
 use lance_index::vector::pq::PQBuildParams;
+use lance_index::vector::DIST_COL;
 use lance_index::{IndexParams, IndexType};
 use lance_io::object_store::{ObjectStoreParams, WrappingObjectStore};
 use lance_linalg::distance::MetricType;
@@ -134,9 +136,10 @@ pub async fn scan_rows_with_ids(ds: &Dataset, columns: &[&str], filter: Option<&
 /// rank the shortlist: the codes alone misorder close neighbours.
 const REFINE_FACTOR: u32 = 10;
 
-/// The `limit` rows nearest to `query` by vector distance, nearest first, each with its row id.
-/// `filter` is applied before the search, not to its result: a selective filter would otherwise
-/// drop most of a globally-nearest pool and return far fewer than `limit` rows when matches exist.
+/// The `limit` rows nearest to `query` by vector distance, nearest first, each with its row id and
+/// its distance ([`search_scores`]). `filter` is applied before the search, not to its result: a
+/// selective filter would otherwise drop most of a globally-nearest pool and return far fewer than
+/// `limit` rows when matches exist.
 pub async fn nearest(
     ds: &Dataset,
     query: &[f32],
@@ -152,13 +155,14 @@ pub async fn nearest(
         scan.prefilter(true);
         scan.filter(f)?;
     }
-    scan.project(columns)?;
+    scan.project(&[columns, &[DIST_COL]].concat())?;
     scan.with_row_id();
     collect(scan).await
 }
 
-/// The `limit` rows best matching `query` by BM25, best first, each with its row id. `filter` is
-/// applied before the search, as in [`nearest`]. Errors on a memory with no text index.
+/// The `limit` rows best matching `query` by BM25, best first, each with its row id and its score
+/// ([`search_scores`]). `filter` is applied before the search, as in [`nearest`]. Errors on a memory
+/// with no text index.
 pub async fn full_text(
     ds: &Dataset,
     query: &str,
@@ -172,7 +176,7 @@ pub async fn full_text(
         scan.prefilter(true);
         scan.filter(f)?;
     }
-    scan.project(columns)?;
+    scan.project(&[columns, &[SCORE_COL]].concat())?;
     scan.with_row_id();
     scan.limit(Some(limit as i64), None)?;
     collect(scan).await
@@ -367,14 +371,16 @@ impl Vectors<'_> {
     }
 }
 
-/// The score of each returned search row, in batch order.
-pub(crate) fn search_scores<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a [f32]> {
-    batch
-        .column_by_name(name)
+/// The score of each row of a batch from [`nearest`] (its distance) or [`full_text`] (its BM25
+/// score), in batch order.
+pub(crate) fn search_scores(batch: &RecordBatch) -> Result<&[f32]> {
+    [DIST_COL, SCORE_COL]
+        .into_iter()
+        .find_map(|name| batch.column_by_name(name))
         .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
         .filter(|c| c.null_count() == 0)
         .map(|c| c.values().as_ref())
-        .with_context(|| format!("a search result without valid {name} scores"))
+        .context("a search result without scores")
 }
 
 /// The row ids of a batch scanned with them.
@@ -1186,9 +1192,7 @@ mod tests {
         build_indexes(&mut ds, |_| {}).await.unwrap();
         assert_eq!(sub_index_counts(&ds).await.unwrap()[VECTOR_INDEX], 1);
 
-        let batches = nearest(&ds, &vectors(n)[7], 10, None, &["turn_uuid", "_distance"])
-            .await
-            .unwrap();
+        let batches = nearest(&ds, &vectors(n)[7], 10, None, &["turn_uuid"]).await.unwrap();
         let distance = batches[0]
             .column_by_name("_distance")
             .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
