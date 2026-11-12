@@ -1252,6 +1252,47 @@ pub async fn run_index(path: &Path, no_thinking: bool, max_sessions: Option<usiz
     run_index_roots(&[path.to_path_buf()], no_thinking, max_sessions, true).await
 }
 
+/// What [`write_rows`] wrote, and how long each part of the run took.
+pub struct RowsWritten {
+    pub sessions: u64,
+    pub chunks: u64,
+    /// The fragments the writes left for the compaction to merge.
+    pub fragments: usize,
+    /// Every unit's rows: reading, scanning for secrets, chunking, appending, recording its state.
+    pub write: Duration,
+    /// The end of the run: the language counts and the compaction.
+    pub finalize: Duration,
+}
+
+/// Index `path` as [`run_index`] does, but leave every embedding pending: the part of a run the
+/// embedder has no share in, which `benchmark/bench_index.rs` times on its own.
+pub async fn write_rows(path: &Path, max_sessions: Option<usize>) -> Result<RowsWritten> {
+    let mut indexer = Indexer::open(vec![source::open(path, max_sessions)?], false).await?;
+    let total = indexer.unit_count();
+    let all: Vec<usize> = (0..total).collect();
+    let t0 = Instant::now();
+    let mut done = 0;
+    while done < total {
+        done += indexer.write_units(&all[done..], done, total).await?;
+    }
+    let write = t0.elapsed();
+    let fragments = match &indexer.ds {
+        Some(ds) => dataset::fragments_to_compact(ds).await?,
+        None => 0,
+    };
+    let (sessions, chunks) = (indexer.n_sessions, indexer.n_chunks);
+    indexer.work_remaining = true;
+    let t1 = Instant::now();
+    indexer.finalize().await?;
+    Ok(RowsWritten {
+        sessions,
+        chunks,
+        fragments,
+        write,
+        finalize: t1.elapsed(),
+    })
+}
+
 /// A first interactive index estimated at ≥ this many seconds prompts before continuing.
 const FIRST_INDEX_PROMPT_SECS: u64 = 120;
 
