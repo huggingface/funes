@@ -952,34 +952,31 @@ async fn hybrid_candidates(
 
 /// Top-`limit` rows by vector distance, each with its row id (the fusion key).
 async fn vector_candidates(ds: &Dataset, qv: &[f32], limit: usize, filter: Option<&str>) -> Result<Vec<(u64, Hit)>> {
-    let batches = dataset::nearest(ds, qv, limit, filter, &hit_cols(ds, "_distance")).await?;
-    hits_of(&batches, "_distance")
+    hits_of(&dataset::nearest(ds, qv, limit, filter, &hit_cols(ds)).await?)
 }
 
 /// Top-`limit` rows by BM25 score, each with its row id. Errors if the memory has no FTS index.
 async fn fts_candidates(ds: &Dataset, query: &str, limit: usize, filter: Option<&str>) -> Result<Vec<(u64, Hit)>> {
-    let batches = dataset::full_text(ds, query, limit, filter, &hit_cols(ds, "_score")).await?;
-    hits_of(&batches, "_score")
+    hits_of(&dataset::full_text(ds, query, limit, filter, &hit_cols(ds)).await?)
 }
 
-/// Project the search score alongside the hit columns. Old memories can omit `harness`.
-fn hit_cols(ds: &Dataset, score_column: &'static str) -> Vec<&'static str> {
+/// `HIT_COLS`, minus `harness` on an un-migrated memory, which [`hits_of`] then reads as "".
+fn hit_cols(ds: &Dataset) -> Vec<&'static str> {
     let has_harness = dataset::has_column(ds, "harness");
     HIT_COLS
         .iter()
         .copied()
         .filter(|&c| c != "harness" || has_harness)
-        .chain([score_column])
         .collect()
 }
 
 /// The `(row id, Hit)` of every row of `batches`, in their order (the search's rank), equal scores
 /// by row id.
-fn hits_of(batches: &[RecordBatch], score_column: &str) -> Result<Vec<(u64, Hit)>> {
+fn hits_of(batches: &[RecordBatch]) -> Result<Vec<(u64, Hit)>> {
     let mut out = Vec::new();
     for batch in batches {
         let row_ids = dataset::row_ids(batch)?;
-        let scores = dataset::search_scores(batch, score_column)?;
+        let scores = dataset::search_scores(batch)?;
         let (chunk_id, text, sess, proj, turn, ts, bt, harness) = (
             dataset::strs(batch, "id"),
             dataset::strs(batch, "text"),
@@ -2239,7 +2236,7 @@ mod tests {
                     batch(score_column, &[(a, best)]),
                     batch(score_column, &[(b, best), (1, worse)]),
                 ];
-                let hits = hits_of(&batches, score_column).unwrap();
+                let hits = hits_of(&batches).unwrap();
                 let row_ids: Vec<_> = hits.iter().map(|(id, _)| *id).collect();
                 assert_eq!(row_ids, [3, 11, 1], "{score_column}");
                 assert_eq!(rrf_fuse(hits, vec![], 1)[0].id, "3");
