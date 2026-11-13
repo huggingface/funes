@@ -1200,7 +1200,7 @@ pub struct RowsWritten {
     pub chunks: u64,
     /// The fragments the writes left for the compaction to merge.
     pub fragments: usize,
-    /// Every unit's rows: reading, scanning for secrets, chunking, appending, recording its state.
+    /// Every unit's rows: reading, chunking, appending, recording its state.
     pub write: Duration,
     /// The end of the run: the language counts and the compaction.
     pub finalize: Duration,

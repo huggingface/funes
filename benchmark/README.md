@@ -96,10 +96,9 @@ that floor moves with the CPU and the inference backend. What the benchmark meas
 
 `bench_index.rs` times the part of `funes index` that writes rows, in a scratch memory. It leaves
 the embedding out, since it takes the longest and does not depend on how the rows are written. It
-times writing the rows (reading each turns file, scanning it for secrets, chunking it, appending its
-rows, recording its state), then the end of the run (the language counts and the compaction). Both
-grow with the number of sessions as well as with their size, so a history of many short sessions is
-where they show.
+times writing the rows (reading each turns file, chunking it, appending its rows, recording its
+state), then the end of the run (the language counts and the compaction). Both grow with the number
+of sessions as well as with their size, so a history of many short sessions is where they show.
 
 ```sh
 cargo run --release --example bench_index -- --sessions 2000 2>/dev/null
@@ -108,10 +107,9 @@ cargo run --release --example bench_index -- --dir path/to/turns --limit 5000 2>
 
 The corpus is generated, `--sessions` sessions (2000 by default) of `--turns` turns (12) that are
 the same on every run, or a directory of turns files given with `--dir`, of which `--limit` keeps
-the most recent sessions. The secrets are scanned when TruffleHog is installed, as in
-`funes index`. The indexer reports each session and the compaction on stderr. The bench prints the
-sessions and chunks written with their time and rate, the fragments the writes left for the
-compaction to merge, then the time the end of the run took.
+the most recent sessions. The indexer reports each session and the compaction on stderr. The bench
+prints the sessions and chunks written with their time and rate, the fragments the writes left for
+the compaction to merge, then the time the end of the run took.
 
 ## `bench_models` — embedding and reranking time
 
