@@ -27,15 +27,16 @@ machine. The design keeps you in control of it:
 
 ## Secrets
 
-Three layers keep credentials out of a memory and off the Hub:
+The local memory keeps sessions as written, credentials included: it is not a publication
+boundary. Two layers keep credentials off the Hub:
 
-- **At index time**, credentials are redacted from each session before it is saved.
 - **At publish time**, an always-on gate scans every outgoing chunk (via
-  [trufflehog](https://github.com/trufflesecurity/trufflehog)) and *withholds* any row that
-  still contains a secret, exiting non-zero rather than uploading it. The gate is fail-closed:
-  if the scanner is missing or crashes, nothing is published.
-- **`funes scrub`** removes secrets from rows already in your local memory, so a subsequent
-  push goes through clean.
+  [trufflehog](https://github.com/trufflesecurity/trufflehog)) and redacts the secrets it finds
+  before uploading. A block it can't redact in place is *withheld*, and the push exits non-zero
+  when that leaves nothing to publish. The gate is fail-closed: if the scanner is missing or
+  crashes, nothing is published.
+- **`funes scrub`** redacts secrets from the rows already in your local memory, including the
+  blocks a push withholds, so the next push publishes them.
 
 ### If a secret reached a remote memory anyway
 
