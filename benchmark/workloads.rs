@@ -7,6 +7,9 @@
 //! measured chunks do, so it shows what a backend spends on padding a mixed batch. The 256-document
 //! workloads match the production batch size and show how grouping by length scales. The
 //! 100-document one is recall's pool at `--candidates 100`.
+//!
+//! No two documents of a workload are the same text: the GPU embedder embeds a repeated text
+//! once, so a workload with repeats would time fewer documents than it holds.
 
 /// The query every reranker workload scores its documents against.
 pub const QUERY: &str = "why did we move the reranker off the onnx runtime";
@@ -39,7 +42,7 @@ const SENT: &str = "recall fuses vector ann and bm25 hits by reciprocal rank bef
 
 /// `n` documents of about 500 tokens, truncated at 512: recall's rerank candidates at the cap.
 fn capped_docs(n: usize) -> Vec<String> {
-    vec![SENT.repeat(18); n]
+    (0..n).map(|i| format!("{i} {}", SENT.repeat(18))).collect()
 }
 
 /// A ragged batch, two ~512-token docs and the rest short: real indexing's shape, and the one that
@@ -69,20 +72,24 @@ pub fn real_docs() -> Vec<String> {
 fn big_mixed_docs() -> Vec<String> {
     let short = short_docs();
     let mut docs = capped_docs(32);
-    docs.extend((0..256 - docs.len()).map(|i| short[i % short.len()].clone()));
+    docs.extend((0..256 - docs.len()).map(|i| format!("{i} {}", short[i % short.len()])));
     docs
 }
 
 /// Like `real_docs` but 256 documents, the production batch size, with the same length spread.
 fn big_real_docs() -> Vec<String> {
     let words: Vec<&str> = SENT.split_whitespace().cycle().take(400).collect();
-    (0..256).map(|i| words[..REAL_WORDS[i % 32]].join(" ")).collect()
+    (0..256)
+        .map(|i| format!("{i} {}", words[..REAL_WORDS[i % 32]].join(" ")))
+        .collect()
 }
 
 /// Like `real_docs` but 100 documents: recall's pool at `--candidates 100`.
 fn deep_docs() -> Vec<String> {
     let words: Vec<&str> = SENT.split_whitespace().cycle().take(400).collect();
-    (0..100).map(|i| words[..REAL_WORDS[i * 13 % 32]].join(" ")).collect()
+    (0..100)
+        .map(|i| format!("{i} {}", words[..REAL_WORDS[i * 13 % 32]].join(" ")))
+        .collect()
 }
 
 /// Each workload's label and documents.
