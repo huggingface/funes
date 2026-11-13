@@ -88,7 +88,7 @@ file-grained cache design and cold-versus-warm behavior.
 | `FUNES_BIN` | Binary path recorded in supported MCP registrations and used by the pi bridge. Hook workers instead find `funes` on `PATH` or in common install directories. |
 | `FUNES_MEMORY` | Per-run memory override understood by the pi extension; otherwise its copy of the host's binding is used. |
 | `FUNES_INTEGRATIONS` | Directory `funes add` installs an agent integration from, instead of the published one. funes can't vouch for those files, so it asks you to confirm before running them — once, until they change. |
-| `FUNES_TRUFFLEHOG` | Explicit TruffleHog binary for secret scanning. Index-time redaction is best-effort; push and scrub scanning fail closed. |
+| `FUNES_TRUFFLEHOG` | Explicit TruffleHog binary for secret scanning. Push and scrub refuse to run without one. |
 | `HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN`, `HUGGINGFACE_TOKEN` | Hugging Face authentication, in the precedence shown above. |
 | `HF_TOKEN_PATH` | The token file, when it is not `$HF_HOME/token`. |
 | `HF_HUB_DISABLE_IMPLICIT_TOKEN` | Set to anything: no token is used, from the variables or a file. |

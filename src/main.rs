@@ -211,9 +211,9 @@ enum Cmd {
         #[arg(value_name = "MEMORY")]
         memory: Option<String>,
     },
-    /// Redact secrets from your local memory in place — for rows indexed before redaction existed (or
-    /// flagged by an updated ruleset); needs no source transcript. Cleans the local memory only: it
-    /// does NOT scrub an already-published remote, which the push gate can only stop adding to.
+    /// Redact secrets from your local memory in place, such as the blocks a push holds back. Needs no
+    /// source transcript, and cleans the local memory only: it does NOT scrub an already-published
+    /// remote, which the push gate can only stop adding to.
     Scrub,
     /// Update funes in place: download the latest release binary for this platform and replace the
     /// running executable, then bring the installed agent integrations to their newest release.

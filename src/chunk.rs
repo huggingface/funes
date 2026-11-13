@@ -268,9 +268,8 @@ pub(crate) fn resplit(template: &Chunk, text: &str) -> Vec<Chunk> {
 }
 
 /// Whether an index (with `include_thinking`) stores a block of this type: it isn't a dropped
-/// thinking block. Shared with redaction, so the blocks scanned for secrets are exactly the blocks
-/// stored.
-pub fn block_selected(block_type: &str, include_thinking: bool) -> bool {
+/// thinking block.
+fn block_selected(block_type: &str, include_thinking: bool) -> bool {
     block_type != "thinking" || include_thinking
 }
 

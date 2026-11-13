@@ -106,10 +106,9 @@ funes recall "..." --memory <user|org>/funes-memory   # read any remote memory f
 ```
 
 That second form is how you read **someone else's** published memory on a topic, without touching
-your own setup. Publishing is guarded: funes redacts credentials at index time, and a separate,
-always-on gate redacts any left in what it publishes, holding back what it can't redact. And because
-a published memory is just a dataset, you can try recall **right now**, before indexing anything of
-your own:
+your own setup. Publishing is guarded: an always-on gate redacts credentials from what it publishes,
+and holds back what it can't redact. And because a published memory is just a dataset, you can try
+recall **right now**, before indexing anything of your own:
 
 ```bash
 funes recall "why is funes append-only" --memory huggingface/funes-memory

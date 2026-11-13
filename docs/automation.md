@@ -78,8 +78,8 @@ validates a producer's output without writing anything, so run it before wiring 
   memory compete for its head on the Hub, and the one that loses retries. The one case that can
   leave rows out is a first publish to an empty memory, which has no head to check against. Setting
   up one host before the others avoids it.
-- **Secrets redacted on the way out.** funes redacts credentials at index time, and on push a
-  separate always-on gate redacts any left in what it publishes. A block it can't redact in place is
+- **Secrets redacted on the way out.** The local memory keeps sessions as written, and on push an
+  always-on gate redacts credentials from what it publishes. A block it can't redact in place is
   held back, the clean rows publish, and the push exits non-zero (code `2`) only if that leaves
   nothing to publish. Run `funes scrub`, then the next push includes it.
 - **The card rides along.** A push to a memory at the repo root creates the repo's dataset card
