@@ -7,15 +7,14 @@
 //!
 //! An index run writes every session's rows, embeds them, then compacts the memory. The embedding
 //! takes the longest and does not depend on how the rows are written, so this leaves it out and
-//! times the rest: writing the rows (reading each turns file, scanning it for secrets, chunking it,
-//! appending its rows, recording its state), then the end of the run (the language counts and the
-//! compaction). Both grow with the number of sessions as well as with their size, so a history of
-//! many short sessions is where they show.
+//! times the rest: writing the rows (reading each turns file, chunking it, appending its rows,
+//! recording its state), then the end of the run (the language counts and the compaction). Both
+//! grow with the number of sessions as well as with their size, so a history of many short sessions
+//! is where they show.
 //!
 //! The corpus is generated, `--sessions` sessions of `--turns` turns that are the same on every run,
 //! or a directory of turns files given with `--dir`, of which `--limit` keeps the most recent
-//! sessions. The secrets are scanned when TruffleHog is installed, as in `funes index`. The indexer
-//! reports each session and the compaction on stderr.
+//! sessions. The indexer reports each session and the compaction on stderr.
 
 use std::path::{Path, PathBuf};
 
