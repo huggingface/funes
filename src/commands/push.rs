@@ -667,7 +667,11 @@ fn gate(batches: &[RecordBatch]) -> Result<Gated> {
             gated.dirty[i] = true;
         }
         let r = scan::excise(text, findings);
-        let pieces = chunk::resplit(&chunks[idxs[0]], &r.text);
+        let tool_name = chunks[idxs[0]]
+            .tool_name
+            .as_deref()
+            .map(|n| scan::excise(n, findings).text);
+        let pieces = chunk::resplit(&chunks[idxs[0]], &r.text, tool_name);
         let same_ids = pieces.iter().map(|p| &p.id).eq(idxs.iter().map(|&i| &chunks[i].id));
         if r.fully_redacted && same_ids {
             candidates.push((idxs, findings, r.text, pieces));
@@ -966,6 +970,33 @@ mod tests {
         assert!(row.text.contains("[REDACTED:PrivateKey]"), "text: {}", row.text);
         let body = key.lines().nth(1).unwrap();
         assert!(!row.text.contains(body), "no line of the key ships");
+    }
+
+    #[test]
+    fn a_secret_in_a_tool_name_ships_in_neither_the_text_nor_the_column() {
+        if scan::Trufflehog::find().is_err() {
+            eprintln!("skip: trufflehog not found");
+            return;
+        }
+        let Some(key) = keygen(&["-t", "ed25519"]) else {
+            eprintln!("skip: ssh-keygen unavailable");
+            return;
+        };
+        // The block's text renders its tool name, which is also stored in a column of its own.
+        let mut call = turn(1, "{}");
+        call.blocks[0].block_type = "tool_use".into();
+        call.blocks[0].tool_name = Some(key.clone());
+        let (b, _) = batch(&[turn(0, "clean note"), call]);
+
+        let gated = gate(std::slice::from_ref(&b)).unwrap();
+        assert_eq!(gated.redacted.blocks, 1, "the block is redacted in place");
+        let shipped = gated_rows(vec![b], &gated, dataset::model::ENGLISH, zero_vectors).unwrap();
+        let body = key.lines().nth(1).unwrap();
+        for row in dataset::chunks(&shipped) {
+            assert!(!row.text.contains(body), "text: {}", row.text);
+            let name = row.tool_name.unwrap_or_default();
+            assert!(!name.contains(body), "tool_name: {name}");
+        }
     }
 
     #[test]

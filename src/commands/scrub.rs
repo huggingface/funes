@@ -67,7 +67,11 @@ pub async fn run() -> Result<()> {
         // window the next is found in. So a redaction counts only if the result scans clean.
         let clean = r.fully_redacted && scan::scan_blocks(&[r.text.as_str()], &scanner)?[0].is_empty();
         if clean {
-            replacements.extend(chunk::resplit(&chunks[idxs[0]], &r.text));
+            let tool_name = chunks[idxs[0]]
+                .tool_name
+                .as_deref()
+                .map(|n| scan::excise(n, findings).text);
+            replacements.extend(chunk::resplit(&chunks[idxs[0]], &r.text, tool_name));
             redacted_detectors.extend(r.removed_detectors);
             redacted_blocks += 1;
         } else {
