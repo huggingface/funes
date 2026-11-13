@@ -2,7 +2,7 @@
 //!
 //! Streamed, never a full mirror. "What's already there" is the memory's own chunk ids, so the
 //! delta is `embedded_local_ids − remote_ids`. `push` is orchestration:
-//! it computes the delta, redacts the secrets still in the rows it ships (holding back the blocks it
+//! it computes the delta, redacts the secrets in the rows it ships (holding back the blocks it
 //! can't redact in place, which wait for `funes scrub`), and drives the HF write operations in
 //! [`crate::memory::remote`], which own the atomic, parent-commit-guarded commits.
 //!
@@ -402,7 +402,7 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
         return Ok(format!("{}: up to date ({} chunks)\n{note}", target.label(), remote_ids.len()).into());
     }
 
-    // 4. Rows, then redact the secrets they still hold. Re-stamp each batch with the local
+    // 4. Rows, then redact the secrets they hold. Re-stamp each batch with the local
     // dataset's schema so its metadata (the embedding-model id) rides along — scan-result batches
     // drop it, and on first publish that schema is what the new dataset persists.
     let schema = dataset::schema_of(&local);
@@ -416,9 +416,9 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
     };
     let batches = dataset::restamped(&schema, rows)?;
 
-    // Redact the secrets the rows still hold, and hold back the blocks that can't be redacted in
-    // place rather than block the whole push: `funes scrub` redacts or drops them in the local
-    // memory, and the next push ships what it leaves.
+    // Redact the secrets the rows hold, and hold back the blocks that can't be redacted in place
+    // rather than block the whole push: `funes scrub` redacts or drops them in the local memory,
+    // and the next push ships what it leaves.
     let n_scanning: usize = batches.iter().map(|b| b.num_rows()).sum();
     eprintln!("scanning {n_scanning} chunk(s) for secrets…");
     let gated = gate(&batches)?;
@@ -579,7 +579,7 @@ fn card_file(remote_readme: Result<Option<String>>, ctx: &CardCtx) -> (Option<St
     }
 }
 
-/// Rows held back from a push because their text still contained a secret.
+/// Rows held back from a push: their block holds a secret the gate can't redact in place.
 #[derive(Default)]
 pub(crate) struct Skipped {
     pub rows: usize,
@@ -640,7 +640,7 @@ struct Gated {
 /// block's coordinates, so the remote holds the ids the local memory does. Otherwise the whole
 /// block is held back, its other chunks carrying the rest of the secret: a secret the scanner
 /// decoded from an encoded region, a redaction that still scans dirty, one re-split into another
-/// number of pieces. Fail-closed on the scanner — a push must scan before it uploads.
+/// number of pieces. Fail-closed on the scanner: a push must scan before it uploads.
 fn gate(batches: &[RecordBatch]) -> Result<Gated> {
     let mut gated = Gated {
         dirty: Vec::new(),
@@ -974,10 +974,10 @@ mod tests {
 
     #[test]
     fn an_escaped_key_is_redacted_not_pushed() {
-        // The exact shape that leaked: a key stored with escaped `\n` (literal backslash-n), as a
-        // JSON-encoded transcript or a logged blob would hold it. trufflehog still detects it, but
-        // its canonical `raw` (real newlines) is not a substring of the stored bytes, so value
-        // matching missed it and pushed it. Its escaped form must be found and redacted.
+        // A key stored with escaped `\n` (literal backslash-n), as a JSON-encoded transcript or a
+        // logged blob would hold it. trufflehog detects it, but its canonical `raw` (real newlines)
+        // is not a substring of the stored bytes, so the gate must find its escaped form to redact
+        // it.
         if scan::Trufflehog::find().is_err() {
             eprintln!("skip: trufflehog not found");
             return;
