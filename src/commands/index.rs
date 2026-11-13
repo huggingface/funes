@@ -415,9 +415,9 @@ struct Indexer {
     rejected: HashSet<usize>,
     /// A unit's state was recorded since the last [`Indexer::persist`].
     recorded: bool,
-    /// The spool files this batch indexed, as key, signature and progress label: drained once
+    /// The spool files this batch indexed, as key, signature and progress label, to drain once
     /// [`Indexer::persist`] has recorded them.
-    drained: Vec<(String, String, String)>,
+    to_drain: Vec<(String, String, String)>,
 }
 
 /// Enumerate every source's units (each source orders its own — recency-desc), tagged with the
@@ -531,7 +531,7 @@ impl Indexer {
             languages,
             rejected: HashSet::new(),
             recorded: false,
-            drained: Vec::new(),
+            to_drain: Vec::new(),
         })
     }
 
@@ -685,7 +685,7 @@ impl Indexer {
                 },
             );
             if drains(&key, Tier::ToolResult, self.include_thinking) {
-                self.drained.push((key, sig.clone(), progress.to_string()));
+                self.to_drain.push((key, sig.clone(), progress.to_string()));
             }
         }
         self.n_sessions += sessions;
@@ -707,7 +707,7 @@ impl Indexer {
         // One state write per batch, since each write holds every unit's state. A spool file is
         // drained only once the state says its unit is indexed.
         self.persist()?;
-        for (key, sig, progress) in std::mem::take(&mut self.drained) {
+        for (key, sig, progress) in std::mem::take(&mut self.to_drain) {
             if let Err(e) = drain(&key, &sig) {
                 eprintln!("{progress} {key} — indexed, but the spool copy stayed: {e:#}");
             }
