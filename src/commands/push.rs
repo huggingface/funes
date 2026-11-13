@@ -2,9 +2,9 @@
 //!
 //! Streamed, never a full mirror. "What's already there" is the memory's own chunk ids, so the
 //! delta is `embedded_local_ids − remote_ids`. `push` is orchestration:
-//! it computes the delta, holds back any row that still contains a secret (redaction happens at
-//! index time; this is the egress backstop — the rows wait for `funes scrub`), and drives the HF
-//! write operations in [`crate::memory::remote`], which own the atomic, parent-commit-guarded commits.
+//! it computes the delta, redacts the secrets still in the rows it ships (holding back the blocks it
+//! can't redact in place, which wait for `funes scrub`), and drives the HF write operations in
+//! [`crate::memory::remote`], which own the atomic, parent-commit-guarded commits.
 //!
 //! - **First publish:** build the dataset locally (data + FTS/IVF indexes) and upload every file in
 //!   one commit.
@@ -22,6 +22,7 @@
 
 use super::compact;
 use crate::hub;
+use crate::inference::{self, embed_batched, EmbeddingModel};
 use crate::memory::card::{self, CardAction, CardCtx};
 use crate::memory::dataset::{self, RecordBatch};
 use crate::memory::lock;
@@ -86,8 +87,8 @@ async fn held_among(local: &Dataset, pending: &HashSet<String>) -> Option<Skippe
         return None;
     }
     let rows = rows_with_ids(local, pending).await.ok()?;
-    let (_, skipped) = drop_secret_rows(rows).ok()?;
-    (skipped.rows > 0).then_some(skipped)
+    let held = gate(&rows).ok()?.held;
+    (held.rows > 0).then_some(held)
 }
 
 /// Every embedded row of the local memory, whole — a publish ships each row as it stands.
@@ -401,10 +402,11 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
         return Ok(format!("{}: up to date ({} chunks)\n{note}", target.label(), remote_ids.len()).into());
     }
 
-    // 4. Rows, then hold back any that still contain a secret. Re-stamp each batch with the local
+    // 4. Rows, then redact the secrets they still hold. Re-stamp each batch with the local
     // dataset's schema so its metadata (the embedding-model id) rides along — scan-result batches
     // drop it, and on first publish that schema is what the new dataset persists.
     let schema = dataset::schema_of(&local);
+    let model = dataset::embedding_model(&local)?;
     // Only a first publish with nothing named ships the whole memory; anything else, `to_push`
     // is the answer — including a first publish of a selection.
     let rows = if first_publish && sessions.is_empty() {
@@ -414,11 +416,23 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
     };
     let batches = dataset::restamped(&schema, rows)?;
 
-    // Drop any row whose text still holds a secret — hold it back from the Hub rather than block the
-    // whole push. `funes scrub` redacts it in the local memory; the next push then ships it.
+    // Redact the secrets the rows still hold, and hold back the blocks that can't be redacted in
+    // place rather than block the whole push: `funes scrub` redacts or drops them in the local
+    // memory, and the next push ships what it leaves.
     let n_scanning: usize = batches.iter().map(|b| b.num_rows()).sum();
     eprintln!("scanning {n_scanning} chunk(s) for secrets…");
-    let (batches, skipped) = drop_secret_rows(batches)?;
+    let gated = gate(&batches)?;
+    let batches = gated_rows(batches, &gated, model, |texts| {
+        eprintln!("re-embedding {} redacted chunk(s)…", texts.len());
+        let mut embedder = inference::embedder(model)?;
+        embed_batched(embedder.as_mut(), texts, |_| {})
+    })?;
+    let batches = dataset::restamped(&schema, batches)?;
+    let Gated {
+        held: skipped,
+        redacted,
+        ..
+    } = gated;
     let n_chunks: usize = batches.iter().map(|b| b.num_rows()).sum();
     if n_chunks == 0 && skipped.rows > 0 {
         // Everything was held back: nothing reached the Hub. Mark `blocked` so the CLI exits non-zero
@@ -441,7 +455,6 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
     // (and two stores sharing a repo would fight over one card's stats) — under a prefix it's
     // the owner's. The chunk count is the post-push total — best-effort: rows another writer
     // lands concurrently are missed until the next push refreshes the card.
-    let model = dataset::embedding_model(&local)?;
     let date = Utc::now().format("%Y-%m-%d").to_string();
     let ctx = CardCtx {
         repo: &w.repo_id,
@@ -485,8 +498,9 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
             n => format!("pushed {n} chunks"),
         };
         return Ok(format!(
-            "{}: {pushed} (commit {oid})\n{card_note}{}",
+            "{}: {pushed} (commit {oid})\n{card_note}{}{}",
             target.label(),
+            redacted.note(),
             skipped.warning()
         )
         .into());
@@ -539,6 +553,7 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
         eprintln!("compacting the remote…");
         out.push_str(&compact_auto(&w).await);
     }
+    out.push_str(&redacted.note());
     out.push_str(&skipped.warning());
     Ok(out.into())
 }
@@ -565,6 +580,7 @@ fn card_file(remote_readme: Result<Option<String>>, ctx: &CardCtx) -> (Option<St
 }
 
 /// Rows held back from a push because their text still contained a secret.
+#[derive(Default)]
 pub(crate) struct Skipped {
     pub rows: usize,
     /// Detectors that fired, e.g. `PrivateKey×1, AWS×2` — empty when nothing was held back.
@@ -584,63 +600,133 @@ impl Skipped {
     }
 }
 
-/// Scan the to-push `batches` and hold back every row of any *block* that holds a secret, returning
-/// the clean batches and what was held back. Detection works at block granularity: a block's chunks
-/// are reconstructed into their contiguous text (so a secret `split` cut across chunks is whole and
-/// detectable), scanned in one pass, and the scanner says which block each finding came from — never
-/// the secret's value, which fails on text stored with escaped or quoted bytes. If any
-/// chunk of a block is dirty, the whole block is held back (its other chunks carry the rest of the
-/// secret). Fail-closed on the scanner — a push must scan before it uploads.
-fn drop_secret_rows(batches: Vec<RecordBatch>) -> Result<(Vec<RecordBatch>, Skipped)> {
+/// Blocks a push redacted secrets from before publishing them.
+#[derive(Default)]
+struct Redacted {
+    blocks: usize,
+    /// Detectors that fired, e.g. `PrivateKey×1, AWS×2`.
+    summary: String,
+}
+
+impl Redacted {
+    /// A line for the push output, or empty if nothing was redacted.
+    fn note(&self) -> String {
+        if self.blocks == 0 {
+            return String::new();
+        }
+        format!(
+            "  redacted secrets in {} block(s) before publishing ({})\n",
+            self.blocks, self.summary
+        )
+    }
+}
+
+/// What the secret gate makes of the rows a push would upload.
+struct Gated {
+    /// Per row, across the batches in order: its block held a secret, so the row is replaced or held
+    /// back.
+    dirty: Vec<bool>,
+    /// The redacted blocks' pieces, each carrying the id of the row it replaces.
+    replacements: Vec<chunk::Chunk>,
+    redacted: Redacted,
+    held: Skipped,
+}
+
+/// Scan the to-push `batches` for secrets, a whole block at a time: a block's chunks are
+/// reconstructed into their contiguous text (so a secret `split` cut across chunks is whole and
+/// detectable), and every block is scanned in one pass. A block that holds a secret is redacted as
+/// `funes scrub` does it: the secret excised from its text, the text re-split by the same chunker,
+/// the result scanned again. Its pieces replace its rows only if they carry the same ids, the
+/// block's coordinates, so the remote holds the ids the local memory does. Otherwise the whole
+/// block is held back, its other chunks carrying the rest of the secret: a secret the scanner
+/// decoded from an encoded region, a redaction that still scans dirty, one re-split into another
+/// number of pieces. Fail-closed on the scanner — a push must scan before it uploads.
+fn gate(batches: &[RecordBatch]) -> Result<Gated> {
+    let mut gated = Gated {
+        dirty: Vec::new(),
+        replacements: Vec::new(),
+        redacted: Redacted::default(),
+        held: Skipped::default(),
+    };
     // Nothing to scan needs no scanner.
     if batches.iter().all(|b| b.num_rows() == 0) {
-        return Ok((
-            batches,
-            Skipped {
-                rows: 0,
-                summary: String::new(),
-            },
-        ));
+        return Ok(gated);
     }
     let scanner = scan::Trufflehog::find()?;
     // Row order across batches matches `chunks_from_batches`, so a chunk's index is its global row.
-    let chunks = dataset::chunks(&batches);
+    let chunks = dataset::chunks(batches);
     let blocks = chunk::reconstruct_blocks(&chunks);
     let texts: Vec<&str> = blocks.iter().map(|(_, text)| text.as_str()).collect();
     let found = scan::scan_blocks(&texts, &scanner)?;
+    gated.dirty = vec![false; chunks.len()];
 
-    let mut dirty = vec![false; chunks.len()];
-    let mut detectors: Vec<String> = Vec::new();
-    for ((idxs, _), findings) in blocks.iter().zip(&found) {
+    // One tally per (block, distinct detector), so a summary reads "PrivateKey×<blocks>".
+    let (mut redacted, mut held) = (Vec::new(), Vec::new());
+    let mut candidates = Vec::new();
+    for ((idxs, text), findings) in blocks.iter().zip(&found) {
         if findings.is_empty() {
             continue;
         }
         for &i in idxs {
-            dirty[i] = true;
+            gated.dirty[i] = true;
         }
-        // One tally per (block, distinct detector), so the warning reads "PrivateKey×<blocks>".
-        detectors.extend(scan::detectors(findings));
+        let r = scan::excise(text, findings);
+        let pieces = chunk::resplit(&chunks[idxs[0]], &r.text);
+        let same_ids = pieces.iter().map(|p| &p.id).eq(idxs.iter().map(|&i| &chunks[i].id));
+        if r.fully_redacted && same_ids {
+            candidates.push((idxs, findings, r.text, pieces));
+        } else {
+            gated.held.rows += idxs.len();
+            held.extend(scan::detectors(findings));
+        }
     }
-    let dropped = dirty.iter().filter(|&&d| d).count();
-    if dropped == 0 {
-        return Ok((
-            batches,
-            Skipped {
-                rows: 0,
-                summary: String::new(),
-            },
-        ));
+    // Excising one match can expose another (removing one from a long base64 run re-aligns the
+    // window the next is found in), so a redaction stands only if it scans clean.
+    if !candidates.is_empty() {
+        let rescan: Vec<&str> = candidates.iter().map(|(_, _, text, _)| text.as_str()).collect();
+        let left = scan::scan_blocks(&rescan, &scanner)?;
+        for ((idxs, findings, _, pieces), left) in candidates.into_iter().zip(&left) {
+            if left.is_empty() {
+                gated.replacements.extend(pieces);
+                gated.redacted.blocks += 1;
+                redacted.extend(scan::detectors(findings));
+            } else {
+                gated.held.rows += idxs.len();
+                held.extend(scan::detectors(findings));
+            }
+        }
     }
+    gated.redacted.summary = scan::summary(redacted.iter().map(String::as_str));
+    gated.held.summary = scan::summary(held.iter().map(String::as_str));
+    Ok(gated)
+}
 
-    // Drop the dirty rows batch by batch, mapping each global row index back via a running offset.
-    let mut clean = Vec::with_capacity(batches.len());
+/// The rows a push uploads once gated: every row outside a dirty block as it stands, then the
+/// redacted blocks' pieces under their rows' ids, embedded by `embed`, which only runs when a block
+/// was redacted. The rows of a held-back block stay behind.
+fn gated_rows(
+    batches: Vec<RecordBatch>,
+    gated: &Gated,
+    model: EmbeddingModel,
+    embed: impl FnOnce(&[&str]) -> Result<Vec<Vec<f32>>>,
+) -> Result<Vec<RecordBatch>> {
+    if !gated.dirty.contains(&true) {
+        return Ok(batches);
+    }
+    // Keep the rows of clean blocks batch by batch, mapping each global row index back via a running
+    // offset.
+    let mut out = Vec::with_capacity(batches.len() + 1);
     let mut base = 0usize;
     for b in &batches {
-        clean.push(dataset::keep_rows(b, |i| !dirty[base + i])?);
+        out.push(dataset::keep_rows(b, |i| !gated.dirty[base + i])?);
         base += b.num_rows();
     }
-    let summary = scan::summary(detectors.iter().map(String::as_str));
-    Ok((clean, Skipped { rows: dropped, summary }))
+    if !gated.replacements.is_empty() {
+        let texts: Vec<&str> = gated.replacements.iter().map(|c| c.text.as_str()).collect();
+        let vectors = embed(&texts)?;
+        out.push(dataset::build_batch(model, &gated.replacements, Some(&vectors))?);
+    }
+    Ok(out)
 }
 
 /// Best-effort compaction during a normal push: one attempt, never retried. The data is already
@@ -844,12 +930,54 @@ mod tests {
         )
     }
 
+    /// Zero vectors in place of an embedder, for the rows a gate redacted.
+    fn zero_vectors(texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        Ok(vec![vec![0.0f32; dataset::DIM as usize]; texts.len()])
+    }
+
     #[test]
-    fn drop_secret_rows_holds_back_an_escaped_key() {
+    fn a_redacted_block_ships_under_its_rows_ids() {
+        if scan::Trufflehog::find().is_err() {
+            eprintln!("skip: trufflehog not found");
+            return;
+        }
+        let Some(key) = keygen(&["-t", "ed25519"]) else {
+            eprintln!("skip: ssh-keygen unavailable");
+            return;
+        };
+        let (b, chunks) = batch(&[turn(0, "clean note"), turn(1, &format!("deploy key: {key}"))]);
+        assert_eq!(chunks.len(), 2, "precondition: one chunk per turn");
+        let ids = dataset::ids_in(std::slice::from_ref(&b));
+
+        let gated = gate(std::slice::from_ref(&b)).unwrap();
+        assert_eq!(
+            gated.held.rows, 0,
+            "a key whose redaction keeps the block's pieces is redacted, not held"
+        );
+        assert_eq!(gated.redacted.blocks, 1);
+        assert!(
+            gated.redacted.summary.contains("PrivateKey"),
+            "summary: {}",
+            gated.redacted.summary
+        );
+
+        let shipped = gated_rows(vec![b], &gated, dataset::model::ENGLISH, zero_vectors).unwrap();
+        assert_eq!(dataset::ids_in(&shipped), ids, "the redacted row keeps its id");
+        let row = dataset::chunks(&shipped)
+            .into_iter()
+            .find(|c| c.id == chunks[1].id)
+            .unwrap();
+        assert!(row.text.contains("[REDACTED:PrivateKey]"), "text: {}", row.text);
+        let body = key.lines().nth(1).unwrap();
+        assert!(!row.text.contains(body), "no line of the key ships");
+    }
+
+    #[test]
+    fn an_escaped_key_is_redacted_not_pushed() {
         // The exact shape that leaked: a key stored with escaped `\n` (literal backslash-n), as a
         // JSON-encoded transcript or a logged blob would hold it. trufflehog still detects it, but
-        // its canonical `raw` (real newlines) is not a substring of the stored bytes — value
-        // matching missed it and pushed it. Line-based location must hold it back.
+        // its canonical `raw` (real newlines) is not a substring of the stored bytes, so value
+        // matching missed it and pushed it. Its escaped form must be found and redacted.
         if scan::Trufflehog::find().is_err() {
             eprintln!("skip: trufflehog not found");
             return;
@@ -862,14 +990,14 @@ mod tests {
         assert!(!escaped.contains('\n'), "precondition: no real newlines remain");
         let (b, _) = batch(&[turn(0, "clean note"), turn(1, &format!("deploy key: {escaped}"))]);
 
-        let (clean, skipped) = drop_secret_rows(vec![b]).unwrap();
-        assert_eq!(skipped.rows, 1, "the escaped key must be held back, not pushed");
-        assert!(skipped.summary.contains("PrivateKey"), "summary: {}", skipped.summary);
-        assert_eq!(
-            clean.iter().map(|b| b.num_rows()).sum::<usize>(),
-            1,
-            "the clean row stays"
-        );
+        let gated = gate(std::slice::from_ref(&b)).unwrap();
+        assert_eq!(gated.held.rows, 0, "the escaped key is redacted, not held");
+        let shipped = gated_rows(vec![b], &gated, dataset::model::ENGLISH, zero_vectors).unwrap();
+        assert_eq!(shipped.iter().map(|b| b.num_rows()).sum::<usize>(), 2, "both rows ship");
+        let body = key.lines().nth(1).unwrap();
+        for row in dataset::chunks(&shipped) {
+            assert!(!row.text.contains(body), "no line of the key ships: {}", row.text);
+        }
     }
 
     /// A two-session local dataset for the selection tests.
@@ -960,12 +1088,15 @@ mod tests {
             eprintln!("skip: trufflehog not found");
             return;
         }
-        let Some(key) = keygen(&["-t", "ed25519"]) else {
+        // A key that is the whole of a block spanning several chunks: its redaction re-splits into
+        // fewer pieces, so a push holds the block back rather than redact it in place.
+        let Some(key) = keygen(&["-t", "rsa", "-b", "4096"]) else {
             eprintln!("skip: ssh-keygen unavailable");
             return;
         };
         let dir = tempfile::tempdir().unwrap();
         let (b, _) = batch(&[turn_sess("clean", 0, "notes on parsers"), turn_sess("dirty", 1, &key)]);
+        assert!(b.num_rows() > 2, "the secret must span multiple chunks");
         let uri = dataset::table_uri(dir.path());
         let schema = b.schema();
         let reader = RecordBatchIterator::new(vec![Ok(b)], schema);
@@ -979,7 +1110,7 @@ mod tests {
         let held = held_among(&ds, &all)
             .await
             .expect("the dirty pending block should be reported");
-        assert!(held.rows >= 1);
+        assert_eq!(held.rows, by_session["dirty"].len());
         assert!(held.summary.contains("PrivateKey"), "summary: {}", held.summary);
 
         let clean_only: HashSet<String> = by_session["clean"].iter().cloned().collect();
@@ -1023,14 +1154,24 @@ mod tests {
 
         let all: HashSet<String> = by_session.values().flatten().cloned().collect();
         let rows = rows_with_ids(&ds, &all).await.unwrap();
-        let (clean, held) = drop_secret_rows(rows).unwrap();
-        assert_eq!(held.rows, by_session["dirty"].len(), "every secret split is held");
-        assert!(held.summary.contains("PrivateKey"), "summary: {}", held.summary);
+        let gated = gate(&rows).unwrap();
+        // The key is the block's whole text, so its redaction re-splits into fewer pieces than the
+        // rows it would replace: held back whole.
+        assert_eq!(gated.held.rows, by_session["dirty"].len(), "every secret split is held");
+        assert!(
+            gated.held.summary.contains("PrivateKey"),
+            "summary: {}",
+            gated.held.summary
+        );
+        let clean = gated_rows(rows, &gated, dataset::model::ENGLISH, |_| {
+            unreachable!("nothing redacted")
+        })
+        .unwrap();
 
         let clean_only: HashSet<String> = by_session["clean"].iter().cloned().collect();
         assert_eq!(dataset::ids_in(&clean), clean_only, "unrelated clean rows survive");
         let rows = rows_with_ids(&ds, &clean_only).await.unwrap();
-        assert_eq!(drop_secret_rows(rows).unwrap().1.rows, 0, "clean rows are not held");
+        assert_eq!(gate(&rows).unwrap().held.rows, 0, "clean rows are not held");
     }
 
     #[tokio::test]

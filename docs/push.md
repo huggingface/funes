@@ -56,9 +56,13 @@ has not crossed a publication boundary. It prints a warning that index-time reda
 
 Push is the hard boundary. A separate, **always-on, fail-closed gate** requires TruffleHog and scans
 the rows about to leave the machine. It reconstructs complete content blocks before scanning, so a
-secret split across chunks cannot evade detection. If any chunk of a block contains a secret, every
-chunk of that block is held back; unrelated clean rows still publish with a warning. Only when that
-leaves *nothing* to publish does push exit non-zero (code `2`):
+secret split across chunks cannot evade detection. A block that contains a secret is redacted the
+way [`funes scrub`](#what-funes-scrub-changes) does it, and its redacted chunks are published in
+place of the stored ones, which the local memory keeps as they are. A block that can't be redacted
+in place is held back whole: a secret found in an encoded region, a redaction that still scans dirty,
+or one that re-chunks into a different number of chunks than the block has. Unrelated clean rows
+still publish with a warning. Only when that leaves *nothing* to publish does push exit non-zero
+(code `2`):
 
 ```console
 $ funes push <user|org>/funes-memory
