@@ -50,9 +50,8 @@ run this at session boundaries automatically; see [automation.md](automation.md)
 
 ## Keeping secrets out: the gate and `funes scrub`
 
-When TruffleHog is available, indexing redacts detected credentials before storing a session. That
-first pass is best-effort: local indexing still works without the scanner because the local memory
-has not crossed a publication boundary. It prints a warning that index-time redaction is disabled.
+Indexing stores sessions as written, credentials included: the local memory is not a publication
+boundary, so indexing doesn't scan it.
 
 Push is the hard boundary. A separate, **always-on, fail-closed gate** requires TruffleHog and scans
 the rows about to leave the machine. It reconstructs complete content blocks before scanning, so a

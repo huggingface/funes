@@ -1,7 +1,6 @@
-//! A directory of many small turns files is scanned for secrets a batch at a time: the scanner is
-//! spawned once per batch, not once per file, by `index --check` and by the index itself, and not
-//! at all by a rerun that owes nothing. Own test binary: it sets `$FUNES_HOME` and
-//! `$FUNES_TRUFFLEHOG`.
+//! A directory of many small turns files is read a batch at a time, by `index --check` and by the
+//! index itself, and neither runs the secret scanner: push is where secrets are redacted. A rerun
+//! that owes nothing adds no rows. Own test binary: it sets `$FUNES_HOME` and `$FUNES_TRUFFLEHOG`.
 
 mod support;
 
@@ -19,13 +18,13 @@ fn write_unit(path: &Path, line: &str, now: SystemTime, age: u64) {
 }
 
 #[tokio::test]
-async fn a_directory_is_scanned_a_batch_at_a_time() {
+async fn a_directory_is_indexed_a_batch_at_a_time_without_a_secret_scan() {
     let home = tempfile::tempdir().unwrap();
     let bin = tempfile::tempdir().unwrap();
     let source = tempfile::tempdir().unwrap();
     std::env::set_var("FUNES_HOME", home.path());
 
-    // A scanner that finds nothing and counts its spawns in a file beside itself.
+    // A scanner that counts its spawns in a file beside itself, so a scan by the index would show.
     let scanner = bin.path().join("trufflehog");
     std::fs::write(&scanner, "#!/bin/sh\necho spawn >> \"$0.spawns\"\n").unwrap();
     std::fs::set_permissions(&scanner, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -82,22 +81,21 @@ async fn a_directory_is_scanned_a_batch_at_a_time() {
         "a rejected unit is reported where it sits:\n{}",
         report.text
     );
-    assert_eq!(
-        spawned(),
-        2,
-        "41 units scan in two batches, the rejected one costing none"
-    );
+    assert_eq!(spawned(), 0, "--check runs no secret scan");
 
-    // The index scans the same two batches; a rerun that owes nothing scans nothing.
+    // The index runs none either, and a rerun that owes nothing adds no rows.
     std::fs::remove_file(&bad).unwrap();
     funes::commands::index::run_index(source.path(), false, None)
         .await
         .unwrap();
-    assert_eq!(spawned(), 4);
+    assert_eq!(spawned(), 0, "the index runs no secret scan");
     assert_eq!(support::stored_rows().await, units as usize);
     funes::commands::index::run_index(source.path(), false, None)
         .await
         .unwrap();
-    assert_eq!(spawned(), 4, "an unchanged rerun spawns no scanner");
-    assert_eq!(support::stored_rows().await, units as usize, "and adds no rows");
+    assert_eq!(
+        support::stored_rows().await,
+        units as usize,
+        "an unchanged rerun adds no rows"
+    );
 }

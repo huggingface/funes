@@ -15,7 +15,6 @@ use crate::inference::{self, embed_batched, Embedder};
 use crate::memory::dataset::{self, build_batch, model};
 use crate::memory::lock;
 use crate::memory::Memory;
-use crate::scan;
 use crate::traces::spool;
 use crate::traces::{self, repo, source};
 use crate::ui::prompt::confirm;
@@ -162,10 +161,9 @@ pub async fn ensure_local_memory(model: inference::EmbeddingModel) -> Result<()>
     }
 }
 
-/// Elide every block's inline base64 `data:` URI payloads, before [`redact_units`] scans them: a
-/// screenshot's entropy trips detectors on values that are not secrets, and excising one of those
-/// plants a marker mid-payload that strands the rest of it in the store. Runs whether or not a
-/// scanner is installed — the payload is unrecallable either way.
+/// Elide every block's inline base64 `data:` URI payloads before they are stored: a payload is
+/// unrecallable, and a screenshot's entropy trips the push gate's detectors on values that are not
+/// secrets.
 fn elide_turns(turns: &mut [traces::Turn]) {
     for b in turns.iter_mut().flat_map(|t| t.blocks.iter_mut()) {
         if let Cow::Owned(elided) = chunk::elide_data_uris(&b.text) {
@@ -174,82 +172,16 @@ fn elide_turns(turns: &mut [traces::Turn]) {
     }
 }
 
-/// Redact secrets from `units`' turns *before* chunking — so a long key that chunking would split
-/// across pieces is whole when scanned, and never reaches the embedding, the local memory, or (via
-/// push) the Hub. One scanner run covers every unit given: the spawn costs ~1 s, the scan itself
-/// milliseconds. Scans exactly the blocks the memory stores ([`chunk::block_selected`]).
-/// Best-effort: removes a secret whose value byte-matches the stored text (the common case, real
-/// newlines); anything that resists is caught downstream by the fail-closed push gate. Reports to
-/// stderr what it removed, per unit.
-fn redact_units(
-    units: &mut [&mut [traces::Turn]],
-    scanner: &dyn scan::SecretScanner,
-    include_thinking: bool,
-) -> Result<()> {
-    let n_units = units.len();
-    let mut blocks: Vec<(usize, &mut traces::Block)> = Vec::new();
-    for (u, turns) in units.iter_mut().enumerate() {
-        for b in turns.iter_mut().flat_map(|t| t.blocks.iter_mut()) {
-            if chunk::block_selected(&b.block_type, include_thinking) {
-                blocks.push((u, b));
-            }
-        }
-    }
-    if blocks.is_empty() {
-        return Ok(());
-    }
-    let per_block = {
-        let texts: Vec<&str> = blocks.iter().map(|(_, b)| b.text.as_str()).collect();
-        scan::scan_blocks(&texts, scanner)?
-    };
-    let mut removed: Vec<Vec<String>> = (0..n_units).map(|_| Vec::new()).collect();
-    for ((u, b), findings) in blocks.into_iter().zip(&per_block) {
-        let r = scan::excise(&b.text, findings);
-        removed[u].extend(r.removed_detectors);
-        b.text = r.text;
-    }
-    for (turns, removed) in units.iter().zip(removed) {
-        if removed.is_empty() {
-            continue;
-        }
-        let sid = turns.first().map(|t| t.session_id.as_str()).unwrap_or("?");
-        eprintln!(
-            "    redacted {} secret(s) in {sid}: {}",
-            removed.len(),
-            scan::summary(removed.iter().map(String::as_str))
-        );
-    }
-    Ok(())
-}
+/// Units a batch consumes. A run reads, writes and records its units a batch at a time, and a
+/// budgeted run checks its clock between batches.
+const BATCH_UNITS: usize = 32;
 
-/// Make a batch of units' turns what the memory stores — data URIs elided and, with a `scanner`,
-/// secrets redacted, the batch in one scanner run — before any of them is chunked, since both
-/// change the text a block splits into.
-fn sanitize_units(
-    units: &mut [&mut [traces::Turn]],
-    include_thinking: bool,
-    scanner: Option<&impl scan::SecretScanner>,
-) -> Result<()> {
-    for turns in units.iter_mut() {
-        elide_turns(turns);
-    }
-    if let Some(scanner) = scanner {
-        redact_units(units, scanner, include_thinking)?;
-    }
-    Ok(())
-}
-
-/// Units a batch consumes: those read are scanned for secrets in one scanner spawn (~1 s) rather
-/// than one per unit, so a directory of hundreds of session files is scanned in seconds, not
-/// minutes.
-const SCAN_BATCH: usize = 32;
-
-/// Block text a batch holds before it is scanned: bounds the memory a batch of bulk units (a Hub
+/// Block text a batch holds before it is written: bounds the memory a batch of bulk units (a Hub
 /// shard holds thousands of sessions) takes, where the unit count alone would not.
-const SCAN_BATCH_BYTES: usize = 64 << 20;
+const BATCH_BYTES: usize = 64 << 20;
 
-/// Read units from the front of `units` until a batch fills — [`SCAN_BATCH`] consumed, or
-/// [`SCAN_BATCH_BYTES`] of block text read, whichever comes first. `read(n, unit)` gives the
+/// Read units from the front of `units` until a batch fills — [`BATCH_UNITS`] consumed, or
+/// [`BATCH_BYTES`] of block text read, whichever comes first. `read(n, unit)` gives the
 /// `n`th unit's turns, or `None` for one the batch has no use for (already indexed, rejected).
 /// Either way the unit is consumed and counts, so whatever a backlog holds, a caller's check
 /// between batches is never more than a batch away. Returns one entry per unit consumed, in
@@ -270,23 +202,11 @@ fn take_batch<T>(
                 .sum::<usize>();
         }
         batch.push(turns);
-        if batch.len() >= SCAN_BATCH || bytes >= SCAN_BATCH_BYTES {
+        if batch.len() >= BATCH_UNITS || bytes >= BATCH_BYTES {
             break;
         }
     }
     Ok(batch)
-}
-
-/// The secret scanner, if installed. Best-effort: without one, indexing continues unredacted — the
-/// push gate still scans, fail-closed, before any upload, so a secret can't reach the Hub.
-fn find_scanner() -> Option<scan::Trufflehog> {
-    match scan::Trufflehog::find() {
-        Ok(s) => Some(s),
-        Err(e) => {
-            eprintln!("note: secret redaction disabled — {e}");
-            None
-        }
-    }
 }
 
 /// A unit's distinct-session count and a log label: `"<sid> (<workdir>)"` for a single session (a
@@ -458,8 +378,8 @@ pub(crate) fn local_index_coverage() -> Option<IndexCoverage> {
     })
 }
 
-/// A set-up indexer: it holds the memory lock, embedder, dataset, redaction scanner, and incremental
-/// state, so a caller can index units in whatever batches it likes — one at a time to check the
+/// A set-up indexer: it holds the memory lock, embedder, dataset, and incremental state, so a
+/// caller can index units in whatever batches it likes — one at a time to check the
 /// clock between them, or all at once — without reloading the model. Build the indexes once at the
 /// end with [`Indexer::finalize`].
 struct Indexer {
@@ -468,7 +388,6 @@ struct Indexer {
     /// [`stored_ids`] at open plus everything written this run — the dedup baseline for new chunks.
     existing: HashSet<String>,
     embedder: Box<dyn Embedder>,
-    scanner: Option<scan::Trufflehog>,
     include_thinking: bool,
     /// cwd → resolved `repo` value, so each distinct checkout runs `git` once across the run.
     repo_cache: HashMap<String, String>,
@@ -537,7 +456,7 @@ fn collect_units(sources: &[Box<dyn source::TraceSource>]) -> Result<Vec<(usize,
 
 impl Indexer {
     /// Acquire the memory lock, open (or plan to create) the dataset, load incremental state, bring
-    /// up the embedder and secret scanner, and enumerate `sources`' units.
+    /// up the embedder, and enumerate `sources`' units.
     async fn open(sources: Vec<Box<dyn source::TraceSource>>, no_thinking: bool) -> Result<Indexer> {
         std::fs::create_dir_all(home::dir())?;
         let interactive = std::io::stdin().is_terminal();
@@ -576,7 +495,6 @@ impl Indexer {
         };
 
         let embedder: Box<dyn Embedder> = inference::embedder(model)?;
-        let scanner = find_scanner();
 
         let units = collect_units(&sources)?;
         if !no_thinking {
@@ -598,7 +516,6 @@ impl Indexer {
             ds,
             existing,
             embedder,
-            scanner,
             include_thinking: !no_thinking,
             repo_cache: HashMap::new(),
             state,
@@ -700,16 +617,17 @@ impl Indexer {
         }
     }
 
-    /// Read and sanitize a batch of units, with one scanner run. Returns one entry per unit
-    /// consumed: its turns, or `None` when skipped or refused.
+    /// Read a batch of units, their data URIs elided. Returns one entry per unit consumed: its turns,
+    /// or `None` when skipped or refused.
     fn read_batch(
         &mut self,
         units: &[usize],
         label: impl Fn(usize) -> String,
     ) -> Result<Vec<Option<Vec<traces::Turn>>>> {
         let mut read = take_batch(units, |n, &i| self.read_unit(i, &label(n)))?;
-        let mut all: Vec<&mut [traces::Turn]> = read.iter_mut().flatten().map(Vec::as_mut_slice).collect();
-        sanitize_units(&mut all, self.include_thinking, self.scanner.as_ref())?;
+        for turns in read.iter_mut().flatten() {
+            elide_turns(turns);
+        }
         Ok(read)
     }
 
@@ -1212,7 +1130,6 @@ pub fn check(path: &Path, no_thinking: bool, limit: Option<usize>) -> Result<Che
     }
     let src = source::open(path, limit)?;
     let units = src.units()?;
-    let scanner = find_scanner();
     let mut text = format!("checking {}\n", path.display());
     let (mut turns, mut chunks, mut rejected, mut duplicate_ids) = (0usize, 0usize, 0usize, 0usize);
     let mut from = 0;
@@ -1225,8 +1142,9 @@ pub fn check(path: &Path, no_thinking: bool, limit: Option<usize>) -> Result<Che
                 Ok(None)
             }
         })?;
-        let mut all: Vec<&mut [traces::Turn]> = read.iter_mut().flatten().map(Vec::as_mut_slice).collect();
-        sanitize_units(&mut all, !no_thinking, scanner.as_ref())?;
+        for unit_turns in read.iter_mut().flatten() {
+            elide_turns(unit_turns);
+        }
         let mut rejections = rejections.into_iter();
         for (n, unit_turns) in read.iter().enumerate() {
             let Some(unit_turns) = unit_turns else {
@@ -1787,23 +1705,7 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_elides_payloads_before_the_scanner_sees_them() {
-        // Records what it is shown, and finds the key wherever it is.
-        struct Recorder(std::cell::RefCell<String>);
-        impl scan::SecretScanner for Recorder {
-            fn scan(&self, texts: &[&str]) -> Result<Vec<Vec<scan::Finding>>> {
-                self.0.borrow_mut().push_str(&texts.join("\n"));
-                let key = scan::Finding {
-                    detector: "PrivateKey".into(),
-                    raw: "TOPSECRET".into(),
-                    decoder: "PLAIN".into(),
-                };
-                Ok(texts
-                    .iter()
-                    .map(|t| t.contains("TOPSECRET").then(|| key.clone()).into_iter().collect())
-                    .collect())
-            }
-        }
+    fn a_stored_block_loses_its_data_uris_and_keeps_its_text_as_written() {
         let mut turns = vec![traces::Turn {
             format: traces::FORMAT_VERSION,
             session_id: "sess".into(),
@@ -1823,81 +1725,10 @@ mod tests {
             source_path: String::new(),
             harness: "codex".into(),
         }];
-        let scanner = Recorder(std::cell::RefCell::new(String::new()));
-        sanitize_units(&mut [&mut turns], true, Some(&scanner)).unwrap();
+        elide_turns(&mut turns);
         assert_eq!(
-            turns[0].blocks[0].text,
-            r#"{"image_url":"data:image/png;base64,[elided]"} key=[REDACTED:PrivateKey]"#
-        );
-        assert!(
-            !scanner.0.borrow().contains("iVBORw0KGgo"),
-            "the scanner must never see the payload: excising a match inside it would strand the rest"
-        );
-    }
-
-    #[test]
-    fn redact_scans_every_unit_in_one_pass_and_only_the_blocks_stored() {
-        // Finds the secret a text carries, so a finding must land on the unit it came from.
-        struct Counting(std::cell::Cell<usize>);
-        impl scan::SecretScanner for Counting {
-            fn scan(&self, texts: &[&str]) -> Result<Vec<Vec<scan::Finding>>> {
-                self.0.set(self.0.get() + 1);
-                let finding = |detector: &str, raw: &str| scan::Finding {
-                    detector: detector.into(),
-                    raw: raw.into(),
-                    decoder: "PLAIN".into(),
-                };
-                Ok(texts
-                    .iter()
-                    .map(|t| {
-                        let mut found = Vec::new();
-                        if t.contains("SECRET") {
-                            found.push(finding("PrivateKey", "SECRET"));
-                        }
-                        if t.contains("TOKEN") {
-                            found.push(finding("Slack", "TOKEN"));
-                        }
-                        found
-                    })
-                    .collect())
-            }
-        }
-        let block = |bt: &str, text: &str| traces::Block {
-            block_type: bt.into(),
-            text: text.into(),
-            tool_name: None,
-            tool_use_id: None,
-        };
-        let turn = |blocks: Vec<traces::Block>| traces::Turn {
-            format: traces::FORMAT_VERSION,
-            session_id: "sess".into(),
-            cwd: None,
-            workdir: "proj".into(),
-            turn_uuid: "turn".into(),
-            parent_uuid: None,
-            seq: 0,
-            ts: String::new(),
-            role: "user".into(),
-            blocks,
-            source_path: String::new(),
-            harness: "claude_code".into(),
-        };
-        let mut a = vec![turn(vec![
-            block("text", "note SECRET here"),
-            block("thinking", "SECRET thought"),
-        ])];
-        let mut b = vec![turn(vec![block("tool_result", "output TOKEN dump")])];
-        let scanner = Counting(std::cell::Cell::new(0));
-        redact_units(&mut [&mut a, &mut b], &scanner, false).unwrap();
-        assert_eq!(scanner.0.get(), 1, "one scanner run for both units");
-        assert_eq!(a[0].blocks[0].text, "note [REDACTED:PrivateKey] here");
-        assert_eq!(
-            a[0].blocks[1].text, "SECRET thought",
-            "a thinking block --no-thinking won't store is not scanned"
-        );
-        assert_eq!(
-            b[0].blocks[0].text, "output [REDACTED:Slack] dump",
-            "each unit of the batch gets its own secrets, and only those"
+            turns[0].blocks[0].text, r#"{"image_url":"data:image/png;base64,[elided]"} key=TOPSECRET"#,
+            "the payload goes, and the push gate is what redacts a secret"
         );
     }
 
@@ -1928,20 +1759,20 @@ mod tests {
 
         // Tiny units fill a batch by count; the rest go in the next.
         let batch = take_batch(&units, |_, _| Ok(Some(turns_of(1)))).unwrap();
-        assert_eq!(batch.len(), SCAN_BATCH);
+        assert_eq!(batch.len(), BATCH_UNITS);
         let rest = take_batch(&units[batch.len()..], |_, _| Ok(Some(turns_of(1)))).unwrap();
-        assert_eq!(rest.len(), 40 - SCAN_BATCH);
+        assert_eq!(rest.len(), 40 - BATCH_UNITS);
 
         // A unit the pass has no use for is consumed and counts: a backlog of them still ends a
         // batch, so a budget check is never more than a batch away.
         let batch = take_batch(&units, |n, _| Ok((n % 2 == 0).then(|| turns_of(1)))).unwrap();
-        assert_eq!(batch.len(), SCAN_BATCH);
-        assert_eq!(batch.iter().flatten().count(), SCAN_BATCH / 2);
+        assert_eq!(batch.len(), BATCH_UNITS);
+        assert_eq!(batch.iter().flatten().count(), BATCH_UNITS / 2);
         let batch = take_batch(&units, |_, _| Ok(None)).unwrap();
-        assert_eq!(batch.len(), SCAN_BATCH);
+        assert_eq!(batch.len(), BATCH_UNITS);
 
         // Text fills a batch before the count does.
-        let batch = take_batch(&units, |_, _| Ok(Some(turns_of(SCAN_BATCH_BYTES / 4)))).unwrap();
+        let batch = take_batch(&units, |_, _| Ok(Some(turns_of(BATCH_BYTES / 4)))).unwrap();
         assert_eq!(batch.len(), 4);
     }
 

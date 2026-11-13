@@ -61,14 +61,12 @@ async fn scrub_dropping_every_block_leaves_a_valid_empty_memory() {
     let mut f = std::fs::File::create(source.path().join(format!("{session}.funes.jsonl"))).unwrap();
     writeln!(f, "{line}").unwrap();
 
-    // Index with a no-op scanner so the escaped key lands in the memory unredacted.
-    std::env::set_var("FUNES_TRUFFLEHOG", "/usr/bin/true");
+    // Indexing stores the escaped key as written.
     funes::commands::index::run_index(source.path(), false, None)
         .await
         .unwrap();
 
-    // Scrub with the real scanner: every block is unredactable, so the memory is rewritten empty.
-    std::env::remove_var("FUNES_TRUFFLEHOG");
+    // Every block is unredactable, so scrub rewrites the memory empty.
     funes::commands::scrub::run().await.unwrap();
 
     // The empty Overwrite must leave a valid, reopenable memory with zero rows.

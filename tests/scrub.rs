@@ -2,9 +2,8 @@
 //! its source, and re-embeds what it rewrote with the memory's own model (multilingual-e5-small
 //! here). Skipped unless trufflehog and ssh-keygen are available.
 //!
-//! A dirty memory is created by indexing with `FUNES_TRUFFLEHOG=/usr/bin/true` — `true` ignores its
-//! args and exits 0, so the scan finds nothing and the secret is stored unredacted (simulating a
-//! memory built before redaction existed). Then scrub runs with the real scanner and cleans it.
+//! Indexing stores the secret as written, so the memory is dirty until scrub runs with the real
+//! scanner and cleans it.
 
 mod support;
 
@@ -50,8 +49,6 @@ async fn scrub_redacts_an_existing_secret_in_place_with_the_memorys_model() {
     let session = "scrub-session-0001";
     support::write_session(source.path(), session, &[format!("部署密钥：\n{key}")]);
 
-    // Index with a no-op scanner so the secret lands in the memory unredacted.
-    std::env::set_var("FUNES_TRUFFLEHOG", "/usr/bin/true");
     funes::commands::index::run_index(source.path(), false, None)
         .await
         .unwrap();
@@ -68,8 +65,7 @@ async fn scrub_redacts_an_existing_secret_in_place_with_the_memorys_model() {
         "setup: the key should be on disk before scrub"
     );
 
-    // Scrub with the real scanner: it must redact the key in place.
-    std::env::remove_var("FUNES_TRUFFLEHOG");
+    // Scrub must redact the key in place.
     funes::commands::scrub::run().await.unwrap();
     let clean = recall::get(Memory::local(), session.into(), TurnRange::default())
         .await

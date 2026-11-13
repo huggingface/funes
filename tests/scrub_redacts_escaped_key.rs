@@ -66,8 +66,7 @@ async fn scrub_redacts_an_escaped_key_in_place() {
         writeln!(f, "{line}").unwrap();
     }
 
-    // Index with a no-op scanner so the escaped key lands in the memory unredacted.
-    std::env::set_var("FUNES_TRUFFLEHOG", "/usr/bin/true");
+    // Indexing stores the escaped key as written.
     funes::commands::index::run_index(source.path(), false, None)
         .await
         .unwrap();
@@ -86,8 +85,7 @@ async fn scrub_redacts_an_escaped_key_in_place() {
         "setup: the escaped key should be in the memory before scrub"
     );
 
-    // Scrub with the real scanner: it matches the key's JSON-escaped form and excises it in place.
-    std::env::remove_var("FUNES_TRUFFLEHOG");
+    // Scrub matches the key's JSON-escaped form and excises it in place.
     funes::commands::scrub::run().await.unwrap();
 
     let after_key = funes::commands::recall::get(

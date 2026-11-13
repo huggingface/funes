@@ -125,8 +125,9 @@ Run it before you publish a producer.
 Behaviour, not contract — it may evolve; the identity rule above will not.
 
 - **Elides** inline base64 `data:` payloads to `[elided]`.
-- **Redacts** secrets before chunking, best-effort; whatever slips through is caught by the fail-closed
-  gate on `push`, so a leaked token never reaches a published memory.
+- **Redacts** secrets only on `push`: the local memory keeps them as written, and the fail-closed
+  gate on `push` redacts them from what it publishes, so a leaked token never reaches a published
+  memory.
 - **Renders** each block to the text that is embedded and full-text indexed: `text` and `thinking`
   as-is; `tool_use` as `[tool_use <tool_name>] <text>` (`[tool_use None] <text>` without a name);
   `tool_result` as `[tool_result <tool_name>] <text>` (`[tool_result] <text>` without a name).
