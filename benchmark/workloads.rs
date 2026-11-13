@@ -1,12 +1,12 @@
-//! The documents `bench_models` times and `score_models` scores, in seven workloads, because they
-//! stress different things. A batch of short docs is dominated by per-call overheads (tokenization,
-//! thread spawns), while 30 docs at the 512-token truncation cap, recall's rerank worst case, are
-//! dominated by GEMM throughput and memory behavior. The ragged batch is real indexing's shape:
-//! batch-longest padding masks most attention columns, whose softmax weights underflow, and the
-//! scores×V GEMM then reads what they leave behind. The real batch spreads its lengths the way
-//! measured chunks do, so it shows what a backend spends on padding a mixed batch. The 256-document
-//! workloads match the production batch size and show how grouping by length scales. The
-//! 100-document one is recall's pool at `--candidates 100`.
+//! Seven workloads of documents to embed and rerank, because they stress different things. A batch
+//! of short docs is dominated by per-call overheads (tokenization, thread spawns), while 30 docs at
+//! the 512-token truncation cap, recall's rerank worst case, are dominated by GEMM throughput and
+//! memory behavior. The ragged batch is real indexing's shape: batch-longest padding masks most
+//! attention columns, whose softmax weights underflow, and the scores×V GEMM then reads what they
+//! leave behind. The real batch spreads its lengths the way measured chunks do, so it shows what a
+//! backend spends on padding a mixed batch. The 256-document workloads are an indexing call's size
+//! on the CPU, and show how grouping by length scales. The 100-document one is recall's pool at
+//! `--candidates 100`.
 //!
 //! No two documents of a workload are the same text: the GPU embedder embeds a repeated text
 //! once, so a workload with repeats would time fewer documents than it holds.
@@ -68,7 +68,7 @@ pub fn real_docs() -> Vec<String> {
     (0..32).map(|i| words[..REAL_WORDS[i * 13 % 32]].join(" ")).collect()
 }
 
-/// Like `mixed_docs` but 256 documents, the batch size `embed_batched` uses in production.
+/// Like `mixed_docs` but 256 documents, an indexing call's size on the CPU.
 fn big_mixed_docs() -> Vec<String> {
     let short = short_docs();
     let mut docs = capped_docs(32);
@@ -76,7 +76,8 @@ fn big_mixed_docs() -> Vec<String> {
     docs
 }
 
-/// Like `real_docs` but 256 documents, the production batch size, with the same length spread.
+/// Like `real_docs` but 256 documents, with the same length spread: an indexing call's size on the
+/// CPU.
 fn big_real_docs() -> Vec<String> {
     let words: Vec<&str> = SENT.split_whitespace().cycle().take(400).collect();
     (0..256)

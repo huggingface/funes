@@ -138,8 +138,8 @@ The seven workloads live in `workloads.rs`, which `score_models` shares:
 - A ragged batch of 2 capped documents among 14 short ones.
 - 32 and 100 documents whose token lengths are the quantiles of real chunks. 100 is recall's pool
   at `--candidates 100`.
-- 256-document mixed and real batches, the production batch size, which show how a backend scales
-  and what it spends on padding.
+- 256-document mixed and real batches, an indexing call's size on the CPU, which show how a backend
+  scales and what it spends on padding.
 
 Edit the query or the workloads when investigating a particular regression.
 
