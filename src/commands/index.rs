@@ -659,12 +659,21 @@ impl Indexer {
             eprintln!("{progress} {label} — no indexable content");
             0
         } else {
-            // A unit can carry one id twice (a turn re-emitted under its `turn_uuid`); the first wins,
-            // as it would have had the two arrived in separate runs.
+            // A block stored once takes no more pieces: a re-read can split it into more than the
+            // memory holds (an edit re-emitted under its `turn_uuid`, or a block an older funes stored
+            // with its secrets cut out), and the extra ones would sit behind the old ones. A block's
+            // first piece stands for it, since its pieces are written together, and the first
+            // occurrence of a block in a unit wins, as it would have in separate runs.
             let mut in_batch = HashSet::new();
+            let mut new_block = false;
             let new_chunks: Vec<chunk::Chunk> = chunks
                 .into_iter()
-                .filter(|c| !self.existing.contains(&c.id) && in_batch.insert(c.id.clone()))
+                .filter(|c| {
+                    if c.split_idx == 0 {
+                        new_block = !self.existing.contains(&c.id) && in_batch.insert(c.id.clone());
+                    }
+                    new_block
+                })
                 .collect();
             if new_chunks.is_empty() {
                 eprintln!("{progress} {label} — {total_chunks} chunks, all already indexed");
