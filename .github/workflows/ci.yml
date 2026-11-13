@@ -201,10 +201,13 @@ jobs:
       # is everything any test needs, so a test added later is covered without touching this file.
       # The Hub ones skip themselves when the secret is absent (on a fork) and clean up the
       # scratch repos they create.
+      # Under umask 002, the default on hosts with a group per user (Debian, Ubuntu). funes refuses
+      # an integration others could write to, so a test fixture that leaves its modes to the umask
+      # fails here, not only on those hosts. The unit job keeps the runner's 022.
       - name: Integration tests
         env:
           HF_FUNES_TEST_TOKEN: ${{ secrets.HF_FUNES_TEST_TOKEN }}
-        run: cargo test --profile ci -- --nocapture
+        run: umask 002 && cargo test --profile ci -- --nocapture
 
       - name: Save model weights
         if: ${{ !cancelled() && github.ref == 'refs/heads/main' && steps.models.outputs.cache-hit != 'true' }}

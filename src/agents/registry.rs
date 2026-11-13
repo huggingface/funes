@@ -988,10 +988,22 @@ mod tests {
         format!(r#"{{"contract_version": {contract}, "id": "{id}", "label": "An Agent", "repo": "acme/funes-pi"}}"#)
     }
 
+    /// A registry root closed to other writers, as funes makes its own. `open` judges the root as
+    /// well, and a temporary directory otherwise takes its mode from the umask, which 002 leaves
+    /// group-writable.
+    fn registry_root() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o755))
+            .tempdir()
+            .unwrap()
+    }
+
     /// Write an integration at `root/<dir_name>` declaring `manifest`, whose `setup` runs `body`.
+    /// Its directories are created as funes creates its own, so `open` judges what the test meant
+    /// and not the umask of whoever runs it.
     fn integration(root: &Path, dir_name: &str, manifest: &str, body: &str) -> PathBuf {
         let dir = root.join(dir_name);
-        std::fs::create_dir_all(&dir).unwrap();
+        create_owned(&dir).unwrap();
         std::fs::write(dir.join("manifest.json"), manifest).unwrap();
         let setup = dir.join(SETUP);
         std::fs::write(&setup, format!("#!/bin/sh\n{body}\n")).unwrap();
@@ -1001,7 +1013,7 @@ mod tests {
 
     #[test]
     fn a_setup_others_could_have_written_is_refused() {
-        let root = tempfile::tempdir().unwrap();
+        let root = registry_root();
         let dir = integration(root.path(), "pi", &manifest("pi", CONTRACT_VERSION), "true");
         assert!(open(root.path(), "pi").is_ok());
 
@@ -1563,7 +1575,7 @@ mod tests {
     /// source is even looked for.
     #[tokio::test]
     async fn an_id_that_is_not_one_is_refused_before_anything_is_written() {
-        let root = tempfile::tempdir().unwrap();
+        let root = registry_root();
         for id in ["../docs", "Pi", "a/b", ""] {
             let err = provision(root.path(), id, None).await.unwrap_err().to_string();
             assert!(err.contains("not an integration id"), "{id:?}: {err}");
@@ -1576,7 +1588,7 @@ mod tests {
 
     #[test]
     fn the_mismatched_integrations_are_listed_with_their_contract() {
-        let root = tempfile::tempdir().unwrap();
+        let root = registry_root();
         integration(root.path(), "pi", &manifest("pi", CONTRACT_VERSION), "true");
         integration(root.path(), "codex", &manifest("codex", CONTRACT_VERSION + 1), "true");
         integration(root.path(), "hermes", "not json", "true");
@@ -1588,7 +1600,7 @@ mod tests {
 
     #[test]
     fn an_unknown_id_names_what_is_registered() {
-        let root = tempfile::tempdir().unwrap();
+        let root = registry_root();
         integration(root.path(), "pi", &manifest("pi", CONTRACT_VERSION), "true");
         integration(root.path(), "codex", &manifest("codex", CONTRACT_VERSION), "true");
         assert_eq!(registered_ids(root.path()), vec!["codex", "pi"]);
@@ -1604,7 +1616,7 @@ mod tests {
 
     #[test]
     fn the_id_must_be_the_directory_name_and_facet_safe() {
-        let root = tempfile::tempdir().unwrap();
+        let root = registry_root();
         integration(root.path(), "pi", &manifest("codex", CONTRACT_VERSION), "true");
         let err = open(root.path(), "pi").unwrap_err().to_string();
         assert!(err.contains("directory name"), "{err}");
@@ -1616,7 +1628,7 @@ mod tests {
 
     #[test]
     fn a_manifest_declares_its_release_and_publisher() {
-        let root = tempfile::tempdir().unwrap();
+        let root = registry_root();
         integration(
             root.path(),
             "pi",
@@ -1657,7 +1669,7 @@ mod tests {
 
     #[test]
     fn a_manifest_is_rejected_rather_than_guessed() {
-        let root = tempfile::tempdir().unwrap();
+        let root = registry_root();
         integration(
             root.path(),
             "pi",
@@ -1679,7 +1691,7 @@ mod tests {
 
     #[test]
     fn setup_must_exist_and_be_executable() {
-        let root = tempfile::tempdir().unwrap();
+        let root = registry_root();
         let dir = integration(root.path(), "pi", &manifest("pi", CONTRACT_VERSION), "true");
 
         let setup = dir.join(SETUP);
@@ -1696,7 +1708,7 @@ mod tests {
     /// funes has no record of installing, are refreshed on every run.
     #[test]
     fn only_an_install_named_with_from_runs_as_installed() {
-        let root = tempfile::tempdir().unwrap();
+        let root = registry_root();
         integration(root.path(), "pi", &manifest("pi", CONTRACT_VERSION), "true");
         let manifest: Manifest = serde_json::from_str(&manifest("pi", CONTRACT_VERSION)).unwrap();
         assert!(refreshes_on_every_run(root.path(), "pi"), "no record");
@@ -1724,7 +1736,7 @@ mod tests {
     /// digest: the same digest from another source, or another digest, is not it.
     #[test]
     fn the_installed_release_is_known_by_its_recorded_digest() {
-        let root = tempfile::tempdir().unwrap();
+        let root = registry_root();
         integration(root.path(), "pi", &manifest("pi", CONTRACT_VERSION), "true");
         let manifest: Manifest = serde_json::from_str(&manifest("pi", CONTRACT_VERSION)).unwrap();
         let release = Release {
