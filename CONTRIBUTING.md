@@ -60,10 +60,6 @@ fine; CI runs them with the repository secret. The ones that write each create a
 repo of their own under `optimum-internal-testing` and delete it after: the Hub's commit lock is
 repo-wide, so two test runs sharing a repo would refuse each other's commits.
 
-The suite passes under any umask, and CI runs it under `umask 002`. funes refuses an integration
-others could write to, so a test that builds one by hand (its directories, its `setup`, a note
-beside it) sets their modes itself, as funes does when it installs one.
-
 ## Style
 
 - **Format** with `cargo fmt` (stable rustfmt; [rustfmt.toml](rustfmt.toml) carries the one
