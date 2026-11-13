@@ -988,9 +988,7 @@ mod tests {
         format!(r#"{{"contract_version": {contract}, "id": "{id}", "label": "An Agent", "repo": "acme/funes-pi"}}"#)
     }
 
-    /// A registry root closed to other writers, as funes makes its own. `open` judges the root as
-    /// well, and a temporary directory otherwise takes its mode from the umask, which 002 leaves
-    /// group-writable.
+    /// A registry root closed to other writers, as funes makes its own.
     fn registry_root() -> tempfile::TempDir {
         tempfile::Builder::new()
             .permissions(std::fs::Permissions::from_mode(0o755))
@@ -999,8 +997,6 @@ mod tests {
     }
 
     /// Write an integration at `root/<dir_name>` declaring `manifest`, whose `setup` runs `body`.
-    /// Its directories are created as funes creates its own, so `open` judges what the test meant
-    /// and not the umask of whoever runs it.
     fn integration(root: &Path, dir_name: &str, manifest: &str, body: &str) -> PathBuf {
         let dir = root.join(dir_name);
         create_owned(&dir).unwrap();
