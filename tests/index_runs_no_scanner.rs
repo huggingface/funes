@@ -1,6 +1,6 @@
-//! A directory of many small turns files is read a batch at a time, by `index --check` and by the
-//! index itself, and neither runs the secret scanner: push is where secrets are redacted. A rerun
-//! that owes nothing adds no rows. Own test binary: it sets `$FUNES_HOME` and `$FUNES_TRUFFLEHOG`.
+//! Indexing runs no secret scanner, neither `index --check` nor the index itself, over a directory
+//! of more turns files than a batch holds: push is where secrets are redacted. A rerun that owes
+//! nothing adds no rows. Own test binary: it sets `$FUNES_HOME` and `$FUNES_TRUFFLEHOG`.
 
 mod support;
 
@@ -18,7 +18,7 @@ fn write_unit(path: &Path, line: &str, now: SystemTime, age: u64) {
 }
 
 #[tokio::test]
-async fn a_directory_is_indexed_a_batch_at_a_time_without_a_secret_scan() {
+async fn indexing_a_directory_runs_no_secret_scan() {
     let home = tempfile::tempdir().unwrap();
     let bin = tempfile::tempdir().unwrap();
     let source = tempfile::tempdir().unwrap();
