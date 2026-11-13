@@ -65,10 +65,10 @@ default `blas` (src/inference/blas.rs, hand-written forwards on Accelerate/faer)
 (fastembed/ort). On macOS the default build also carries `metal` (src/inference/metal.rs): the same
 encoders as MPSGraphs in fp16, which the embedder hands calls of 32+ texts to and the reranker calls
 of 8+ pairs, falling back to `blas` where no GPU starts. `blas` and `metal` each keep one module per
-encoder architecture: `bert.rs` (the embedders) and `modernbert.rs`
-(gte-reranker-modernbert-base, the reranker). `onnx` runs the same reranker, from the ONNX export in
-gte's Hub repo. CI lints and unit-tests the default build on Linux and on macOS 15, each with the
-other's seam compiled out, and `onnx` on Linux: so also run
+encoder architecture: `bert.rs` (the embedders) and `modernbert.rs` (gte-reranker-modernbert-base,
+the reranker). `onnx` runs the same reranker, from the ONNX export in gte's Hub repo. CI lints and
+unit-tests the default build on Linux and on macOS 15, each with the other's seam compiled out, and
+`onnx` on Linux: so also run
 `cargo clippy --all-targets --no-default-features --features onnx` before calling work done.
 `cargo run --release --features onnx --example score_models` scores `blas` and `metal` against
 `onnx`, and `cargo run --release --example bench_models -- --backend <blas|metal>` times one of them.
