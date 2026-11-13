@@ -45,9 +45,7 @@ async fn acquire_lock(interactive: bool) -> Result<lock::MemoryLock> {
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
     }
-    Err(anyhow!(
-        "another funes memory operation is in progress; retry in a moment"
-    ))
+    Err(lock::Busy.into())
 }
 
 /// What `funes index` was asked, as the CLI help describes each.

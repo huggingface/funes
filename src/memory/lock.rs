@@ -11,7 +11,7 @@
 use std::fs::{File, TryLockError};
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 
 use crate::home;
 
@@ -79,8 +79,21 @@ impl MemoryLock {
 }
 
 fn in_progress() -> anyhow::Error {
-    anyhow!("another funes memory operation is in progress; retry once it finishes")
+    Busy.into()
 }
+
+/// Another memory operation holds the lock: a temporary failure, which the same call gets past
+/// once that operation finishes.
+#[derive(Debug)]
+pub struct Busy;
+
+impl std::fmt::Display for Busy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("another funes memory operation is in progress; retry once it finishes")
+    }
+}
+
+impl std::error::Error for Busy {}
 
 /// Whether a funes up to 1.6 is writing the home's memory: those lock `store.lock` in the funes
 /// home rather than in the memory.

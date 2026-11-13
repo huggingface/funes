@@ -313,9 +313,20 @@ impl MemoryOpts {
     }
 }
 
+/// The exit status of a command that found the memory busy: sysexits' EX_TEMPFAIL, a temporary
+/// failure.
+const EX_TEMPFAIL: i32 = 75;
+
 fn main() -> Result<()> {
     hub::configure_user_agent_origin();
-    tokio::runtime::Runtime::new()?.block_on(run())
+    let ran = tokio::runtime::Runtime::new()?.block_on(run());
+    if let Err(e) = &ran {
+        if e.downcast_ref::<memory::lock::Busy>().is_some() {
+            eprintln!("Error: {e:?}");
+            std::process::exit(EX_TEMPFAIL);
+        }
+    }
+    ran
 }
 
 async fn run() -> Result<()> {
