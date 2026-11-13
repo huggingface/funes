@@ -22,6 +22,21 @@ async fn memory_lock_fails_loudly_on_contention() {
         "acquire should report contention, got: {err}"
     );
 
+    // `funes index` off a terminal, as a hook runs it, exits 75 (EX_TEMPFAIL) rather than 1.
+    std::fs::create_dir_all(home.path().join("spool/pi")).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_funes"))
+        .args(["index", "--harness", "pi"])
+        .env("HOME", home.path())
+        .stdin(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(75), "{stderr}");
+    assert!(
+        stderr.contains("another funes memory operation is in progress"),
+        "{stderr}"
+    );
+
     // scrub refuses while the lock is held (its guard is the same acquire).
     let err = funes::commands::scrub::run().await.unwrap_err();
     assert!(

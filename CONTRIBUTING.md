@@ -174,7 +174,9 @@ and what it holds `funes sessions` says, each row closing on the last indexed tu
 a seed can skip a session whose source has not grown since; one file per session, named from the
 session id, so a re-emit overwrites its own file; write a temporary name in the same directory and
 rename it into place, with the temporary name off `.jsonl` (see [funes-jsonl.md](docs/funes-jsonl.md)).
-The hook then runs `funes index --harness <id>`, one budgeted step over the spool.
+The hook then runs `funes index --harness <id>`, one budgeted step over the spool. It exits 75
+(`EX_TEMPFAIL`) when another funes holds the memory: the next turn's run catches up, so that exit
+is no failure.
 
 The maintained four register `$FUNES_BIN mcp [MEMORY]` as the agent's MCP server, convert the
 agent's history into the spool at install, and install automation that converts each finished
