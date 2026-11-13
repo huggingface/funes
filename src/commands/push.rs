@@ -428,21 +428,17 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
         embed_batched(embedder.as_mut(), texts, |_| {})
     })?;
     let batches = dataset::restamped(&schema, batches)?;
-    let Gated {
-        held: skipped,
-        redacted,
-        ..
-    } = gated;
+    let Gated { held, redacted, .. } = gated;
     let n_chunks: usize = batches.iter().map(|b| b.num_rows()).sum();
-    if n_chunks == 0 && skipped.rows > 0 {
+    if n_chunks == 0 && held.rows > 0 {
         // Everything was held back: nothing reached the Hub. Mark `blocked` so the CLI exits non-zero
         // — automation must not read this as a successful publish.
         return Ok(Pushed {
             report: format!(
                 "{}: nothing published — held back {} row(s) with secrets ({}); run `funes scrub`, then push again\n",
                 target.label(),
-                skipped.rows,
-                skipped.summary
+                held.rows,
+                held.summary
             ),
             blocked: true,
         });
@@ -501,7 +497,7 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
             "{}: {pushed} (commit {oid})\n{card_note}{}{}",
             target.label(),
             redacted.note(),
-            skipped.warning()
+            held.warning()
         )
         .into());
     }
@@ -554,7 +550,7 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
         out.push_str(&compact_auto(&w).await);
     }
     out.push_str(&redacted.note());
-    out.push_str(&skipped.warning());
+    out.push_str(&held.warning());
     Ok(out.into())
 }
 
