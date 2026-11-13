@@ -172,15 +172,14 @@ fn elide_turns(turns: &mut [traces::Turn]) {
     }
 }
 
-/// Units a batch consumes. A run reads, writes and records its units a batch at a time, and a
-/// budgeted run checks its clock between batches.
+/// Units a batch consumes, at most: a batch's units are read, written and recorded together.
 const BATCH_UNITS: usize = 32;
 
 /// Block text a batch holds before it is written: bounds the memory a batch of bulk units (a Hub
 /// shard holds thousands of sessions) takes, where the unit count alone would not.
 const BATCH_BYTES: usize = 64 << 20;
 
-/// Read units from the front of `units` until a batch fills — [`BATCH_UNITS`] consumed, or
+/// Read units from the front of `units` until a batch fills: [`BATCH_UNITS`] consumed, or
 /// [`BATCH_BYTES`] of block text read, whichever comes first. `read(n, unit)` gives the
 /// `n`th unit's turns, or `None` for one the batch has no use for (already indexed, rejected).
 /// Either way the unit is consumed and counts, so whatever a backlog holds, a caller's check
@@ -379,9 +378,9 @@ pub(crate) fn local_index_coverage() -> Option<IndexCoverage> {
 }
 
 /// A set-up indexer: it holds the memory lock, embedder, dataset, and incremental state, so a
-/// caller can index units in whatever batches it likes — one at a time to check the
-/// clock between them, or all at once — without reloading the model. Build the indexes once at the
-/// end with [`Indexer::finalize`].
+/// caller can index units in whatever batches it likes (one at a time to check the clock between
+/// them, or all at once) without reloading the model. Build the indexes once at the end with
+/// [`Indexer::finalize`].
 struct Indexer {
     uri: String,
     ds: Option<Dataset>,
@@ -561,14 +560,14 @@ impl Indexer {
             .collect()
     }
 
-    /// Record a unit's state, which [`Indexer::persist`] writes with the rest of its batch.
+    /// Record a unit's state, unwritten until the next [`Indexer::persist`].
     fn record(&mut self, key: &str, state: UnitState) {
         self.state.insert(key.to_string(), state);
         self.recorded = true;
     }
 
-    /// Persist the recorded states, so an interrupted run resumes where it stopped. Each write holds
-    /// every unit's state, so it runs once a batch rather than once a unit, and only after a record.
+    /// Write every unit's state, if one was recorded since the last write, so an interrupted run
+    /// resumes where it stopped.
     fn persist(&mut self) -> Result<()> {
         if !std::mem::take(&mut self.recorded) {
             return Ok(());
@@ -631,10 +630,10 @@ impl Indexer {
         Ok(read)
     }
 
-    /// Write all tiers of unit `i` from sanitized `turns`, keeping only new chunks in one append,
-    /// and record that its rows are in the memory. Its spool file is drained once
-    /// [`Indexer::write_units`] has persisted that record, and the memory itself carries any
-    /// embeddings still owed. A bulk source stays one fragment per unit.
+    /// Write all tiers of unit `i` from its `turns`, keeping only new chunks in one append, and
+    /// record that its rows are in the memory. A spool file left with nothing owed is queued to
+    /// drain. The memory itself carries any embeddings still owed. A bulk source stays one fragment
+    /// per unit.
     async fn write_unit(&mut self, i: usize, turns: &[traces::Turn], progress: &str) -> Result<u64> {
         let (key, sig) = {
             let unit = &self.units[i].1;
@@ -707,7 +706,8 @@ impl Indexer {
                 self.write_unit(units[n], &turns, &label(n)).await?;
             }
         }
-        // A spool file is drained only once the state says its unit is indexed.
+        // One state write per batch, since each write holds every unit's state. A spool file is
+        // drained only once the state says its unit is indexed.
         self.persist()?;
         for (key, sig, progress) in std::mem::take(&mut self.drained) {
             if let Err(e) = drain(&key, &sig) {
@@ -1207,7 +1207,7 @@ pub struct RowsWritten {
 }
 
 /// Index `path` as [`run_index`] does, but leave every embedding pending: the part of a run the
-/// embedder has no share in, which `benchmark/bench_index.rs` times on its own.
+/// embedder has no share in.
 pub async fn write_rows(path: &Path, max_sessions: Option<usize>) -> Result<RowsWritten> {
     let mut indexer = Indexer::open(vec![source::open(path, max_sessions)?], false).await?;
     let total = indexer.unit_count();
