@@ -193,3 +193,29 @@ async fn a_row_closes_on_the_highest_seq_not_the_latest_stamp() {
         "the span closes on the highest seq's stamp:\n{listing}"
     );
 }
+
+/// A block keeps the pieces it was first stored with, whatever text a re-read brings. funes 1.12
+/// and older stored a block with its secrets cut out, so reading its session again can split the
+/// block into more pieces than the memory holds, the extra ones carrying the secret's raw tail.
+#[tokio::test]
+async fn a_stored_block_takes_no_pieces_from_a_longer_reread() {
+    let _one_at_a_time = HOME.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("key.funes.jsonl");
+    let mut turns = turns_of("funes_jsonl/valid.funes.jsonl");
+    turns.truncate(1);
+    turns[0].blocks[0].text = "deploy key: [REDACTED:PrivateKey]".into();
+    write_turns(&path, &turns);
+    let (home, first) = index_fresh(dir.path()).await;
+
+    // The block as written, three pieces long, read again because its file changed.
+    turns[0].blocks[0].text = format!("deploy key: {}", "the raw tail of the secret ".repeat(100));
+    write_turns(&path, &turns);
+    std::env::set_var("FUNES_HOME", home.path());
+    run_index(dir.path(), false, None).await.unwrap();
+    assert_eq!(
+        rows().await,
+        first,
+        "the stored block takes no piece of the longer text"
+    );
+}
