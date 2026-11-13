@@ -253,8 +253,9 @@ pub(crate) fn reconstruct_blocks(chunks: &[Chunk]) -> Vec<(Vec<usize>, String)> 
 /// Re-chunk a block's (already rendered) `text` after it changed — e.g. a secret was redacted out —
 /// reusing the block's identity (session, turn, block_idx, role, …) from `template`. Ids and
 /// `split_idx` are regenerated from the new split count, so they stay coordinate-stable. An empty
-/// result means nothing indexable survived.
-pub(crate) fn resplit(template: &Chunk, text: &str) -> Vec<Chunk> {
+/// result means nothing indexable survived. The pieces carry `tool_name`, the name `text` renders,
+/// which a redaction of the text may have changed.
+pub(crate) fn resplit(template: &Chunk, text: &str, tool_name: Option<String>) -> Vec<Chunk> {
     split(text)
         .into_iter()
         .enumerate()
@@ -262,6 +263,7 @@ pub(crate) fn resplit(template: &Chunk, text: &str) -> Vec<Chunk> {
             id: cid(&template.session_id, &template.turn_uuid, template.block_idx, si as i64),
             text: piece,
             split_idx: si as i64,
+            tool_name: tool_name.clone(),
             ..(*template).clone()
         })
         .collect()
@@ -484,7 +486,7 @@ mod tests {
         let fresh = chunks_from_turns(std::slice::from_ref(&t), true);
         let template = fresh[0].clone();
         let rendered = render("text", &long, &None);
-        let re = resplit(&template, &rendered);
+        let re = resplit(&template, &rendered, None);
         assert_eq!(re.len(), fresh.len());
         for (a, b) in re.iter().zip(&fresh) {
             assert_eq!(a.id, b.id);
