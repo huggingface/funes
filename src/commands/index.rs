@@ -497,6 +497,11 @@ struct Indexer {
     /// Units (by index) whose read failed this run — reported once. Signed units also keep their
     /// refusal in state until their content or this build changes.
     rejected: HashSet<usize>,
+    /// A unit's state was recorded since the last [`Indexer::persist`].
+    recorded: bool,
+    /// The spool files this batch indexed, as key, signature and progress label: drained once
+    /// [`Indexer::persist`] has recorded them.
+    drained: Vec<(String, String, String)>,
 }
 
 /// Enumerate every source's units (each source orders its own — recency-desc), tagged with the
@@ -611,6 +616,8 @@ impl Indexer {
             n_embedded: 0,
             languages,
             rejected: HashSet::new(),
+            recorded: false,
+            drained: Vec::new(),
         })
     }
 
@@ -637,9 +644,18 @@ impl Indexer {
             .collect()
     }
 
-    /// Record a unit's state and persist it, so an interrupted run resumes where it stopped.
-    fn record(&mut self, key: &str, state: UnitState) -> Result<()> {
+    /// Record a unit's state, which [`Indexer::persist`] writes with the rest of its batch.
+    fn record(&mut self, key: &str, state: UnitState) {
         self.state.insert(key.to_string(), state);
+        self.recorded = true;
+    }
+
+    /// Persist the recorded states, so an interrupted run resumes where it stopped. Each write holds
+    /// every unit's state, so it runs once a batch rather than once a unit, and only after a record.
+    fn persist(&mut self) -> Result<()> {
+        if !std::mem::take(&mut self.recorded) {
+            return Ok(());
+        }
         std::fs::write(&self.state_path, serde_json::to_string_pretty(&self.state)?)?;
         write_index_coverage(&self.coverage_path, &self.sources, &self.units, &self.state)
     }
@@ -676,7 +692,7 @@ impl Indexer {
                             level: None,
                             refused: Some(VERSION.to_string()),
                         },
-                    )?;
+                    );
                 }
                 Ok(None)
             }
@@ -697,9 +713,10 @@ impl Indexer {
         Ok(read)
     }
 
-    /// Write all tiers of unit `i` from sanitized `turns`, keeping only new chunks in one append.
-    /// Record that its rows are in the memory before draining its spool file; the memory itself
-    /// carries any embeddings still owed. A bulk source stays one fragment per unit.
+    /// Write all tiers of unit `i` from sanitized `turns`, keeping only new chunks in one append,
+    /// and record that its rows are in the memory. Its spool file is drained once
+    /// [`Indexer::write_units`] has persisted that record, and the memory itself carries any
+    /// embeddings still owed. A bulk source stays one fragment per unit.
     async fn write_unit(&mut self, i: usize, turns: &[traces::Turn], progress: &str) -> Result<u64> {
         let (key, sig) = {
             let unit = &self.units[i].1;
@@ -751,11 +768,9 @@ impl Indexer {
                     level: Some(Tier::ToolResult),
                     refused: None,
                 },
-            )?;
+            );
             if drains(&key, Tier::ToolResult, self.include_thinking) {
-                if let Err(e) = drain(&key, sig) {
-                    eprintln!("{progress} {key} — indexed, but the spool copy stayed: {e:#}");
-                }
+                self.drained.push((key, sig.clone(), progress.to_string()));
             }
         }
         self.n_sessions += sessions;
@@ -772,6 +787,13 @@ impl Indexer {
         for (n, turns) in batch.into_iter().enumerate() {
             if let Some(turns) = turns {
                 self.write_unit(units[n], &turns, &label(n)).await?;
+            }
+        }
+        // A spool file is drained only once the state says its unit is indexed.
+        self.persist()?;
+        for (key, sig, progress) in std::mem::take(&mut self.drained) {
+            if let Err(e) = drain(&key, &sig) {
+                eprintln!("{progress} {key} — indexed, but the spool copy stayed: {e:#}");
             }
         }
         Ok(consumed)
