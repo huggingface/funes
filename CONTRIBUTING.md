@@ -46,6 +46,28 @@ You need:
 - **`expect`** — the `funes add` tests run the binary at a pty to answer the prompts it only asks
   at a terminal. macOS ships it; `sudo apt-get install -y expect` elsewhere.
 
+### Specifications with coding agents
+
+[Spec-kit](https://github.github.io/spec-kit/) provides tools for requirements, clarification,
+planning, and checking work against specifications. [AGENTS.md](AGENTS.md#spec-kit) tells agents
+when to use them. You can describe the work in ordinary language and let the agent choose the
+appropriate tool.
+
+Install the Specify CLI once for your user account (requires [uv](https://docs.astral.sh/uv/)):
+
+```bash
+uv tool install specify-cli
+```
+
+Initialize each checkout for your coding agent. Replace `<agent>` with its
+[integration key](https://github.github.io/spec-kit/integrations/index.html):
+
+```bash
+specify init --here --integration <agent>
+```
+
+For an already initialized checkout, use `specify integration install <agent>` to add an integration.
+
 ## Building and testing
 
 ```bash

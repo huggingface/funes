@@ -51,6 +51,25 @@ that will drift.
   the passages alone, where the two adjacent chunk snippets it replaced added none. Trim a reply
   with `--oneline` or `k`, not by dropping the frame.
 
+## Spec-kit
+
+Choose the relevant available Spec-kit skills from the task context:
+
+- Project principles: `speckit-constitution`.
+- Describing behavior or resolving requirement ambiguities: `speckit-specify`, `speckit-clarify`.
+- Planning and task breakdown: `speckit-plan`, `speckit-tasks`.
+- Requirements quality and artifact consistency: `speckit-checklist`, `speckit-analyze`.
+- Implementing planned work and checking its coverage: `speckit-implement`, `speckit-converge`.
+
+Read and follow the chosen skill's instructions and prerequisites. Select skills as needed, without
+imposing a fixed sequence on every task. The agent chooses the tools and handles their commands.
+The user describes goals, answers behavior questions, and reviews results without having to learn
+tool names or invocation conventions.
+
+Check availability before use. Do not assume Spec-kit or its project setup exists in a clone.
+If a prerequisite is missing, explain what is needed. Ask before installing tooling or initializing
+a checkout.
+
 ## Working on the repo
 
 Building needs `protoc` (lance compiles protobuf at build time).
