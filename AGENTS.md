@@ -66,9 +66,9 @@ imposing a fixed sequence on every task. The agent chooses the tools and handles
 The user describes goals, answers behavior questions, and reviews results without having to learn
 tool names or invocation conventions.
 
-Before calling a spec ready for planning, check it against the sessions that produced it (funes
-holds them). Each requirement must come from a decision the user made, or follow from one. Turn
-the rest into clarification questions. Spec-kit's checklists only assess how a spec is written.
+Before calling a spec ready for planning, check that each requirement comes from a decision the
+user made, or follows from one. A requirement you cannot trace to such a decision becomes a
+clarification question. Spec-kit's checklists only assess how a spec is written.
 
 Check availability before use. Do not assume Spec-kit or its project setup exists in a clone.
 If a prerequisite is missing, explain what is needed. Ask before installing tooling or initializing
