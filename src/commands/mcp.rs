@@ -11,17 +11,20 @@ use super::recall;
 use super::target::Target;
 use crate::agents;
 use crate::home;
-use anyhow::{Context, Result};
+use crate::memory::lock::try_lock_file;
+use anyhow::{bail, Context, Result};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{Implementation, ServerCapabilities, ServerConfig};
 use rmcp::transport::async_rw::AsyncRwTransport;
 use rmcp::transport::stdio;
 use rmcp::{schemars, tool, tool_handler, tool_router, ServerHandler, ServiceExt};
-use std::fs::Permissions;
-use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::task::JoinSet;
 
 // A request refuses a parameter its schema does not list: an agent reading the schema never sends
 // one, so an unknown field is the caller's bug, failed with the field named rather than ignored.
@@ -420,59 +423,137 @@ fn default_socket() -> PathBuf {
     home::dir().join("mcp.sock")
 }
 
-/// Serve on `path` until killed: one MCP session per connection, all of them on the one server this
-/// process made, and therefore on the one embedder and reranker it loads.
+/// Serve on `path`: one MCP session per connection, all of them on the one server this process
+/// made, and therefore on the one embedder and reranker it loads.
 ///
-/// A path another server already serves is left to it, and this returns: a launcher may start-or-join
-/// with the same command, without a check of its own.
+/// A path a server of this version already serves is left to it, and this returns: a launcher may
+/// start-or-join with the same command, without a check of its own. A server of another version is
+/// replaced: it stops taking agents once its socket is gone, and exits when its last one leaves.
 async fn serve_socket(memory: Option<String>, path: PathBuf) -> Result<()> {
-    if UnixStream::connect(&path).await.is_ok() {
-        return Ok(());
-    }
-    // Nothing is listening, so a file at that path is left over from a server that was killed.
-    if path.exists() {
-        std::fs::remove_file(&path).with_context(|| format!("removing the stale socket {}", path.display()))?;
-    }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-    }
-    let listener = UnixListener::bind(&path).with_context(|| format!("binding {}", path.display()))?;
-    // Agents run as the user whose memory this is; nobody else may talk to it.
-    std::fs::set_permissions(&path, Permissions::from_mode(0o600))
-        .with_context(|| format!("closing {}", path.display()))?;
+    let listener = {
+        // Probe, clear and bind as one step: two servers starting together would each find nothing
+        // listening, and the second would unlink the first's fresh socket.
+        let mut lock = path.clone().into_os_string();
+        lock.push(".lock");
+        let lock = PathBuf::from(lock);
+        let _held = loop {
+            match try_lock_file(&lock)? {
+                Some(held) => break held,
+                None => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        };
+        match server_version(&path).await {
+            Some(v) if v == env!("CARGO_PKG_VERSION") => return Ok(()),
+            Some(v) => eprintln!("funes mcp: replacing the funes {v} server on {}", path.display()),
+            None => {}
+        }
+        match std::fs::symlink_metadata(&path) {
+            // A socket nobody of this version answers on: a killed server's, or an older one's.
+            Ok(m) if m.file_type().is_socket() => {
+                std::fs::remove_file(&path).with_context(|| format!("removing the stale socket {}", path.display()))?
+            }
+            Ok(_) => bail!("{} is not a socket — name another path", path.display()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        }
+        // Agents run as the user whose memory this is; nobody else may talk to it, from the moment
+        // the socket exists.
+        // SAFETY: `umask` swaps a process attribute and cannot fail.
+        let umask = unsafe { libc::umask(0o177) };
+        let bound = UnixListener::bind(&path);
+        unsafe { libc::umask(umask) };
+        bound.with_context(|| format!("binding {}", path.display()))?
+    };
+    let ino = std::fs::symlink_metadata(&path)?.ino();
     eprintln!("funes mcp: listening on {}", path.display());
 
+    let funes = Funes::new(memory);
+    let mut sessions = JoinSet::new();
+    let mut check = tokio::time::interval(Duration::from_secs(5));
     loop {
-        let (stream, _) = listener.accept().await.context("accepting an agent")?;
-        let funes = Funes::new(memory.clone());
-        tokio::spawn(async move {
-            let (read, write) = stream.into_split();
-            match funes.serve(AsyncRwTransport::new_server(read, write)).await {
-                // Waiting on the session is what keeps it open: dropping the service ends it.
-                Ok(service) => {
-                    let _ = service.waiting().await;
+        tokio::select! {
+            accepted = listener.accept() => match accepted {
+                Ok((stream, _)) => {
+                    let funes = funes.clone();
+                    sessions.spawn(async move {
+                        let (read, write) = stream.into_split();
+                        match funes.serve(AsyncRwTransport::new_server(read, write)).await {
+                            // Waiting on the session is what keeps it open: dropping the service ends it.
+                            Ok(service) => {
+                                let _ = service.waiting().await;
+                            }
+                            Err(e) => eprintln!("funes mcp: an agent could not start a session: {e}"),
+                        }
+                    });
                 }
-                Err(e) => eprintln!("funes mcp: an agent could not start a session: {e}"),
+                // Out of descriptors, or a client gone before it was accepted: the agents already
+                // connected keep their sessions, and the next accept may succeed.
+                Err(e) => {
+                    eprintln!("funes mcp: accepting an agent: {e}");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            },
+            Some(_) = sessions.join_next() => {}
+            _ = check.tick() => {
+                let ours = std::fs::symlink_metadata(&path).map(|m| m.ino()).ok() == Some(ino);
+                if !ours {
+                    break;
+                }
             }
-        });
+        }
     }
+    // Replaced or removed: no agent can reach this server any more, so it serves out the ones it has.
+    drop(listener);
+    while sessions.join_next().await.is_some() {}
+    Ok(())
+}
+
+/// The version of the funes server answering on `path`, from its reply to an `initialize`; `None`
+/// if nothing answers.
+async fn server_version(path: &Path) -> Option<String> {
+    let probe = async {
+        let mut stream = UnixStream::connect(path).await.ok()?;
+        let hello = serde_json::json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
+            "protocolVersion": "2024-11-05", "capabilities": {},
+            "clientInfo": {"name": "funes-probe", "version": env!("CARGO_PKG_VERSION")}}});
+        stream.write_all(format!("{hello}\n").as_bytes()).await.ok()?;
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).await.ok()?;
+        let reply: serde_json::Value = serde_json::from_str(&line).ok()?;
+        // A server too old to say which it is, is not this one.
+        Some(
+            reply["result"]["serverInfo"]["version"]
+                .as_str()
+                .unwrap_or("unknown")
+                .to_string(),
+        )
+    };
+    tokio::time::timeout(Duration::from_secs(5), probe).await.ok().flatten()
 }
 
 /// Bridge this process's stdio to the server on `path`, a byte-for-byte relay: an agent whose
-/// integration can only spawn a stdio server still reaches the shared one. Whichever end closes
-/// first ends the relay.
+/// integration can only spawn a stdio server still reaches the shared one. The end of stdin ends the
+/// requests, not the relay; the server closing ends it, once its last reply is out.
 async fn proxy_stdio(path: PathBuf) -> Result<()> {
     let stream = UnixStream::connect(&path)
         .await
         .with_context(|| format!("connecting to {} — is a server on it?", path.display()))?;
     let (mut read, mut write) = stream.into_split();
-    let up = tokio::spawn(async move { tokio::io::copy(&mut tokio::io::stdin(), &mut write).await });
-    let down = tokio::spawn(async move { tokio::io::copy(&mut read, &mut tokio::io::stdout()).await });
-    tokio::select! {
-        r = up => r??,
-        r = down => r??,
-    };
-    Ok(())
+    tokio::spawn(async move {
+        let _ = tokio::io::copy(&mut tokio::io::stdin(), &mut write).await;
+        // Dropping the write half shuts it down: the server sees the requests end and answers them.
+        drop(write);
+    });
+    let mut stdout = tokio::io::stdout();
+    let relayed = tokio::io::copy(&mut read, &mut stdout).await;
+    let _ = stdout.flush().await;
+    if let Err(e) = relayed {
+        eprintln!("funes mcp: relaying from {}: {e}", path.display());
+        std::process::exit(1);
+    }
+    // stdin is read on a blocking thread nothing can interrupt: dropping the runtime would wait for
+    // the agent's next byte, so the relay exits here instead.
+    std::process::exit(0)
 }
 
 #[cfg(test)]

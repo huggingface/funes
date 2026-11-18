@@ -231,9 +231,9 @@ enum Cmd {
         #[arg(value_name = "MEMORY")]
         memory: Option<String>,
         /// Serve on a unix socket instead of stdio: every connection is its own MCP session on
-        /// this one server, so the agents that connect share the models it loads. A path another
-        /// server already serves is left to it, so a launcher may start-or-join with the same
-        /// command.
+        /// this one server, so the agents that connect share the models it loads. A path a server
+        /// of this version already serves is left to it, so a launcher may start-or-join with the
+        /// same command; one of another version is replaced.
         ///
         /// Name the memory before this flag — after a bare `--socket`, a following word is the
         /// path. Defaults to `<funes home>/mcp.sock`.
@@ -241,7 +241,7 @@ enum Cmd {
         socket: Option<Option<PathBuf>>,
         /// Relay stdio to the socket at PATH, for an integration that can only spawn a stdio
         /// server. Defaults to `<funes home>/mcp.sock`.
-        #[arg(long, value_name = "PATH", num_args = 0..=1)]
+        #[arg(long, value_name = "PATH", num_args = 0..=1, conflicts_with = "memory")]
         proxy: Option<Option<PathBuf>>,
     },
     /// Bind this host to a memory: every installed agent recalls from it and publishes to it.

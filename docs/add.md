@@ -235,9 +235,11 @@ funes mcp --socket         # or: funes mcp <memory> --socket [PATH]
 
 Each connection is its own MCP session on the one server: the same tools, the same isolation, and
 an agent leaving takes nothing from the others. The socket is `<funes home>/mcp.sock`, which only
-its owner can connect to. A second server on a path another one already serves exits quietly, so a
-launcher can run it unconditionally; one that was killed leaves its socket file behind, and the next
-server clears it.
+its owner can connect to. A second server on a path one of the same version already serves exits
+quietly, so a launcher can run it unconditionally. A server of another version is replaced: after an
+upgrade the next launch takes the path, and the old server serves out the agents it has, then
+exits. One that was killed leaves its socket file behind, and the next server clears it; a path
+holding anything but a socket is refused, never cleared.
 
 An integration that can only spawn a stdio server reaches the same server through `--proxy`:
 

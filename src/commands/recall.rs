@@ -388,6 +388,14 @@ async fn models() -> &'static Mutex<Models> {
     MODELS.get_or_init(|| async { Mutex::new(Models::default()) }).await
 }
 
+/// Run model work — a load, an embedding, a rerank: seconds of CPU — off the async workers, so the
+/// sessions of a shared server that are not waiting on the models keep being served.
+async fn blocking<T: Send + 'static>(work: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .context("the model work panicked")?
+}
+
 /// A recall's defaults, owned here so the CLI and the MCP server search the same way.
 pub const DEFAULT_K: usize = 8;
 pub const DEFAULT_CANDIDATES: usize = 30;
@@ -601,7 +609,8 @@ impl Search {
             .qv
             .get_or_try_init(|| async {
                 progress("loading model…");
-                let qv = models().await.lock().await.embedder(model)?.embed_query(&self.query)?;
+                let (models, query) = (models().await, self.query.clone());
+                let qv = blocking(move || models.blocking_lock().embedder(model)?.embed_query(&query)).await?;
                 Ok::<_, anyhow::Error>((model, qv))
             })
             .await?;
@@ -656,14 +665,14 @@ impl Search {
         }
 
         let mut scored: Vec<(usize, f64)> = if reranks(k, hits.len()) {
-            let docs: Vec<&str> = hits.iter().map(|(_, h)| h.text.as_str()).collect();
+            let docs: Vec<String> = hits.iter().map(|(_, h)| h.text.clone()).collect();
             progress(&format!("reranking {} candidates…", docs.len()));
-            let scores = models()
-                .await
-                .lock()
-                .await
-                .reranker()?
-                .rerank(self.query.as_str(), &docs)?;
+            let (models, query) = (models().await, self.query.clone());
+            let scores = blocking(move || {
+                let docs: Vec<&str> = docs.iter().map(String::as_str).collect();
+                models.blocking_lock().reranker()?.rerank(&query, &docs)
+            })
+            .await?;
             scores
                 .iter()
                 .enumerate()

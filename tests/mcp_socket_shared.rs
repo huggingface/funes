@@ -243,3 +243,161 @@ fn the_proxy_without_a_server_fails() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("connecting to"), "it says what failed: {stderr}");
 }
+
+/// Wait for `child` to exit, and return whether it succeeded.
+fn exits(child: &mut Child, within: Duration, what: &str) -> bool {
+    let deadline = Instant::now() + within;
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return status.success();
+        }
+        assert!(Instant::now() < deadline, "{what}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// An agent that writes its requests and closes its end still gets every reply.
+#[test]
+fn the_proxy_answers_requests_sent_before_stdin_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mcp.sock");
+    let _server = serve(&path, None);
+
+    let mut proxy = Command::new(FUNES)
+        .args(["mcp", "--proxy", path.to_str().unwrap()])
+        .env("FUNES_HOME", dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawning the proxy");
+    let mut stdin = proxy.stdin.take().unwrap();
+    let init = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "p", "version": "0"}}});
+    let initialized = serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}});
+    let list = serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}});
+    write!(stdin, "{init}\n{initialized}\n{list}\n").unwrap();
+    drop(stdin);
+
+    let ids: Vec<_> = BufReader::new(proxy.stdout.take().unwrap())
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(&l.unwrap()).unwrap()["id"].as_u64())
+        .collect();
+    assert_eq!(ids, [Some(1), Some(2)], "every reply is relayed before the proxy exits");
+    assert!(exits(
+        &mut proxy,
+        Duration::from_secs(10),
+        "the proxy outlived its session"
+    ));
+}
+
+/// The server going away ends the proxy, though the agent's stdin stays open.
+#[test]
+fn the_proxy_exits_with_its_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mcp.sock");
+    let server = serve(&path, None);
+
+    let mut proxy = Command::new(FUNES)
+        .args(["mcp", "--proxy", path.to_str().unwrap()])
+        .env("FUNES_HOME", dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawning the proxy");
+    let _stdin = proxy.stdin.take().unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    drop(server);
+    exits(&mut proxy, Duration::from_secs(10), "the proxy outlived its server");
+}
+
+/// A path that holds something other than a socket is refused, and left as it was.
+#[test]
+fn a_server_never_clears_a_file_that_is_not_a_socket() {
+    let dir = tempfile::tempdir().unwrap();
+    let notes = dir.path().join("notes.md");
+    std::fs::write(&notes, "keep me").unwrap();
+    let out = Command::new(FUNES)
+        .args(["mcp", "--socket", notes.to_str().unwrap()])
+        .env("FUNES_HOME", dir.path())
+        .stdin(Stdio::null())
+        .output()
+        .expect("running the server");
+    assert!(!out.status.success(), "a server on a regular file fails");
+    assert_eq!(std::fs::read_to_string(&notes).unwrap(), "keep me");
+}
+
+/// The version the server on `path` reports, polled until one answers.
+fn answering_version(path: &Path) -> String {
+    let hello = serde_json::json!({"jsonrpc": "2.0", "id": 0, "method": "initialize",
+        "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "probe", "version": "0"}}});
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        if let Ok(mut probe) = UnixStream::connect(path) {
+            probe.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            let mut line = String::new();
+            if writeln!(probe, "{hello}").is_ok() && BufReader::new(probe).read_line(&mut line).is_ok() {
+                if let Ok(reply) = serde_json::from_str::<serde_json::Value>(&line) {
+                    return reply["result"]["serverInfo"]["version"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string();
+                }
+            }
+        }
+        assert!(Instant::now() < deadline, "no server answering on {}", path.display());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// `funes mcp --socket PATH`, its output discarded.
+fn spawn_server(path: &Path) -> Server {
+    Server(
+        Command::new(FUNES)
+            .args(["mcp", "--socket", path.to_str().unwrap()])
+            .env("FUNES_HOME", path.parent().unwrap())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawning the server"),
+    )
+}
+
+/// Servers started together leave one serving, and every other one exits: none is left running on
+/// a socket nobody can reach.
+#[test]
+fn servers_started_together_leave_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mcp.sock");
+    let mut racers: Vec<Server> = (0..4).map(|_| spawn_server(&path)).collect();
+    answering_version(&path);
+    std::thread::sleep(Duration::from_secs(1));
+    let running = racers.iter_mut().filter(|s| s.0.try_wait().unwrap().is_none()).count();
+    assert_eq!(running, 1, "one server serves the path");
+}
+
+/// A server of another version is replaced, so an upgrade reaches the agents that connect after it.
+#[test]
+fn a_server_of_another_version_is_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mcp.sock");
+    let old = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    std::thread::spawn(move || {
+        for stream in old.incoming().flatten() {
+            let mut line = String::new();
+            let _ = BufReader::new(stream.try_clone().unwrap()).read_line(&mut line);
+            let reply = serde_json::json!({"jsonrpc": "2.0", "id": 0,
+                "result": {"serverInfo": {"name": "funes", "version": "0.0.0-old"}}});
+            let _ = writeln!(&stream, "{reply}");
+        }
+    });
+    assert_eq!(answering_version(&path), "0.0.0-old");
+    let _new = spawn_server(&path);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while answering_version(&path) == "0.0.0-old" {
+        assert!(Instant::now() < deadline, "the old server kept the path");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
