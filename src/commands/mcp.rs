@@ -1,16 +1,27 @@
 //! `funes mcp`: expose recall over the Model Context Protocol (stdio transport),
 //! so any MCP client (Claude Code, Cursor, …) can call funes as a first-class tool.
 //! stdout is the JSON-RPC channel — logs must go to stderr.
+//!
+//! With `--socket` the server listens on a unix socket instead, and serves every connection as its
+//! own MCP session: the agents on a host share the one process, and with it the embedder and
+//! reranker it loads — most of what a `funes mcp` process costs. `--proxy` relays stdio to that
+//! socket, for an integration that can only spawn a stdio server.
 
 use super::recall;
 use super::target::Target;
 use crate::agents;
-use anyhow::Result;
+use crate::home;
+use anyhow::{Context, Result};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{Implementation, ServerCapabilities, ServerConfig};
+use rmcp::transport::async_rw::AsyncRwTransport;
 use rmcp::transport::stdio;
 use rmcp::{schemars, tool, tool_handler, tool_router, ServerHandler, ServiceExt};
+use std::fs::Permissions;
+use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
+use tokio::net::{UnixListener, UnixStream};
 
 // A request refuses a parameter its schema does not list: an agent reading the schema never sends
 // one, so an unknown field is the caller's bug, failed with the field named rather than ignored.
@@ -386,9 +397,81 @@ impl ServerHandler for Funes {
     }
 }
 
-pub async fn run(memory: Option<String>) -> Result<()> {
+pub async fn run(
+    memory: Option<String>,
+    socket: Option<Option<PathBuf>>,
+    proxy: Option<Option<PathBuf>>,
+) -> Result<()> {
+    if let Some(path) = socket {
+        return serve_socket(memory, path.unwrap_or_else(default_socket)).await;
+    }
+    if let Some(path) = proxy {
+        return proxy_stdio(path.unwrap_or_else(default_socket)).await;
+    }
+
     let service = Funes::new(memory).serve(stdio()).await?;
     service.waiting().await?;
+    Ok(())
+}
+
+/// The socket a `--socket` or `--proxy` naming no path uses: beside the local memory, in the home a
+/// host's agents and its index already share.
+fn default_socket() -> PathBuf {
+    home::dir().join("mcp.sock")
+}
+
+/// Serve on `path` until killed: one MCP session per connection, all of them on the one server this
+/// process made, and therefore on the one embedder and reranker it loads.
+///
+/// A path another server already serves is left to it, and this returns: a launcher may start-or-join
+/// with the same command, without a check of its own.
+async fn serve_socket(memory: Option<String>, path: PathBuf) -> Result<()> {
+    if UnixStream::connect(&path).await.is_ok() {
+        return Ok(());
+    }
+    // Nothing is listening, so a file at that path is left over from a server that was killed.
+    if path.exists() {
+        std::fs::remove_file(&path).with_context(|| format!("removing the stale socket {}", path.display()))?;
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let listener = UnixListener::bind(&path).with_context(|| format!("binding {}", path.display()))?;
+    // Agents run as the user whose memory this is; nobody else may talk to it.
+    std::fs::set_permissions(&path, Permissions::from_mode(0o600))
+        .with_context(|| format!("closing {}", path.display()))?;
+    eprintln!("funes mcp: listening on {}", path.display());
+
+    loop {
+        let (stream, _) = listener.accept().await.context("accepting an agent")?;
+        let funes = Funes::new(memory.clone());
+        tokio::spawn(async move {
+            let (read, write) = stream.into_split();
+            match funes.serve(AsyncRwTransport::new_server(read, write)).await {
+                // Waiting on the session is what keeps it open: dropping the service ends it.
+                Ok(service) => {
+                    let _ = service.waiting().await;
+                }
+                Err(e) => eprintln!("funes mcp: an agent could not start a session: {e}"),
+            }
+        });
+    }
+}
+
+/// Bridge this process's stdio to the server on `path`, a byte-for-byte relay: an agent whose
+/// integration can only spawn a stdio server still reaches the shared one. Whichever end closes
+/// first ends the relay.
+async fn proxy_stdio(path: PathBuf) -> Result<()> {
+    let stream = UnixStream::connect(&path)
+        .await
+        .with_context(|| format!("connecting to {} — is a server on it?", path.display()))?;
+    let (mut read, mut write) = stream.into_split();
+    let up = tokio::spawn(async move { tokio::io::copy(&mut tokio::io::stdin(), &mut write).await });
+    let down = tokio::spawn(async move { tokio::io::copy(&mut read, &mut tokio::io::stdout()).await });
+    tokio::select! {
+        r = up => r??,
+        r = down => r??,
+    };
     Ok(())
 }
 

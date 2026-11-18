@@ -224,6 +224,30 @@ A call naming a memory, the bound one included, reads exactly what that memory h
 a call naming none on a server started by hand on a memory this host is not bound to: your local
 sessions are never mixed into a memory this host only reads.
 
+### One server, many agents
+
+Every agent that spawns `funes mcp` loads its own embedder and reranker — most of what that process
+costs. `funes mcp --socket` loads them once and serves every agent that connects:
+
+```sh
+funes mcp --socket         # or: funes mcp <memory> --socket [PATH]
+```
+
+Each connection is its own MCP session on the one server: the same tools, the same isolation, and
+an agent leaving takes nothing from the others. The socket is `<funes home>/mcp.sock`, which only
+its owner can connect to. A second server on a path another one already serves exits quietly, so a
+launcher can run it unconditionally; one that was killed leaves its socket file behind, and the next
+server clears it.
+
+An integration that can only spawn a stdio server reaches the same server through `--proxy`:
+
+```json
+{ "command": "funes", "args": ["mcp", "--proxy"] }
+```
+
+Name the memory before the flags (`funes mcp acme/funes-memory --socket`): after a bare `--socket`, a
+following word is the path.
+
 ## How it works
 
 ### What a run does

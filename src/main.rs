@@ -15,6 +15,7 @@ use funes::ui::banner::Banner;
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use std::io::Write;
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "funes", version, about = "Recall over your past AI agent sessions.")]
@@ -222,12 +223,26 @@ enum Cmd {
         #[arg(short, long)]
         force: bool,
     },
-    /// Run as an MCP server over stdio (for Claude Code, Cursor, …).
+    /// Run as an MCP server over stdio (for Claude Code, Cursor, …), or over the unix socket
+    /// every agent on this host shares.
     Mcp {
         /// Memory to serve — an `<org>/<repo>` shorthand, an `hf://…` URI, a local path, or `local`.
         /// Defaults to the memory this host is bound to, else your local memory.
         #[arg(value_name = "MEMORY")]
         memory: Option<String>,
+        /// Serve on a unix socket instead of stdio: every connection is its own MCP session on
+        /// this one server, so the agents that connect share the models it loads. A path another
+        /// server already serves is left to it, so a launcher may start-or-join with the same
+        /// command.
+        ///
+        /// Name the memory before this flag — after a bare `--socket`, a following word is the
+        /// path. Defaults to `<funes home>/mcp.sock`.
+        #[arg(long, value_name = "PATH", num_args = 0..=1, conflicts_with = "proxy")]
+        socket: Option<Option<PathBuf>>,
+        /// Relay stdio to the socket at PATH, for an integration that can only spawn a stdio
+        /// server. Defaults to `<funes home>/mcp.sock`.
+        #[arg(long, value_name = "PATH", num_args = 0..=1)]
+        proxy: Option<Option<PathBuf>>,
     },
     /// Bind this host to a memory: every installed agent recalls from it and publishes to it.
     ///
@@ -498,7 +513,7 @@ async fn run() -> Result<()> {
         }
         Cmd::Scrub => scrub::run().await,
         Cmd::Update { force } => update::run(force).await,
-        Cmd::Mcp { memory } => mcp::run(memory).await,
+        Cmd::Mcp { memory, socket, proxy } => mcp::run(memory, socket, proxy).await,
         Cmd::Bind { memory } => bind::run(&memory).await,
         Cmd::Add { agent, memory, from } => add::run(&agent, memory.memory.as_deref(), from.as_deref()).await,
         Cmd::Remove { agent } => add::remove(&agent).await,
