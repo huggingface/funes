@@ -68,6 +68,13 @@ specify init --here --integration <agent>
 
 For an already initialized checkout, use `specify integration install <agent>` to add an integration.
 
+### Executable specifications with Quint
+
+Turn behavioral specifications into executable [Quint](https://quint.sh/) models whenever possible.
+Use the [Quint agent skills](https://github.com/quint-co/quint-llm-kit#agent-skills-no-docker-required)
+to build models from requirements and work with code against existing models.
+[AGENTS.md](AGENTS.md#quint) tells agents when to use them. The agent handles the tools and commands.
+
 ## Building and testing
 
 ```bash

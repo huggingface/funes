@@ -74,6 +74,21 @@ Check availability before use. Do not assume Spec-kit or its project setup exist
 If a prerequisite is missing, explain what is needed. Ask before installing tooling or initializing
 a checkout.
 
+## Quint
+
+Create or update executable Quint models for behavioral specifications whenever possible. Choose
+the modeling scope from the task context and link modeled properties to their source requirements.
+Record assumptions and coverage alongside the model.
+
+Choose the relevant available Quint skills:
+
+- Creating or reviewing a model from requirements or code: `quint-modeling`.
+- Quint syntax, CLI commands, and simulation traces: `quint-lang`.
+- Implementing or changing code against an existing model: `quint-execute-spec`.
+
+Read and follow the chosen skill's instructions and prerequisites. The agent chooses the tools and
+handles their commands. Check availability before use and ask before installing missing tooling.
+
 ## Working on the repo
 
 Building needs `protoc` (lance compiles protobuf at build time).
