@@ -356,7 +356,7 @@ pub fn memory_hint(read: Option<&str>) -> String {
 /// shared. Loading a model is the costly part of a recall, so a long-lived process (the MCP server)
 /// pays it on the first call and reuses the models after, and a search that never reranks never
 /// loads the reranker. The `Mutex` serializes recalls (the models run with `&mut`), which is fine:
-/// the work is CPU-bound and the server's calls are serial anyway.
+/// a recall is seconds of CPU, and the agents sharing a server take turns behind it.
 #[derive(Default)]
 struct Models {
     embedders: HashMap<EmbeddingModel, Box<dyn Embedder>>,

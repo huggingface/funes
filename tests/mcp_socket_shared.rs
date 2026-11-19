@@ -374,7 +374,13 @@ fn servers_started_together_leave_one() {
     let mut racers: Vec<Server> = (0..4).map(|_| spawn_server(&path)).collect();
     answering_version(&path);
     std::thread::sleep(Duration::from_secs(1));
-    let running = racers.iter_mut().filter(|s| s.0.try_wait().unwrap().is_none()).count();
+    // Not a `filter`: it hands the closure a shared reference, and `try_wait` needs `&mut`.
+    let mut running = 0;
+    for server in racers.iter_mut() {
+        if server.0.try_wait().unwrap().is_none() {
+            running += 1;
+        }
+    }
     assert_eq!(running, 1, "one server serves the path");
 }
 
@@ -400,4 +406,35 @@ fn a_server_of_another_version_is_replaced() {
         assert!(Instant::now() < deadline, "the old server kept the path");
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// A server whose socket is gone — replaced or removed — keeps serving the agent it has, and leaves
+/// with it: an upgrade never leaves a second copy of the models resident.
+#[test]
+fn a_server_without_its_socket_serves_out_its_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mcp.sock");
+    let mut server = serve(&path, None);
+    let mut agent = Agent::connect(&path, "a");
+    agent.initialize();
+
+    // Taking the path is what a replacement does under the old server.
+    std::fs::remove_file(&path).unwrap();
+    std::thread::sleep(Duration::from_secs(6)); // past the server's next check of the path
+
+    agent.tools();
+    assert!(
+        server.0.try_wait().unwrap().is_none(),
+        "a server with an agent still serves it"
+    );
+
+    drop(agent);
+    assert!(
+        exits(
+            &mut server.0,
+            Duration::from_secs(10),
+            "the replaced server outlived its last agent"
+        ),
+        "it leaves with its last agent"
+    );
 }

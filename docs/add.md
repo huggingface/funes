@@ -239,7 +239,8 @@ its owner can connect to. A second server on a path one of the same version alre
 quietly, so a launcher can run it unconditionally. A server of another version is replaced: after an
 upgrade the next launch takes the path, and the old server serves out the agents it has, then
 exits. One that was killed leaves its socket file behind, and the next server clears it; a path
-holding anything but a socket is refused, never cleared.
+holding anything but a socket is refused, never cleared. An upgrade briefly holds two copies of
+the models in memory: until the old server's last agent leaves, it serves on.
 
 An integration that can only spawn a stdio server reaches the same server through `--proxy`:
 
@@ -247,8 +248,14 @@ An integration that can only spawn a stdio server reaches the same server throug
 { "command": "funes", "args": ["mcp", "--proxy"] }
 ```
 
-Name the memory before the flags (`funes mcp acme/funes-memory --socket`): after a bare `--socket`, a
-following word is the path.
+`--proxy` defaults to the same `<funes home>/mcp.sock`: give it the path too if you gave the server
+one, or if its `$FUNES_HOME` differs. `--socket` belongs in a launcher, never in an agent's own
+configuration — a client that spawns it waits for a handshake that never comes.
+
+The server on a path owns its memory: a launch that joins a server already there serves that
+server's memory, whatever memory the joining command named — so start the server on the memory you
+want. Name the memory before the flags (`funes mcp acme/funes-memory --socket`): after a bare
+`--socket`, a following word is the path.
 
 ## How it works
 

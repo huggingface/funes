@@ -11,7 +11,7 @@ use super::recall;
 use super::target::Target;
 use crate::agents;
 use crate::home;
-use crate::memory::lock::try_lock_file;
+use crate::memory::lock::{try_lock_file, FileLock};
 use anyhow::{bail, Context, Result};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -427,8 +427,9 @@ fn default_socket() -> PathBuf {
 /// made, and therefore on the one embedder and reranker it loads.
 ///
 /// A path a server of this version already serves is left to it, and this returns: a launcher may
-/// start-or-join with the same command, without a check of its own. A server of another version is
-/// replaced: it stops taking agents once its socket is gone, and exits when its last one leaves.
+/// start-or-join with the same command, without a check of its own — or of the memory, which stays
+/// the running server's. A server of another version is replaced: it stops taking agents once its
+/// socket is gone, and exits when its last one leaves.
 async fn serve_socket(memory: Option<String>, path: PathBuf) -> Result<()> {
     let listener = {
         // Probe, clear and bind as one step: two servers starting together would each find nothing
@@ -436,11 +437,11 @@ async fn serve_socket(memory: Option<String>, path: PathBuf) -> Result<()> {
         let mut lock = path.clone().into_os_string();
         lock.push(".lock");
         let lock = PathBuf::from(lock);
-        let _held = loop {
-            match try_lock_file(&lock)? {
-                Some(held) => break held,
-                None => tokio::time::sleep(Duration::from_millis(20)).await,
-            }
+        // Bounded: the lock file is another local user's to hold, and a launch that waited on it
+        // forever would wedge with nothing on stderr.
+        let _held = match tokio::time::timeout(Duration::from_secs(30), socket_lock(&lock)).await {
+            Ok(held) => held?,
+            Err(_) => bail!("another funes is starting on {} — retry", path.display()),
         };
         match server_version(&path).await {
             Some(v) if v == env!("CARGO_PKG_VERSION") => return Ok(()),
@@ -506,6 +507,17 @@ async fn serve_socket(memory: Option<String>, path: PathBuf) -> Result<()> {
     drop(listener);
     while sessions.join_next().await.is_some() {}
     Ok(())
+}
+
+/// `path`'s start lock, waiting for whoever holds it — another starter — to let go; the caller
+/// bounds the wait.
+async fn socket_lock(path: &Path) -> Result<FileLock> {
+    loop {
+        if let Some(held) = try_lock_file(path)? {
+            return Ok(held);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 /// The version of the funes server answering on `path`, from its reply to an `initialize`; `None`
