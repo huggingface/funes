@@ -30,8 +30,8 @@ various points.
 1. **Given** a memory that received many small writes, **When** compaction runs, **Then** the
    regrouped data ends up in fewer files, and every record keeps its content and its place in
    its conversation (FR-002, FR-003).
-2. **Given** a memory holding more than 256 small pieces of data, **When** compaction runs,
-   **Then** it regroups them (FR-013).
+2. **Given** data written since the last compaction, and a memory holding more than 256 small
+   pieces of older data, **When** compaction runs, **Then** it regroups both (FR-013).
 3. **Given** records added since the last compaction, **When** compaction runs, **Then** search
    is brought up to date with them, and every record stays searchable (FR-001, FR-009).
 4. **Given** stored data that nothing needs anymore, **When** compaction runs, **Then** that
@@ -44,6 +44,8 @@ various points.
    FR-008).
 7. **Given** a remote memory that keeps receiving pushes, **When** compactions run, **Then** the
    history it keeps on the Hub does not keep growing (FR-015).
+8. **Given** the owner's local memory, a local memory at another path, or a remote memory,
+   **When** the owner runs `funes compact` naming it, **Then** that memory is compacted (FR-016).
 
 ---
 
@@ -157,18 +159,21 @@ machine sees.
 - **FR-012**: When funes cannot tell whether a compaction took effect, it MUST report the
   outcome as unknown, never as a success or a conflict. Whether and how funes tries to find out
   is decided once for all writes to a remote memory, not by compaction.
-- **FR-013**: When a memory holds more than 256 small pieces of data, its next compaction MUST
-  regroup them. The design sets what counts as small.
+- **FR-013**: Every compaction MUST regroup the data written since the previous one. When a
+  memory holds more than 256 small pieces of older data, its next compaction MUST regroup those
+  too. The design sets what counts as small.
 - **FR-014**: When another compaction of the same remote memory collides with `funes compact`,
   it MUST retry by itself a limited number of times, then report a conflict.
 - **FR-015**: The history a remote memory keeps on the Hub MUST NOT keep growing.
+- **FR-016**: `funes compact` MUST compact the memory the owner names: the owner's local memory
+  by default, a local memory at any path, or a remote memory.
 
 ### Key Entities
 
 - **Memory**: a store of records. A local memory lives on one machine. A remote memory is a
   Hugging Face Hub repository that several machines push to and read from.
-- **Record**: a stored passage of a session, with its content, its metadata and its place in
-  its conversation.
+- **Record**: a stored passage of a session, with its content, its metadata, its embedding and
+  its place in its conversation.
 - **Write**: a push to a remote memory, or an index run on a local one, that adds records.
 - **Read**: a recall, or any other command that reads a memory.
 - **Compaction**: the maintenance a memory goes through, on its own after writes, or on demand
@@ -186,7 +191,8 @@ machine sees.
   a network failure (FR-003, FR-006).
 - **SC-002**: Every compaction that regroups data leaves the regrouped data in fewer files than
   before (FR-002).
-- **SC-003**: Every compaction that starts with more than 256 small pieces of data regroups them
+- **SC-003**: Every compaction regroups the data written since the previous one, and every
+  compaction that starts with more than 256 small pieces of older data regroups those too
   (FR-013).
 - **SC-004**: With pushes and index runs made during compactions, zero records are lost, zero
   writes are refused, and zero writes wait for a compaction to end (FR-004).
@@ -206,37 +212,39 @@ machine sees.
   least once, stops at its limit, and reports a conflict, with zero records lost (FR-014).
 - **SC-012**: As pushes and compactions accumulate on a remote memory, the history it keeps on
   the Hub stays under a fixed size (FR-015).
+- **SC-013**: `funes compact` compacts the local memory with no argument, and the named memory
+  when given a local path or a remote memory (FR-016).
 
 ## Assumptions
 
 - A compaction starts from a valid, fully saved memory. Recovering a damaged memory is outside
   this specification.
-- How two index runs on the same local memory coordinate is outside this specification.
 - Memories are stored with Lance, and remote memories on the Hugging Face Hub. The platform
   constraints that bound how these requirements can be met are listed in
   [constraints.md](constraints.md), for the design.
 
 ## Decision Record
 
-Each requirement comes from a decision of the owner. The full question-and-answer log of the
+Each requirement comes from a decision of the owner. Quotes are the owner's words, with typos fixed. The full question-and-answer log of the
 sessions that produced them is in [spec-before-rewrite.md](spec-before-rewrite.md).
 
 | Requirement | Owner's words | Date |
 | --- | --- | --- |
-| User Story 1 (purpose) | "we need something to cleanup existing memories with 2k+ files", "because the hard limit is STILL 10k", "not compacting leads to much longer recall time" | 2026-10-05 |
-| FR-001 | "Compaction is an optimization of existing records storage, without modifying their order", "funes compaction is the three lance operations" | 2026-11-17 |
+| User Story 1 (purpose) | "we need something to clean up existing memories with 2k+ files", "because the hard limit is STILL 10k", "not compacting leads to much longer recall time" | 2026-10-05 |
+| FR-001 | "Compaction is an optimization of existing records storage, without modifying their order", "funes compaction is the three Lance operations" | 2026-11-17 |
 | FR-002 | "the only requirement I would impose is that compaction leads to less files" (2026-11-18), "The requirement is that the compaction part of the funes compact operation returns less files" (2026-11-19) | 2026-11-18, 2026-11-19 |
 | FR-003 | "just the position in the conversation", then "yes" to keeping every saved record unchanged, including its number of copies | 2026-11-17 |
 | FR-004 | Selected "Allow concurrent pushes" (2026-11-18), then "The index run proceeds, as a push does on a remote" (2026-11-19) | 2026-11-18, 2026-11-19 |
 | FR-005 | Selected "Preserve the files until the read finishes" | 2026-11-18 |
 | FR-006 | "I am only worried about integrity", "machine crashes or power loss too". Readable and searchable is derived from integrity. | 2026-11-17 |
-| FR-007 | Approved compaction on push and at the end of `funes index` (2026-10-05), then "i am not arguing about the feature, i am arguing about it being silent / hidden" (2026-10-06) | 2026-10-05, 2026-10-06 |
-| FR-008 | "We never undo. No works succeeds" | 2026-11-18 |
+| FR-007 | Approved compaction on push and at the end of `funes index` (2026-10-05), then "I am not arguing about the feature, I am arguing about it being silent / hidden" (2026-10-06) | 2026-10-05, 2026-10-06 |
+| FR-008 | "We never undo. No work succeeds" | 2026-11-18 |
 | FR-009 | "A. This is true for any index update", then selected "Later additions remain searchable and may be indexed by a later run" | 2026-11-18 |
-| FR-010 | "Worried that repeated cleanup failures get unnoticed", selected visibility between runs, "Every host" (2026-11-18), then both search indexes treated alike: "That distinction was purely arbitrary AFAICT" (2026-11-19) | 2026-11-18, 2026-11-19 |
+| FR-010 | "Worried that repeated cleanup failures get unnoticed", selected visibility between runs, "Every host" (2026-11-18), then both search indexes treated alike: "That distinction was purely arbitrary AFAICT" (2026-11-19). The decisions name cleanup and search updates. Extending them to every part of compaction follows from the same concern. | 2026-11-18, 2026-11-19 |
 | FR-011 | "Yes" to a push staying successful once its records are saved, selected nonzero for both `funes index` and `funes push --compact`, and incomplete `funes compact` exiting nonzero (2026-11-18), then nonzero for an unknown outcome (2026-11-19). A conflict exiting with an error follows from FR-014. | 2026-11-18, 2026-11-19 |
 | FR-012 | Selected "Leave confirmation to a shared policy. Compaction must protect potentially live files and report an unknown outcome when success cannot be established." | 2026-11-18 |
-| FR-013 | Approved the 256 limit (2026-10-05), then "we need a limit, and because timings are too dependent of the dataset and host" (2026-11-19) | 2026-10-05, 2026-11-19 |
+| FR-013 | Approved the 256 limit (2026-10-05), then selected "fragments no index covers are merged at every compaction, and small fragments the indexes cover are merged once there are more than 256 of them": "we need a limit, and because timings are too dependent on the dataset and host" (2026-11-19) | 2026-10-05, 2026-11-19 |
 | FR-014 | Selected "Retry automatically, with a limit. Report a conflict when the limit is reached." | 2026-11-18 |
 | FR-015 | "I think squashing is part of compaction too", restated as what squashing achieves. How belongs to the design. | 2026-11-19 |
+| FR-016 | "ok, so you remove the local path restriction then?", then "You're so non-cooperative. Think as a user for once, not as a coder", then "go on with all commits" once `funes compact` compacted whatever memory is named | 2026-10-06 |
 | Out of scope: recovery | "this goes beyond compaction" | 2026-11-17 |
