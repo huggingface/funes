@@ -46,7 +46,7 @@ jobs:
       - name: Install Rust from rust-toolchain.toml
         run: rustup toolchain install --no-self-update
 
-      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+      - uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # v2
         with:
           # One cache per OS (the key carries it), the Linux one shared with the integration job
           # (same deps under the ci profile) — fewer, smaller caches that survive GitHub's
@@ -160,7 +160,7 @@ jobs:
       - name: Install Rust from rust-toolchain.toml
         run: rustup toolchain install --no-self-update
 
-      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+      - uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # v2
         with:
           shared-key: ci
 
@@ -235,7 +235,7 @@ jobs:
       - name: Install Rust from rust-toolchain.toml
         run: rustup toolchain install --no-self-update
 
-      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+      - uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # v2
         with:
           # Its own cache: the onnx feature set has different dependency fingerprints than the
           # default jobs' `ci` key, so sharing would evict one to store the other.
