@@ -161,7 +161,7 @@ jobs:
           rustup toolchain install --no-self-update
           rustup target add ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+      - uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # v2
         with:
           # Keyed by profile: fat-LTO deps have different fingerprints than the fast profile's, so a
           # shared key would make each profile's build restore the other's artifacts and recompile.
@@ -253,7 +253,7 @@ jobs:
           rustup toolchain install --no-self-update
           rustup target add aarch64-apple-darwin
 
-      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+      - uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # v2
         with:
           key: release-aarch64-apple-darwin-${{ env.PROFILE }}
 
