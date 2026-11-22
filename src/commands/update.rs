@@ -5,7 +5,8 @@
 //! The root `VERSION` marker resolves latest to a tagged directory containing `VERSION`,
 //! `SHA256SUMS`, and the binaries. The checksum and tagged version are verified before a binary is
 //! made executable. Replacement uses a same-filesystem rename, so the live process keeps its old
-//! inode and the next run picks up the new binary.
+//! inode and the next run picks up the new binary. Windows will not rename over a running program,
+//! so there the old binary is renamed aside first, and deleted by a later update.
 
 use super::add::{confirm_trust, setup_add};
 use super::bind::migrate_bindings;
@@ -16,9 +17,6 @@ use crate::traces::spool;
 use anyhow::{anyhow, bail, Context, Result};
 use hf_hub::buckets::BucketDownload;
 use hf_hub::HFBucket;
-use std::fs::Permissions;
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -40,6 +38,8 @@ const ASSET: Option<&str> = if cfg!(all(target_os = "linux", target_arch = "x86_
     Some("funes-aarch64-linux")
 } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
     Some("funes-arm64-apple-darwin")
+} else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+    Some("funes-x86_64-windows.exe")
 } else {
     None
 };
@@ -78,11 +78,29 @@ pub async fn run(force: bool) -> Result<()> {
     wait_for_older_writers().await?;
     let binary = binary(force).await;
     if let Ok(Some(exe)) = &binary {
-        let e = Command::new(exe).arg("update").exec();
-        return Err(anyhow::Error::new(e).context(format!("running {} to update the integrations", exe.display())));
+        return hand_over(exe);
     }
     let agents = agents().await;
     binary.and(agents)
+}
+
+/// Run the binary at `exe` as `funes update`, in this process's place.
+#[cfg(unix)]
+fn hand_over(exe: &Path) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+    let e = Command::new(exe).arg("update").exec();
+    Err(anyhow::Error::new(e).context(format!("running {} to update the integrations", exe.display())))
+}
+
+/// Run the binary at `exe` as `funes update`, and exit as it does: Windows has no exec, so it runs
+/// as a child this process waits for.
+#[cfg(windows)]
+fn hand_over(exe: &Path) -> Result<()> {
+    let status = Command::new(exe)
+        .arg("update")
+        .status()
+        .with_context(|| format!("running {} to update the integrations", exe.display()))?;
+    std::process::exit(status.code().unwrap_or(1));
 }
 
 /// Fetch the latest release binary for this platform and replace the running executable in
@@ -117,7 +135,7 @@ async fn binary(force: bool) -> Result<Option<PathBuf>> {
     // Replacing the live binary means renaming over its path, so the download must land on the
     // same filesystem — stage it in a temp dir beside the executable.
     let exe = std::env::current_exe().context("locating the running funes binary")?;
-    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    let exe = std::fs::canonicalize(&exe).map(plain).unwrap_or(exe);
     let dir = exe
         .parent()
         .ok_or_else(|| anyhow!("cannot determine the install directory of {}", exe.display()))?;
@@ -127,7 +145,8 @@ async fn binary(force: bool) -> Result<Option<PathBuf>> {
             dir.display()
         )
     })?;
-    let staged = staging.path().join("funes");
+    // Named as a program is on this platform: it is run before it is installed.
+    let staged = staging.path().join(format!("funes{}", std::env::consts::EXE_SUFFIX));
     let manifest = staging.path().join("SHA256SUMS");
     let tagged_version = staging.path().join("VERSION");
 
@@ -230,7 +249,7 @@ async fn agent(root: &Path, id: &str) -> Result<String> {
 /// Verify the staged binary, confirm its reported version, and atomically rename it over `exe`.
 fn install_verified(staged: &Path, exe: &Path, manifest: &Path, asset: &str, expected_version: &str) -> Result<String> {
     verify_checksum(staged, manifest, asset)?;
-    std::fs::set_permissions(staged, Permissions::from_mode(0o755)).context("making the new binary executable")?;
+    set_mode(staged, 0o755).context("making the new binary executable")?;
 
     let out = verify_runs(staged)?;
     if !out.status.success() {
@@ -243,14 +262,11 @@ fn install_verified(staged: &Path, exe: &Path, manifest: &Path, asset: &str, exp
 
     // Preserve the existing binary's mode so an update never broadens it (e.g. 0700 → 0755); fall
     // back to 0755 when there's no existing binary to copy the mode from.
-    let mode = std::fs::metadata(exe)
-        .map(|m| m.permissions().mode() & 0o777)
-        .unwrap_or(0o755);
-    std::fs::set_permissions(staged, Permissions::from_mode(mode)).context("setting the new binary's permissions")?;
+    set_mode(staged, mode_of(exe).unwrap_or(0o755)).context("setting the new binary's permissions")?;
 
     // Same-filesystem rename (staged sits in a temp dir beside exe), so this is atomic. The live
     // process holds the old inode; replacing the path it launched from is safe.
-    std::fs::rename(staged, exe).map_err(|e| {
+    replace(staged, exe).map_err(|e| {
         anyhow!(
             "could not replace {}: {e} — need write access to {} (re-run the install script, or with the right permissions)",
             exe.display(),
@@ -258,6 +274,76 @@ fn install_verified(staged: &Path, exe: &Path, manifest: &Path, asset: &str, exp
         )
     })?;
     Ok(expected_version.to_string())
+}
+
+/// A resolved path as a user reads one. Windows resolves `C:\bin\funes.exe` to
+/// `\\?\C:\bin\funes.exe`, a spelling no message need show: the prefix goes when a plain drive path
+/// follows it.
+fn plain(resolved: PathBuf) -> PathBuf {
+    match resolved.to_str().and_then(|path| path.strip_prefix(r"\\?\")) {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => PathBuf::from(rest),
+        _ => resolved,
+    }
+}
+
+/// A file's permission bits, where the platform has them: Windows has none, and a file there is a
+/// program by its name.
+#[cfg(unix)]
+fn mode_of(path: &Path) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).ok().map(|m| m.permissions().mode() & 0o777)
+}
+
+#[cfg(windows)]
+fn mode_of(_: &Path) -> Option<u32> {
+    None
+}
+
+#[cfg(unix)]
+fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+}
+
+#[cfg(windows)]
+fn set_mode(_: &Path, _: u32) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Put `staged` where `exe` is, atomically.
+#[cfg(unix)]
+fn replace(staged: &Path, exe: &Path) -> std::io::Result<()> {
+    std::fs::rename(staged, exe)
+}
+
+/// Put `staged` where `exe` is. Windows will not rename over a running program but lets one be
+/// renamed, so the old binary steps aside first, as `<exe>.<pid>.old`, and comes back if the new
+/// one cannot take its place. It cannot be deleted while it runs: the ones earlier updates left
+/// are deleted here, those still running excepted.
+#[cfg(windows)]
+fn replace(staged: &Path, exe: &Path) -> std::io::Result<()> {
+    if let (Some(dir), Some(name)) = (exe.parent(), exe.file_name().and_then(|n| n.to_str())) {
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let stale = entry
+                .file_name()
+                .to_str()
+                .and_then(|n| n.strip_prefix(name))
+                .is_some_and(|rest| rest.starts_with('.') && rest.ends_with(".old"));
+            if stale {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    if !exe.exists() {
+        return std::fs::rename(staged, exe);
+    }
+    let mut old = exe.as_os_str().to_owned();
+    old.push(format!(".{}.old", std::process::id()));
+    let old = PathBuf::from(old);
+    std::fs::rename(exe, &old)?;
+    std::fs::rename(staged, exe).inspect_err(|_| {
+        let _ = std::fs::rename(&old, exe);
+    })
 }
 
 /// Run `<path> --version`, retrying briefly on `ETXTBSY`. A just-written executable can
@@ -357,50 +443,100 @@ pub(crate) fn parse_semver(s: &str) -> Option<(u32, u32, u32)> {
 mod tests {
     use super::{install_verified, notice_for, parse_semver, read_release_version};
     use crate::hub::sha256_file;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     fn write_manifest(path: &Path, binary: &Path, asset: &str) {
         let digest = hex::encode(sha256_file(binary).unwrap());
         std::fs::write(path, format!("{digest}  {asset}\n")).unwrap();
     }
 
+    /// A downloaded binary in `dir` that reports `version`, creating `marker` first when one is
+    /// named: a shell script on Unix, a batch file on Windows. Not yet executable, as a download
+    /// is. Its path, and its text.
+    fn staged_binary(dir: &Path, version: &str, marker: Option<&Path>) -> (PathBuf, String) {
+        let (name, text) = if cfg!(windows) {
+            let touch = marker.map_or(String::new(), |m| format!("type nul > \"{}\"\r\n", m.display()));
+            ("staged.cmd", format!("@echo off\r\n{touch}echo funes {version}\r\n"))
+        } else {
+            let touch = marker.map_or(String::new(), |m| format!("touch {}\n", m.display()));
+            ("staged", format!("#!/bin/sh\n{touch}echo 'funes {version}'\n"))
+        };
+        let staged = dir.join(name);
+        std::fs::write(&staged, &text).unwrap();
+        (staged, text)
+    }
+
     #[test]
     fn install_verified_atomically_replaces() {
-        use std::fs::Permissions;
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().unwrap();
-        let staged = dir.path().join("staged");
-        std::fs::write(&staged, "#!/bin/sh\necho 'funes 9.9.9'\n").unwrap();
+        let (staged, text) = staged_binary(dir.path(), "9.9.9", None);
         let manifest = dir.path().join("SHA256SUMS");
         write_manifest(&manifest, &staged, "funes-test");
         let exe = dir.path().join("funes");
         std::fs::write(&exe, "old binary").unwrap();
-        std::fs::set_permissions(&exe, Permissions::from_mode(0o700)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
 
         let installed = install_verified(&staged, &exe, &manifest, "funes-test", "9.9.9").unwrap();
         assert_eq!(installed, "9.9.9");
         assert!(!staged.exists());
 
-        assert_eq!(
-            std::fs::read_to_string(&exe).unwrap(),
-            "#!/bin/sh\necho 'funes 9.9.9'\n"
-        );
-        assert_eq!(std::fs::metadata(&exe).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(std::fs::read_to_string(&exe).unwrap(), text);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&exe).unwrap().permissions().mode() & 0o777, 0o700);
+        }
+    }
+
+    /// Windows will not rename over a running program, so the binary an update replaces steps
+    /// aside, and the update after it deletes what that one left.
+    #[cfg(windows)]
+    #[test]
+    fn a_replaced_binary_steps_aside_until_the_next_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("funes.exe");
+        let asides = || {
+            let mut names: Vec<String> = std::fs::read_dir(dir.path())
+                .unwrap()
+                .map(|e| e.unwrap().file_name().into_string().unwrap())
+                .filter(|n| n.ends_with(".old"))
+                .collect();
+            names.sort();
+            names
+        };
+        let update = |text: &str| {
+            let staged = dir.path().join("staged.exe");
+            std::fs::write(&staged, text).unwrap();
+            super::replace(&staged, &exe).unwrap();
+            assert!(!staged.exists());
+            assert_eq!(std::fs::read_to_string(&exe).unwrap(), text);
+        };
+
+        update("first");
+        assert!(asides().is_empty(), "nothing steps aside on a first install");
+
+        update("second");
+        let aside = format!("funes.exe.{}.old", std::process::id());
+        assert_eq!(asides(), vec![aside.clone()]);
+        assert_eq!(std::fs::read_to_string(dir.path().join(&aside)).unwrap(), "first");
+
+        // What another update left is deleted; a neighbour that only looks like it is not.
+        std::fs::write(dir.path().join("funes.exe.1.old"), "stale").unwrap();
+        std::fs::write(dir.path().join("other.exe.1.old"), "not funes's").unwrap();
+        update("third");
+        assert_eq!(asides(), vec![aside.clone(), "other.exe.1.old".to_string()]);
+        assert_eq!(std::fs::read_to_string(dir.path().join(&aside)).unwrap(), "second");
     }
 
     #[test]
     fn checksum_mismatch_is_rejected_before_execution() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().unwrap();
-        let staged = dir.path().join("staged");
         let marker = dir.path().join("executed");
-        std::fs::write(
-            &staged,
-            format!("#!/bin/sh\ntouch {}\necho 'funes 9.9.9'\n", marker.display()),
-        )
-        .unwrap();
+        let (staged, _) = staged_binary(dir.path(), "9.9.9", Some(&marker));
         let manifest = dir.path().join("SHA256SUMS");
         std::fs::write(&manifest, format!("{}  funes-test\n", "0".repeat(64))).unwrap();
         let exe = dir.path().join("funes");
@@ -408,15 +544,18 @@ mod tests {
 
         assert!(install_verified(&staged, &exe, &manifest, "funes-test", "9.9.9").is_err());
         assert!(!marker.exists());
-        assert_eq!(std::fs::metadata(&staged).unwrap().permissions().mode() & 0o111, 0);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&staged).unwrap().permissions().mode() & 0o111, 0);
+        }
         assert_eq!(std::fs::read_to_string(&exe).unwrap(), "old binary");
     }
 
     #[test]
     fn reported_version_mismatch_does_not_replace() {
         let dir = tempfile::tempdir().unwrap();
-        let staged = dir.path().join("staged");
-        std::fs::write(&staged, "#!/bin/sh\necho 'funes 9.9.8'\n").unwrap();
+        let (staged, _) = staged_binary(dir.path(), "9.9.8", None);
         let manifest = dir.path().join("SHA256SUMS");
         write_manifest(&manifest, &staged, "funes-test");
         let exe = dir.path().join("funes");
@@ -424,6 +563,20 @@ mod tests {
 
         assert!(install_verified(&staged, &exe, &manifest, "funes-test", "9.9.9").is_err());
         assert_eq!(std::fs::read_to_string(&exe).unwrap(), "old binary");
+    }
+
+    #[test]
+    fn a_resolved_path_is_shown_without_the_windows_prefix() {
+        let shown = |path: &str| super::plain(PathBuf::from(path));
+        assert_eq!(shown(r"\\?\C:\bin\funes.exe"), PathBuf::from(r"C:\bin\funes.exe"));
+        // A share has no plain spelling of the kind, and a Unix path no prefix.
+        for kept in [
+            r"\\?\UNC\server\share\funes.exe",
+            "/usr/local/bin/funes",
+            r"C:\bin\funes.exe",
+        ] {
+            assert_eq!(shown(kept), PathBuf::from(kept));
+        }
     }
 
     #[test]

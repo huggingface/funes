@@ -317,7 +317,28 @@ fn conclude(agent: &str, run: Run) -> Result<()> {
 
 fn missing_agent(agent: &str) -> anyhow::Error {
     let other = if agent == "claude" { "codex" } else { "claude" };
+    #[cfg(windows)]
+    if let Some(launcher) = batch_launcher(agent, std::env::var_os("PATH"), |p| p.is_file()) {
+        return anyhow!(
+            "`{agent}` on PATH is {}, a batch launcher, and a prompt does not pass through one whole — \
+             put {agent}.exe itself on PATH, or try `funes ask {other} …`",
+            launcher.display()
+        );
+    }
     anyhow!("`{agent}` isn't on PATH — install it, or try `funes ask {other} …`")
+}
+
+/// The batch file `PATH` names `agent` by, as npm installs a CLI on Windows: `<agent>.cmd`, which
+/// Windows runs only through `cmd.exe`, and no argument holding a line break survives that.
+#[cfg(windows)]
+fn batch_launcher(
+    agent: &str,
+    path: Option<std::ffi::OsString>,
+    exists: impl Fn(&std::path::Path) -> bool,
+) -> Option<std::path::PathBuf> {
+    std::env::split_paths(&path?)
+        .flat_map(|dir| [dir.join(format!("{agent}.cmd")), dir.join(format!("{agent}.bat"))])
+        .find(|launcher| exists(launcher))
 }
 
 #[cfg(test)]
@@ -351,6 +372,21 @@ mod tests {
                 "p"
             ]
         );
+    }
+
+    /// npm's launcher is told apart from an agent that is not installed at all.
+    #[cfg(windows)]
+    #[test]
+    fn a_batch_launcher_on_path_is_found_by_either_extension() {
+        use std::path::{Path, PathBuf};
+
+        let path = std::env::join_paths([r"C:\bin", r"C:\npm"]).unwrap();
+        let found =
+            |present: &'static str| super::batch_launcher("codex", Some(path.clone()), |p| p == Path::new(present));
+        assert_eq!(found(r"C:\npm\codex.cmd"), Some(PathBuf::from(r"C:\npm\codex.cmd")));
+        assert_eq!(found(r"C:\bin\codex.bat"), Some(PathBuf::from(r"C:\bin\codex.bat")));
+        assert_eq!(found(r"C:\npm\claude.cmd"), None);
+        assert_eq!(super::batch_launcher("codex", None, |_| true), None);
     }
 
     #[test]
