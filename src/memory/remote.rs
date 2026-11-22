@@ -62,6 +62,16 @@ use super::dataset::{self, IndexBuildEvent};
 use super::fetch_store::{FetchStore, FileFetcher};
 use crate::hub;
 
+/// A staged file's path as the Hub names it: `/` between its components, whatever separates them
+/// on the disk it was staged on.
+fn repo_path(staged: &Path) -> String {
+    staged
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// Outcome of an [`append`] commit.
 pub(crate) enum Appended {
     /// The data was committed; carries the new commit oid, the resulting unindexed-row backlog, and
@@ -201,10 +211,7 @@ pub(crate) async fn first_publish(
             continue;
         }
         let rel = entry.path().strip_prefix(staging.path()).unwrap_or(entry.path());
-        ops.push(CommitOperation::add_file(
-            rel.to_string_lossy().into_owned(),
-            entry.path().to_path_buf(),
-        ));
+        ops.push(CommitOperation::add_file(repo_path(rel), entry.path().to_path_buf()));
     }
     if ops.is_empty() {
         return Ok(None);
@@ -971,6 +978,20 @@ mod tests {
     use lance_io::object_store::ObjectStore as LanceObjectStore;
     use object_store::path::Path as OPath;
     use object_store::ObjectStoreExt;
+
+    /// A first publish names what it staged the Hub's way, from a disk that separates otherwise.
+    #[test]
+    fn a_staged_file_is_named_with_the_hubs_separator() {
+        let staged = PathBuf::from("prefix 中文")
+            .join("chunks.lance")
+            .join("_versions")
+            .join("1.manifest");
+        assert_eq!(repo_path(&staged), "prefix 中文/chunks.lance/_versions/1.manifest");
+        assert_eq!(
+            repo_path(Path::new("chunks.lance/data/0.lance")),
+            "chunks.lance/data/0.lance"
+        );
+    }
 
     /// Every object in `store`: path → size.
     async fn objects(store: &dyn OSObjectStore) -> BTreeMap<String, u64> {

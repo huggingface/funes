@@ -318,6 +318,7 @@ impl MemoryOpts {
 const EX_TEMPFAIL: i32 = 75;
 
 fn main() -> Result<()> {
+    hub::configure_hf_home();
     hub::configure_user_agent_origin();
     let ran = tokio::runtime::Runtime::new()?.block_on(run());
     if let Err(e) = &ran {

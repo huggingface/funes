@@ -2602,6 +2602,7 @@ dependencies = [
  "uuid",
  "walkdir",
  "whatlang",
+ "winapi-util",
 ]
 
 [[package]]

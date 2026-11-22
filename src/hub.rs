@@ -26,13 +26,37 @@ pub fn configure_user_agent_origin() {
         .iter()
         .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()));
     let install = (!opted_out)
-        .then(|| std::env::var_os("HOME"))
+        .then(crate::home::user)
         .flatten()
-        .and_then(|home| install_id(&PathBuf::from(home).join(INSTALL_ID_FILE)));
+        .and_then(|home| install_id(&home.join(INSTALL_ID_FILE)));
     std::env::set_var(
         USER_AGENT_ORIGIN_ENV,
         user_agent_origin(current.as_deref(), install.as_deref()),
     );
+}
+
+/// Name the Hugging Face home for hf-hub on Windows, unless the user named one. hf-hub resolves
+/// `~/.cache/huggingface` from `$HOME` alone, which only a POSIX shell sets there, and settles for
+/// `/tmp` without it: the models would be cached, and the token looked for, in one place from Git
+/// Bash and at the root of whatever drive funes ran on from PowerShell. The user profile is where
+/// `huggingface_hub` keeps both on Windows, whichever shell asks. Call this once at process
+/// startup, before starting worker threads.
+pub fn configure_hf_home() {
+    if !cfg!(windows) {
+        return;
+    }
+    if let Some(hf_home) = default_hf_home(|key| std::env::var_os(key), crate::home::user()) {
+        std::env::set_var("HF_HOME", hf_home);
+    }
+}
+
+/// Pure core of [`configure_hf_home`]: the Hugging Face home under the user's, or `None` when the
+/// environment names where hf-hub keeps its files already. `$HOME` names nothing here: it is the
+/// variable that says one thing in one shell and nothing in another.
+fn default_hf_home(env: impl Fn(&str) -> Option<std::ffi::OsString>, home: Option<PathBuf>) -> Option<PathBuf> {
+    let named = ["HF_HOME", "XDG_CACHE_HOME"].iter().any(|key| env(key).is_some());
+    home.filter(|_| !named)
+        .map(|home| home.join(".cache").join("huggingface"))
 }
 
 fn user_agent_origin(current: Option<&str>, install_id: Option<&str>) -> String {
@@ -86,9 +110,18 @@ fn read_install_id(path: &Path) -> Option<String> {
     Some(Uuid::parse_str(text.trim()).ok()?.hyphenated().to_string())
 }
 
-/// `<org>/<repo>[/…]` with no scheme and not a path (`/` `.` `~`) → an HF dataset shorthand.
+/// `<org>/<repo>[/…]` with no scheme and not a path (`/` `.` `~`, or a Windows one) → an HF dataset
+/// shorthand.
 pub fn is_remote_shorthand(spec: &str) -> bool {
-    !spec.starts_with(['/', '.', '~']) && spec.contains('/')
+    !spec.starts_with(['/', '.', '~']) && !is_windows_path(spec) && spec.contains('/')
+}
+
+/// Whether `spec` is spelled as a Windows path: under a drive (`C:\memory`, `C:/memory`), or with a
+/// backslash anywhere (`\\server\share`, `memories\team`). No repo id holds a `:` or a `\`, so the
+/// answer is the same on every platform.
+fn is_windows_path(spec: &str) -> bool {
+    let bytes = spec.as_bytes();
+    spec.contains('\\') || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
 }
 
 /// Parse `hf://datasets/<owner>/<name>[/<prefix…>]` into (owner, name, prefix). Empty prefix = repo
@@ -325,6 +358,21 @@ mod tests {
         // path can't be built here; it's exercised by the gated round-trip.)
         assert!(!is_read_only(&anyhow::anyhow!("server said 403 Forbidden")));
         assert!(!is_read_only(&anyhow::anyhow!("no HF token")));
+    }
+
+    /// The Hugging Face home is the user's own unless the environment names one, and `$HOME`
+    /// names none: Git Bash sets it and PowerShell does not, and both must find the same cache.
+    #[test]
+    fn the_hf_home_defaults_under_the_users_own_whatever_home_says() {
+        let profile = || Some(PathBuf::from("profile"));
+        let with = |set: &'static str| move |key: &str| (key == set).then(|| "elsewhere".into());
+        let under_profile = Some(PathBuf::from("profile").join(".cache").join("huggingface"));
+
+        assert_eq!(default_hf_home(|_| None, profile()), under_profile);
+        assert_eq!(default_hf_home(with("HOME"), profile()), under_profile);
+        assert_eq!(default_hf_home(with("HF_HOME"), profile()), None);
+        assert_eq!(default_hf_home(with("XDG_CACHE_HOME"), profile()), None);
+        assert_eq!(default_hf_home(|_| None, None), None, "no home to keep it under");
     }
 
     #[test]

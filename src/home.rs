@@ -3,13 +3,23 @@
 
 use std::path::PathBuf;
 
+/// The user's own home, the `~` of every path funes documents: `$HOME` on Unix, the user profile
+/// on Windows, where `HOME` is a POSIX shell's convention rather than the system's and a process
+/// started outside one would find another home, or none. `None` when the platform names none.
+pub fn user() -> Option<PathBuf> {
+    #[cfg(unix)]
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    #[cfg(windows)]
+    let home = std::env::home_dir();
+    home.filter(|home| !home.as_os_str().is_empty())
+}
+
 /// funes's home: `$FUNES_HOME`, else `~/.funes`.
 pub fn dir() -> PathBuf {
     if let Ok(d) = std::env::var("FUNES_HOME") {
         return PathBuf::from(d);
     }
-    let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".funes")
+    user().unwrap_or_default().join(".funes")
 }
 
 /// The local memory. An earlier funes kept it at `<home>/store`, which is renamed here once, when

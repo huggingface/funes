@@ -5,7 +5,6 @@
 mod support;
 
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
@@ -24,12 +23,22 @@ async fn indexing_a_directory_runs_no_secret_scan() {
     let source = tempfile::tempdir().unwrap();
     std::env::set_var("FUNES_HOME", home.path());
 
-    // A scanner that counts its spawns in a file beside itself, so a scan by the index would show.
-    let scanner = bin.path().join("trufflehog");
-    std::fs::write(&scanner, "#!/bin/sh\necho spawn >> \"$0.spawns\"\n").unwrap();
-    std::fs::set_permissions(&scanner, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // A scanner that counts its spawns in a file beside itself, so a scan by the index would show:
+    // a shell script, or on Windows a batch file.
+    let (name, script) = if cfg!(windows) {
+        ("trufflehog.cmd", "@echo spawn >> \"%~f0.spawns\"\r\n")
+    } else {
+        ("trufflehog", "#!/bin/sh\necho spawn >> \"$0.spawns\"\n")
+    };
+    let scanner = bin.path().join(name);
+    std::fs::write(&scanner, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&scanner, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
     std::env::set_var("FUNES_TRUFFLEHOG", &scanner);
-    let spawns = bin.path().join("trufflehog.spawns");
+    let spawns = bin.path().join(format!("{name}.spawns"));
     let spawned = || std::fs::read_to_string(&spawns).map_or(0, |s| s.lines().count());
 
     // More units than one batch holds, each a one-turn session, newest last.

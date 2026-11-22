@@ -18,11 +18,10 @@ use funes::memory::{dataset, Memory};
 use hf_hub::{HFClient, HFError, HFRepository, RepoTypeDataset};
 use lance::Dataset;
 
-/// The model cache the embedder and reranker read, for a run whose `$HOME` is fake.
+/// The model cache the embedder and reranker read, for a run whose `$HOME` is fake: where hf-hub
+/// resolves it for this process.
 pub fn hf_home() -> PathBuf {
-    std::env::var_os("HF_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").expect("a home")).join(".cache/huggingface"))
+    hf_hub::hf_home()
 }
 
 pub fn assert_success(output: &Output) {

@@ -56,7 +56,13 @@ impl Trufflehog {
     /// Locate the trufflehog binary; fail-closed if none is found.
     pub fn find() -> Result<Self> {
         Ok(Self {
-            bin: find_in(|k| std::env::var_os(k), |p| p.is_file())?,
+            bin: find_in(
+                |k| match k {
+                    "HOME" => crate::home::user().map(PathBuf::into_os_string),
+                    _ => std::env::var_os(k),
+                },
+                |p| p.is_file(),
+            )?,
         })
     }
 }
@@ -188,16 +194,18 @@ fn parse_finding(line: &str) -> Result<(String, Finding)> {
 /// the real environment or filesystem. Errors if none exists — the scan is mandatory, never a
 /// silent pass.
 fn find_in(env: impl Fn(&str) -> Option<OsString>, exists: impl Fn(&Path) -> bool) -> Result<PathBuf> {
+    // `trufflehog.exe` on Windows, where a file is a program by its extension.
+    let bin = format!("trufflehog{}", std::env::consts::EXE_SUFFIX);
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(over) = env("FUNES_TRUFFLEHOG") {
         candidates.push(PathBuf::from(over));
     }
     if let Some(path) = env("PATH") {
-        candidates.extend(std::env::split_paths(&path).map(|d| d.join("trufflehog")));
+        candidates.extend(std::env::split_paths(&path).map(|d| d.join(&bin)));
     }
     if let Some(home) = env("HOME").map(PathBuf::from) {
-        candidates.push(home.join("go/bin/trufflehog"));
-        candidates.push(home.join(".local/bin/trufflehog"));
+        candidates.push(home.join("go/bin").join(&bin));
+        candidates.push(home.join(".local/bin").join(&bin));
     }
     candidates.extend(
         [
@@ -359,11 +367,11 @@ mod tests {
         };
         assert_eq!(find_in(env, |_| true).unwrap(), PathBuf::from("/custom/trufflehog"));
 
-        // No override: the first existing PATH entry wins.
-        let env = |k: &str| (k == "PATH").then(|| OsString::from("/aa:/bb"));
+        // No override: the first existing PATH entry wins, under the name a program has here.
+        let env = |k: &str| (k == "PATH").then(|| std::env::join_paths(["/aa", "/bb"]).unwrap());
         assert_eq!(
             find_in(env, |p| p.starts_with("/aa") || p.starts_with("/bb")).unwrap(),
-            PathBuf::from("/aa/trufflehog")
+            PathBuf::from("/aa").join(format!("trufflehog{}", std::env::consts::EXE_SUFFIX))
         );
 
         // Nothing anywhere: fail-closed with an actionable message.
