@@ -7,9 +7,10 @@ fn main() {
     if blas && target_os == "macos" {
         println!("cargo:rustc-link-lib=framework=Accelerate");
     }
-    // A command's future runs on the main thread, and `funes index` overflows the 1 MiB Windows
-    // gives it where Linux and macOS give 8. The stack is reserved in the executable — funes's own
-    // and the benchmarks' — since RUST_MIN_STACK reaches spawned threads only.
+    // A command's future runs on the main thread, and an unoptimized `funes index` overflows the
+    // 1 MiB Windows gives it where Linux and macOS give 8; an optimized one fits, by a margin
+    // nothing promises. The stack is reserved in the executable — funes's own and the benchmarks'
+    // — since RUST_MIN_STACK reaches spawned threads only.
     if target_os == "windows" {
         let reserve = 16 * 1024 * 1024;
         let arg = match std::env::var("CARGO_CFG_TARGET_ENV").as_deref() {
