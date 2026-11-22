@@ -27,9 +27,9 @@ permissions: {}
 
 jobs:
   # One leg per OS funes ships on: a run proves only the OS it ran on, the dependencies having
-  # per-platform code paths and funes its own (faer on Linux, Accelerate and the metal backend
-  # on macOS). macos-15 is the first whose MPSGraph has the fused attention the metal backend
-  # needs.
+  # per-platform code paths and funes its own (faer on Linux and Windows, Accelerate and the
+  # metal backend on macOS; the home, the registry and the update on Windows). macos-15 is the
+  # first whose MPSGraph has the fused attention the metal backend needs.
   lint-test:
     permissions:
       contents: read
@@ -39,7 +39,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-15]
+        os: [ubuntu-latest, macos-15, windows-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -66,6 +66,27 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install protobuf
 
+      # No package manager on the runner carries it: the release archive, pinned.
+      - name: Install protoc
+        if: runner.os == 'Windows'
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'protoc.zip'
+          $destination = Join-Path $env:RUNNER_TEMP 'protoc'
+          Invoke-WebRequest 'https://github.com/protocolbuffers/protobuf/releases/download/v28.3/protoc-28.3-win64.zip' -OutFile $archive
+          Expand-Archive $archive -DestinationPath $destination
+          "PROTOC=$destination\bin\protoc.exe" >> $env:GITHUB_ENV
+
+      # What the Windows runner needs said before anything is built. hf-hub finds its cache from
+      # $HOME, which the runner's PowerShell does not set: name it, where the weights below are
+      # restored (funes does the same for its own runs). And the linker writes a 300 MB PDB beside
+      # each of the forty-odd test binaries, 11 GB that nothing reads: none, which costs a failing
+      # test the symbols of its backtrace, not its message.
+      - name: Set the Windows environment
+        if: runner.os == 'Windows'
+        run: |
+          "HF_HOME=$env:USERPROFILE\.cache\huggingface" >> $env:GITHUB_ENV
+          "RUSTFLAGS=-C link-arg=/DEBUG:NONE" >> $env:GITHUB_ENV
+
       - name: Format check
         run: cargo fmt --check
 
@@ -80,11 +101,23 @@ jobs:
         run: cargo clippy --all-targets --profile ci --no-default-features --features onnx -- -D warnings
 
       # trufflehog for the secret-scan unit tests, pinned to the version used locally. sudo, so
-      # the install dir is writable on both runners.
+      # the install dir is writable on both Unix runners.
       - name: Install trufflehog
+        if: runner.os != 'Windows'
         run: |
           curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sudo sh -s -- -b /usr/local/bin v3.95.5
           trufflehog --version
+
+      - name: Install trufflehog
+        if: runner.os == 'Windows'
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'trufflehog.tar.gz'
+          $destination = Join-Path $env:RUNNER_TEMP 'trufflehog'
+          $null = New-Item -ItemType Directory -Force $destination
+          Invoke-WebRequest 'https://github.com/trufflesecurity/trufflehog/releases/download/v3.95.5/trufflehog_3.95.5_windows_amd64.tar.gz' -OutFile $archive
+          & "$env:SystemRoot\System32\tar.exe" -xzf $archive -C $destination trufflehog.exe
+          $destination >> $env:GITHUB_PATH
+          & "$destination\trufflehog.exe" --version
 
       # The weights the unit tests read: the reranker's, for the CPU forward's test against
       # transformers (and on macOS the GPU's), and on macOS the two embedding models' too, for the
@@ -118,7 +151,8 @@ jobs:
 
   # install.sh ships to Linux and macOS and is plain POSIX sh, so it gets a runner of
   # each: the test fakes the platform detection, but not the BSD vs GNU utilities
-  # underneath it. No toolchain here — the script is all this job needs.
+  # underneath it. install.ps1 ships to Windows, and is tested on the PowerShell every
+  # Windows has. No toolchain here — the script is all this job needs.
   installer-test:
     name: Installer (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -129,12 +163,18 @@ jobs:
       fail-fast: false
       matrix:
         # macos-15 is the runner release.yml builds the darwin asset on.
-        os: [ubuntu-latest, macos-15]
+        os: [ubuntu-latest, macos-15, windows-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Installer tests
+        if: runner.os != 'Windows'
         run: sh scripts/test-install.sh
+
+      - name: Installer tests
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: ./scripts/test-install.ps1
 
   # One leg per OS, as above, and gated on nothing: a lint failure is cheaper to see twice than to
   # wait on the other OS's lint for.
@@ -147,7 +187,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-15]
+        os: [ubuntu-latest, macos-15, windows-latest]
     env:
       # The push round-trip test awaits one large combined future (embed + Xet upload + lance);
       # it overflows the default ~2 MB test-thread stack under the CI toolchain. Give it headroom.
@@ -168,7 +208,7 @@ jobs:
         if: runner.os == 'Linux'
 
       # expect drives `funes add` at a pty, so the tests can answer the prompts that are only
-      # asked at a terminal. macOS ships it.
+      # asked at a terminal. macOS ships it; Windows has neither, and those tests are Unix's.
       - name: Install protoc and expect
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler expect
@@ -177,12 +217,45 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install protobuf
 
+      # No package manager on the runner carries it: the release archive, pinned.
+      - name: Install protoc
+        if: runner.os == 'Windows'
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'protoc.zip'
+          $destination = Join-Path $env:RUNNER_TEMP 'protoc'
+          Invoke-WebRequest 'https://github.com/protocolbuffers/protobuf/releases/download/v28.3/protoc-28.3-win64.zip' -OutFile $archive
+          Expand-Archive $archive -DestinationPath $destination
+          "PROTOC=$destination\bin\protoc.exe" >> $env:GITHUB_ENV
+
+      # What the Windows runner needs said before anything is built. hf-hub finds its cache from
+      # $HOME, which the runner's PowerShell does not set: name it, where the weights below are
+      # restored (funes does the same for its own runs). And the linker writes a 300 MB PDB beside
+      # each of the forty-odd test binaries, 11 GB that nothing reads: none, which costs a failing
+      # test the symbols of its backtrace, not its message.
+      - name: Set the Windows environment
+        if: runner.os == 'Windows'
+        run: |
+          "HF_HOME=$env:USERPROFILE\.cache\huggingface" >> $env:GITHUB_ENV
+          "RUSTFLAGS=-C link-arg=/DEBUG:NONE" >> $env:GITHUB_ENV
+
       # push's pre-publish secret gate shells out to trufflehog (fail-closed), so the
       # round-trip test below needs the binary on PATH. Pinned to the version used locally.
       - name: Install trufflehog
+        if: runner.os != 'Windows'
         run: |
           curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sudo sh -s -- -b /usr/local/bin v3.95.5
           trufflehog --version
+
+      - name: Install trufflehog
+        if: runner.os == 'Windows'
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'trufflehog.tar.gz'
+          $destination = Join-Path $env:RUNNER_TEMP 'trufflehog'
+          $null = New-Item -ItemType Directory -Force $destination
+          Invoke-WebRequest 'https://github.com/trufflesecurity/trufflehog/releases/download/v3.95.5/trufflehog_3.95.5_windows_amd64.tar.gz' -OutFile $archive
+          & "$env:SystemRoot\System32\tar.exe" -xzf $archive -C $destination trufflehog.exe
+          $destination >> $env:GITHUB_PATH
+          & "$destination\trufflehog.exe" --version
 
       # Embedder/reranker weights for the default (blas) backend (~0.7 GB of safetensors; funes
       # downloads them into the HF cache on first use). Cache on main only — PRs restore main's

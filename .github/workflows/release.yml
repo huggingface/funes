@@ -15,6 +15,7 @@ on:
       - "Cargo.lock"
       - "rust-toolchain.toml"
       - "scripts/install.sh"
+      - "scripts/install.ps1"
       - ".github/workflows/release.yml"
   workflow_dispatch:
     inputs:
@@ -286,17 +287,84 @@ jobs:
           name: macos-arm64
           path: dist/
 
-  # Runs only after both builds succeed. The release itself — tag + GitHub Release with the binaries
+  build-windows:
+    permissions:
+      contents: read
+    name: Build Windows (x86_64)
+    needs: [compute]
+    if: |
+      !cancelled() &&
+      (startsWith(github.ref, 'refs/tags/') || needs.compute.result == 'success'
+        || github.event_name == 'pull_request' || github.ref == 'refs/heads/main')
+    runs-on: windows-latest
+    timeout-minutes: 90
+    # See build-linux: the optimized `dist` profile for published builds, fast `release` otherwise.
+    env:
+      PROFILE: ${{ (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')) && 'dist' || 'release' }}
+    # bash, as on the other runners, so the steps below read as theirs do.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust from rust-toolchain.toml
+        run: |
+          rustup toolchain install --no-self-update
+          rustup target add x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # v2
+        with:
+          key: release-x86_64-pc-windows-msvc-${{ env.PROFILE }}
+
+      # No package manager on the runner carries it: the release archive, pinned.
+      - name: Install protoc
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'protoc.zip'
+          $destination = Join-Path $env:RUNNER_TEMP 'protoc'
+          Invoke-WebRequest 'https://github.com/protocolbuffers/protobuf/releases/download/v28.3/protoc-28.3-win64.zip' -OutFile $archive
+          Expand-Archive $archive -DestinationPath $destination
+          "PROTOC=$destination\bin\protoc.exe" >> $env:GITHUB_ENV
+
+      - name: Set release version
+        if: needs.compute.outputs.version != ''
+        env:
+          NEW_VERSION: ${{ needs.compute.outputs.version }}
+        run: perl -i -pe 'if (!$d && s/^version = ".*"/version = "$ENV{NEW_VERSION}"/) { $d = 1 }' Cargo.toml
+
+      - name: Build
+        run: cargo build --profile ${PROFILE} --target x86_64-pc-windows-msvc
+
+      # tr: a checkout that converts line endings leaves Cargo.toml's with a carriage return.
+      - name: Check binary version
+        run: |
+          EXPECTED=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/' | tr -d '\r')
+          REPORTED=$(target/x86_64-pc-windows-msvc/${PROFILE}/funes.exe --version | tr -d '\r')
+          test "$REPORTED" = "funes $EXPECTED"
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/x86_64-pc-windows-msvc/${PROFILE}/funes.exe dist/funes-x86_64-windows.exe
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-x86_64
+          path: dist/
+
+  # Runs only after every build succeeds. The release itself — tag + GitHub Release with the binaries
   # — never touches main, so branch protection doesn't apply. The only change to main, advancing the
   # `+dev` version marker, is pushed as a branch; the org blocks Actions from opening PRs, so a
   # maintainer opens that PR (one click from the run summary) and merges it.
   publish:
     name: Publish Release
-    needs: [compute, build-linux, build-macos]
+    needs: [compute, build-linux, build-macos, build-windows]
     if: |
       !cancelled() &&
       needs.build-linux.result == 'success' &&
       needs.build-macos.result == 'success' &&
+      needs.build-windows.result == 'success' &&
       (startsWith(github.ref, 'refs/tags/') || needs.compute.result == 'success')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -311,7 +379,7 @@ jobs:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: artifacts
-          pattern: "{linux-*,macos-*}"
+          pattern: "{linux-*,macos-*,windows-*}"
           merge-multiple: true
 
       - name: Validate release metadata and generate checksums
@@ -334,7 +402,8 @@ jobs:
           set -- \
             funes-x86_64-linux \
             funes-aarch64-linux \
-            funes-arm64-apple-darwin
+            funes-arm64-apple-darwin \
+            funes-x86_64-windows.exe
           for ASSET in "$@"; do
             test -f "artifacts/$ASSET" || {
               echo "::error::missing release asset: $ASSET"
@@ -385,11 +454,12 @@ jobs:
           ROOT="hf://buckets/huggingface/funes"
 
           "$HF" buckets sync ./artifacts "$ROOT/$TAG" --ignore-existing
-          for ASSET in funes-x86_64-linux funes-aarch64-linux funes-arm64-apple-darwin; do
+          for ASSET in funes-x86_64-linux funes-aarch64-linux funes-arm64-apple-darwin funes-x86_64-windows.exe; do
             "$HF" buckets cp "./artifacts/$ASSET" "$ROOT/$ASSET"
           done
           "$HF" buckets cp ./artifacts/VERSION "$ROOT/VERSION"
           "$HF" buckets cp scripts/install.sh "$ROOT/install.sh"
+          "$HF" buckets cp scripts/install.ps1 "$ROOT/install.ps1"
 
       # Dispatch only: push a branch advancing main's version marker to `<version>+dev`. The org
       # blocks Actions from opening PRs, so the workflow stops at the branch and surfaces a one-click
