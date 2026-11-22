@@ -67,8 +67,15 @@ encoders as MPSGraphs in fp16, which the embedder hands calls of 32+ texts to an
 of 8+ pairs, falling back to `blas` where no GPU starts. `blas` and `metal` each keep one module per
 encoder architecture: `bert.rs` (the embedders) and `modernbert.rs` (gte-reranker-modernbert-base,
 the reranker). `onnx` runs the same reranker, from the ONNX export in gte's Hub repo. CI lints and
-unit-tests the default build on Linux and on macOS 15, each with the other's seam compiled out, and
-`onnx` on Linux: so also run
+unit-tests the default build on Linux, on macOS 15 and on Windows, macOS with the faer seam compiled
+out and the other two with Accelerate's, and `onnx` on Linux: so also run
 `cargo clippy --all-targets --no-default-features --features onnx` before calling work done.
 `cargo run --release --features onnx --example score_models` scores `blas` and `metal` against
 `onnx`, and `cargo run --release --example bench_models -- --backend <blas|metal>` times one of them.
+
+funes runs on Windows as on Unix ([docs/windows.md](docs/windows.md)), and CI proves only the OS a
+leg ran on. The user's home is `home::user()`, never `$HOME`, which Windows does not set. A path
+that leaves the process for the Hub or for a shell is spelled with `/`. What the two platforms
+answer differently sits in one `os` module beside what asks (`src/agents/registry.rs`), or in a
+function with a `cfg` twin, not in `cfg`s through the logic; a test of permission bits or of a file
+symlink is Unix's, and says so.

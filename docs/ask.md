@@ -18,7 +18,8 @@ back with `funes get`.
 `ask` supports **claude** and **codex**. Both get the same forced grounding: funes recalls
 in-process, embeds the returned passages in one prompt, and asks the selected agent for one answer.
 The child gets no tools and reads no stdin; registered MCP servers are disabled for this invocation,
-so the answer can use only the question and passages funes supplied.
+so the answer can use only the question and passages funes supplied. On Windows the agent must be
+on `PATH` as its own `.exe`: [windows.md](windows.md#asking).
 
 This is deliberately different from [`funes add`](add.md), where a persistent agent decides when to
 call `recall` and can try another query or drill in with `get`. A one-shot `ask` is faster and more

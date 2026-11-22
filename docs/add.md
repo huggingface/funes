@@ -266,7 +266,8 @@ scratch is `funes add <agent>` again, whose seed re-converts the agent's own his
 executed. The location is fixed rather than under `$FUNES_HOME` because an agent records the path
 it is handed (pi installs the directory as an extension), so the files must outlive any one home.
 funes refuses a `setup` that anyone but its owner could have written: the file and every directory
-from `~/.funes/agents` down must belong to you and be neither group- nor world-writable.
+from `~/.funes/agents` down must belong to you and be neither group- nor world-writable. Windows
+has no such bits, and runs `setup` through a shell: [windows.md](windows.md#adding-an-agent).
 
 The source, in order: what `--from` names; the directory `$FUNES_INTEGRATIONS` names, when set —
 authoritative, consulted on every run, and nothing else is; the integrations catalog,

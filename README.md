@@ -31,6 +31,12 @@ default):
 curl -fsSL "https://huggingface.co/buckets/huggingface/funes/resolve/install.sh?src=readme" | sh
 ```
 
+On Windows, from PowerShell — [docs/windows.md](docs/windows.md) has what differs there:
+
+```powershell
+irm "https://huggingface.co/buckets/huggingface/funes/resolve/install.ps1?src=readme" | iex
+```
+
 Then add it to your agent:
 
 ```bash
@@ -56,6 +62,7 @@ Tagged binaries and their `SHA256SUMS` manifest are also available in the
 | Linux x86_64 | `funes-x86_64-linux` |
 | Linux aarch64 | `funes-aarch64-linux` |
 | macOS Apple Silicon | `funes-arm64-apple-darwin` |
+| Windows x86_64 | `funes-x86_64-windows.exe` |
 
 The checksum detects corrupt, truncated, or mismatched release downloads. Because the binary and
 checksum share the same bucket, it does not authenticate the bucket itself.
@@ -173,15 +180,17 @@ Needs a Rust toolchain and **`protoc`** — `lance`'s build scripts compile prot
 # System-wide:
 sudo apt-get install -y protobuf-compiler   # Debian/Ubuntu
 brew install protobuf                        # macOS
+winget install Google.Protobuf               # Windows
 ```
 
 Then `cargo build --release` (binary at `target/release/funes`); `cargo test` runs the suite. The
 integration test downloads the embedder/reranker weights on first run.
 
 Inference (embedding + reranking) runs on a built-in backend — Accelerate on macOS, pure Rust on
-Linux — so the default build has no ML runtime dependency and runs on any glibc ≥ 2.35 (Ubuntu
-22.04). On macOS 15 or later, indexing embeds and recall reranks on the GPU through Metal, falling
-back to the CPU where no GPU starts. An ONNX Runtime backend is available as an opt-in variant:
+Linux and Windows — so the default build has no ML runtime dependency and runs on any glibc ≥ 2.35
+(Ubuntu 22.04). On macOS 15 or later, indexing embeds and recall reranks on the GPU through Metal,
+falling back to the CPU where no GPU starts. An ONNX Runtime backend is available as an opt-in
+variant:
 
 ```bash
 cargo build --release --no-default-features --features onnx   # ONNX backend instead
