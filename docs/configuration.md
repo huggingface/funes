@@ -30,6 +30,35 @@ and push receipts can be recreated by running `funes push <memory>`.
 `FUNES_HOME` does **not** relocate agent configuration, installed integrations, model caches, or
 the install id (`~/.funes/install-id`). Those paths must remain stable after an agent records them.
 
+### Two memories on one host
+
+A host has one binding, and can still keep two memories apart: a second memory is a second home.
+An agent started with `FUNES_HOME` in its environment indexes into that home's memory, since the
+maintained integrations fill the spool of the home their agent runs under. They publish only from
+the home that last ran `funes add`, `funes bind` or `funes update`, whose binding they recorded, so
+every other home stays local. Each home needs its agent's own session store as well:
+
+```bash
+# The memory that stays on the box first: the default home, and Claude Code's default store.
+funes add claude
+
+# The published one last, with a home and a store of its own.
+export FUNES_HOME="$HOME/.funes-shared" CLAUDE_CONFIG_DIR="$HOME/.claude-shared"
+funes add claude <user|org>/funes-memory
+claude            # indexed into ~/.funes-shared, and published
+```
+
+A `claude` started without the two variables is indexed into `~/.funes`, and never published.
+
+`funes add` runs once under each home because an agent keeps its plugins and MCP servers with its
+store, and the home that publishes goes last because an integration is installed once for the host
+and records the home of its last run. `funes bind` and `funes update` belong under that home too.
+The store is the agent's to move (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, a hermes profile,
+`PI_CODING_AGENT_DIR`), and the two homes must not share one, because an integration cannot tell
+which home a session ran under: the seed at install converts the history of the store it finds,
+and each sweep after it every session written there since the last one. With one store for two
+homes, each would index the other's sessions, and the bound one publish them.
+
 ## Agent integration files
 
 `funes add` writes or registers these user-wide files; `funes remove <agent>` removes the matching

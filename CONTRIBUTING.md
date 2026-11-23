@@ -157,7 +157,9 @@ funes asks for confirmation before running your bundle's setup.
 
 `setup` runs with three variables: `FUNES_BIN`, the funes command to record or invoke (the user's
 pin, else `funes`); `FUNES_HOME`, the home whose memory and spool this install serves; and
-`FUNES_AGENT_ID`, its own id, which names its spool. Everything else the bundle needs — converter,
+`FUNES_AGENT_ID`, its own id, which names its spool. The automation an install leaves behind runs
+`funes` in its agent's environment, so it fills the spool of the home found there (the maintained
+four do, and push only under the home `setup` last ran for). Everything else the bundle needs — converter,
 hook scripts, plugin files — sits beside `setup`, and so does any state it keeps: a refresh rewrites
 only the files that changed and prunes nothing, while `funes remove` deletes the directory whole.
 
