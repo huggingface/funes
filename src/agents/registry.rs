@@ -121,6 +121,10 @@ mod os {
         })?;
         let mut command = Command::new(sh);
         command.args(["-c", r#"exec "$0" "$@""#]).arg(for_setup(setup));
+        // The profile, which Git's launcher would take from HOMEDRIVE and HOMEPATH instead.
+        if let Some(home) = crate::home::user() {
+            command.env("HOME", for_setup(&home));
+        }
         Ok(command)
     }
 
@@ -1989,6 +1993,33 @@ printf '%s|%s|%s\n' "$#" "$*" "$FUNES_AGENT_ID" >>"$here/ran"
         assert_eq!(
             found(&[r"C:\Users\u\AppData\Local\Programs\Git\bin\sh.exe"]),
             Some(PathBuf::from(r"C:\Users\u\AppData\Local\Programs\Git\bin\sh.exe"))
+        );
+    }
+
+    /// `setup`'s home is the profile, as funes's own, wherever HOMEDRIVE and HOMEPATH point.
+    #[cfg(windows)]
+    #[test]
+    fn setup_gets_the_profile_as_its_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let setup = tmp.path().join("setup");
+        std::fs::write(&setup, "#!/bin/sh\ncd \"$HOME\" && pwd -W\n").unwrap();
+        let profile = os::for_setup(&crate::home::user().unwrap());
+        let mut command = os::setup_command(&setup).unwrap();
+        assert!(
+            command
+                .get_envs()
+                .any(|(k, v)| k == "HOME" && v == Some(profile.as_os_str())),
+            "set, not left to whatever the shell derives"
+        );
+        let out = command
+            .env("HOMEDRIVE", "C:")
+            .env("HOMEPATH", r"\elsewhere")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim().to_lowercase(),
+            profile.to_string_lossy().to_lowercase()
         );
     }
 

@@ -45,7 +45,8 @@ else [Git for Windows](https://gitforwindows.org)'s — beside the `git.exe` on 
 installer puts it. Without one, `funes add` says so before it installs anything. WSL's `bash.exe`
 is not one: it would run `setup` in another system, with another home.
 
-funes hands `setup` its paths spelled with `/`, which Windows takes as well as `\`. Whether a
+funes hands `setup` its paths spelled with `/`, which Windows takes as well as `\`, and your
+profile as `HOME`, where the shell would derive another from `HOMEDRIVE` and `HOMEPATH`. Whether a
 given integration supports Windows, and what else it needs there, is its own README's to say: the
 maintained four are in
 [huggingface/funes-integrations](https://github.com/huggingface/funes-integrations).
