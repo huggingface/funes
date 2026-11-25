@@ -133,9 +133,9 @@ jobs:
             ~/.cache/huggingface/hub/models--Alibaba-NLP--gte-reranker-modernbert-base
           key: hf-models-unit-${{ runner.os }}-v1
 
-      # Unix only: the script builds a Unix venv. The Windows leg fetches on first use.
+      # bash: Git's on Windows, where steps otherwise run in PowerShell.
       - name: Download model weights
-        if: runner.os != 'Windows'
+        shell: bash
         run: |
           set -- Alibaba-NLP/gte-reranker-modernbert-base
           if [ "$RUNNER_OS" = macOS ]; then
@@ -279,9 +279,9 @@ jobs:
             ~/.cache/huggingface/hub/models--Alibaba-NLP--gte-reranker-modernbert-base
           key: hf-models-blas-v3
 
-      # Unix only: the script builds a Unix venv. The Windows leg fetches on first use.
+      # bash: Git's on Windows, where steps otherwise run in PowerShell.
       - name: Download model weights
-        if: runner.os != 'Windows'
+        shell: bash
         run: |
           sh scripts/download-test-models.sh \
             BAAI/bge-small-en-v1.5 \
