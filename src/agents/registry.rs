@@ -67,9 +67,11 @@ mod os {
         Ok(())
     }
 
-    /// The command that runs `setup`: the file itself.
-    pub(super) fn setup_command(setup: &Path) -> Result<Command> {
-        Ok(Command::new(setup))
+    /// The command that runs `setup` with `args`: the file itself.
+    pub(super) fn setup_command(setup: &Path, args: &[&str]) -> Result<Command> {
+        let mut command = Command::new(setup);
+        command.args(args);
+        Ok(command)
     }
 
     /// A path as `setup` is handed it.
@@ -108,10 +110,12 @@ mod os {
         Ok(())
     }
 
-    /// The command that runs `setup`: a POSIX shell that runs it as Unix would, by its first line.
-    /// The maintained integrations are shell scripts, and Git for Windows brings the shell that
-    /// runs them.
-    pub(super) fn setup_command(setup: &Path) -> Result<Command> {
+    /// The command that runs `setup` with `args`: a POSIX shell that runs it as Unix would, by its
+    /// first line. The maintained integrations are shell scripts, and Git for Windows brings the
+    /// shell that runs them.
+    pub(super) fn setup_command(setup: &Path, args: &[&str]) -> Result<Command> {
+        use std::os::windows::process::CommandExt;
+
         let sh = posix_shell(|key| std::env::var_os(key), |path| path.is_file()).ok_or_else(|| {
             anyhow!(
                 "an integration's setup is run by a POSIX shell, and funes found no sh.exe — \
@@ -120,12 +124,34 @@ mod os {
             )
         })?;
         let mut command = Command::new(sh);
-        command.args(["-c", r#"exec "$0" "$@""#]).arg(for_setup(setup));
+        let setup = for_setup(setup).to_string_lossy().into_owned();
+        for arg in ["-c", r#"exec "$0" "$@""#, setup.as_str()].iter().chain(args) {
+            command.raw_arg(quote_msys2(arg));
+        }
         // The profile, which Git's launcher would take from HOMEDRIVE and HOMEPATH instead.
         if let Some(home) = crate::home::user() {
             command.env("HOME", for_setup(&home));
         }
         Ok(command)
+    }
+
+    /// `arg` on a command line the MSYS2 runtime under `sh.exe` splits, which is not as Rust
+    /// quotes one: it also quotes with `'`, globs, and reads `\` inside `"` as an escape. Git
+    /// quotes for it the same way (`quote_arg_msys2`).
+    pub(super) fn quote_msys2(arg: &str) -> String {
+        let special = |c: char| c.is_whitespace() || "\\\"'{}[]?*~".contains(c);
+        if !arg.is_empty() && !arg.chars().any(special) {
+            return arg.to_string();
+        }
+        let mut quoted = String::from('"');
+        for c in arg.chars() {
+            if c == '\\' || c == '"' {
+                quoted.push('\\');
+            }
+            quoted.push(c);
+        }
+        quoted.push('"');
+        quoted
     }
 
     /// A path as `setup` is handed it: spelled with `/`, which Windows takes as well as `\` and
@@ -526,7 +552,7 @@ fn require_executable(setup: &Path) -> Result<()> {
         bail!("{} is not executable", setup.display());
     }
     // Nor one with nothing to run it: on Windows that is a shell, which may not be installed.
-    os::setup_command(setup).map(|_| ())
+    os::setup_command(setup, &[]).map(|_| ())
 }
 
 /// Read what the manifest at `path` declares for the integration `id`, and check it. Every
@@ -636,8 +662,7 @@ impl Integration {
         let command = super::shell_command(&setup.to_string_lossy(), args);
         // What the integration records or invokes: the user's pin, else `funes` from PATH.
         let funes = std::env::var("FUNES_BIN").unwrap_or_else(|_| "funes".to_string());
-        let status = os::setup_command(&setup)?
-            .args(args)
+        let status = os::setup_command(&setup, args)?
             .env("FUNES_BIN", os::for_setup(Path::new(&funes)))
             .env("FUNES_HOME", os::for_setup(&home::dir()))
             .env("FUNES_AGENT_ID", &self.manifest.id)
@@ -2004,7 +2029,7 @@ printf '%s|%s|%s\n' "$#" "$*" "$FUNES_AGENT_ID" >>"$here/ran"
         let setup = tmp.path().join("setup");
         std::fs::write(&setup, "#!/bin/sh\ncd \"$HOME\" && pwd -W\n").unwrap();
         let profile = os::for_setup(&crate::home::user().unwrap());
-        let mut command = os::setup_command(&setup).unwrap();
+        let mut command = os::setup_command(&setup, &[]).unwrap();
         assert!(
             command
                 .get_envs()
@@ -2020,6 +2045,37 @@ printf '%s|%s|%s\n' "$#" "$*" "$FUNES_AGENT_ID" >>"$here/ran"
         assert_eq!(
             String::from_utf8_lossy(&out.stdout).trim().to_lowercase(),
             profile.to_string_lossy().to_lowercase()
+        );
+    }
+
+    /// Split by MSYS2's rules, not Rust's: a quote, glob characters, a leading `~` and a UNC
+    /// path's doubled backslash reach `setup` as written.
+    #[cfg(windows)]
+    #[test]
+    fn setup_gets_its_path_and_arguments_whole_through_msys2() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("o'brien");
+        std::fs::create_dir_all(&dir).unwrap();
+        let setup = dir.join("setup");
+        std::fs::write(&setup, "#!/bin/sh\nprintf '%s\\n' \"$0\" \"$@\"\n").unwrap();
+        let args = [
+            "add",
+            r"\\nas\Team Share\kb",
+            r"\\nas\kb",
+            "*",
+            "~x",
+            "{a,b}",
+            "it's",
+            r#"say "hi""#,
+            "",
+        ];
+        let out = os::setup_command(&setup, &args).unwrap().output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let mut expected = vec![os::for_setup(&setup).to_string_lossy().into_owned()];
+        expected.extend(args.iter().map(|a| a.to_string()));
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).lines().collect::<Vec<_>>(),
+            expected
         );
     }
 
