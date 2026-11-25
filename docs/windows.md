@@ -59,10 +59,8 @@ Two checks on [the registry](add.md#where-the-integrations-files-come-from) diff
 
 ## Asking
 
-[`funes ask`](ask.md) runs `claude` or `codex` with the grounded prompt as an argument, which
-needs the agent's own `.exe` on `PATH`. A launcher npm installs, `codex.cmd`, runs through
-`cmd.exe`, where no argument holding a line break survives: funes says so rather than send a
-mangled prompt.
+[`funes ask`](ask.md) runs the agent's `.exe` on `PATH` — else, where npm installed it, the
+launcher npm puts there, `codex.cmd`.
 
 ## Publishing
 

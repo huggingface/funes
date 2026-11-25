@@ -10,7 +10,8 @@
 
 use anyhow::{anyhow, bail, Result};
 use serde_json::Value;
-use std::io::{BufRead, BufReader, IsTerminal, Read};
+use std::ffi::OsString;
+use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
 use std::process::{Command, ExitStatus, Stdio};
 
 use super::recall::{check_readable, recall_hits, RecallFilter};
@@ -23,14 +24,12 @@ use crate::ui::render;
 const K: usize = 8;
 const CANDIDATES: usize = 30;
 
-/// The prompt must precede the flags, which would otherwise swallow it; the empty strict MCP
-/// config keeps any registered servers out of a session that must answer from the passages
-/// alone. stream-json (and the --verbose it requires) turns stdout into the events the wait
-/// animation feeds on.
-fn claude_args(prompt: &str) -> Vec<String> {
+/// The prompt arrives on stdin ([`run_streaming`]); the empty strict MCP config keeps any
+/// registered servers out of a session that must answer from the passages alone. stream-json
+/// (and the --verbose it requires) turns stdout into the events the wait animation feeds on.
+fn claude_args() -> Vec<String> {
     [
         "-p",
-        prompt,
         "--strict-mcp-config",
         "--mcp-config",
         r#"{"mcpServers":{}}"#,
@@ -43,10 +42,10 @@ fn claude_args(prompt: &str) -> Vec<String> {
     .collect()
 }
 
-/// codex exec cannot run MCP tools, so `mcp_servers={}` silences any registered ones; `--`
-/// guards a dash-leading prompt; `--skip-git-repo-check` lets ask run outside a trusted repo;
-/// `--json` swaps the console chatter for the events the wait animation feeds on.
-fn codex_args(prompt: &str) -> Vec<String> {
+/// codex exec cannot run MCP tools, so `mcp_servers={}` silences any registered ones; `-` reads
+/// the prompt from stdin ([`run_streaming`]); `--skip-git-repo-check` lets ask run outside a
+/// trusted repo; `--json` swaps the console chatter for the events the wait animation feeds on.
+fn codex_args() -> Vec<String> {
     [
         "exec",
         "--json",
@@ -54,7 +53,7 @@ fn codex_args(prompt: &str) -> Vec<String> {
         "-c",
         "mcp_servers={}",
         "--",
-        prompt,
+        "-",
     ]
     .into_iter()
     .map(String::from)
@@ -85,7 +84,7 @@ pub async fn claude(question: String, target: impl Into<Target>) -> Result<()> {
     let progress = |label: &str| banner.set(label);
     let prompt = grounding(target, &question, &progress).await?;
     progress("waking claude…");
-    let run = run_streaming("claude", &claude_args(&prompt), claude_event, &progress)?;
+    let run = run_streaming("claude", &claude_args(), &prompt, claude_event, &progress)?;
     drop(banner);
     conclude("claude", run)
 }
@@ -98,7 +97,7 @@ pub async fn codex(question: String, target: impl Into<Target>) -> Result<()> {
     let progress = |label: &str| banner.set(label);
     let prompt = grounding(target, &question, &progress).await?;
     progress("waking codex…");
-    let run = run_streaming("codex", &codex_args(&prompt), codex_event, &progress)?;
+    let run = run_streaming("codex", &codex_args(), &prompt, codex_event, &progress)?;
     drop(banner);
     conclude("codex", run)
 }
@@ -130,7 +129,7 @@ pub async fn grounding(target: impl Into<Target>, question: &str, progress: &(dy
 
 /// Probe that an agent CLI exists before any expensive work is done on its behalf.
 pub fn preflight(agent: &str) -> Result<()> {
-    match Command::new(agent)
+    match Command::new(program(agent))
         .arg("--version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -216,16 +215,17 @@ struct Run {
 }
 
 /// Stream an agent's JSONL events: statuses feed `progress`, the answer rides back in the
-/// [`Run`]. stdin is closed — an open pipe would feed the child's prompt.
+/// [`Run`]. The prompt goes in on stdin, out of `ps` and past the system's cap on an argument.
 fn run_streaming(
     agent: &str,
     args: &[String],
+    prompt: &str,
     event: fn(&str) -> Event,
     progress: &(dyn Fn(&str) + Sync),
 ) -> Result<Run> {
-    let mut child = match Command::new(agent)
+    let mut child = match Command::new(program(agent))
         .args(args)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -234,6 +234,13 @@ fn run_streaming(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(missing_agent(agent)),
         Err(e) => return Err(anyhow::Error::new(e).context(format!("running `{agent}`"))),
     };
+    // Its own thread, so a prompt larger than the pipe cannot deadlock against unread stdout.
+    let stdin = child.stdin.take();
+    let prompt = prompt.to_owned();
+    let feed = std::thread::spawn(move || match stdin {
+        Some(mut stdin) => stdin.write_all(prompt.as_bytes()),
+        None => Ok(()),
+    });
     let stderr = child.stderr.take();
     let drain = std::thread::spawn(move || {
         let mut text = String::new();
@@ -268,14 +275,20 @@ fn run_streaming(
     }
     let status = child.wait();
     output.push_str(&drain.join().unwrap_or_default());
+    let fed = feed
+        .join()
+        .unwrap_or_else(|_| Err(std::io::Error::other("the prompt's writer panicked")));
     if let Some(e) = read_err {
         return Err(anyhow::Error::new(e).context(format!("reading `{agent}` output")));
     }
-    Ok(Run {
-        answer,
-        output,
-        status: status?,
-    })
+    let status = status?;
+    match fed {
+        // The agent quit first; its output says why.
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe && !status.success() => {}
+        Err(e) => return Err(anyhow::Error::new(e).context(format!("handing `{agent}` its prompt"))),
+        Ok(()) => {}
+    }
+    Ok(Run { answer, output, status })
 }
 
 /// Past the animation: print the answer, or replay the captured output so the failure stays
@@ -317,41 +330,49 @@ fn conclude(agent: &str, run: Run) -> Result<()> {
 
 fn missing_agent(agent: &str) -> anyhow::Error {
     let other = if agent == "claude" { "codex" } else { "claude" };
-    #[cfg(windows)]
-    if let Some(launcher) = batch_launcher(agent, std::env::var_os("PATH"), |p| p.is_file()) {
-        return anyhow!(
-            "`{agent}` on PATH is {}, a batch launcher, and a prompt does not pass through one whole — \
-             put {agent}.exe itself on PATH, or try `funes ask {other} …`",
-            launcher.display()
-        );
-    }
     anyhow!("`{agent}` isn't on PATH — install it, or try `funes ask {other} …`")
 }
 
-/// The batch file `PATH` names `agent` by, as npm installs a CLI on Windows: `<agent>.cmd`, which
-/// Windows runs only through `cmd.exe`, and no argument holding a line break survives that.
+/// The program `ask` runs for `agent`.
+#[cfg(not(windows))]
+fn program(agent: &str) -> OsString {
+    agent.into()
+}
+
+/// The program `ask` runs for `agent`: a name finds only an `.exe`, so npm's launcher by its path.
+#[cfg(windows)]
+fn program(agent: &str) -> OsString {
+    batch_launcher(agent, std::env::var_os("PATH"), |p| p.is_file()).map_or_else(|| agent.into(), Into::into)
+}
+
+/// `<agent>.cmd` or `.bat` on `PATH`, when no `<agent>.exe` is.
 #[cfg(windows)]
 fn batch_launcher(
     agent: &str,
-    path: Option<std::ffi::OsString>,
+    path: Option<OsString>,
     exists: impl Fn(&std::path::Path) -> bool,
 ) -> Option<std::path::PathBuf> {
-    std::env::split_paths(&path?)
+    let dirs: Vec<_> = std::env::split_paths(&path?)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .collect();
+    if dirs.iter().any(|dir| exists(&dir.join(format!("{agent}.exe")))) {
+        return None;
+    }
+    dirs.iter()
         .flat_map(|dir| [dir.join(format!("{agent}.cmd")), dir.join(format!("{agent}.bat"))])
         .find(|launcher| exists(launcher))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{claude_args, claude_event, codex_args, codex_event, grounded_prompt, Event};
+    use super::{claude_args, claude_event, codex_args, codex_event, grounded_prompt, run_streaming, Event};
 
     #[test]
     fn agents_get_a_bare_session_and_streamed_events() {
         assert_eq!(
-            claude_args("p"),
+            claude_args(),
             [
                 "-p",
-                "p",
                 "--strict-mcp-config",
                 "--mcp-config",
                 r#"{"mcpServers":{}}"#,
@@ -361,7 +382,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            codex_args("p"),
+            codex_args(),
             [
                 "exec",
                 "--json",
@@ -369,23 +390,48 @@ mod tests {
                 "-c",
                 "mcp_servers={}",
                 "--",
-                "p"
+                "-"
             ]
         );
     }
 
-    /// npm's launcher is told apart from an agent that is not installed at all.
+    /// Larger than any argument may be; `sort`, on every system, hands back every line.
+    #[test]
+    fn the_prompt_reaches_the_agent_whole_on_stdin() {
+        let lines: Vec<String> = (0..20_000).map(|i| format!("line-{i:05}")).collect();
+        let prompt = lines.join("\n") + "\n";
+        assert!(prompt.len() > 128 << 10);
+        let run = run_streaming("sort", &[], &prompt, |line| Event::Answer(line.to_string()), &|_| ()).unwrap();
+        assert!(run.status.success(), "{}", run.output);
+        assert_eq!(run.answer.as_deref(), Some("line-19999"));
+        assert_eq!(run.output.lines().count(), lines.len());
+    }
+
+    /// npm's launcher runs only where no `.exe` is on PATH.
     #[cfg(windows)]
     #[test]
     fn a_batch_launcher_on_path_is_found_by_either_extension() {
         use std::path::{Path, PathBuf};
 
         let path = std::env::join_paths([r"C:\bin", r"C:\npm"]).unwrap();
-        let found =
-            |present: &'static str| super::batch_launcher("codex", Some(path.clone()), |p| p == Path::new(present));
-        assert_eq!(found(r"C:\npm\codex.cmd"), Some(PathBuf::from(r"C:\npm\codex.cmd")));
-        assert_eq!(found(r"C:\bin\codex.bat"), Some(PathBuf::from(r"C:\bin\codex.bat")));
-        assert_eq!(found(r"C:\npm\claude.cmd"), None);
+        let found = |present: &[&'static str]| {
+            super::batch_launcher("codex", Some(path.clone()), |p| {
+                present.iter().any(|f| p == Path::new(f))
+            })
+        };
+        assert_eq!(found(&[r"C:\npm\codex.cmd"]), Some(PathBuf::from(r"C:\npm\codex.cmd")));
+        assert_eq!(found(&[r"C:\bin\codex.bat"]), Some(PathBuf::from(r"C:\bin\codex.bat")));
+        assert_eq!(found(&[r"C:\npm\claude.cmd"]), None);
+        assert_eq!(
+            found(&[r"C:\npm\codex.exe", r"C:\npm\codex.cmd"]),
+            None,
+            "an .exe is run by name"
+        );
+        assert_eq!(
+            found(&[r"C:\npm\codex.cmd", r"C:\bin\codex.exe"]),
+            None,
+            "wherever it is"
+        );
         assert_eq!(super::batch_launcher("codex", None, |_| true), None);
     }
 
