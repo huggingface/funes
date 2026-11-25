@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/img/logo.png" alt="funes elephant mascot" width="180">
+</p>
+
 # funes
 
 **Durable memory for your AI coding agents.** `funes` indexes your past sessions across Claude
