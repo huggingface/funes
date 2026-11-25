@@ -133,6 +133,14 @@ jobs:
             ~/.cache/huggingface/hub/models--Alibaba-NLP--gte-reranker-modernbert-base
           key: hf-models-unit-${{ runner.os }}-v1
 
+      - name: Download model weights
+        run: |
+          set -- Alibaba-NLP/gte-reranker-modernbert-base
+          if [ "$RUNNER_OS" = macOS ]; then
+            set -- "$@" BAAI/bge-small-en-v1.5 intfloat/multilingual-e5-small
+          fi
+          sh scripts/download-test-models.sh "$@"
+
       # Unit tests only here — hermetic, no network but the weights above. The integration test
       # that runs the real embedder lives in its own job below. --nocapture: the agreement test
       # says in the log whether it ran on the GPU or skipped for want of one.
@@ -261,14 +269,24 @@ jobs:
       # downloads them into the HF cache on first use). Cache on main only — PRs restore main's
       # copy, so there's no duplicate per-PR copy eating the 10 GB cache budget. The files are the
       # same on both OSes, so one key serves both legs.
+      # All three models the integration suite reads. Cache on main only so PRs restore main's
+      # copy without saving duplicates. The model files are the same on both OSes.
       - name: Restore model weights
         id: models
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cache/huggingface/hub/models--BAAI--bge-small-en-v1.5
+            ~/.cache/huggingface/hub/models--intfloat--multilingual-e5-small
             ~/.cache/huggingface/hub/models--Alibaba-NLP--gte-reranker-modernbert-base
-          key: hf-models-blas-v2
+          key: hf-models-blas-v3
+
+      - name: Download model weights
+        run: |
+          sh scripts/download-test-models.sh \
+            BAAI/bge-small-en-v1.5 \
+            intfloat/multilingual-e5-small \
+            Alibaba-NLP/gte-reranker-modernbert-base
 
       # The whole suite, named by nothing: this job has the model cache and the Hub secret, which
       # is everything any test needs, so a test added later is covered without touching this file.
@@ -285,8 +303,9 @@ jobs:
         with:
           path: |
             ~/.cache/huggingface/hub/models--BAAI--bge-small-en-v1.5
+            ~/.cache/huggingface/hub/models--intfloat--multilingual-e5-small
             ~/.cache/huggingface/hub/models--Alibaba-NLP--gte-reranker-modernbert-base
-          key: hf-models-blas-v2
+          key: hf-models-blas-v3
 
   # The ONNX backend is an opt-in feature. Its lint runs on every PR (in lint-test above);
   # the build + real-model integration test here run only on merges to main, so pull requests
