@@ -207,24 +207,25 @@ fn find_in(env: impl Fn(&str) -> Option<OsString>, exists: impl Fn(&Path) -> boo
         candidates.push(home.join("go/bin").join(&bin));
         candidates.push(home.join(".local/bin").join(&bin));
     }
-    candidates.extend(
-        [
-            "/opt/homebrew/bin/trufflehog",
-            "/usr/local/bin/trufflehog",
-            "/usr/bin/trufflehog",
-        ]
-        .into_iter()
-        .map(PathBuf::from),
-    );
+    candidates.extend(SYSTEM_DIRS.iter().map(|d| Path::new(d).join(&bin)));
     candidates.into_iter().find(|p| exists(p)).ok_or_else(|| {
+        let checked: String = SYSTEM_DIRS.iter().map(|d| format!(", {d}")).collect();
         anyhow!(
-            "trufflehog not found (checked $FUNES_TRUFFLEHOG, $PATH, Homebrew, /usr/local/bin, \
-             /usr/bin, ~/go/bin, ~/.local/bin). The secret scan is mandatory — refusing to proceed \
-             unscanned. Install it (https://github.com/trufflesecurity/trufflehog) or set \
+            "trufflehog not found (checked $FUNES_TRUFFLEHOG, $PATH, ~/go/bin, ~/.local/bin{checked}). \
+             The secret scan is mandatory — refusing to proceed unscanned. Install it \
+             (https://github.com/trufflesecurity/trufflehog) or set \
              FUNES_TRUFFLEHOG=/path/to/trufflehog."
         )
     })
 }
+
+/// Where package managers put trufflehog outside the user's home.
+#[cfg(unix)]
+const SYSTEM_DIRS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"];
+
+/// None on Windows, where `/usr/bin` is on the current drive, which any user may write to.
+#[cfg(windows)]
+const SYSTEM_DIRS: &[&str] = &[];
 
 /// The one place a scanner is invoked for *block-level* detection: scans `texts` in one pass and
 /// returns what it found in each of them. `texts` must each be a contiguous unit (a reconstructed
@@ -377,6 +378,15 @@ mod tests {
         // Nothing anywhere: fail-closed with an actionable message.
         let err = find_in(|_| None, |_| false).unwrap_err().to_string();
         assert!(err.contains("not found") && err.contains("FUNES_TRUFFLEHOG"), "{err}");
+
+        // A system dir is one on Unix only; on Windows it would name the current drive.
+        let found = find_in(|_| None, |p| p == Path::new("/usr/local/bin/trufflehog"));
+        if cfg!(unix) {
+            assert_eq!(found.unwrap(), PathBuf::from("/usr/local/bin/trufflehog"));
+        } else {
+            let err = found.unwrap_err().to_string();
+            assert!(!err.contains("/usr/local/bin"), "{err}");
+        }
     }
 
     #[test]
