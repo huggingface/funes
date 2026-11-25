@@ -188,7 +188,8 @@ function Install-Funes([string]$InstallDir, [string]$Version, [bool]$NoPathUpdat
     }
 }
 
-# Dot-sourced, as the installer's test does, this file only defines its functions.
-if ($MyInvocation.InvocationName -ne '.') {
+# The installer's test sets this to dot-source the functions alone. Not `$MyInvocation`: piped to
+# iex, the script reads its caller's, which is a dot-source in every GitHub Actions step.
+if (-not $FunesInstallDefineOnly) {
     Install-Funes $InstallDir $Version $NoPathUpdate.IsPresent
 }

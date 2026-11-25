@@ -53,6 +53,7 @@ public class FunesFixture {
     $sums = ('0' * 64) + "  funes-x86_64-linux`n$digest  $asset`n"
     Write-Fixtures $sums
 
+    $FunesInstallDefineOnly = $true
     . (Join-Path $PSScriptRoot 'install.ps1')
     $rev = $FunesInstallRev
     Assert ($rev -ge 1) 'the script names its revision'
@@ -170,6 +171,16 @@ public class FunesFixture {
     Remove-ItemProperty -LiteralPath $scratchKey -Name Path
     Assert (Add-FunesToPath $install $scratchKey) 'a PATH was not created where there was none'
     Assert ((& $read) -ceq $install) 'a created PATH holds more than the directory'
+
+    # Piped to iex inside a dot-sourced script, as every GitHub Actions step runs, it installs. The
+    # alias, which wins over the function, catches the call: the script's own would download.
+    Remove-Variable FunesInstallDefineOnly
+    $installed = $false
+    function Register-Install { $script:installed = $true }
+    Set-Alias Install-Funes Register-Install
+    . { Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'install.ps1') | Invoke-Expression }
+    Remove-Item Alias:Install-Funes
+    Assert $installed 'piped to iex from a dot-sourced script, nothing was installed'
 
     Write-Host 'install.ps1: all tests passed.'
 } finally {
