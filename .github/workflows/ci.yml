@@ -133,7 +133,9 @@ jobs:
             ~/.cache/huggingface/hub/models--Alibaba-NLP--gte-reranker-modernbert-base
           key: hf-models-unit-${{ runner.os }}-v1
 
+      # Unix only: the script builds a Unix venv. The Windows leg fetches on first use.
       - name: Download model weights
+        if: runner.os != 'Windows'
         run: |
           set -- Alibaba-NLP/gte-reranker-modernbert-base
           if [ "$RUNNER_OS" = macOS ]; then
@@ -265,10 +267,6 @@ jobs:
           $destination >> $env:GITHUB_PATH
           & "$destination\trufflehog.exe" --version
 
-      # Embedder/reranker weights for the default (blas) backend (~0.7 GB of safetensors; funes
-      # downloads them into the HF cache on first use). Cache on main only — PRs restore main's
-      # copy, so there's no duplicate per-PR copy eating the 10 GB cache budget. The files are the
-      # same on both OSes, so one key serves both legs.
       # All three models the integration suite reads. Cache on main only so PRs restore main's
       # copy without saving duplicates. The model files are the same on both OSes.
       - name: Restore model weights
@@ -281,7 +279,9 @@ jobs:
             ~/.cache/huggingface/hub/models--Alibaba-NLP--gte-reranker-modernbert-base
           key: hf-models-blas-v3
 
+      # Unix only: the script builds a Unix venv. The Windows leg fetches on first use.
       - name: Download model weights
+        if: runner.os != 'Windows'
         run: |
           sh scripts/download-test-models.sh \
             BAAI/bge-small-en-v1.5 \
