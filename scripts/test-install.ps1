@@ -89,6 +89,23 @@ public class FunesFixture {
     Assert ((@($agents | Sort-Object -Unique) -join '|') -ceq "funes-install/$rev (windows-x86_64); requested/v$release") 'a pinned download did not name its tag'
     Assert ((Get-Failure { Install-Funes $install '../9.9.9' $true }) -match 'invalid release version') 'a version that is not one was accepted'
 
+    # A relative install dir is the session's location's, and ~ its home, not the process's.
+    $here = Join-Path $work 'here'
+    $null = New-Item -ItemType Directory -Force $here
+    $home0 = (Get-PSProvider FileSystem).Home
+    Push-Location -LiteralPath $here
+    try {
+        (Get-PSProvider FileSystem).Home = $here
+        Install-Funes 'rel bin' "v$release" $true
+        Assert (Test-Path -LiteralPath (Join-Path $here 'rel bin\funes.exe')) 'a relative install dir was not the location''s'
+        Install-Funes '~\tilde bin' "v$release" $true
+        Assert (Test-Path -LiteralPath (Join-Path $here 'tilde bin\funes.exe')) 'a ~ install dir was not the home'
+        Assert ((Get-Failure { Install-Funes 'HKCU:\Software' "v$release" $true }) -match 'not a folder') 'a registry key was taken for an install dir'
+    } finally {
+        (Get-PSProvider FileSystem).Home = $home0
+        Pop-Location
+    }
+
     # A processor with no prebuilt asset stops before it touches the install dir.
     $unsupported = Join-Path $work 'unsupported'
     function Get-FunesArchitecture { 'ARM64' }

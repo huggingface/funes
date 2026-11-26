@@ -125,7 +125,11 @@ function Install-Funes([string]$InstallDir, [string]$Version, [bool]$NoPathUpdat
     }
 
     if (-not $InstallDir) { $InstallDir = Join-Path $env:USERPROFILE '.local\bin' }
-    $InstallDir = [IO.Path]::GetFullPath($InstallDir)
+    # Against this session's location, ~ expanded, as any path given PowerShell; GetFullPath would
+    # use the process's directory, which Set-Location never moves.
+    $provider = $null; $drive = $null
+    $InstallDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($InstallDir, [ref]$provider, [ref]$drive)
+    if ($provider.Name -ne 'FileSystem') { throw "funes: the install dir is not a folder: $InstallDir" }
     $null = New-Item -ItemType Directory -Force -Path $InstallDir
     $staging = Join-Path $InstallDir ('.funes-install.' + [Guid]::NewGuid().ToString('N'))
     $null = New-Item -ItemType Directory -Path $staging
