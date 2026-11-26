@@ -51,7 +51,9 @@ async fn upload_without_indexes(repo: &HFRepository<RepoTypeDataset>, path: &str
         .filter(|e| e.file_type().is_file())
         .map(|e| {
             let rel = e.path().strip_prefix(staging.path()).unwrap();
-            CommitOperation::add_file(rel.to_string_lossy().into_owned(), e.path().to_path_buf())
+            // The Hub names a file with `/` between its components, on every platform.
+            let rel: Vec<_> = rel.components().map(|c| c.as_os_str().to_string_lossy()).collect();
+            CommitOperation::add_file(rel.join("/"), e.path().to_path_buf())
         })
         .collect();
     repo.create_commit()
