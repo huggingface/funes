@@ -55,7 +55,7 @@ impl Memory {
     }
 
     /// Parse a memory spec: `"local"` → the local memory; an `hf://…` URI or `<org>/<repo>` shorthand
-    /// → a remote; a path (`/`, `.`, `~`, or a bare name) → a local memory there.
+    /// → a remote; a path (`/`, `.`, `~`, a Windows one, or a bare name) → a local memory there.
     pub fn parse(spec: &str) -> Self {
         if spec == "local" {
             Memory::local()
@@ -427,6 +427,18 @@ mod tests {
             _ => panic!("expected a local path"),
         }
         assert!(matches!(Memory::parse("./rel/dir"), Memory::Local { .. }));
+        // a Windows path is one however it is slashed: under a drive, on a share, or relative
+        for path in [
+            r"C:\Users\u\memory",
+            "C:/Users/u/memory",
+            r"\\server\share\memory",
+            r"memories\team",
+        ] {
+            match Memory::parse(path) {
+                Memory::Local { path: parsed } => assert_eq!(parsed, std::path::PathBuf::from(path)),
+                _ => panic!("expected a local path for {path}"),
+            }
+        }
         // full hf:// URI
         match Memory::parse("hf://datasets/org/kb") {
             Memory::Remote { uri } => assert_eq!(uri, "hf://datasets/org/kb"),

@@ -13,6 +13,7 @@ This directory contains the user guides and design notes for
 - [Browsing sessions](sessions.md) — list what a memory holds, digest a session, scan one for a
   literal.
 - [Asking](ask.md) — borrow a coding agent for one answer grounded in a memory.
+- [funes on Windows](windows.md) — installing there, where things live, and what differs.
 
 ## Sharing and automation
 

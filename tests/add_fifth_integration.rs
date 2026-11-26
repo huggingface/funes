@@ -3,6 +3,10 @@
 //! or the network, and still stops at every check: an invalid manifest before anything runs, and
 //! the trust confirmation before its setup. Confirmed at a terminal — `expect` gives funes a pty
 //! and answers its prompts — it adds and removes. Drives the binary; each run sets its own `$HOME`.
+//!
+//! Unix only: `expect` and the pty it answers on have no counterpart on Windows, where
+//! `tests/add_installed_integration.rs` covers the run that asks nothing.
+#![cfg(unix)]
 
 mod support;
 

@@ -27,6 +27,7 @@ async fn memory_lock_fails_loudly_on_contention() {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_funes"))
         .args(["index", "--harness", "pi"])
         .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
         .stdin(std::process::Stdio::piped())
         .output()
         .unwrap();

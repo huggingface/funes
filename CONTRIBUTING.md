@@ -38,13 +38,16 @@ You need:
   ```bash
   sudo apt-get install -y protobuf-compiler   # Debian/Ubuntu
   brew install protobuf                        # macOS
+  winget install Google.Protobuf               # Windows
   ```
 
 - **[trufflehog](https://github.com/trufflesecurity/trufflehog)** — the pre-publish secret
   gate shells out to it (CI pins v3.95.5). Needed on `PATH` (or via `FUNES_TRUFFLEHOG`) to run
   the secret-scan tests and `funes push`.
 - **`expect`** — the `funes add` tests run the binary at a pty to answer the prompts it only asks
-  at a terminal. macOS ships it; `sudo apt-get install -y expect` elsewhere.
+  at a terminal. macOS ships it; `sudo apt-get install -y expect` elsewhere. Windows has neither,
+  and those tests are compiled out there: [docs/windows.md](docs/windows.md#building-from-source)
+  has what a Windows build needs instead.
 
 ## Building and testing
 
@@ -145,7 +148,7 @@ funes asks for confirmation before running your bundle's setup.
 | File | Role |
 | --- | --- |
 | `manifest.json` | What the integration declares — the fields below. |
-| `setup` | An executable. `setup add [MEMORY]` wires funes into the agent, bound to `MEMORY` when given (an `<org>/<repo>` shorthand or an `hf://…` URI; absent is the local memory); `setup remove` undoes it. A non-zero exit fails the command. |
+| `setup` | An executable. `setup add [MEMORY]` wires funes into the agent, bound to `MEMORY` when given (an `<org>/<repo>` shorthand or an `hf://…` URI; absent is the local memory); `setup remove` undoes it. A non-zero exit fails the command. On Windows, where no file runs by its first line, funes runs it with [Git for Windows' `sh`](docs/windows.md#adding-an-agent), and hands it its paths spelled with `/`. |
 
 | Field | |
 | --- | --- |

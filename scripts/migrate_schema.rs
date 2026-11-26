@@ -22,8 +22,12 @@ use lance::dataset::{ColumnAlteration, Dataset, NewColumnTransform};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    funes::hub::configure_hf_home();
+    tokio::runtime::Runtime::new()?.block_on(run())
+}
+
+async fn run() -> Result<()> {
     let mut specs: Vec<String> = std::env::args().skip(1).collect();
     let apply = specs.iter().any(|a| a == "--apply");
     specs.retain(|a| a != "--apply");

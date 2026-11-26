@@ -12,7 +12,6 @@ use super::jsonl;
 use super::Turn;
 
 use anyhow::{bail, Result};
-use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
@@ -84,8 +83,23 @@ pub(crate) fn file_sig(p: &Path) -> Option<String> {
         md.len(),
         mtime.as_secs(),
         mtime.subsec_nanos(),
-        md.ino()
+        file_id(p, &md)?
     ))
+}
+
+/// What tells a file from the one that replaced it at the same path: its inode.
+#[cfg(unix)]
+fn file_id(_: &Path, md: &std::fs::Metadata) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    Some(md.ino())
+}
+
+/// What tells a file from the one that replaced it at the same path: its index on the volume,
+/// which Windows reads from an open file rather than from its metadata.
+#[cfg(windows)]
+fn file_id(p: &Path, _: &std::fs::Metadata) -> Option<u64> {
+    let file = std::fs::File::open(p).ok()?;
+    Some(winapi_util::file::information(&file).ok()?.file_index())
 }
 
 #[cfg(test)]

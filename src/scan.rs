@@ -56,7 +56,13 @@ impl Trufflehog {
     /// Locate the trufflehog binary; fail-closed if none is found.
     pub fn find() -> Result<Self> {
         Ok(Self {
-            bin: find_in(|k| std::env::var_os(k), |p| p.is_file())?,
+            bin: find_in(
+                |k| match k {
+                    "HOME" => crate::home::user().map(PathBuf::into_os_string),
+                    _ => std::env::var_os(k),
+                },
+                |p| p.is_file(),
+            )?,
         })
     }
 }
@@ -188,35 +194,38 @@ fn parse_finding(line: &str) -> Result<(String, Finding)> {
 /// the real environment or filesystem. Errors if none exists — the scan is mandatory, never a
 /// silent pass.
 fn find_in(env: impl Fn(&str) -> Option<OsString>, exists: impl Fn(&Path) -> bool) -> Result<PathBuf> {
+    // `trufflehog.exe` on Windows, where a file is a program by its extension.
+    let bin = format!("trufflehog{}", std::env::consts::EXE_SUFFIX);
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(over) = env("FUNES_TRUFFLEHOG") {
         candidates.push(PathBuf::from(over));
     }
     if let Some(path) = env("PATH") {
-        candidates.extend(std::env::split_paths(&path).map(|d| d.join("trufflehog")));
+        candidates.extend(std::env::split_paths(&path).map(|d| d.join(&bin)));
     }
     if let Some(home) = env("HOME").map(PathBuf::from) {
-        candidates.push(home.join("go/bin/trufflehog"));
-        candidates.push(home.join(".local/bin/trufflehog"));
+        candidates.push(home.join("go/bin").join(&bin));
+        candidates.push(home.join(".local/bin").join(&bin));
     }
-    candidates.extend(
-        [
-            "/opt/homebrew/bin/trufflehog",
-            "/usr/local/bin/trufflehog",
-            "/usr/bin/trufflehog",
-        ]
-        .into_iter()
-        .map(PathBuf::from),
-    );
+    candidates.extend(SYSTEM_DIRS.iter().map(|d| Path::new(d).join(&bin)));
     candidates.into_iter().find(|p| exists(p)).ok_or_else(|| {
+        let checked: String = SYSTEM_DIRS.iter().map(|d| format!(", {d}")).collect();
         anyhow!(
-            "trufflehog not found (checked $FUNES_TRUFFLEHOG, $PATH, Homebrew, /usr/local/bin, \
-             /usr/bin, ~/go/bin, ~/.local/bin). The secret scan is mandatory — refusing to proceed \
-             unscanned. Install it (https://github.com/trufflesecurity/trufflehog) or set \
+            "trufflehog not found (checked $FUNES_TRUFFLEHOG, $PATH, ~/go/bin, ~/.local/bin{checked}). \
+             The secret scan is mandatory — refusing to proceed unscanned. Install it \
+             (https://github.com/trufflesecurity/trufflehog) or set \
              FUNES_TRUFFLEHOG=/path/to/trufflehog."
         )
     })
 }
+
+/// Where package managers put trufflehog outside the user's home.
+#[cfg(unix)]
+const SYSTEM_DIRS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"];
+
+/// None on Windows, where `/usr/bin` is on the current drive, which any user may write to.
+#[cfg(windows)]
+const SYSTEM_DIRS: &[&str] = &[];
 
 /// The one place a scanner is invoked for *block-level* detection: scans `texts` in one pass and
 /// returns what it found in each of them. `texts` must each be a contiguous unit (a reconstructed
@@ -359,16 +368,25 @@ mod tests {
         };
         assert_eq!(find_in(env, |_| true).unwrap(), PathBuf::from("/custom/trufflehog"));
 
-        // No override: the first existing PATH entry wins.
-        let env = |k: &str| (k == "PATH").then(|| OsString::from("/aa:/bb"));
+        // No override: the first existing PATH entry wins, under the name a program has here.
+        let env = |k: &str| (k == "PATH").then(|| std::env::join_paths(["/aa", "/bb"]).unwrap());
         assert_eq!(
             find_in(env, |p| p.starts_with("/aa") || p.starts_with("/bb")).unwrap(),
-            PathBuf::from("/aa/trufflehog")
+            PathBuf::from("/aa").join(format!("trufflehog{}", std::env::consts::EXE_SUFFIX))
         );
 
         // Nothing anywhere: fail-closed with an actionable message.
         let err = find_in(|_| None, |_| false).unwrap_err().to_string();
         assert!(err.contains("not found") && err.contains("FUNES_TRUFFLEHOG"), "{err}");
+
+        // A system dir is one on Unix only. On Windows it would name the current drive.
+        let found = find_in(|_| None, |p| p == Path::new("/usr/local/bin/trufflehog"));
+        if cfg!(unix) {
+            assert_eq!(found.unwrap(), PathBuf::from("/usr/local/bin/trufflehog"));
+        } else {
+            let err = found.unwrap_err().to_string();
+            assert!(!err.contains("/usr/local/bin"), "{err}");
+        }
     }
 
     #[test]

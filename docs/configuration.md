@@ -6,7 +6,8 @@ files below hold the local derived memory, incremental state, the binding, and i
 
 ## The funes home
 
-`FUNES_HOME` changes funes's state directory; the default is `~/.funes`.
+`FUNES_HOME` changes funes's state directory; the default is `~/.funes`. On Windows `~` is your
+user profile; [windows.md](windows.md) has the paths there.
 
 ```bash
 FUNES_HOME=/tmp/funes-demo funes index ./traces

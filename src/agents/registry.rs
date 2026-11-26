@@ -10,7 +10,6 @@ use hf_hub::buckets::{BucketDownload, BucketTreeEntry};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
@@ -23,6 +22,176 @@ pub const CONTRACT_VERSION: u32 = 1;
 
 /// The executable every integration provides: `setup add [MEMORY]`, `setup remove`.
 const SETUP: &str = "setup";
+
+/// What the registry asks of the platform, on Unix: a file's permission bits say who may write it
+/// and whether it runs, and the kernel runs a script by its first line.
+#[cfg(unix)]
+mod os {
+    use anyhow::{bail, Result};
+    use std::ffi::OsString;
+    use std::fs::Metadata;
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    use std::path::Path;
+    use std::process::Command;
+
+    pub(super) fn mode(meta: &Metadata) -> u32 {
+        meta.permissions().mode() & 0o777
+    }
+
+    pub(super) fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+    }
+
+    pub(super) fn create_dir_all(dir: &Path, mode: u32) -> std::io::Result<()> {
+        std::fs::DirBuilder::new().recursive(true).mode(mode).create(dir)
+    }
+
+    /// Refuse a `path` someone other than the user running funes could have written: group or
+    /// world write gives it away, and so does another owner.
+    pub(super) fn refuse_other_writers(path: &Path, meta: &Metadata) -> Result<()> {
+        // SAFETY: `geteuid` reads a process attribute and cannot fail.
+        let me = unsafe { libc::geteuid() };
+        if meta.permissions().mode() & 0o022 != 0 {
+            bail!(
+                "{} is writable by other users — funes will not run it; `chmod go-w` it or reinstall",
+                path.display()
+            );
+        }
+        if meta.uid() != me {
+            bail!(
+                "{} is owned by uid {} rather than you — funes will not run it",
+                path.display(),
+                meta.uid()
+            );
+        }
+        Ok(())
+    }
+
+    /// The command that runs `setup` with `args`: the file itself.
+    pub(super) fn setup_command(setup: &Path, args: &[&str]) -> Result<Command> {
+        let mut command = Command::new(setup);
+        command.args(args);
+        Ok(command)
+    }
+
+    /// A path as `setup` is handed it.
+    pub(super) fn for_setup(path: &Path) -> OsString {
+        path.as_os_str().to_owned()
+    }
+}
+
+/// What the registry asks of the platform, on Windows: a file has no permission bits, and none
+/// runs by its first line.
+#[cfg(windows)]
+mod os {
+    use anyhow::{anyhow, Result};
+    use std::ffi::OsString;
+    use std::fs::Metadata;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    /// A file has no permission bits to read: every one counts as the user's own, and runnable.
+    pub(super) fn mode(_: &Metadata) -> u32 {
+        0o755
+    }
+
+    pub(super) fn set_mode(_: &Path, _: u32) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    pub(super) fn create_dir_all(dir: &Path, _: u32) -> std::io::Result<()> {
+        std::fs::create_dir_all(dir)
+    }
+
+    /// Who may write a file is its ACL's to say, and funes does not read ACLs: the registry is
+    /// closed to other users by living under the user's profile, whose ACL every file created
+    /// there inherits. A link is still refused, by the caller.
+    pub(super) fn refuse_other_writers(_: &Path, _: &Metadata) -> Result<()> {
+        Ok(())
+    }
+
+    /// The command that runs `setup` with `args`: a POSIX shell that runs it as Unix would, by its
+    /// first line. The maintained integrations are shell scripts, and Git for Windows brings the
+    /// shell that runs them.
+    pub(super) fn setup_command(setup: &Path, args: &[&str]) -> Result<Command> {
+        use std::os::windows::process::CommandExt;
+
+        let sh = posix_shell(|key| std::env::var_os(key), |path| path.is_file()).ok_or_else(|| {
+            anyhow!(
+                "an integration's setup is run by a POSIX shell, and funes found no sh.exe — \
+                 install Git for Windows (https://gitforwindows.org), or put the directory of an \
+                 sh.exe on PATH"
+            )
+        })?;
+        let mut command = Command::new(sh);
+        let setup = for_setup(setup).to_string_lossy().into_owned();
+        for arg in ["-c", r#"exec "$0" "$@""#, setup.as_str()].iter().chain(args) {
+            command.raw_arg(quote_msys2(arg));
+        }
+        // The profile, which Git's launcher would take from HOMEDRIVE and HOMEPATH instead.
+        if let Some(home) = crate::home::user() {
+            command.env("HOME", for_setup(&home));
+        }
+        Ok(command)
+    }
+
+    /// `arg` on a command line the MSYS2 runtime under `sh.exe` splits, which is not as Rust
+    /// quotes one: it also quotes with `'`, globs, and reads `\` inside `"` as an escape. Git
+    /// quotes for it the same way (`quote_arg_msys2`).
+    pub(super) fn quote_msys2(arg: &str) -> String {
+        let special = |c: char| c.is_whitespace() || "\\\"'{}[]?*~".contains(c);
+        if !arg.is_empty() && !arg.chars().any(special) {
+            return arg.to_string();
+        }
+        let mut quoted = String::from('"');
+        for c in arg.chars() {
+            if c == '\\' || c == '"' {
+                quoted.push('\\');
+            }
+            quoted.push(c);
+        }
+        quoted.push('"');
+        quoted
+    }
+
+    /// A path as `setup` is handed it: spelled with `/`, which Windows takes as well as `\` and
+    /// a shell script does not take for an escape.
+    pub(super) fn for_setup(path: &Path) -> OsString {
+        path.to_string_lossy().replace('\\', "/").into()
+    }
+
+    /// The `sh.exe` to run a `setup` with: the first on `PATH`, else Git for Windows' — beside a
+    /// `git.exe` on `PATH`, or where its installer puts it. Its `bin\sh.exe` puts the tools a
+    /// script calls on its `PATH`; `usr\bin\sh.exe` run from outside a Git shell does not, so it
+    /// is taken only when `PATH` already names its directory. Split out so discovery is testable
+    /// without the real environment or filesystem.
+    pub(super) fn posix_shell(
+        env: impl Fn(&str) -> Option<OsString>,
+        exists: impl Fn(&Path) -> bool,
+    ) -> Option<PathBuf> {
+        // An empty entry, from a doubled or trailing `;`, would name a `sh.exe` Windows never runs.
+        let on_path: Vec<PathBuf> = env("PATH")
+            .map(|path| {
+                std::env::split_paths(&path)
+                    .filter(|dir| !dir.as_os_str().is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let named = on_path.iter().map(|dir| dir.join("sh.exe"));
+        let beside_git = on_path
+            .iter()
+            .filter(|dir| exists(&dir.join("git.exe")))
+            .filter_map(|dir| dir.parent())
+            .map(|git| git.join("bin").join("sh.exe"));
+        let installed = ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)", "LOCALAPPDATA"]
+            .into_iter()
+            .filter_map(&env)
+            .map(PathBuf::from)
+            .flat_map(|base| [base.join("Git"), base.join("Programs").join("Git")])
+            .map(|git| git.join("bin").join("sh.exe"));
+        named.chain(beside_git).chain(installed).find(|sh| exists(sh))
+    }
+}
 
 /// The most an integration's archive may weigh: the four maintained ones are a few hundred
 /// kilobytes, and an archive is unpacked before anything about it is checked but its listing.
@@ -267,10 +436,7 @@ fn write_owned(root: &Path, path: &Path, text: String) -> Result<()> {
     let tmp = root.join(format!(".{name}.funes-tmp{}", std::process::id()));
     let written = std::fs::write(&tmp, text)
         .with_context(|| format!("writing {}", tmp.display()))
-        .and_then(|()| {
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644))
-                .with_context(|| format!("setting the mode of {}", tmp.display()))
-        })
+        .and_then(|()| os::set_mode(&tmp, 0o644).with_context(|| format!("setting the mode of {}", tmp.display())))
         .and_then(|()| std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display())));
     if written.is_err() {
         let _ = std::fs::remove_file(&tmp);
@@ -327,8 +493,8 @@ pub fn bindings(root: &Path) -> Result<Bound> {
 /// The registry root, `~/.funes/agents` — fixed, not under `$FUNES_HOME`: an agent records the
 /// install path it is handed, so these files must outlive any one home.
 pub fn default_root() -> Result<PathBuf> {
-    let home = std::env::var_os("HOME").context("resolving $HOME for the agent registry")?;
-    Ok(PathBuf::from(home).join(".funes/agents"))
+    let home = home::user().context("resolving your home directory for the agent registry")?;
+    Ok(home.join(".funes").join("agents"))
 }
 
 /// The ids in `root`: every directory holding a `manifest.json`, sorted. Unvalidated.
@@ -387,10 +553,11 @@ pub fn open(root: &Path, id: &str) -> Result<Integration> {
 /// Refuse a `setup` that is not there to run, or could not.
 fn require_executable(setup: &Path) -> Result<()> {
     let meta = std::fs::metadata(setup).with_context(|| format!("no {SETUP} at {}", setup.display()))?;
-    if meta.permissions().mode() & 0o111 == 0 {
+    if os::mode(&meta) & 0o111 == 0 {
         bail!("{} is not executable", setup.display());
     }
-    Ok(())
+    // Nor one with nothing to run it: on Windows that is a shell, which may not be installed.
+    os::setup_command(setup, &[]).map(|_| ())
 }
 
 /// Read what the manifest at `path` declares for the integration `id`, and check it. Every
@@ -438,11 +605,10 @@ fn read_manifest(path: &Path, id: &str) -> Result<Manifest> {
 
 /// Refuse a `path` that someone other than the user running funes could have written, checking
 /// every directory from `top` down as well as the file itself: funes is about to execute what it
-/// finds there. Group or world write gives it away. Below `top`, a link is refused rather than
-/// followed: what it points at has parents of its own that this walk would never see.
+/// finds there. Group or world write gives it away, where the platform has such bits. Below `top`,
+/// a link is refused rather than followed: what it points at has parents of its own that this walk
+/// would never see.
 fn owned_by_me(top: &Path, path: &Path) -> Result<()> {
-    // SAFETY: `geteuid` reads a process attribute and cannot fail.
-    let me = unsafe { libc::geteuid() };
     let mut path = path.to_path_buf();
     loop {
         let meta = if path == top {
@@ -457,19 +623,7 @@ fn owned_by_me(top: &Path, path: &Path) -> Result<()> {
                 path.display()
             );
         }
-        if meta.permissions().mode() & 0o022 != 0 {
-            bail!(
-                "{} is writable by other users — funes will not run it; `chmod go-w` it or reinstall",
-                path.display()
-            );
-        }
-        if meta.uid() != me {
-            bail!(
-                "{} is owned by uid {} rather than you — funes will not run it",
-                path.display(),
-                meta.uid()
-            );
-        }
+        os::refuse_other_writers(&path, &meta)?;
         if path == top {
             return Ok(());
         }
@@ -513,10 +667,9 @@ impl Integration {
         let command = super::shell_command(&setup.to_string_lossy(), args);
         // What the integration records or invokes: the user's pin, else `funes` from PATH.
         let funes = std::env::var("FUNES_BIN").unwrap_or_else(|_| "funes".to_string());
-        let status = Command::new(&setup)
-            .args(args)
-            .env("FUNES_BIN", &funes)
-            .env("FUNES_HOME", home::dir())
+        let status = os::setup_command(&setup, args)?
+            .env("FUNES_BIN", os::for_setup(Path::new(&funes)))
+            .env("FUNES_HOME", os::for_setup(&home::dir()))
             .env("FUNES_AGENT_ID", &self.manifest.id)
             .status()
             .with_context(|| format!("running `{command}`"))?;
@@ -840,8 +993,13 @@ fn validate_archive(archive: &Path) -> Result<()> {
 /// One archive entry: its `name` as `tar -t` lists it, and its `-tv` line, whose first character
 /// is its type.
 fn archive_entry_allowed(name: &str, entry: &str) -> Result<()> {
-    let path = Path::new(name);
-    if path.is_absolute() || path.components().any(|c| matches!(c, Component::ParentDir)) {
+    // Nothing but names below the root: no `..`, and no root or drive to start over from. A name
+    // rooted at `/` is not absolute to Windows, which wants a drive as well, so the components
+    // are judged rather than the path.
+    let below_root = Path::new(name)
+        .components()
+        .all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
+    if !below_root {
         bail!("{name} lies outside the archive's root");
     }
     if matches!(entry.chars().next(), Some('l') | Some('h')) {
@@ -899,11 +1057,7 @@ pub fn discard(root: &Path, id: &str) -> Result<()> {
 /// refuses a registry anyone else could write to and a umask of 002 would make one. A directory
 /// that already exists is left as it is, to be judged then.
 fn create_owned(dir: &Path) -> Result<()> {
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o755)
-        .create(dir)
-        .with_context(|| format!("creating {}", dir.display()))
+    os::create_dir_all(dir, 0o755).with_context(|| format!("creating {}", dir.display()))
 }
 
 /// Refuse a source tree an integration may not carry before any of it is copied: a link to a
@@ -956,7 +1110,7 @@ fn copy_tree(src: &Path, dst: &Path, under: &str, files: &mut Files) -> Result<(
         files.insert(path, hex::encode(Sha256::digest(&bytes)));
         // The source's mode, closed to others: `open` refuses a file others could write, and a
         // private group's umask leaves a source directory's files group-writable.
-        let mode = std::fs::Permissions::from_mode(meta.permissions().mode() & 0o777 & !0o022);
+        let mode = os::mode(&meta) & !0o022;
         // Written beside and renamed over: a link left at the destination is replaced, never
         // followed to wherever it points, and a reader never sees a half-written file.
         let stale_link = to.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink());
@@ -965,8 +1119,7 @@ fn copy_tree(src: &Path, dst: &Path, under: &str, files: &mut Files) -> Result<(
             let written = std::fs::write(&tmp, &bytes)
                 .with_context(|| format!("writing {}", tmp.display()))
                 .and_then(|()| {
-                    std::fs::set_permissions(&tmp, mode)
-                        .with_context(|| format!("setting the mode of {}", tmp.display()))
+                    os::set_mode(&tmp, mode).with_context(|| format!("setting the mode of {}", tmp.display()))
                 })
                 .and_then(|()| std::fs::rename(&tmp, &to).with_context(|| format!("replacing {}", to.display())));
             if written.is_err() {
@@ -974,7 +1127,7 @@ fn copy_tree(src: &Path, dst: &Path, under: &str, files: &mut Files) -> Result<(
             }
             written?;
         } else {
-            std::fs::set_permissions(&to, mode).with_context(|| format!("setting the mode of {}", to.display()))?;
+            os::set_mode(&to, mode).with_context(|| format!("setting the mode of {}", to.display()))?;
         }
     }
     Ok(())
@@ -990,10 +1143,9 @@ mod tests {
 
     /// A registry root closed to other writers, as funes makes its own.
     fn registry_root() -> tempfile::TempDir {
-        tempfile::Builder::new()
-            .permissions(std::fs::Permissions::from_mode(0o755))
-            .tempdir()
-            .unwrap()
+        let root = tempfile::tempdir().unwrap();
+        os::set_mode(root.path(), 0o755).unwrap();
+        root
     }
 
     /// Write an integration at `root/<dir_name>` declaring `manifest`, whose `setup` runs `body`.
@@ -1003,10 +1155,80 @@ mod tests {
         std::fs::write(dir.join("manifest.json"), manifest).unwrap();
         let setup = dir.join(SETUP);
         std::fs::write(&setup, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&setup, std::fs::Permissions::from_mode(0o755)).unwrap();
+        os::set_mode(&setup, 0o755).unwrap();
         dir
     }
 
+    /// Link `link` to the directory `target`, as a user without privileges can on each platform: a
+    /// symlink on Unix, a junction on Windows, where a symlink takes a privilege.
+    fn link_dir(target: &Path, link: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+        #[cfg(windows)]
+        {
+            let made = Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()
+                .unwrap();
+            assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
+        }
+    }
+
+    /// Remove a link [`link_dir`] made, and not what it points at.
+    fn unlink_dir(link: &Path) {
+        #[cfg(unix)]
+        std::fs::remove_file(link).unwrap();
+        #[cfg(windows)]
+        std::fs::remove_dir(link).unwrap();
+    }
+
+    /// A link to a directory, which takes no privilege on any platform, is refused in the source
+    /// and where the copy goes. What `setup` wrote beside the files survives a refresh.
+    #[test]
+    fn copying_refuses_directory_links_and_keeps_local_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(src.join("scripts")).unwrap();
+        std::fs::write(src.join("manifest.json"), "{}").unwrap();
+        std::fs::write(src.join("scripts/hook.sh"), "v1").unwrap();
+        let dst = tmp.path().join("dst");
+        copy_into(&src, &dst).unwrap();
+
+        // The integration's own state, and a second run that must not disturb it.
+        std::fs::write(dst.join("memory"), "acme/kb\n").unwrap();
+        std::fs::write(src.join("scripts/hook.sh"), "v2").unwrap();
+        copy_into(&src, &dst).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dst.join("scripts/hook.sh")).unwrap(),
+            "v2",
+            "drift is refreshed"
+        );
+        assert_eq!(std::fs::read_to_string(dst.join("memory")).unwrap(), "acme/kb\n");
+
+        // A link where a directory goes is refused, and nothing is written where it points.
+        std::fs::remove_dir_all(dst.join("scripts")).unwrap();
+        let elsewhere = tmp.path().join("elsewhere-dir");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        link_dir(&elsewhere, &dst.join("scripts"));
+        let err = copy_into(&src, &dst).unwrap_err().to_string();
+        assert!(err.contains("is a symlink"), "{err}");
+        assert!(
+            std::fs::read_dir(&elsewhere).unwrap().next().is_none(),
+            "nothing written through"
+        );
+        unlink_dir(&dst.join("scripts"));
+
+        // A link to a directory in the source is refused before anything is copied.
+        link_dir(tmp.path(), &src.join("everything"));
+        let err = copy_into(&src, &dst).unwrap_err().to_string();
+        assert!(err.contains("symlink to a directory"), "{err}");
+        assert!(!dst.join("scripts").exists(), "refused before a byte moved");
+        unlink_dir(&src.join("everything"));
+    }
+
+    #[cfg(unix)]
     #[test]
     fn a_setup_others_could_have_written_is_refused() {
         let root = registry_root();
@@ -1014,13 +1236,13 @@ mod tests {
         assert!(open(root.path(), "pi").is_ok());
 
         let setup = dir.join(SETUP);
-        std::fs::set_permissions(&setup, std::fs::Permissions::from_mode(0o777)).unwrap();
+        os::set_mode(&setup, 0o777).unwrap();
         let err = open(root.path(), "pi").unwrap_err().to_string();
         assert!(err.contains("writable by other users"), "{err}");
 
         // A directory above it counts too: write access there is write access to the file.
-        std::fs::set_permissions(&setup, std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        os::set_mode(&setup, 0o755).unwrap();
+        os::set_mode(&dir, 0o777).unwrap();
         let err = open(root.path(), "pi").unwrap_err().to_string();
         assert!(err.contains("writable by other users"), "{err}");
     }
@@ -1033,7 +1255,7 @@ mod tests {
         std::fs::create_dir_all(src.join("scripts")).unwrap();
         std::fs::write(src.join("manifest.json"), "{}").unwrap();
         std::fs::write(src.join("setup"), "#!/bin/sh\ntrue\n").unwrap();
-        std::fs::set_permissions(src.join("setup"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        os::set_mode(&src.join("setup"), 0o755).unwrap();
         std::fs::write(src.join("scripts/funes-index.sh"), "shared").unwrap();
 
         let archive = tmp.path().join("pi.tar.gz");
@@ -1057,7 +1279,7 @@ mod tests {
             "shared"
         );
         assert!(
-            std::fs::metadata(dst.join("setup")).unwrap().permissions().mode() & 0o111 != 0,
+            os::mode(&std::fs::metadata(dst.join("setup")).unwrap()) & 0o111 != 0,
             "setup arrives executable"
         );
         assert!(
@@ -1066,8 +1288,12 @@ mod tests {
         );
     }
 
+    // A file symlink takes a privilege on Windows, so the file links a copy meets are Unix's to test.
+    #[cfg(unix)]
     #[test]
-    fn copying_a_directory_follows_links_keeps_modes_and_keeps_local_state() {
+    fn copying_follows_file_links_and_keeps_modes() {
+        use std::os::unix::fs::PermissionsExt;
+
         let tmp = tempfile::tempdir().unwrap();
         let shared = tmp.path().join("shared.sh");
         std::fs::write(&shared, "shared v1").unwrap();
@@ -1089,17 +1315,14 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&copied).unwrap(), "shared v1");
         assert!(std::fs::metadata(&copied).unwrap().permissions().mode() & 0o111 != 0);
 
-        // The integration's own state, and a second run that must not disturb it.
-        std::fs::write(dst.join("memory"), "acme/kb\n").unwrap();
+        // What a link points at is copied again when it drifts.
         std::fs::write(&shared, "shared v2").unwrap();
         copy_into(&src, &dst).unwrap();
-
         assert_eq!(
             std::fs::read_to_string(&copied).unwrap(),
             "shared v2",
             "drift is refreshed"
         );
-        assert_eq!(std::fs::read_to_string(dst.join("memory")).unwrap(), "acme/kb\n");
 
         // A link left where a file goes is replaced, not written through: the file it pointed at
         // is untouched, and the bundle's file is a file.
@@ -1112,58 +1335,30 @@ mod tests {
         let manifest = dst.join("manifest.json");
         assert!(!manifest.symlink_metadata().unwrap().file_type().is_symlink());
         assert_eq!(std::fs::read_to_string(&manifest).unwrap(), "{}");
-
-        // A link where a directory goes is refused outright, and nothing lands where it points.
-        std::fs::remove_dir_all(dst.join("scripts")).unwrap();
-        let elsewhere_dir = tmp.path().join("elsewhere-dir");
-        std::fs::create_dir_all(&elsewhere_dir).unwrap();
-        std::os::unix::fs::symlink(&elsewhere_dir, dst.join("scripts")).unwrap();
-        let err = copy_into(&src, &dst).unwrap_err().to_string();
-        assert!(err.contains("is a symlink"), "{err}");
-        assert!(
-            std::fs::read_dir(&elsewhere_dir).unwrap().next().is_none(),
-            "nothing written through"
-        );
-        std::fs::remove_file(dst.join("scripts")).unwrap();
-
-        // A link to a directory in the source is refused before anything is copied.
-        std::fs::write(&shared, "shared v3").unwrap();
-        std::os::unix::fs::symlink(tmp.path(), src.join("everything")).unwrap();
-        let err = copy_into(&src, &dst).unwrap_err().to_string();
-        assert!(err.contains("symlink to a directory"), "{err}");
-        assert!(!dst.join("scripts/shared.sh").exists(), "refused before a byte moved");
     }
 
     /// A private group's umask leaves a source directory's files group-writable; the registry's
     /// copy is closed to others, or `open` would refuse what funes itself just wrote.
+    #[cfg(unix)]
     #[test]
     fn a_copied_file_is_closed_to_other_writers() {
         let tmp = tempfile::tempdir().unwrap();
         let src = tmp.path().join("src");
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(src.join("setup"), "#!/bin/sh\n").unwrap();
-        std::fs::set_permissions(src.join("setup"), std::fs::Permissions::from_mode(0o775)).unwrap();
+        os::set_mode(&src.join("setup"), 0o775).unwrap();
         std::fs::write(src.join("manifest.json"), "{}").unwrap();
-        std::fs::set_permissions(src.join("manifest.json"), std::fs::Permissions::from_mode(0o666)).unwrap();
+        os::set_mode(&src.join("manifest.json"), 0o666).unwrap();
 
         let dst = tmp.path().join("dst");
         copy_into(&src, &dst).unwrap();
-        assert_eq!(
-            std::fs::metadata(dst.join("setup")).unwrap().permissions().mode() & 0o777,
-            0o755
-        );
-        assert_eq!(
-            std::fs::metadata(dst.join("manifest.json"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o644
-        );
+        assert_eq!(os::mode(&std::fs::metadata(dst.join("setup")).unwrap()), 0o755);
+        assert_eq!(os::mode(&std::fs::metadata(dst.join("manifest.json")).unwrap()), 0o644);
         assert!(owned_by_me(&dst, &dst.join("setup")).is_ok());
     }
 
     /// Ownership is judged against the user running funes, file by file up to the top.
+    #[cfg(unix)]
     #[test]
     fn ownership_is_the_running_users_up_to_the_top() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1171,11 +1366,11 @@ mod tests {
         std::fs::create_dir_all(top.join("a")).unwrap();
         let file = top.join("a/setup");
         std::fs::write(&file, "").unwrap();
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o775)).unwrap();
+        os::set_mode(&file, 0o775).unwrap();
         let err = owned_by_me(&top, &file).unwrap_err().to_string();
         assert!(err.contains("writable by other users"), "{err}");
-        std::fs::set_permissions(top.join("a"), std::fs::Permissions::from_mode(0o777)).unwrap();
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        os::set_mode(&top.join("a"), 0o777).unwrap();
+        os::set_mode(&file, 0o755).unwrap();
         let err = owned_by_me(&top, &file).unwrap_err().to_string();
         assert!(err.contains("a is writable"), "a directory on the way counts: {err}");
     }
@@ -1186,25 +1381,30 @@ mod tests {
     fn a_setup_reached_through_a_link_is_refused() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("agents");
-        let dir = integration(&root, "pi", &manifest("pi", 1), "true");
-        let elsewhere = tmp.path().join("elsewhere");
-        std::fs::write(&elsewhere, "#!/bin/sh\ntrue\n").unwrap();
-        std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::fs::remove_file(dir.join(SETUP)).unwrap();
-        std::os::unix::fs::symlink(&elsewhere, dir.join(SETUP)).unwrap();
-        let err = open(&root, "pi").unwrap_err().to_string();
-        assert!(err.contains("setup is a symlink"), "{err}");
+        integration(&root, "pi", &manifest("pi", 1), "true");
+        // A linked file is Unix's to test: a file symlink takes a privilege on Windows.
+        #[cfg(unix)]
+        {
+            let elsewhere = tmp.path().join("elsewhere");
+            std::fs::write(&elsewhere, "#!/bin/sh\ntrue\n").unwrap();
+            os::set_mode(&elsewhere, 0o755).unwrap();
+            let setup = root.join("pi").join(SETUP);
+            std::fs::remove_file(&setup).unwrap();
+            std::os::unix::fs::symlink(&elsewhere, &setup).unwrap();
+            let err = open(&root, "pi").unwrap_err().to_string();
+            assert!(err.contains("setup is a symlink"), "{err}");
+        }
 
         // A linked directory on the way is refused the same.
         let real = tmp.path().join("real-clyde");
         integration(tmp.path(), "real-clyde", &manifest("clyde", 1), "true");
-        std::os::unix::fs::symlink(&real, root.join("clyde")).unwrap();
+        link_dir(&real, &root.join("clyde"));
         let err = open(&root, "clyde").unwrap_err().to_string();
         assert!(err.contains("clyde is a symlink"), "{err}");
 
         // The top itself may be reached through a link: that is the user's own layout.
         let linked_root = tmp.path().join("agents-link");
-        std::os::unix::fs::symlink(&root, &linked_root).unwrap();
+        link_dir(&root, &linked_root);
         integration(&root, "hermes", &manifest("hermes", 1), "true");
         open(&linked_root, "hermes").unwrap();
     }
@@ -1280,9 +1480,12 @@ mod tests {
         );
 
         // A record others could have written vouches for nothing.
-        std::fs::set_permissions(root.join("pi.json"), std::fs::Permissions::from_mode(0o666)).unwrap();
-        let err = verify_installed(&root, "pi").unwrap_err().to_string();
-        assert!(err.contains("writable by other users"), "{err}");
+        #[cfg(unix)]
+        {
+            os::set_mode(&root.join("pi.json"), 0o666).unwrap();
+            let err = verify_installed(&root, "pi").unwrap_err().to_string();
+            assert!(err.contains("writable by other users"), "{err}");
+        }
     }
 
     /// A note an older funes kept beside an install reads back as its memory, goes when forgotten,
@@ -1303,12 +1506,15 @@ mod tests {
         assert!(!root.join("pi.memory").exists());
 
         bind(&root, "pi", Some("acme/kb")).unwrap();
-        std::fs::set_permissions(root.join("pi.memory"), std::fs::Permissions::from_mode(0o666)).unwrap();
-        let err = binding(&root, "pi").unwrap_err().to_string();
-        assert!(err.contains("writable by other users"), "{err}");
+        #[cfg(unix)]
+        {
+            os::set_mode(&root.join("pi.memory"), 0o666).unwrap();
+            let err = binding(&root, "pi").unwrap_err().to_string();
+            assert!(err.contains("writable by other users"), "{err}");
+            os::set_mode(&root.join("pi.memory"), 0o644).unwrap();
+        }
 
         // Discarded with the install.
-        std::fs::set_permissions(root.join("pi.memory"), std::fs::Permissions::from_mode(0o644)).unwrap();
         discard(&root, "pi").unwrap();
         assert!(!root.join("pi.memory").exists());
     }
@@ -1350,16 +1556,20 @@ mod tests {
         assert!(err.contains(&format!("no {SETUP} at")), "{err}");
         assert_eq!(installed_setup(), "#!/bin/sh\ntrue\n", "nothing copied");
 
-        let inert = integration(
-            &tmp.path().join("inert"),
-            "pi",
-            &manifest("pi", CONTRACT_VERSION),
-            "echo inert",
-        );
-        std::fs::set_permissions(inert.join(SETUP), std::fs::Permissions::from_mode(0o644)).unwrap();
-        let err = stage(&root, "pi", &inert).unwrap_err().to_string();
-        assert!(err.contains("not executable"), "{err}");
-        assert_eq!(installed_setup(), "#!/bin/sh\ntrue\n", "nothing copied");
+        // One that cannot run is Unix's to tell: Windows has no bit that says so.
+        #[cfg(unix)]
+        {
+            let inert = integration(
+                &tmp.path().join("inert"),
+                "pi",
+                &manifest("pi", CONTRACT_VERSION),
+                "echo inert",
+            );
+            os::set_mode(&inert.join(SETUP), 0o644).unwrap();
+            let err = stage(&root, "pi", &inert).unwrap_err().to_string();
+            assert!(err.contains("not executable"), "{err}");
+            assert_eq!(installed_setup(), "#!/bin/sh\ntrue\n", "nothing copied");
+        }
     }
 
     /// Another publisher's files are refused before a byte moves, whether funes recorded where
@@ -1489,12 +1699,16 @@ mod tests {
         pack(&clean, &[]);
         validate_archive(&clean).unwrap();
 
-        std::os::unix::fs::symlink("/bin/sh", src.join("sh")).unwrap();
-        let linked = tmp.path().join("linked.tar.gz");
-        pack(&linked, &[]);
-        let err = format!("{:#}", validate_archive(&linked).unwrap_err());
-        assert!(err.contains("sh is a link"), "{err}");
-        std::fs::remove_file(src.join("sh")).unwrap();
+        // A file symlink takes a privilege on Windows, where the listing above stands for it.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("/bin/sh", src.join("sh")).unwrap();
+            let linked = tmp.path().join("linked.tar.gz");
+            pack(&linked, &[]);
+            let err = format!("{:#}", validate_archive(&linked).unwrap_err());
+            assert!(err.contains("sh is a link"), "{err}");
+            std::fs::remove_file(src.join("sh")).unwrap();
+        }
 
         // Packed with absolute names kept.
         let absolute = tmp.path().join("absolute.tar.gz");
@@ -1691,9 +1905,13 @@ mod tests {
         let dir = integration(root.path(), "pi", &manifest("pi", CONTRACT_VERSION), "true");
 
         let setup = dir.join(SETUP);
-        std::fs::set_permissions(&setup, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let err = open(root.path(), "pi").unwrap_err().to_string();
-        assert!(err.contains("not executable"), "{err}");
+        // Windows has no bit that says a file cannot run.
+        #[cfg(unix)]
+        {
+            os::set_mode(&setup, 0o644).unwrap();
+            let err = open(root.path(), "pi").unwrap_err().to_string();
+            assert!(err.contains("not executable"), "{err}");
+        }
 
         std::fs::remove_file(&setup).unwrap();
         let err = format!("{:#}", open(root.path(), "pi").unwrap_err());
@@ -1762,5 +1980,156 @@ mod tests {
         assert!(!installed(Origin::Directory {
             path: root.path().join("src"),
         }));
+    }
+
+    /// `setup` runs as the contract says on every platform: by its first line, with its arguments
+    /// whole, the contract's environment, and a failure that fails the command. The registry sits
+    /// under a name with a space, which a shell would split if funes left it unquoted.
+    #[test]
+    fn setup_runs_with_its_arguments_and_the_contracts_environment() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("the agents");
+        let dir = integration(
+            &root,
+            "pi",
+            &manifest("pi", CONTRACT_VERSION),
+            r#"here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+printf '%s|%s|%s\n' "$#" "$*" "$FUNES_AGENT_ID" >>"$here/ran"
+[ -n "$FUNES_HOME" ] && [ -n "$FUNES_BIN" ] || exit 4
+[ "$1" != remove ] || exit 3"#,
+        );
+        let pi = open(&root, "pi").unwrap();
+
+        pi.add(None).unwrap();
+        pi.add(Some("acme/a memory")).unwrap();
+        let err = pi.remove().unwrap_err().to_string();
+        assert!(err.contains("failed (exit Some(3))"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("ran")).unwrap(),
+            "1|add|pi\n2|add acme/a memory|pi\n1|remove|pi\n"
+        );
+    }
+
+    /// The shell a `setup` runs under is the first `sh.exe` on `PATH`, else Git for Windows' own
+    /// launcher: beside a `git.exe` on `PATH`, then where its installer puts it.
+    #[cfg(windows)]
+    #[test]
+    fn the_shell_for_setup_is_found_on_path_then_with_git() {
+        use std::ffi::OsString;
+
+        let path = std::env::join_paths([r"C:\Windows\System32", r"D:\Git\cmd", r"D:\msys\usr\bin"]).unwrap();
+        let env = |key: &str| match key {
+            "PATH" => Some(path.clone()),
+            "ProgramFiles" => Some(OsString::from(r"C:\Program Files")),
+            "LOCALAPPDATA" => Some(OsString::from(r"C:\Users\u\AppData\Local")),
+            _ => None,
+        };
+        let found = |present: &[&str]| os::posix_shell(env, |p| present.iter().any(|at| Path::new(at) == p));
+
+        assert_eq!(found(&[]), None);
+        // On PATH it wins, whatever else is installed.
+        assert_eq!(
+            found(&[r"D:\msys\usr\bin\sh.exe", r"D:\Git\cmd\git.exe", r"D:\Git\bin\sh.exe"]),
+            Some(PathBuf::from(r"D:\msys\usr\bin\sh.exe"))
+        );
+        // Git on PATH names its own shell, which PATH itself does not.
+        assert_eq!(
+            found(&[
+                r"D:\Git\cmd\git.exe",
+                r"D:\Git\bin\sh.exe",
+                r"C:\Program Files\Git\bin\sh.exe"
+            ]),
+            Some(PathBuf::from(r"D:\Git\bin\sh.exe"))
+        );
+        // Neither on PATH: where the installer puts it, machine-wide before per-user.
+        assert_eq!(
+            found(&[
+                r"C:\Users\u\AppData\Local\Programs\Git\bin\sh.exe",
+                r"C:\Program Files\Git\bin\sh.exe"
+            ]),
+            Some(PathBuf::from(r"C:\Program Files\Git\bin\sh.exe"))
+        );
+        assert_eq!(
+            found(&[r"C:\Users\u\AppData\Local\Programs\Git\bin\sh.exe"]),
+            Some(PathBuf::from(r"C:\Users\u\AppData\Local\Programs\Git\bin\sh.exe"))
+        );
+
+        // A trailing `;` names no directory, so not a `sh.exe` in the current one.
+        let trailing = OsString::from(r"C:\Windows\System32;D:\Git\cmd;");
+        let env = |key: &str| (key == "PATH").then(|| trailing.clone());
+        let present = [r"sh.exe", r"D:\Git\cmd\git.exe", r"D:\Git\bin\sh.exe"];
+        assert_eq!(
+            os::posix_shell(env, |p| present.iter().any(|at| Path::new(at) == p)),
+            Some(PathBuf::from(r"D:\Git\bin\sh.exe"))
+        );
+    }
+
+    /// `setup`'s home is the profile, as funes's own, wherever HOMEDRIVE and HOMEPATH point.
+    #[cfg(windows)]
+    #[test]
+    fn setup_gets_the_profile_as_its_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let setup = tmp.path().join("setup");
+        std::fs::write(&setup, "#!/bin/sh\ncd \"$HOME\" && pwd -W\n").unwrap();
+        let profile = os::for_setup(&crate::home::user().unwrap());
+        let mut command = os::setup_command(&setup, &[]).unwrap();
+        assert!(
+            command
+                .get_envs()
+                .any(|(k, v)| k == "HOME" && v == Some(profile.as_os_str())),
+            "set, not left to whatever the shell derives"
+        );
+        let out = command
+            .env("HOMEDRIVE", "C:")
+            .env("HOMEPATH", r"\elsewhere")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim().to_lowercase(),
+            profile.to_string_lossy().to_lowercase()
+        );
+    }
+
+    /// Split by MSYS2's rules, not Rust's: a quote, glob characters, a leading `~` and a UNC
+    /// path's doubled backslash reach `setup` as written.
+    #[cfg(windows)]
+    #[test]
+    fn setup_gets_its_path_and_arguments_whole_through_msys2() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("o'brien");
+        std::fs::create_dir_all(&dir).unwrap();
+        let setup = dir.join("setup");
+        std::fs::write(&setup, "#!/bin/sh\nprintf '%s\\n' \"$0\" \"$@\"\n").unwrap();
+        let args = [
+            "add",
+            r"\\nas\Team Share\kb",
+            r"\\nas\kb",
+            "*",
+            "~x",
+            "{a,b}",
+            "it's",
+            r#"say "hi""#,
+            "",
+        ];
+        let out = os::setup_command(&setup, &args).unwrap().output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let mut expected = vec![os::for_setup(&setup).to_string_lossy().into_owned()];
+        expected.extend(args.iter().map(|a| a.to_string()));
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).lines().collect::<Vec<_>>(),
+            expected
+        );
+    }
+
+    /// What `setup` is handed is spelled for the shell that runs it.
+    #[cfg(windows)]
+    #[test]
+    fn a_path_is_handed_to_setup_with_forward_slashes() {
+        assert_eq!(
+            os::for_setup(Path::new(r"C:\Users\u\.funes\agents\pi\setup")),
+            "C:/Users/u/.funes/agents/pi/setup"
+        );
+        assert_eq!(os::for_setup(Path::new("funes")), "funes");
     }
 }

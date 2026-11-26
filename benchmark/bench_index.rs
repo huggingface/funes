@@ -129,8 +129,12 @@ fn generate(dir: &Path, sessions: usize, turns: usize) -> Result<()> {
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    funes::hub::configure_hf_home();
+    tokio::runtime::Runtime::new()?.block_on(run())
+}
+
+async fn run() -> Result<()> {
     let args = Args::parse();
     let scratch = tempfile::tempdir()?;
     let (dir, corpus) = match &args.dir {

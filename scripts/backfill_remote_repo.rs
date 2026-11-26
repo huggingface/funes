@@ -21,8 +21,12 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    funes::hub::configure_hf_home();
+    tokio::runtime::Runtime::new()?.block_on(run())
+}
+
+async fn run() -> Result<()> {
     let specs: Vec<String> = std::env::args().skip(1).collect();
     if specs.is_empty() {
         bail!("usage: backfill_remote_repo <org/repo> [<org/repo>…]");

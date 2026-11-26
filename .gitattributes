@@ -1,0 +1,4 @@
+# Text is checked out with LF endings on every platform, Windows included, whatever a clone's
+# core.autocrlf says: the shell scripts run there under Git's sh, which takes a carriage return for
+# part of a command, and the fixtures are read as the bytes they were committed as.
+* text=auto eol=lf

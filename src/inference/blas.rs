@@ -1,10 +1,10 @@
 //! A from-scratch forward for funes' models — a BLAS-backed alternative to the ONNX backend
 //! (see `inference`). Every matmul goes through a small platform **seam** (`sgemm`/`vexp`): macOS
-//! wires it to Accelerate (cblas_sgemm on AMX + vForce vvexpf), Linux to faer's pure-Rust GEMM
-//! plus a runtime-dispatched polynomial exp. This module holds the seam, the kernels, the model
-//! loaders and the length-grouped batching. The encoders built on them are cross-platform source:
-//! BERT (the embedders) in [`bert`], ModernBERT (gte-reranker-modernbert-base) in [`modernbert`].
-//! Gated behind the `blas` feature.
+//! wires it to Accelerate (cblas_sgemm on AMX + vForce vvexpf), Linux and Windows to faer's
+//! pure-Rust GEMM plus a runtime-dispatched polynomial exp. This module holds the seam, the
+//! kernels, the model loaders and the length-grouped batching. The encoders built on them are
+//! cross-platform source: BERT (the embedders) in [`bert`], ModernBERT
+//! (gte-reranker-modernbert-base) in [`modernbert`]. Gated behind the `blas` feature.
 
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
@@ -101,7 +101,7 @@ mod seam {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 mod seam {
     use faer::linalg::matmul::matmul;
     use faer::{Accum, MatMut, MatRef, Par};
@@ -635,9 +635,9 @@ mod tests {
 
     /// `UNDERFLOW` has one correct value and two ways to be wrong: one f32 lower lets a subnormal
     /// through, one f32 higher flushes e^x values that are representable normals to zero. This
-    /// walks every f32 across the boundary and rejects both. Linux only — the macOS seam calls
+    /// walks every f32 across the boundary and rejects both. The faer seam only — the macOS one calls
     /// Accelerate's `exp`, which returns the subnormals rather than zeroing them.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     #[test]
     fn vexp_cutoff_sits_on_the_subnormal_boundary() {
         let (mut bits, end) = ((-87.5f32).to_bits(), (-87.2f32).to_bits());

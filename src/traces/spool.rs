@@ -148,13 +148,37 @@ mod tests {
         std::fs::create_dir_all(&mine).unwrap();
         std::fs::write(root.join("pi/s.funes.jsonl"), "").unwrap();
         std::fs::write(mine.join("y.funes.jsonl"), "").unwrap();
-        std::os::unix::fs::symlink(mine.join("y.funes.jsonl"), root.join("pi/link.funes.jsonl")).unwrap();
 
         assert!(is_under(&root, &root.join("pi/s.funes.jsonl")));
         assert!(is_under(&root, &root.join("pi/../pi/s.funes.jsonl")));
         assert!(!is_under(&root, &root.join("pi/../../mine/y.funes.jsonl")));
-        assert!(!is_under(&root, &root.join("pi/link.funes.jsonl")));
         assert!(!is_under(&root, &root.join("pi/gone.funes.jsonl")), "nothing to own");
+        // A linked file is Unix's to test: a file symlink takes a privilege on Windows.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(mine.join("y.funes.jsonl"), root.join("pi/link.funes.jsonl")).unwrap();
+            assert!(!is_under(&root, &root.join("pi/link.funes.jsonl")));
+        }
+        // A linked directory resolves elsewhere on either platform.
+        link_dir(&mine, &root.join("pi").join("linked"));
+        assert!(!is_under(&root, &root.join("pi/linked/y.funes.jsonl")));
+    }
+
+    /// Link `link` to the directory `target`, as a user without privileges can on each platform: a
+    /// symlink on Unix, a junction on Windows, where a symlink takes a privilege.
+    fn link_dir(target: &Path, link: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+        #[cfg(windows)]
+        {
+            let made = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()
+                .unwrap();
+            assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
+        }
     }
 
     /// A spool is a directory of the root's own: a link there, however it is named, is neither
@@ -166,7 +190,7 @@ mod tests {
         let mine = tmp.path().join("mine");
         std::fs::create_dir_all(root.join("pi")).unwrap();
         std::fs::create_dir_all(&mine).unwrap();
-        std::os::unix::fs::symlink(&mine, root.join("clyde")).unwrap();
+        link_dir(&mine, &root.join("clyde"));
         std::fs::write(root.join("pi.missing"), "").unwrap();
 
         assert_eq!(spools_in(&root), vec![root.join("pi")]);

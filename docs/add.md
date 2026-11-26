@@ -233,10 +233,11 @@ sessions are never mixed into a memory this host only reads.
 1. **Asks** before your first index. Declining aborts the add; nothing is installed. At a terminal,
    with no memory yet, it also asks whether your sessions are English or multilingual, which picks
    the memory's [embedding model](index.md#sessions-not-in-english). The default is multilingual
-   when your locale (`LC_ALL`, `LC_MESSAGES`, then `LANG`) is in another language than English
-   (an unset, `C` or `POSIX` locale counts as English, `C.UTF-8` too), and off a terminal funes
-   takes that default without asking. When the memory it binds already has a model, the local
-   memory takes it instead, and nothing is asked.
+   when your locale (`LC_ALL`, `LC_MESSAGES`, then `LANG`, or on Windows with none of them set,
+   your display language) is in another language than English (an unset, `C` or `POSIX` locale
+   counts as English, `C.UTF-8` too), and off a terminal funes takes that default without asking.
+   When the memory it binds already has a model, the local memory takes it instead, and nothing is
+   asked.
    If funes can't read that memory (offline, or your token has no access), the add stops here.
 2. **Binds the host** to the memory named, or offered and taken, as `funes bind` does: every
    other installed agent's setup is re-run on it. A bare add on a bound host binds nothing.
@@ -266,7 +267,8 @@ scratch is `funes add <agent>` again, whose seed re-converts the agent's own his
 executed. The location is fixed rather than under `$FUNES_HOME` because an agent records the path
 it is handed (pi installs the directory as an extension), so the files must outlive any one home.
 funes refuses a `setup` that anyone but its owner could have written: the file and every directory
-from `~/.funes/agents` down must belong to you and be neither group- nor world-writable.
+from `~/.funes/agents` down must belong to you and be neither group- nor world-writable. Windows
+has no such bits, and runs `setup` through a shell: [windows.md](windows.md#adding-an-agent).
 
 The source, in order: what `--from` names; the directory `$FUNES_INTEGRATIONS` names, when set —
 authoritative, consulted on every run, and nothing else is; the integrations catalog,

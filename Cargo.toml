@@ -7,7 +7,6 @@ license = "Apache-2.0"
 repository = "https://github.com/huggingface/funes"
 
 [dependencies]
-libc = "0.2"  # geteuid: whose files funes will run
 # The `onnx` backend (feature below): embeddings + rerank on the ONNX Runtime. Off by default —
 # ort ships prebuilt against glibc 2.38, above the glibc 2.35 floor releases target (Ubuntu 22.04).
 fastembed = { version = "5", optional = true }
@@ -40,13 +39,19 @@ rmcp = { version = "3", features = ["server", "macros", "transport-io", "schemar
 tempfile = "3"                   # temp dir for the pre-publish secret scan; temp files/dirs in tests
 hf-hub = { version = "1.0.0", features = ["rustls-tls", "blocking"] }  # native create_commit + parent_commit CAS + Xet upload; blocking: model downloads (src/inference.rs)
 # The `blas` backend (feature below): a from-scratch forward that loads safetensors weights
-# and tokenizes itself. macOS runs it on Accelerate, Linux on faer.
+# and tokenizes itself. macOS runs it on Accelerate, Linux and Windows on faer.
 tokenizers = { version = "0.22", optional = true, default-features = false, features = ["onig"] }  # onig: the reranker's normalizer is a regex
 safetensors = { version = "0.8", optional = true }
 
-# The `blas` backend's Linux seam. Both are pure Rust with runtime CPU dispatch, so release
-# binaries stay baseline x86-64/aarch64 yet use AVX2/AVX-512/NEON where the host has them.
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"  # geteuid: whose files funes will run
+
+[target.'cfg(windows)'.dependencies]
+winapi-util = "0.1"  # a file's index on its volume, the inode's stand-in in a turns file's signature
+
+# The `blas` backend's Linux and Windows seam. Both are pure Rust with runtime CPU dispatch, so
+# release binaries stay baseline x86-64/aarch64 yet use AVX2/AVX-512/NEON where the host has them.
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 faer = { version = "0.24", optional = true, default-features = false, features = ["std", "rayon"] }  # GEMM ("std" pulls its fast x86 kernels)
 multiversion = { version = "0.8", optional = true }  # per-CPU clones of the vectorized exp
 
@@ -62,7 +67,7 @@ half = { version = "2", optional = true }  # fp16 weights for the GPU
 [features]
 default = ["blas", "metal"]
 # BLAS inference backend (src/inference/blas.rs), the default: macOS wires it to Accelerate (see build.rs),
-# Linux to faer + a polynomial exp.
+# Linux and Windows to faer + a polynomial exp.
 blas = ["dep:tokenizers", "dep:safetensors", "dep:faer", "dep:multiversion"]
 # The embedder and the reranker on the GPU (src/inference/metal.rs), macOS only — a no-op elsewhere.
 # They reuse the BLAS backend's loaders, and its CPU forwards for small calls.

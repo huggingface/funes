@@ -6,8 +6,11 @@ mod support;
 
 #[tokio::test]
 async fn index_then_read_surface() {
-    let db_dir = tempfile::tempdir().unwrap();
-    let source = tempfile::tempdir().unwrap();
+    // Under names a shell would split and no ASCII spells, as a home is under a user's own name:
+    // Lance takes the memory's path for a URI, and must keep both through it, on every platform.
+    let tmp = |prefix| tempfile::Builder::new().prefix(prefix).tempdir().unwrap();
+    let db_dir = tmp("funes memory 测试 ");
+    let source = tmp("funes turns 测试 ");
     // home::dir() reads $FUNES_HOME; point the whole read/write surface at the temp dir.
     std::env::set_var("FUNES_HOME", db_dir.path());
     let (session, workdir) = support::write_transcript(source.path());
