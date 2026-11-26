@@ -59,6 +59,7 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 }
 
 fn main() -> Result<()> {
+    funes::hub::configure_hf_home();
     let args = Args::parse();
     let model = match &args.model {
         Some(id) => EmbeddingModel::from_id(id).ok_or_else(|| anyhow!("funes does not run {id:?}"))?,

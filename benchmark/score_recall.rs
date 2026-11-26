@@ -135,8 +135,12 @@ fn row(label: &str, scores: &[&Score]) {
     );
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    funes::hub::configure_hf_home();
+    tokio::runtime::Runtime::new()?.block_on(run())
+}
+
+async fn run() -> Result<()> {
     let args = Args::parse();
     let bytes = std::fs::read(&args.questions).with_context(|| format!("reading {}", args.questions.display()))?;
     let digest = hex::encode(Sha256::digest(&bytes));

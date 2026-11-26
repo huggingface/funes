@@ -101,8 +101,12 @@ fn cpu_reranker() -> Result<Box<dyn Reranker>> {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    funes::hub::configure_hf_home();
+    tokio::runtime::Runtime::new()?.block_on(run())
+}
+
+async fn run() -> Result<()> {
     let args = Args::parse();
     let text =
         std::fs::read_to_string(&args.questions).with_context(|| format!("reading {}", args.questions.display()))?;

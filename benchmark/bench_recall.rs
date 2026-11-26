@@ -138,8 +138,12 @@ async fn bench_memory(name: &str, memory: &Memory, a: &Args) -> Result<Stats> {
     })
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    funes::hub::configure_hf_home();
+    tokio::runtime::Runtime::new()?.block_on(run())
+}
+
+async fn run() -> Result<()> {
     let a = Args::parse();
     let remote = Memory::parse(a.remote.trim());
 

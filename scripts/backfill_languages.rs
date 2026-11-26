@@ -15,8 +15,12 @@ use hf_hub::HFClient;
 use std::cmp::Reverse;
 use std::collections::HashMap;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    funes::hub::configure_hf_home();
+    tokio::runtime::Runtime::new()?.block_on(run())
+}
+
+async fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let dry_run = args.iter().any(|a| a == "--dry-run");
     let specs: Vec<&String> = args.iter().filter(|a| *a != "--dry-run").collect();

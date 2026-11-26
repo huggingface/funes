@@ -19,8 +19,12 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    funes::hub::configure_hf_home();
+    tokio::runtime::Runtime::new()?.block_on(run())
+}
+
+async fn run() -> Result<()> {
     // add_columns is a schema-evolution commit — hold the memory lock to be the sole writer.
     let _lock = lock::MemoryLock::acquire()?;
     let uri = dataset::table_uri(home::memory_dir());
