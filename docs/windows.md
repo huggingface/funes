@@ -73,10 +73,11 @@ launcher npm puts there, `codex.cmd`.
 ## Building from source
 
 The MSVC toolchain (the "Desktop development with C++" workload of Visual Studio or its Build
-Tools), Rust through rustup, and `protoc`:
+Tools), Rust through rustup, and `protoc`, from winget's own source: on Windows Server, the
+Microsoft Store source winget also asks fails with a certificate error.
 
 ```powershell
-winget install Google.Protobuf
+winget install --source winget Google.Protobuf
 cargo build --release      # target\release\funes.exe
 ```
 
