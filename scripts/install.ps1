@@ -96,7 +96,9 @@ function Move-FunesIntoPlace([string]$Staged, [string]$Target) {
         [IO.File]::Move($Staged, $Target)
         return
     }
+    # Numbered past an aside of this window's that still runs, which the sweep could not delete.
     $old = "$Target.$PID.old"
+    for ($n = 1; Test-Path -LiteralPath $old; $n++) { $old = "$Target.$PID.$n.old" }
     [IO.File]::Move($Target, $old)
     try { [IO.File]::Move($Staged, $Target) } catch {
         [IO.File]::Move($old, $Target)

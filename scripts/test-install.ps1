@@ -123,16 +123,23 @@ public class FunesFixture {
     Assert ((Get-FileHash -LiteralPath $target).Hash -eq $before) 'a refused release replaced the installed one'
 
     # funes is replaced while it runs, as it does under an agent's MCP server: the running binary
-    # steps aside, and the install after it has exited deletes it.
-    $running = Start-Process -FilePath $target -ArgumentList 'serve' -PassThru -WindowStyle Hidden
+    # steps aside, and the install after it has exited deletes it. Installed again from the same
+    # window while both still run, the second steps aside beside the first.
+    $running = @(Start-Process -FilePath $target -ArgumentList 'serve' -PassThru -WindowStyle Hidden)
     try {
         Start-Sleep -Milliseconds 300
         Install-Funes $install '' $true
         Assert ((& $target --version) -ceq "funes $release") 'funes was not replaced while it ran'
         Assert (@(Get-ChildItem -LiteralPath $install -Filter 'funes.exe.*.old').Count -eq 1) 'the running binary did not step aside'
+        $running += Start-Process -FilePath $target -ArgumentList 'serve' -PassThru -WindowStyle Hidden
+        Start-Sleep -Milliseconds 300
+        Install-Funes $install '' $true
+        Assert (@(Get-ChildItem -LiteralPath $install -Filter 'funes.exe.*.old').Count -eq 2) 'a second running binary did not step aside beside the first'
     } finally {
-        Stop-Process -Id $running.Id -Force -ErrorAction SilentlyContinue
-        $running.WaitForExit()
+        foreach ($process in $running) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            $process.WaitForExit()
+        }
     }
     Install-Funes $install '' $true
     Assert (@(Get-ChildItem -LiteralPath $install -Force).Count -eq 1) 'the binary that stepped aside was not deleted once it exited'

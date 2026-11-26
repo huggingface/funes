@@ -317,9 +317,9 @@ fn replace(staged: &Path, exe: &Path) -> std::io::Result<()> {
 }
 
 /// Put `staged` where `exe` is. Windows will not rename over a running program but lets one be
-/// renamed, so the old binary steps aside first, as `<exe>.<pid>.old`, and comes back if the new
-/// one cannot take its place. It cannot be deleted while it runs: the ones earlier updates left
-/// are deleted here, those still running excepted.
+/// renamed, so the old binary steps aside first, as `<exe>.<pid>.old`, numbered past one that
+/// still runs, and comes back if the new one cannot take its place. It cannot be deleted while it
+/// runs: the ones earlier updates left are deleted here, those still running excepted.
 #[cfg(windows)]
 fn replace(staged: &Path, exe: &Path) -> std::io::Result<()> {
     if let (Some(dir), Some(name)) = (exe.parent(), exe.file_name().and_then(|n| n.to_str())) {
@@ -337,9 +337,19 @@ fn replace(staged: &Path, exe: &Path) -> std::io::Result<()> {
     if !exe.exists() {
         return std::fs::rename(staged, exe);
     }
-    let mut old = exe.as_os_str().to_owned();
-    old.push(format!(".{}.old", std::process::id()));
-    let old = PathBuf::from(old);
+    let pid = std::process::id();
+    let old = (0u32..)
+        .map(|n| {
+            let mut old = exe.as_os_str().to_owned();
+            old.push(if n == 0 {
+                format!(".{pid}.old")
+            } else {
+                format!(".{pid}.{n}.old")
+            });
+            PathBuf::from(old)
+        })
+        .find(|old| !old.exists())
+        .expect("a name no aside has");
     std::fs::rename(exe, &old)?;
     std::fs::rename(staged, exe).inspect_err(|_| {
         let _ = std::fs::rename(&old, exe);
@@ -530,6 +540,19 @@ mod tests {
         update("third");
         assert_eq!(asides(), vec![aside.clone(), "other.exe.1.old".to_string()]);
         assert_eq!(std::fs::read_to_string(dir.path().join(&aside)).unwrap(), "second");
+
+        // An aside of this pid's that still runs, which cannot be deleted, is stepped past.
+        use std::os::windows::fs::OpenOptionsExt;
+        let running = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(dir.path().join(&aside))
+            .unwrap();
+        update("fourth");
+        let next = format!("funes.exe.{}.1.old", std::process::id());
+        assert_eq!(asides(), vec![next.clone(), aside, "other.exe.1.old".to_string()]);
+        assert_eq!(std::fs::read_to_string(dir.path().join(&next)).unwrap(), "third");
+        drop(running);
     }
 
     #[test]
