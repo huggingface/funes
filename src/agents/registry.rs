@@ -1177,6 +1177,58 @@ mod tests {
         }
     }
 
+    /// Remove a link [`link_dir`] made, and not what it points at.
+    fn unlink_dir(link: &Path) {
+        #[cfg(unix)]
+        std::fs::remove_file(link).unwrap();
+        #[cfg(windows)]
+        std::fs::remove_dir(link).unwrap();
+    }
+
+    /// A link to a directory, which takes no privilege on any platform, is refused in the source
+    /// and where the copy goes; what `setup` wrote beside the files survives a refresh.
+    #[test]
+    fn copying_refuses_directory_links_and_keeps_local_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(src.join("scripts")).unwrap();
+        std::fs::write(src.join("manifest.json"), "{}").unwrap();
+        std::fs::write(src.join("scripts/hook.sh"), "v1").unwrap();
+        let dst = tmp.path().join("dst");
+        copy_into(&src, &dst).unwrap();
+
+        // The integration's own state, and a second run that must not disturb it.
+        std::fs::write(dst.join("memory"), "acme/kb\n").unwrap();
+        std::fs::write(src.join("scripts/hook.sh"), "v2").unwrap();
+        copy_into(&src, &dst).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dst.join("scripts/hook.sh")).unwrap(),
+            "v2",
+            "drift is refreshed"
+        );
+        assert_eq!(std::fs::read_to_string(dst.join("memory")).unwrap(), "acme/kb\n");
+
+        // A link where a directory goes is refused outright, and nothing lands where it points.
+        std::fs::remove_dir_all(dst.join("scripts")).unwrap();
+        let elsewhere = tmp.path().join("elsewhere-dir");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        link_dir(&elsewhere, &dst.join("scripts"));
+        let err = copy_into(&src, &dst).unwrap_err().to_string();
+        assert!(err.contains("is a symlink"), "{err}");
+        assert!(
+            std::fs::read_dir(&elsewhere).unwrap().next().is_none(),
+            "nothing written through"
+        );
+        unlink_dir(&dst.join("scripts"));
+
+        // A link to a directory in the source is refused before anything is copied.
+        link_dir(tmp.path(), &src.join("everything"));
+        let err = copy_into(&src, &dst).unwrap_err().to_string();
+        assert!(err.contains("symlink to a directory"), "{err}");
+        assert!(!dst.join("scripts").exists(), "refused before a byte moved");
+        unlink_dir(&src.join("everything"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_setup_others_could_have_written_is_refused() {
@@ -1237,10 +1289,10 @@ mod tests {
         );
     }
 
-    // A file symlink takes a privilege on Windows, so the links a copy meets are Unix's to test.
+    // A file symlink takes a privilege on Windows, so the file links a copy meets are Unix's to test.
     #[cfg(unix)]
     #[test]
-    fn copying_a_directory_follows_links_keeps_modes_and_keeps_local_state() {
+    fn copying_follows_file_links_and_keeps_modes() {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = tempfile::tempdir().unwrap();
@@ -1264,17 +1316,14 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&copied).unwrap(), "shared v1");
         assert!(std::fs::metadata(&copied).unwrap().permissions().mode() & 0o111 != 0);
 
-        // The integration's own state, and a second run that must not disturb it.
-        std::fs::write(dst.join("memory"), "acme/kb\n").unwrap();
+        // What a link points at is copied again when it drifts.
         std::fs::write(&shared, "shared v2").unwrap();
         copy_into(&src, &dst).unwrap();
-
         assert_eq!(
             std::fs::read_to_string(&copied).unwrap(),
             "shared v2",
             "drift is refreshed"
         );
-        assert_eq!(std::fs::read_to_string(dst.join("memory")).unwrap(), "acme/kb\n");
 
         // A link left where a file goes is replaced, not written through: the file it pointed at
         // is untouched, and the bundle's file is a file.
@@ -1287,26 +1336,6 @@ mod tests {
         let manifest = dst.join("manifest.json");
         assert!(!manifest.symlink_metadata().unwrap().file_type().is_symlink());
         assert_eq!(std::fs::read_to_string(&manifest).unwrap(), "{}");
-
-        // A link where a directory goes is refused outright, and nothing lands where it points.
-        std::fs::remove_dir_all(dst.join("scripts")).unwrap();
-        let elsewhere_dir = tmp.path().join("elsewhere-dir");
-        std::fs::create_dir_all(&elsewhere_dir).unwrap();
-        std::os::unix::fs::symlink(&elsewhere_dir, dst.join("scripts")).unwrap();
-        let err = copy_into(&src, &dst).unwrap_err().to_string();
-        assert!(err.contains("is a symlink"), "{err}");
-        assert!(
-            std::fs::read_dir(&elsewhere_dir).unwrap().next().is_none(),
-            "nothing written through"
-        );
-        std::fs::remove_file(dst.join("scripts")).unwrap();
-
-        // A link to a directory in the source is refused before anything is copied.
-        std::fs::write(&shared, "shared v3").unwrap();
-        std::os::unix::fs::symlink(tmp.path(), src.join("everything")).unwrap();
-        let err = copy_into(&src, &dst).unwrap_err().to_string();
-        assert!(err.contains("symlink to a directory"), "{err}");
-        assert!(!dst.join("scripts/shared.sh").exists(), "refused before a byte moved");
     }
 
     /// A private group's umask leaves a source directory's files group-writable; the registry's

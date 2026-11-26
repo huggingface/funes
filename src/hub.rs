@@ -41,18 +41,22 @@ pub fn configure_user_agent_origin() {
 /// Bash and at the root of whatever drive funes ran on from PowerShell. The user profile is where
 /// `huggingface_hub` keeps both on Windows, whichever shell asks. Call this once at process
 /// startup, before starting worker threads.
+#[cfg(windows)]
 pub fn configure_hf_home() {
-    if !cfg!(windows) {
-        return;
-    }
     if let Some(hf_home) = default_hf_home(|key| std::env::var_os(key), crate::home::user()) {
         std::env::set_var("HF_HOME", hf_home);
     }
 }
 
+/// Elsewhere `$HOME` is set in every shell, and hf-hub finds the Hugging Face home from it as
+/// `huggingface_hub` does.
+#[cfg(not(windows))]
+pub fn configure_hf_home() {}
+
 /// Pure core of [`configure_hf_home`]: the Hugging Face home under the user's, or `None` when the
 /// environment names where hf-hub keeps its files already. `$HOME` names nothing here: it is the
 /// variable that says one thing in one shell and nothing in another.
+#[cfg(any(windows, test))]
 fn default_hf_home(env: impl Fn(&str) -> Option<std::ffi::OsString>, home: Option<PathBuf>) -> Option<PathBuf> {
     let named = ["HF_HOME", "XDG_CACHE_HOME"].iter().any(|key| env(key).is_some());
     home.filter(|_| !named)
