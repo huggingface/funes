@@ -140,14 +140,14 @@ public class FunesFixture {
     Assert ((Get-FileHash -LiteralPath $target).Hash -eq $before) 'a refused release replaced the installed one'
 
     # funes is replaced while it runs, as it does under an agent's MCP server: the running binary
-    # steps aside, and the install after it has exited deletes it. Installed again from the same
-    # window while both still run, the second steps aside beside the first.
+    # steps aside, and the install after it has exited deletes it.
     $running = @(Start-Process -FilePath $target -ArgumentList 'serve' -PassThru -WindowStyle Hidden)
     try {
         Start-Sleep -Milliseconds 300
         Install-Funes $install '' $true
         Assert ((& $target --version) -ceq "funes $release") 'funes was not replaced while it ran'
         Assert (@(Get-ChildItem -LiteralPath $install -Filter 'funes.exe.*.old').Count -eq 1) 'the running binary did not step aside'
+        # Again from the same window while both run: the second steps aside beside the first.
         $running += Start-Process -FilePath $target -ArgumentList 'serve' -PassThru -WindowStyle Hidden
         Start-Sleep -Milliseconds 300
         Install-Funes $install '' $true
@@ -196,8 +196,7 @@ public class FunesFixture {
     Assert (Add-FunesToPath $install $scratchKey) 'a PATH was not created where there was none'
     Assert ((& $read) -ceq $install) 'a created PATH holds more than the directory'
 
-    # Piped to iex inside a dot-sourced script, as every GitHub Actions step runs, it installs. The
-    # alias, which wins over the function, catches the call: the script's own would download.
+    # Piped to iex from a dot-sourced script, it installs. The alias outranks the real function.
     Remove-Variable FunesInstallDefineOnly
     $installed = $false
     function Register-Install { $script:installed = $true }

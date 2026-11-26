@@ -169,8 +169,7 @@ mod os {
         env: impl Fn(&str) -> Option<OsString>,
         exists: impl Fn(&Path) -> bool,
     ) -> Option<PathBuf> {
-        // Without the empty entries a doubled or trailing `;` leaves, which would name a `sh.exe`
-        // in the current directory, where Windows never runs a program by name from.
+        // An empty entry, from a doubled or trailing `;`, would name a `sh.exe` Windows never runs.
         let on_path: Vec<PathBuf> = env("PATH")
             .map(|path| {
                 std::env::split_paths(&path)
@@ -1186,7 +1185,7 @@ mod tests {
     }
 
     /// A link to a directory, which takes no privilege on any platform, is refused in the source
-    /// and where the copy goes; what `setup` wrote beside the files survives a refresh.
+    /// and where the copy goes. What `setup` wrote beside the files survives a refresh.
     #[test]
     fn copying_refuses_directory_links_and_keeps_local_state() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1208,7 +1207,7 @@ mod tests {
         );
         assert_eq!(std::fs::read_to_string(dst.join("memory")).unwrap(), "acme/kb\n");
 
-        // A link where a directory goes is refused outright, and nothing lands where it points.
+        // A link where a directory goes is refused, and nothing is written where it points.
         std::fs::remove_dir_all(dst.join("scripts")).unwrap();
         let elsewhere = tmp.path().join("elsewhere-dir");
         std::fs::create_dir_all(&elsewhere).unwrap();

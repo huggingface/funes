@@ -24,7 +24,7 @@ use crate::ui::render;
 const K: usize = 8;
 const CANDIDATES: usize = 30;
 
-/// The prompt arrives on stdin ([`run_streaming`]); the empty strict MCP config keeps any
+/// The prompt arrives on stdin ([`run_streaming`]). The empty strict MCP config keeps any
 /// registered servers out of a session that must answer from the passages alone. stream-json
 /// (and the --verbose it requires) turns stdout into the events the wait animation feeds on.
 fn claude_args() -> Vec<String> {
@@ -42,9 +42,9 @@ fn claude_args() -> Vec<String> {
     .collect()
 }
 
-/// codex exec cannot run MCP tools, so `mcp_servers={}` silences any registered ones; `-` reads
-/// the prompt from stdin ([`run_streaming`]); `--skip-git-repo-check` lets ask run outside a
-/// trusted repo; `--json` swaps the console chatter for the events the wait animation feeds on.
+/// codex exec cannot run MCP tools, so `mcp_servers={}` silences any registered ones. `-` reads
+/// the prompt from stdin ([`run_streaming`]), `--skip-git-repo-check` lets ask run outside a
+/// trusted repo, and `--json` swaps the console chatter for the events the wait animation feeds on.
 fn codex_args() -> Vec<String> {
     [
         "exec",
@@ -283,7 +283,7 @@ fn run_streaming(
     }
     let status = status?;
     match fed {
-        // The agent quit first; its output says why.
+        // The agent quit first, and its output says why.
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe && !status.success() => {}
         Err(e) => return Err(anyhow::Error::new(e).context(format!("handing `{agent}` its prompt"))),
         Ok(()) => {}
@@ -333,13 +333,14 @@ fn missing_agent(agent: &str) -> anyhow::Error {
     anyhow!("`{agent}` isn't on PATH — install it, or try `funes ask {other} …`")
 }
 
-/// The program `ask` runs for `agent`.
+/// The program that is `agent`: its name.
 #[cfg(not(windows))]
 fn program(agent: &str) -> OsString {
     agent.into()
 }
 
-/// The program `ask` runs for `agent`: a name finds only an `.exe`, so npm's launcher by its path.
+/// The program that is `agent`: its name, or npm's launcher by its path, as a name finds only
+/// an `.exe`.
 #[cfg(windows)]
 fn program(agent: &str) -> OsString {
     batch_launcher(agent, std::env::var_os("PATH"), |p| p.is_file()).map_or_else(|| agent.into(), Into::into)
@@ -395,7 +396,7 @@ mod tests {
         );
     }
 
-    /// Larger than any argument may be; `sort`, on every system, hands back every line.
+    /// Larger than any argument may be. `sort`, on every system, hands back every line.
     #[test]
     fn the_prompt_reaches_the_agent_whole_on_stdin() {
         let lines: Vec<String> = (0..20_000).map(|i| format!("line-{i:05}")).collect();

@@ -333,16 +333,13 @@ jobs:
           NEW_VERSION: ${{ needs.compute.outputs.version }}
         run: perl -i -pe 'if (!$d && s/^version = ".*"/version = "$ENV{NEW_VERSION}"/) { $d = 1 }' Cargo.toml
 
-      # The C runtime linked in: Windows ships the UCRT but not VCRUNTIME140.dll, which a binary
-      # linked against the default dynamic runtime needs, and which this runner has but a clean
-      # machine does not. It weighs 301 KiB in the `dist` build.
+      # The C runtime linked in, since Windows ships the UCRT but not VCRUNTIME140.dll.
       - name: Build
         env:
           RUSTFLAGS: -C target-feature=+crt-static
         run: cargo build --profile ${PROFILE} --target x86_64-pc-windows-msvc
 
-      # The runner has the runtime DLLs, so a binary that needs them still starts here: read the
-      # names it imports instead.
+      # Read from the imports: a binary that needs the runtime DLLs starts on this runner anyway.
       - name: Check binary needs no Visual C++ runtime
         run: |
           if grep -a -o -i -E '(vcruntime|msvcp)[0-9_]*\.dll' target/x86_64-pc-windows-msvc/${PROFILE}/funes.exe; then

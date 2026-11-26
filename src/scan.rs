@@ -379,7 +379,7 @@ mod tests {
         let err = find_in(|_| None, |_| false).unwrap_err().to_string();
         assert!(err.contains("not found") && err.contains("FUNES_TRUFFLEHOG"), "{err}");
 
-        // A system dir is one on Unix only; on Windows it would name the current drive.
+        // A system dir is one on Unix only. On Windows it would name the current drive.
         let found = find_in(|_| None, |p| p == Path::new("/usr/local/bin/trufflehog"));
         if cfg!(unix) {
             assert_eq!(found.unwrap(), PathBuf::from("/usr/local/bin/trufflehog"));

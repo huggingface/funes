@@ -62,7 +62,7 @@ Two checks on [the registry](add.md#where-the-integrations-files-come-from) diff
 
 ## Asking
 
-[`funes ask`](ask.md) runs the agent's `.exe` on `PATH` — else, where npm installed it, the
+[`funes ask`](ask.md) runs the agent's `.exe` on `PATH`, or, where npm installed the agent, the
 launcher npm puts there, `codex.cmd`.
 
 ## Publishing

@@ -125,8 +125,7 @@ function Install-Funes([string]$InstallDir, [string]$Version, [bool]$NoPathUpdat
     }
 
     if (-not $InstallDir) { $InstallDir = Join-Path $env:USERPROFILE '.local\bin' }
-    # Against this session's location, ~ expanded, as any path given PowerShell; GetFullPath would
-    # use the process's directory, which Set-Location never moves.
+    # As PowerShell resolves any path, where GetFullPath takes the process's directory.
     $provider = $null; $drive = $null
     $InstallDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($InstallDir, [ref]$provider, [ref]$drive)
     if ($provider.Name -ne 'FileSystem') { throw "funes: the install dir is not a folder: $InstallDir" }
@@ -194,8 +193,7 @@ function Install-Funes([string]$InstallDir, [string]$Version, [bool]$NoPathUpdat
     }
 }
 
-# The installer's test sets this to dot-source the functions alone. Not `$MyInvocation`: piped to
-# iex, the script reads its caller's, which is a dot-source in every GitHub Actions step.
+# Set by the installer's test, since under iex `$MyInvocation` is the caller's, a dot-source in CI.
 if (-not $FunesInstallDefineOnly) {
     Install-Funes $InstallDir $Version $NoPathUpdate.IsPresent
 }
