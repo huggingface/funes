@@ -66,9 +66,22 @@ trait Animation: Send {
     fn render(&self, width: usize, palette: Palette) -> Vec<String>;
 }
 
+/// Whether the terminal reads escape codes.
+#[cfg(not(windows))]
+pub fn ansi() -> bool {
+    true
+}
+
+/// Whether the terminal reads escape codes: on Windows the console is asked to, once, and a
+/// console host that cannot would print them.
+#[cfg(windows)]
+pub fn ansi() -> bool {
+    ratatui::crossterm::ansi_support::supports_ansi()
+}
+
 /// The wait display; the status label is swapped live via [`Banner::set`], and each swap excites
-/// the animation. Dropping it stops and erases the display. Off a terminal nothing is drawn, so
-/// piped and scripted runs stay silent.
+/// the animation. Dropping it stops and erases the display. Off a terminal, or one that reads no
+/// escape codes, nothing is drawn, so piped and scripted runs stay silent.
 pub struct Banner {
     label: Arc<Mutex<String>>,
     pulse: Arc<AtomicBool>,
@@ -91,7 +104,7 @@ impl Banner {
         let label = Arc::new(Mutex::new(label.to_string()));
         let pulse = Arc::new(AtomicBool::new(false));
         let stop = Arc::new(AtomicBool::new(false));
-        if !std::io::stderr().is_terminal() {
+        if !std::io::stderr().is_terminal() || !ansi() {
             return Banner {
                 label,
                 pulse,

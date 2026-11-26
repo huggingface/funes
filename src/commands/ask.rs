@@ -16,7 +16,7 @@ use std::process::{Command, ExitStatus, Stdio};
 
 use super::recall::{check_readable, recall_hits, RecallFilter};
 use super::target::Target;
-use crate::ui::banner::{accent, band_width, Banner};
+use crate::ui::banner::{accent, ansi, band_width, Banner};
 use crate::ui::render;
 
 // Recall's CLI defaults, so the pool is reranked as a default recall's is. ask exposes no tuning
@@ -299,7 +299,7 @@ fn conclude(agent: &str, run: Run) -> Result<()> {
             let answer = answer.trim_end();
             // Set the answer off from the command line above it — but only for a human at the
             // terminal; a redirected or piped answer must stay plain text.
-            if std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none() {
+            if std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none() && ansi() {
                 println!("{}", accent(&"─".repeat(band_width())));
                 // Dim the trailing provenance line, but never a lone single-line answer.
                 let mut lines = answer.lines().peekable();
