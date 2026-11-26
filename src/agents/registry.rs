@@ -169,8 +169,14 @@ mod os {
         env: impl Fn(&str) -> Option<OsString>,
         exists: impl Fn(&Path) -> bool,
     ) -> Option<PathBuf> {
+        // Without the empty entries a doubled or trailing `;` leaves, which would name a `sh.exe`
+        // in the current directory, where Windows never runs a program by name from.
         let on_path: Vec<PathBuf> = env("PATH")
-            .map(|path| std::env::split_paths(&path).collect())
+            .map(|path| {
+                std::env::split_paths(&path)
+                    .filter(|dir| !dir.as_os_str().is_empty())
+                    .collect()
+            })
             .unwrap_or_default();
         let named = on_path.iter().map(|dir| dir.join("sh.exe"));
         let beside_git = on_path
@@ -2018,6 +2024,15 @@ printf '%s|%s|%s\n' "$#" "$*" "$FUNES_AGENT_ID" >>"$here/ran"
         assert_eq!(
             found(&[r"C:\Users\u\AppData\Local\Programs\Git\bin\sh.exe"]),
             Some(PathBuf::from(r"C:\Users\u\AppData\Local\Programs\Git\bin\sh.exe"))
+        );
+
+        // A trailing `;` names no directory, so not a `sh.exe` in the current one.
+        let trailing = OsString::from(r"C:\Windows\System32;D:\Git\cmd;");
+        let env = |key: &str| (key == "PATH").then(|| trailing.clone());
+        let present = [r"sh.exe", r"D:\Git\cmd\git.exe", r"D:\Git\bin\sh.exe"];
+        assert_eq!(
+            os::posix_shell(env, |p| present.iter().any(|at| Path::new(at) == p)),
+            Some(PathBuf::from(r"D:\Git\bin\sh.exe"))
         );
     }
 
