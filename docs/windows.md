@@ -56,6 +56,8 @@ Two checks on [the registry](add.md#where-the-integrations-files-come-from) diff
 - A file has no permission bits, so funes does not judge who else could write to the registry. It
   is closed to other users by living under your profile, whose access list every file created there
   inherits. A link on the way to `setup` is refused as elsewhere, a directory junction included.
+  So keep `%USERPROFILE%\.funes` a folder of your profile, not a junction to one elsewhere: a folder
+  at a drive's root, say, lets every user change the files funes will run as you.
 - Every file counts as executable; a `setup` that cannot run fails when funes runs it.
 
 ## Asking
