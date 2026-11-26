@@ -404,12 +404,44 @@ fn parse_model(input: &str, default: EmbeddingModel) -> EmbeddingModel {
 fn host_model() -> EmbeddingModel {
     let locale = ["LC_ALL", "LC_MESSAGES", "LANG"]
         .into_iter()
-        .find_map(|var| std::env::var(var).ok().filter(|value| !value.is_empty()));
+        .find_map(|var| std::env::var(var).ok().filter(|value| !value.is_empty()))
+        .or_else(system_locale);
     model_for_locale(locale.as_deref())
 }
 
+/// The locale the system names when the environment names none.
+#[cfg(not(windows))]
+fn system_locale() -> Option<String> {
+    None
+}
+
+/// The locale the system names when the environment names none: on Windows the user's display
+/// language, which Git Bash sets LANG from and PowerShell and cmd set nothing from.
+#[cfg(windows)]
+fn system_locale() -> Option<String> {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetUserDefaultUILanguage() -> u16;
+        fn LCIDToLocaleName(locale: u32, name: *mut u16, len: i32, flags: u32) -> i32;
+    }
+    let mut name = [0u16; 85];
+    // SAFETY: the buffer is as long as the length handed with it.
+    let len = unsafe {
+        LCIDToLocaleName(
+            u32::from(GetUserDefaultUILanguage()),
+            name.as_mut_ptr(),
+            name.len() as i32,
+            0,
+        )
+    };
+    // The length counts the terminating NUL.
+    (len > 1).then(|| String::from_utf16_lossy(&name[..len as usize - 1]))
+}
+
 fn model_for_locale(locale: Option<&str>) -> EmbeddingModel {
-    let language = locale.and_then(|l| l.split(['_', '.', '@']).next()).unwrap_or_default();
+    let language = locale
+        .and_then(|l| l.split(['_', '-', '.', '@']).next())
+        .unwrap_or_default();
     match language.to_ascii_lowercase().as_str() {
         "" | "c" | "posix" | "en" => model::ENGLISH,
         _ => model::MULTILINGUAL,
@@ -445,11 +477,25 @@ mod tests {
             Some("POSIX"),
             Some("en_US.UTF-8"),
             Some("en"),
+            Some("en-GB"),
         ] {
             assert_eq!(model_for_locale(locale), ENGLISH, "{locale:?}");
         }
-        for locale in ["zh_CN.UTF-8", "fr_FR", "ja_JP.eucJP", "de_DE@euro", "pt"] {
+        for locale in ["zh_CN.UTF-8", "fr_FR", "ja_JP.eucJP", "de_DE@euro", "pt", "de-DE"] {
             assert_eq!(model_for_locale(Some(locale)), MULTILINGUAL, "{locale}");
         }
+    }
+
+    /// Windows names its display language as `en-US` does, whatever the environment says.
+    #[cfg(windows)]
+    #[test]
+    fn windows_names_the_display_language() {
+        let locale = super::system_locale().expect("a display language");
+        let (language, region) = locale.split_once('-').unwrap_or((&locale, ""));
+        assert!(
+            language.len() >= 2 && language.chars().all(|c| c.is_ascii_lowercase()),
+            "{locale}"
+        );
+        assert!(region.is_empty() || !region.contains('_'), "{locale}");
     }
 }
