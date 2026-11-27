@@ -39,26 +39,17 @@ A memory is named as elsewhere. A Windows path names a local one however it is s
 
 ## Adding an agent
 
-`funes add <agent>` runs the agent's integration, whose `setup` is a script for a POSIX shell.
-Windows runs no file by its first line, so funes hands `setup` to an `sh.exe`: the first on `PATH`,
-else [Git for Windows](https://gitforwindows.org)'s — beside the `git.exe` on `PATH`, or where its
-installer puts it. Without one, `funes add` says so before it installs anything. WSL's `bash.exe`
-is not one: it would run `setup` in another system, with another home.
-
-funes hands `setup` its paths spelled with `/`, which Windows takes as well as `\`, and your
-profile as `HOME`, where the shell would derive another from `HOMEDRIVE` and `HOMEPATH`. Whether a
-given integration supports Windows, and what else it needs there, is its own README's to say: the
-maintained four are in
+`funes add <agent>` runs the integration's `setup.ps1` with Windows PowerShell, which every Windows
+has. An integration without one does not install on Windows. Whether a given integration supports
+Windows, and what else it needs there, is its own README's to say: the maintained four are in
 [huggingface/funes-integrations](https://github.com/huggingface/funes-integrations).
 
-Two checks on [an integration's files](add.md#installing-from-elsewhere) differ from elsewhere:
-
-- A file has no permission bits, so funes does not judge who else could write to the registry. It
-  is closed to other users by living under your profile, whose access list every file created there
-  inherits. A link on the way to `setup` is refused as elsewhere, a directory junction included.
-  So keep `%USERPROFILE%\.funes` a folder of your profile, not a junction to one elsewhere: a folder
-  at a drive's root, say, lets every user change the files funes will run as you.
-- Every file counts as executable; a `setup` that cannot run fails when funes runs it.
+One check on [an integration's files](add.md#installing-from-elsewhere) differs from elsewhere. A
+file has no permission bits, so funes does not judge who else could write to the registry. It is
+closed to other users by living under your profile, whose access list every file created there
+inherits. A link on the way to `setup.ps1` is refused as elsewhere, a directory junction included.
+So keep `%USERPROFILE%\.funes` a folder of your profile, not a junction to one elsewhere: a folder
+at a drive's root, say, lets every user change the files funes will run as you.
 
 ## Asking
 
@@ -81,6 +72,6 @@ winget install --source winget Google.Protobuf
 cargo build --release      # target\release\funes.exe
 ```
 
-Inference runs on the same pure-Rust backend as on Linux. The tests need Git for Windows, for the
-shell that runs a `setup`. Those that answer `funes add`'s prompts drive a pty with `expect` and
-are Unix's; `tests/add_installed_integration.rs` covers the run that asks nothing.
+Inference runs on the same pure-Rust backend as on Linux. The tests that answer `funes add`'s
+prompts drive a pty with `expect` and are Unix's; `tests/add_installed_integration.rs` covers the
+run that asks nothing.

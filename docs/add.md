@@ -176,12 +176,12 @@ read-only: indexing and publishing remain separate commands or automation instal
 ## The integration contract
 
 The four above are integrations like any other, and a fifth needs no change to funes and no
-approval from anyone: a `manifest.json`, an executable `setup`, and whatever the integration needs
-beside them. Using funes needs no integration at all — the read verbs, `funes index` on a turns
-file or directory, and `funes push` work with nothing installed, and any producer that writes
-[the turns format](funes-jsonl.md) is indexed the same way. An integration is the managed journey
-for one agent: setup, conversion, automation, removal. What funes requires of one is
-[the contract](../CONTRIBUTING.md#the-integration-contract), and the
+approval from anyone: a `manifest.json`, a `setup` (a `setup.ps1` on Windows), and whatever the
+integration needs beside them. Using funes needs no integration at all — the read verbs,
+`funes index` on a turns file or directory, and `funes push` work with nothing installed, and any
+producer that writes [the turns format](funes-jsonl.md) is indexed the same way. An integration is
+the managed journey for one agent: setup, conversion, automation, removal. What funes requires of
+one is [the contract](../CONTRIBUTING.md#the-integration-contract), and the
 [rationale](RATIONALE.md#why-integrations-live-outside-this-repository) explains why integrations
 live outside the funes repository.
 
