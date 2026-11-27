@@ -25,6 +25,12 @@ agent can recall from it.
 
 *And it happens on its own: with funes added, your agent reaches for `recall` mid-conversation — no command to run. Here it recalls to answer a question about funes's own design, grounded, naming the session it drew from.*
 
+![Choosing an embedding model in Claude Code, then Codex recalling that decision in a separate session](docs/img/cross-agents.gif)
+
+*Different agents, one memory: Claude picks an embedding model; a session-end hook indexes it on its own; Codex — a separate agent — uses funes to recall the decision. No `funes` command in sight — the hooks do the capturing.*
+
+*Look closely at Codex's hits: some timestamps predate this recording. Those are earlier takes of this very demo — funes had already memorized the rehearsals. An append-only memory has no clean take, so we kept the Droste effect rather than pretend otherwise.*
+
 ## Get funes
 
 The [installer](scripts/install.sh) detects your platform, downloads the matching prebuilt binary,
@@ -151,9 +157,6 @@ workflow-oriented [documentation index](docs/README.md) for the complete guides.
 | `funes push <memory>` (+ `scrub`, `status`) | [docs/push.md](docs/push.md) — publish and share a memory |
 | `funes update` | [installation and updating](#get-funes) — replace the installed binary with a verified release, and update the agent integrations |
 
-The per-turn indexing and session-boundary publishing the hooks run are detailed in
-[docs/automation.md](docs/automation.md).
-
 ## How it works
 
 `funes add` runs one loop: **index** what you've done, **recall** it when it matters — and index what
@@ -173,7 +176,6 @@ any cited turn in full.
 - [docs/recall.md](docs/recall.md) — retrieval, drill-down with `get`, and reading a shared memory.
 - [docs/sessions.md](docs/sessions.md) — browsing a memory by session: `sessions`, `sketch`, `scan`.
 - [docs/ask.md](docs/ask.md) — borrow an agent for a grounded answer, nothing installed.
-- [docs/automation.md](docs/automation.md) — the per-turn hooks that keep it all fresh.
 
 ## Building from source
 

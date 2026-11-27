@@ -119,8 +119,8 @@ as you, and adding one grants it your session history and hooks that keep runnin
 vouches only for what it published. Anything else runs after a person has confirmed it, and no flag
 answers in their place, because consent to run someone else's code on your sessions is not a step
 to script away. Signed, verifiable integration artifacts would let funes vouch for more. Until then,
-the person at the terminal is the certification. What funes vouches for, and how a confirmation is
-kept, is in [add.md](add.md#what-funes-vouches-for).
+the person at the terminal is the certification. What funes vouches for is in
+[add.md](add.md#installing-from-elsewhere).
 
 For the steps to build, test, publish, and list one, see
 [Writing an integration](../CONTRIBUTING.md#writing-an-integration).
