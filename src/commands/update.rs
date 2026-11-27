@@ -193,7 +193,9 @@ async fn agents() -> Result<()> {
         match agent(&root, &id).await {
             Ok(done) => println!("{done}"),
             Err(e) => {
-                eprintln!("the {id} integration could not be updated: {e:#}");
+                eprintln!(
+                    "the {id} integration could not be updated: {e:#}. Fix what it says, then run `funes add {id}`."
+                );
                 failed.push(id);
             }
         }
