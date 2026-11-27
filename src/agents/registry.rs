@@ -1,7 +1,7 @@
 //! The registry of agent integrations: where one lives, what it declares, and how funes runs it.
 //!
-//! An integration is a directory `<root>/<id>/` holding a `manifest.json` and an executable
-//! `setup`, run as `setup add [MEMORY]` or `setup remove` with `$FUNES_BIN`, `$FUNES_HOME` and
+//! An integration is a directory `<root>/<id>/` holding a `manifest.json` and a setup, the file
+//! [`SETUP`] names, run with `add [MEMORY]` or `remove` and with `$FUNES_BIN`, `$FUNES_HOME` and
 //! `$FUNES_AGENT_ID` in its environment.
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -20,8 +20,8 @@ use crate::traces::spool;
 /// The integration contract this funes speaks.
 pub const CONTRACT_VERSION: u32 = 1;
 
-/// The executable every integration provides: `setup add [MEMORY]`, `setup remove`.
-const SETUP: &str = "setup";
+/// The setup every integration provides, run with `add [MEMORY]` or `remove`.
+pub use os::SETUP;
 
 /// What the registry asks of the platform, on Unix: a file's permission bits say who may write it
 /// and whether it runs, and the kernel runs a script by its first line.
@@ -67,6 +67,9 @@ mod os {
         Ok(())
     }
 
+    /// An executable.
+    pub const SETUP: &str = "setup";
+
     /// The command that runs `setup` with `args`: the file itself.
     pub(super) fn setup_command(setup: &Path, args: &[&str]) -> Result<Command> {
         let mut command = Command::new(setup);
@@ -110,86 +113,32 @@ mod os {
         Ok(())
     }
 
-    /// The command that runs `setup` with `args`: a POSIX shell that runs it as Unix would, by its
-    /// first line. The maintained integrations are shell scripts, and Git for Windows brings the
-    /// shell that runs them.
+    /// A Windows PowerShell script.
+    pub const SETUP: &str = "setup.ps1";
+
+    /// The command that runs `setup` with `args`: Windows PowerShell, which every Windows has.
     pub(super) fn setup_command(setup: &Path, args: &[&str]) -> Result<Command> {
-        use std::os::windows::process::CommandExt;
-
-        let sh = posix_shell(|key| std::env::var_os(key), |path| path.is_file()).ok_or_else(|| {
-            anyhow!(
-                "an integration's setup is run by a POSIX shell, and funes found no sh.exe — \
-                 install Git for Windows (https://gitforwindows.org), or put the directory of an \
-                 sh.exe on PATH"
-            )
-        })?;
-        let mut command = Command::new(sh);
-        let setup = for_setup(setup).to_string_lossy().into_owned();
-        for arg in ["-c", r#"exec "$0" "$@""#, setup.as_str()].iter().chain(args) {
-            command.raw_arg(quote_msys2(arg));
-        }
-        // The profile, which Git's launcher would take from HOMEDRIVE and HOMEPATH instead.
-        if let Some(home) = crate::home::user() {
-            command.env("HOME", for_setup(&home));
-        }
+        let powershell = std::env::var_os("SystemRoot")
+            .map(|root| PathBuf::from(root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe"))
+            .filter(|exe| exe.is_file())
+            .ok_or_else(|| {
+                anyhow!(
+                    "an integration's setup is run by Windows PowerShell, and funes found no \
+                     powershell.exe under %SystemRoot%"
+                )
+            })?;
+        let mut command = Command::new(powershell);
+        command
+            .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(for_setup(setup))
+            .args(args);
         Ok(command)
-    }
-
-    /// `arg` on a command line the MSYS2 runtime under `sh.exe` splits, which is not as Rust
-    /// quotes one: it also quotes with `'`, globs, and reads `\` inside `"` as an escape. Git
-    /// quotes for it the same way (`quote_arg_msys2`).
-    pub(super) fn quote_msys2(arg: &str) -> String {
-        let special = |c: char| c.is_whitespace() || "\\\"'{}[]?*~".contains(c);
-        if !arg.is_empty() && !arg.chars().any(special) {
-            return arg.to_string();
-        }
-        let mut quoted = String::from('"');
-        for c in arg.chars() {
-            if c == '\\' || c == '"' {
-                quoted.push('\\');
-            }
-            quoted.push(c);
-        }
-        quoted.push('"');
-        quoted
     }
 
     /// A path as `setup` is handed it: spelled with `/`, which Windows takes as well as `\` and
     /// a shell script does not take for an escape.
     pub(super) fn for_setup(path: &Path) -> OsString {
         path.to_string_lossy().replace('\\', "/").into()
-    }
-
-    /// The `sh.exe` to run a `setup` with: the first on `PATH`, else Git for Windows' — beside a
-    /// `git.exe` on `PATH`, or where its installer puts it. Its `bin\sh.exe` puts the tools a
-    /// script calls on its `PATH`; `usr\bin\sh.exe` run from outside a Git shell does not, so it
-    /// is taken only when `PATH` already names its directory. Split out so discovery is testable
-    /// without the real environment or filesystem.
-    pub(super) fn posix_shell(
-        env: impl Fn(&str) -> Option<OsString>,
-        exists: impl Fn(&Path) -> bool,
-    ) -> Option<PathBuf> {
-        // An empty entry, from a doubled or trailing `;`, would name a `sh.exe` Windows never runs.
-        let on_path: Vec<PathBuf> = env("PATH")
-            .map(|path| {
-                std::env::split_paths(&path)
-                    .filter(|dir| !dir.as_os_str().is_empty())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let named = on_path.iter().map(|dir| dir.join("sh.exe"));
-        let beside_git = on_path
-            .iter()
-            .filter(|dir| exists(&dir.join("git.exe")))
-            .filter_map(|dir| dir.parent())
-            .map(|git| git.join("bin").join("sh.exe"));
-        let installed = ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)", "LOCALAPPDATA"]
-            .into_iter()
-            .filter_map(&env)
-            .map(PathBuf::from)
-            .flat_map(|base| [base.join("Git"), base.join("Programs").join("Git")])
-            .map(|git| git.join("bin").join("sh.exe"));
-        named.chain(beside_git).chain(installed).find(|sh| exists(sh))
     }
 }
 
@@ -556,7 +505,7 @@ fn require_executable(setup: &Path) -> Result<()> {
     if os::mode(&meta) & 0o111 == 0 {
         bail!("{} is not executable", setup.display());
     }
-    // Nor one with nothing to run it: on Windows that is a shell, which may not be installed.
+    // Nor one with nothing to run it.
     os::setup_command(setup, &[]).map(|_| ())
 }
 
@@ -1193,6 +1142,7 @@ mod tests {
         create_owned(&dir).unwrap();
         std::fs::write(dir.join("manifest.json"), manifest).unwrap();
         let setup = dir.join(SETUP);
+        // Windows PowerShell reads the `#!` line as a comment.
         std::fs::write(&setup, format!("#!/bin/sh\n{body}\n")).unwrap();
         os::set_mode(&setup, 0o755).unwrap();
         dir
@@ -1493,7 +1443,7 @@ mod tests {
         let files = copy_into(&src, &root.join("pi")).unwrap();
         assert_eq!(
             files.keys().collect::<Vec<_>>(),
-            vec!["manifest.json", "scripts/hook.sh", "setup"]
+            vec!["manifest.json", "scripts/hook.sh", SETUP]
         );
         assert_eq!(files["scripts/hook.sh"], hex::encode(Sha256::digest(b"hook")));
 
@@ -1512,10 +1462,10 @@ mod tests {
 
         // A changed or missing package file is named.
         std::fs::write(root.join("pi/scripts/hook.sh"), "hooked").unwrap();
-        std::fs::remove_file(root.join("pi/setup")).unwrap();
+        std::fs::remove_file(root.join("pi").join(SETUP)).unwrap();
         assert_eq!(
             verify_installed(&root, "pi").unwrap(),
-            Verification::Changed(vec!["scripts/hook.sh".to_string(), "setup".to_string()])
+            Verification::Changed(vec!["scripts/hook.sh".to_string(), SETUP.to_string()])
         );
 
         // A record others could have written vouches for nothing.
@@ -2100,22 +2050,24 @@ mod tests {
         }));
     }
 
-    /// `setup` runs as the contract says on every platform: by its first line, with its arguments
-    /// whole, the contract's environment, and a failure that fails the command. The registry sits
-    /// under a name with a space, which a shell would split if funes left it unquoted.
+    /// `setup` runs as the contract says on every platform: with its arguments whole, the
+    /// contract's environment, and a failure that fails the command. The registry sits under a
+    /// name with a space, which a shell would split if funes left it unquoted.
     #[test]
     fn setup_runs_with_its_arguments_and_the_contracts_environment() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("the agents");
-        let dir = integration(
-            &root,
-            "pi",
-            &manifest("pi", CONTRACT_VERSION),
+        let body = if cfg!(windows) {
+            r#"[IO.File]::AppendAllText("$PSScriptRoot/ran", "$($args.Count)|$args|$env:FUNES_AGENT_ID`n")
+if (-not ($env:FUNES_HOME -and $env:FUNES_BIN)) { exit 4 }
+if ($args[0] -eq 'remove') { exit 3 }"#
+        } else {
             r#"here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 printf '%s|%s|%s\n' "$#" "$*" "$FUNES_AGENT_ID" >>"$here/ran"
 [ -n "$FUNES_HOME" ] && [ -n "$FUNES_BIN" ] || exit 4
-[ "$1" != remove ] || exit 3"#,
-        );
+[ "$1" != remove ] || exit 3"#
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("the agents");
+        let dir = integration(&root, "pi", &manifest("pi", CONTRACT_VERSION), body);
         let pi = open(&root, "pi").unwrap();
 
         pi.add(None).unwrap();
@@ -2128,116 +2080,20 @@ printf '%s|%s|%s\n' "$#" "$*" "$FUNES_AGENT_ID" >>"$here/ran"
         );
     }
 
-    /// The shell a `setup` runs under is the first `sh.exe` on `PATH`, else Git for Windows' own
-    /// launcher: beside a `git.exe` on `PATH`, then where its installer puts it.
+    /// A UNC path and a quote reach `setup` as written, through Windows PowerShell, from a
+    /// directory whose name has a quote too.
     #[cfg(windows)]
     #[test]
-    fn the_shell_for_setup_is_found_on_path_then_with_git() {
-        use std::ffi::OsString;
-
-        let path = std::env::join_paths([r"C:\Windows\System32", r"D:\Git\cmd", r"D:\msys\usr\bin"]).unwrap();
-        let env = |key: &str| match key {
-            "PATH" => Some(path.clone()),
-            "ProgramFiles" => Some(OsString::from(r"C:\Program Files")),
-            "LOCALAPPDATA" => Some(OsString::from(r"C:\Users\u\AppData\Local")),
-            _ => None,
-        };
-        let found = |present: &[&str]| os::posix_shell(env, |p| present.iter().any(|at| Path::new(at) == p));
-
-        assert_eq!(found(&[]), None);
-        // On PATH it wins, whatever else is installed.
-        assert_eq!(
-            found(&[r"D:\msys\usr\bin\sh.exe", r"D:\Git\cmd\git.exe", r"D:\Git\bin\sh.exe"]),
-            Some(PathBuf::from(r"D:\msys\usr\bin\sh.exe"))
-        );
-        // Git on PATH names its own shell, which PATH itself does not.
-        assert_eq!(
-            found(&[
-                r"D:\Git\cmd\git.exe",
-                r"D:\Git\bin\sh.exe",
-                r"C:\Program Files\Git\bin\sh.exe"
-            ]),
-            Some(PathBuf::from(r"D:\Git\bin\sh.exe"))
-        );
-        // Neither on PATH: where the installer puts it, machine-wide before per-user.
-        assert_eq!(
-            found(&[
-                r"C:\Users\u\AppData\Local\Programs\Git\bin\sh.exe",
-                r"C:\Program Files\Git\bin\sh.exe"
-            ]),
-            Some(PathBuf::from(r"C:\Program Files\Git\bin\sh.exe"))
-        );
-        assert_eq!(
-            found(&[r"C:\Users\u\AppData\Local\Programs\Git\bin\sh.exe"]),
-            Some(PathBuf::from(r"C:\Users\u\AppData\Local\Programs\Git\bin\sh.exe"))
-        );
-
-        // A trailing `;` names no directory, so not a `sh.exe` in the current one.
-        let trailing = OsString::from(r"C:\Windows\System32;D:\Git\cmd;");
-        let env = |key: &str| (key == "PATH").then(|| trailing.clone());
-        let present = [r"sh.exe", r"D:\Git\cmd\git.exe", r"D:\Git\bin\sh.exe"];
-        assert_eq!(
-            os::posix_shell(env, |p| present.iter().any(|at| Path::new(at) == p)),
-            Some(PathBuf::from(r"D:\Git\bin\sh.exe"))
-        );
-    }
-
-    /// `setup`'s home is the profile, as funes's own, wherever HOMEDRIVE and HOMEPATH point.
-    #[cfg(windows)]
-    #[test]
-    fn setup_gets_the_profile_as_its_home() {
-        let tmp = tempfile::tempdir().unwrap();
-        let setup = tmp.path().join("setup");
-        std::fs::write(&setup, "#!/bin/sh\ncd \"$HOME\" && pwd -W\n").unwrap();
-        let profile = os::for_setup(&crate::home::user().unwrap());
-        let mut command = os::setup_command(&setup, &[]).unwrap();
-        assert!(
-            command
-                .get_envs()
-                .any(|(k, v)| k == "HOME" && v == Some(profile.as_os_str())),
-            "set, not left to whatever the shell derives"
-        );
-        let out = command
-            .env("HOMEDRIVE", "C:")
-            .env("HOMEPATH", r"\elsewhere")
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-        assert_eq!(
-            String::from_utf8_lossy(&out.stdout).trim().to_lowercase(),
-            profile.to_string_lossy().to_lowercase()
-        );
-    }
-
-    /// Split by MSYS2's rules, not Rust's: a quote, glob characters, a leading `~` and a UNC
-    /// path's doubled backslash reach `setup` as written.
-    #[cfg(windows)]
-    #[test]
-    fn setup_gets_its_path_and_arguments_whole_through_msys2() {
+    fn setup_gets_its_arguments_whole_through_windows_powershell() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("o'brien");
         std::fs::create_dir_all(&dir).unwrap();
-        let setup = dir.join("setup");
-        std::fs::write(&setup, "#!/bin/sh\nprintf '%s\\n' \"$0\" \"$@\"\n").unwrap();
-        let args = [
-            "add",
-            r"\\nas\Team Share\kb",
-            r"\\nas\kb",
-            "*",
-            "~x",
-            "{a,b}",
-            "it's",
-            r#"say "hi""#,
-            "",
-        ];
+        let setup = dir.join(SETUP);
+        std::fs::write(&setup, "$args\n").unwrap();
+        let args = ["add", r"\\nas\Team Share\kb", "it's"];
         let out = os::setup_command(&setup, &args).unwrap().output().unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-        let mut expected = vec![os::for_setup(&setup).to_string_lossy().into_owned()];
-        expected.extend(args.iter().map(|a| a.to_string()));
-        assert_eq!(
-            String::from_utf8_lossy(&out.stdout).lines().collect::<Vec<_>>(),
-            expected
-        );
+        assert_eq!(String::from_utf8_lossy(&out.stdout).lines().collect::<Vec<_>>(), args);
     }
 
     /// What `setup` is handed is spelled for the shell that runs it.

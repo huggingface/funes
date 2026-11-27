@@ -148,7 +148,8 @@ funes asks for confirmation before running your bundle's setup.
 | File | Role |
 | --- | --- |
 | `manifest.json` | What the integration declares — the fields below. |
-| `setup` | An executable. `setup add [MEMORY]` wires funes into the agent, bound to `MEMORY` when given (an `<org>/<repo>` shorthand or an `hf://…` URI; absent is the local memory); `setup remove` undoes it. A non-zero exit fails the command. On Windows, where no file runs by its first line, funes runs it with [Git for Windows' `sh`](docs/windows.md#adding-an-agent), and hands it its paths spelled with `/`. |
+| `setup` | An executable, which funes runs on Linux and macOS. `setup add [MEMORY]` wires funes into the agent, bound to `MEMORY` when given (an `<org>/<repo>` shorthand or an `hf://…` URI; absent is the local memory); `setup remove` undoes it. A non-zero exit fails the command. |
+| `setup.ps1` | The same for Windows: funes runs it with Windows PowerShell 5.1, and hands it its paths spelled with `/`. An integration without one does not install on Windows. |
 
 | Field | |
 | --- | --- |

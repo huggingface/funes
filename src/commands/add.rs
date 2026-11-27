@@ -197,8 +197,8 @@ pub(crate) fn confirm_trust(
     }
     if !confirm(
         &format!(
-            "funes is about to run {}/setup — {package}, from {origin}. Trust it? [y/N] ",
-            dir.display()
+            "funes is about to run {} — {package}, from {origin}. Trust it? [y/N] ",
+            dir.join(registry::SETUP).display()
         ),
         false,
     ) {

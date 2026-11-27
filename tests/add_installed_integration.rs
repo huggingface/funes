@@ -1,7 +1,7 @@
 //! An integration funes installed and recorded runs again with nothing asked of a terminal: `funes
 //! add` hands its `setup` the contract's arguments and environment, indexes what it converted into
 //! its spool, and `funes remove` runs it once more and takes its files. No pty, so this is the run
-//! that reaches a `setup` on every platform — on Windows through the shell, where
+//! that reaches a `setup` on every platform — on Windows through Windows PowerShell, where
 //! `tests/add_fifth_integration.rs`, which answers the prompts, cannot go. Drives the binary; each
 //! run has its own home.
 
@@ -20,6 +20,7 @@ const HISTORY: &str = r#"{"format":1,"session_id":"h-1","cwd":"/home/u/dev/demo"
 
 /// Records its arguments and the id it was handed, and on `add` converts the history beside it
 /// into the spool funes named.
+#[cfg(unix)]
 const SETUP: &str = r#"#!/bin/sh
 set -eu
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -28,6 +29,17 @@ if [ "$1" = add ]; then
     mkdir -p "$FUNES_HOME/spool/$FUNES_AGENT_ID"
     cp "$here/history.funes.jsonl" "$FUNES_HOME/spool/$FUNES_AGENT_ID/h-1.funes.jsonl"
 fi
+"#;
+
+/// The same, for Windows PowerShell.
+#[cfg(windows)]
+const SETUP: &str = r#"$ErrorActionPreference = 'Stop'
+[IO.File]::AppendAllText($env:FUNES_TEST_SETUP_LOG, "$($args -join ' ')`nFUNES_AGENT_ID=$env:FUNES_AGENT_ID`n")
+if ($args[0] -eq 'add') {
+    $spool = Join-Path $env:FUNES_HOME "spool/$env:FUNES_AGENT_ID"
+    New-Item -ItemType Directory -Force -Path $spool | Out-Null
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'history.funes.jsonl') -Destination (Join-Path $spool 'h-1.funes.jsonl')
+}
 "#;
 
 /// Close `path` to other writers, as funes leaves what it installs: a registry others could write
@@ -85,7 +97,7 @@ fn an_installed_integration_is_added_and_removed_off_a_terminal() {
     let mut files = Files::new();
     for (name, text, mode) in [
         ("manifest.json", manifest, 0o644),
-        ("setup", SETUP, 0o755),
+        (registry::SETUP, SETUP, 0o755),
         ("history.funes.jsonl", HISTORY, 0o644),
     ] {
         fs::write(dir.join(name), text).unwrap();
