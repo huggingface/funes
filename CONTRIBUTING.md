@@ -162,7 +162,8 @@ funes asks for confirmation before running your bundle's setup.
 pin, else `funes`); `FUNES_HOME`, the home whose memory and spool this install serves; and
 `FUNES_AGENT_ID`, its own id, which names its spool. Everything else the bundle needs — converter,
 hook scripts, plugin files — sits beside `setup`, and so does any state it keeps: a refresh rewrites
-only the files that changed and prunes nothing, while `funes remove` deletes the directory whole.
+the files that changed and removes those the new release dropped, while `funes remove` deletes the
+directory whole.
 
 Each integration converts a session into `~/.funes/spool/<id>/<session id>.funes.jsonl` — at
 install for the history, then on every turn for the session in progress and any other changed since

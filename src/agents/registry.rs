@@ -739,15 +739,55 @@ pub struct Provisioned {
 }
 
 impl Provisioned {
-    /// Copy the staged files over `root/<id>`, resolve the integration there, and record it as
-    /// installed. Only a file that differs is rewritten, and nothing is pruned — an integration's
-    /// `setup` keeps its own state beside them.
+    /// Install the staged files at `root/<id>`, resolve the integration there, and record it as
+    /// installed. Only a file that differs is rewritten.
     pub fn install(self, root: &Path) -> Result<Integration> {
+        // Before the copy: where case is ignored, a file renamed by case alone is the same file.
+        remove_dropped(root, &self.manifest.id, &self.files)?;
         copy_into(self.staged.path(), &root.join(&self.manifest.id))?;
         let integration = open(root, &self.manifest.id)?;
         record(root, &Installed::new(&integration.manifest, self.origin, self.files))?;
         Ok(integration)
     }
+}
+
+/// Remove from `root/<id>` the files its record names and `files` does not.
+fn remove_dropped(root: &Path, id: &str, files: &Files) -> Result<()> {
+    let Some(record) = installed(root, id) else {
+        return Ok(());
+    };
+    let record_path = record_path(root, id);
+    owned_by_me(root, &record_path)?;
+    let dir = root.join(id);
+    for name in record.files.keys().filter(|name| !files.contains_key(*name)) {
+        if !is_below(name) {
+            bail!(
+                "{} names {name:?}, which lies outside the installation",
+                record_path.display()
+            );
+        }
+        let path = dir.join(name);
+        if let Some(link) = link_on_the_way(root, &path) {
+            bail!("{} is a link, and funes removes nothing through one", link.display());
+        }
+        super::remove_tree(&path)?;
+    }
+    Ok(())
+}
+
+/// Whether `name` is a path strictly below the directory it is relative to.
+fn is_below(name: &str) -> bool {
+    let mut components = Path::new(name).components().peekable();
+    components.peek().is_some() && components.all(|c| matches!(c, Component::Normal(_)))
+}
+
+/// The first directory strictly between `root` and `path` that is a link.
+fn link_on_the_way(root: &Path, path: &Path) -> Option<PathBuf> {
+    path.parent()?
+        .ancestors()
+        .take_while(|dir| *dir != root)
+        .find(|dir| dir.symlink_metadata().is_ok_and(|meta| meta.file_type().is_symlink()))
+        .map(Path::to_path_buf)
 }
 
 /// Resolve `id`'s files: what `from` names, else `$FUNES_INTEGRATIONS` if set — authoritative, so
@@ -885,9 +925,8 @@ fn is_installed_release(root: &Path, id: &str, release: &Release) -> bool {
 
 /// Copy `src` into a staging directory once what it declares checks out: a manifest that would be
 /// refused installed is refused here, before a byte moves, and so is another publisher's than
-/// `root/<id>`'s, and so is a package without its `setup` — the install prunes nothing, so the
-/// installed one would run outside the record. What it declares, the files copied with their
-/// digests, and where.
+/// `root/<id>`'s, and so is a package without its `setup`, which would install with nothing to
+/// run. What it declares, the files copied with their digests, and where.
 fn stage(root: &Path, id: &str, src: &Path) -> Result<(Manifest, Files, tempfile::TempDir)> {
     let incoming = read_manifest(&src.join("manifest.json"), id)?;
     require_executable(&src.join(SETUP))?;
@@ -1536,8 +1575,87 @@ mod tests {
         );
     }
 
-    /// A package without its executable would leave the installed one running outside the
-    /// record: refused before the copy, like one whose executable cannot run.
+    /// Stage the package at `src` and install it over `root/pi`, as a refresh does.
+    fn refresh(root: &Path, src: &Path) -> Result<Integration> {
+        let (manifest, files, staged) = stage(root, "pi", src)?;
+        Provisioned {
+            provenance: Provenance::Vouched,
+            origin: Origin::Directory {
+                path: src.to_path_buf(),
+            },
+            files,
+            manifest,
+            staged,
+        }
+        .install(root)
+    }
+
+    /// A refresh removes the files the installed release had and the new one drops, a name
+    /// changed by case alone included, and leaves what `setup` wrote beside them.
+    #[test]
+    fn a_refresh_removes_the_files_the_new_release_drops() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("agents");
+        let release = |name: &str, scripts: &[&str]| {
+            let src = integration(&tmp.path().join(name), "pi", &manifest("pi", CONTRACT_VERSION), "true");
+            std::fs::create_dir_all(src.join("scripts")).unwrap();
+            for script in scripts {
+                std::fs::write(src.join("scripts").join(script), script).unwrap();
+            }
+            src
+        };
+        let scripts = || {
+            let mut names: Vec<String> = std::fs::read_dir(root.join("pi/scripts"))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect();
+            names.sort();
+            names
+        };
+
+        refresh(&root, &release("v1", &["hook.sh", "old.sh"])).unwrap();
+        std::fs::write(root.join("pi/scripts/pushed"), "state").unwrap();
+
+        refresh(&root, &release("v2", &["hook.sh"])).unwrap();
+        assert_eq!(scripts(), ["hook.sh", "pushed"]);
+
+        refresh(&root, &release("v3", &["Hook.sh"])).unwrap();
+        assert_eq!(scripts(), ["Hook.sh", "pushed"]);
+    }
+
+    /// What a refresh removes stays inside the installation: a record naming a path outside it is
+    /// refused, and so is a dropped file reached through a link.
+    #[test]
+    fn a_refresh_removes_nothing_outside_the_installation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("agents");
+        let src = integration(&tmp.path().join("src"), "pi", &manifest("pi", CONTRACT_VERSION), "true");
+        refresh(&root, &src).unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("keep"), "keep").unwrap();
+        let record_naming = |name: &str| {
+            let mut rec = installed(&root, "pi").unwrap();
+            rec.files.retain(|path, _| !path.contains("keep"));
+            rec.files.insert(name.to_string(), "00".repeat(32));
+            record(&root, &rec).unwrap();
+        };
+
+        record_naming("../../outside/keep");
+        let err = format!("{:#}", refresh(&root, &src).unwrap_err());
+        assert!(err.contains("outside the installation"), "{err}");
+        assert!(outside.join("keep").exists());
+
+        record_naming("scripts/keep");
+        link_dir(&outside, &root.join("pi/scripts"));
+        let err = format!("{:#}", refresh(&root, &src).unwrap_err());
+        assert!(err.contains("is a link"), "{err}");
+        assert!(outside.join("keep").exists());
+        unlink_dir(&root.join("pi/scripts"));
+    }
+
+    /// A package without its executable would install with nothing to run: refused before the
+    /// copy, like one whose executable cannot run.
     #[test]
     fn a_package_without_its_executable_is_refused_before_the_copy() {
         let tmp = tempfile::tempdir().unwrap();
