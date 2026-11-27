@@ -1597,11 +1597,12 @@ mod tests {
         assert!(outside.join("keep").exists());
 
         record_naming("scripts/keep");
-        link_dir(&outside, &root.join("pi/scripts"));
+        let scripts = root.join("pi").join("scripts");
+        link_dir(&outside, &scripts);
         let err = format!("{:#}", refresh(&root, &src).unwrap_err());
         assert!(err.contains("is a link"), "{err}");
         assert!(outside.join("keep").exists());
-        unlink_dir(&root.join("pi/scripts"));
+        unlink_dir(&scripts);
     }
 
     /// A package without its executable would install with nothing to run: refused before the
