@@ -36,7 +36,9 @@ pub async fn run(id: &str, memory: Option<&str>, from: Option<&str>) -> Result<(
     let registry_root = &root;
     let install = |memory: Option<String>| async move {
         let integration = prepared.install(registry_root)?;
-        setup_add(&integration, memory.as_deref())?;
+        setup_add(&integration, memory.as_deref()).with_context(|| {
+            format!("the {id} integration is not set up: fix what it says, then run `funes add {id}` again")
+        })?;
         // The note an older funes kept beside the agent is obsolete once its setup ran on the
         // host's memory; left, a later bare add would bind the host to it again.
         registry::bind(registry_root, id, None)
