@@ -46,7 +46,7 @@ local one's model, so every host that binds it next embeds with the same.
 
 One publish per memory at a time on a machine: a push that starts while another is still running
 says so and stops, and the next one picks up what it left. The hooks [`funes add`](add.md) installs
-run this at session boundaries automatically; see [automation.md](automation.md).
+run this at session boundaries automatically.
 
 ## Keeping secrets out: the gate and `funes scrub`
 
@@ -149,5 +149,4 @@ it. Run `funes push <memory>` once to initialize the receipt for an existing mem
 ## See also
 
 - [recall.md](recall.md) — reading a shared memory with `--memory`.
-- [automation.md](automation.md) — the session-boundary publishing the hooks run.
 - [hub-caching.md](hub-caching.md) — how recall over a remote caches to local disk.

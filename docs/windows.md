@@ -51,7 +51,7 @@ given integration supports Windows, and what else it needs there, is its own REA
 maintained four are in
 [huggingface/funes-integrations](https://github.com/huggingface/funes-integrations).
 
-Two checks on [the registry](add.md#where-the-integrations-files-come-from) differ from elsewhere:
+Two checks on [an integration's files](add.md#installing-from-elsewhere) differ from elsewhere:
 
 - A file has no permission bits, so funes does not judge who else could write to the registry. It
   is closed to other users by living under your profile, whose access list every file created there

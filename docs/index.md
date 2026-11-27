@@ -109,6 +109,10 @@ answer multilingual when the first `funes add` asks, or create the local memory 
 words. A memory keeps the model it was created with. Indexing also counts the languages your
 sessions are written in, and `funes status` lists them.
 
+The first `funes add` defaults to multilingual when your locale is not English (`LC_ALL`,
+`LC_MESSAGES`, then `LANG`, or on Windows your display language when none is set), and takes that
+default without asking off a terminal.
+
 ## Flags
 
 | Flag | Meaning |
@@ -123,5 +127,4 @@ sessions are written in, and `funes status` lists them.
 ## See also
 
 - [recall.md](recall.md) — querying the memory you just built.
-- [automation.md](automation.md) — the per-turn indexing the hooks run.
 - [storage.md](storage.md) — how a memory grows on disk.

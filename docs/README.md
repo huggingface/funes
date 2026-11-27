@@ -15,10 +15,8 @@ This directory contains the user guides and design notes for
 - [Asking](ask.md) — borrow a coding agent for one answer grounded in a memory.
 - [funes on Windows](windows.md) — installing there, where things live, and what differs.
 
-## Sharing and automation
+## Sharing and configuration
 
-- [Automating funes](automation.md) — keep memories current with per-turn indexing and
-  session-boundary publishing.
 - [Publishing and sharing](push.md) — publish a memory to the Hugging Face Hub and share it across
   machines or teams.
 - [Configuration and local files](configuration.md) — state paths, caches, authentication,
